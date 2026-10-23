@@ -2,6 +2,7 @@
 use crate::{render, schema};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget, WaitTransport};
 pub use provenant_fabric_runtime::coordination::facade::*;
+use provenant_fabric_runtime::coordination::input::{InputError, ValidateInput};
 pub use provenant_fabric_runtime::coordination::{
     ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, LandingInput,
     MailInput, TaskInput,
@@ -26,25 +27,34 @@ pub enum ToolCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid input for MCP tool `{tool}`")]
-pub struct InvalidInput {
-    pub tool: String,
+pub enum InvalidInput {
+    #[error("unknown MCP tool")]
+    UnknownTool,
+    #[error("invalid tool argument at {path}")]
+    Arguments { path: String },
 }
 
 impl ToolCall {
-    /// Deserialize one named tool's arguments with the tool enum's strict
-    /// tagged serde model. Unknown tools and unknown fields fail closed.
+    /// Strict runtime serde contracts own argument validation. The catalogue
+    /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
         macro_rules! parse {
             ($ty:ty, $variant:ident) => {
-                serde_json::from_value::<$ty>(arguments)
+                serde_json::from_value::<$ty>(arguments.clone())
                     .map(Self::$variant)
-                    .map_err(|_| InvalidInput {
-                        tool: name.to_owned(),
+                    .map_err(|error| InvalidInput::Arguments {
+                        path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
+                            let message = error.to_string();
+                            message
+                                .strip_prefix("invalid input field `")
+                                .and_then(|path| path.strip_suffix('`'))
+                                .map(|path| format!("arguments.{path}"))
+                                .unwrap_or_else(|| "arguments".to_owned())
+                        }),
                     })
             };
         }
-        let call = match name {
+        match name {
             "fabric_identity" => parse!(IdentityInput, Identity),
             "fabric_mail" => parse!(MailInput, Mail),
             "fabric_task" => parse!(TaskInput, Task),
@@ -55,34 +65,53 @@ impl ToolCall {
             "fabric_run" => parse!(RunInput, Run),
             "fabric_output" => parse!(OutputInput, Output),
             "fabric_hosts" => parse!(HostsInput, Hosts),
-            _ => Err(InvalidInput {
-                tool: name.to_owned(),
-            }),
-        }?;
-        validate(&call).map_err(|()| InvalidInput {
-            tool: name.to_owned(),
-        })?;
-        Ok(call)
+            _ => Err(InvalidInput::UnknownTool),
+        }
     }
 
-    /// Execute a parsed call through the service seam. Cancellation suppresses
-    /// this response; it never means cancel the submitted run.
-    pub fn execute<S: FabricService>(
+    /// A single match composes the runtime and the F3 seam. Cancellation only
+    /// abandons the observation; run cancellation remains an explicit call.
+    pub fn execute<F: F3Facade>(
         self,
-        service: &mut S,
+        service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        let budget = service.budget(match &self {
+            Self::Run(RunInput::Wait { wait_ms, .. }) => *wait_ms,
+            _ => 55_000,
+        })?;
+        macro_rules! call {
+            ($owner:ident, $method:ident, $input:ident, $tool:literal) => {{
+                $input.validate_input().map_err(ServiceError::Invalid)?;
+                response($tool, service.$owner.$method($input, budget, cancel)?)
+            }};
+        }
         match self {
-            Self::Identity(input) => service.identity(input, cancel),
-            Self::Mail(input) => service.mail(input, cancel),
-            Self::Task(input) => service.task(input, cancel),
-            Self::Events(input) => service.events(input, cancel),
-            Self::Claim(input) => service.claim(input, cancel),
-            Self::Landing(input) => service.landing(input, cancel),
-            Self::Submit(input) => service.submit(input, cancel),
-            Self::Run(input) => service.run(input, cancel),
-            Self::Output(input) => service.output(input, cancel),
-            Self::Hosts(input) => service.hosts(input, cancel),
+            Self::Identity(input) => call!(facade, identity, input, "fabric_identity"),
+            Self::Mail(input) => response(
+                "fabric_mail",
+                service.coordination.mail(input, budget, cancel)?,
+            ),
+            Self::Task(input) => response(
+                "fabric_task",
+                service.coordination.task(input, budget, cancel)?,
+            ),
+            Self::Events(input) => response(
+                "fabric_events",
+                service.coordination.events(input, budget, cancel)?,
+            ),
+            Self::Claim(input) => response(
+                "fabric_claim",
+                service.coordination.claim(input, budget, cancel)?,
+            ),
+            Self::Landing(input) => response(
+                "fabric_landing",
+                service.coordination.landing(input, budget, cancel)?,
+            ),
+            Self::Submit(input) => call!(facade, submit, input, "fabric_submit"),
+            Self::Run(input) => call!(facade, run, input, "fabric_run"),
+            Self::Output(input) => call!(facade, output, input, "fabric_output"),
+            Self::Hosts(input) => call!(facade, hosts, input, "fabric_hosts"),
         }
     }
 }
@@ -91,6 +120,8 @@ impl ToolCall {
 /// sources while the protocol exposes a stable domain code.
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error(transparent)]
+    Invalid(#[from] InputError),
     #[error(transparent)]
     Coordination(#[from] CoordinationError),
     #[error("execution facade refused the request: {0}")]
@@ -104,6 +135,7 @@ pub enum ServiceError {
 impl ServiceError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
             Self::Encode(_) => "state_corrupt",
@@ -115,229 +147,16 @@ impl ServiceError {
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
         match self {
+            Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
+            Self::Coordination(CoordinationError::Input(error)) => {
+                serde_json::json!({"code":self.code(),"path":error.path})
+            }
             Self::Facade(FacadeError::LaunchUnknown { operation_id }) => {
                 serde_json::json!({"code":self.code(),"operation_id":operation_id})
             }
             _ => serde_json::json!({"code":self.code()}),
         }
     }
-}
-
-fn validate(call: &ToolCall) -> Result<(), ()> {
-    fn page(limit: u64) -> Result<(), ()> {
-        (1..=100).contains(&limit).then_some(()).ok_or(())
-    }
-    fn lease(milliseconds: u64) -> Result<(), ()> {
-        (1_000..=3_600_000)
-            .contains(&milliseconds)
-            .then_some(())
-            .ok_or(())
-    }
-    fn wait(milliseconds: u64) -> Result<(), ()> {
-        (1_000..=55_000)
-            .contains(&milliseconds)
-            .then_some(())
-            .ok_or(())
-    }
-    match call {
-        ToolCall::Identity(_) => {}
-        ToolCall::Hosts(HostsInput::List { limit, .. }) => page(u64::from(*limit))?,
-        ToolCall::Mail(MailInput::Send {
-            recipients,
-            body,
-            artifacts,
-            ..
-        }) => {
-            if recipients.is_empty()
-                || recipients.len() > 100
-                || recipients.iter().enumerate().any(|(index, recipient)| {
-                    recipients
-                        .iter()
-                        .take(index)
-                        .any(|previous| previous == recipient)
-                })
-                || body.is_empty()
-                || body.len() > 65_536
-                || body.contains('\0')
-                || artifacts.len() > 100
-            {
-                return Err(());
-            }
-        }
-        ToolCall::Mail(MailInput::Read { after, limit }) => {
-            if after.is_some_and(|seq| seq < 0) {
-                return Err(());
-            }
-            page(*limit)?;
-        }
-        ToolCall::Mail(MailInput::MarkRead { through }) if *through < 0 => return Err(()),
-        ToolCall::Mail(MailInput::MarkRead { .. }) => {}
-        ToolCall::Task(TaskInput::Create { objective, note }) => {
-            if objective.is_empty()
-                || objective.len() > 65_536
-                || objective.contains('\0')
-                || note.as_ref().is_some_and(|value| {
-                    value.is_empty() || value.len() > 65_536 || value.contains('\0')
-                })
-            {
-                return Err(());
-            }
-        }
-        ToolCall::Task(TaskInput::List {
-            after: _, limit, ..
-        }) => page(*limit)?,
-        ToolCall::Task(TaskInput::Claim { lease_ms, .. }) => lease(*lease_ms)?,
-        ToolCall::Task(TaskInput::Update {
-            objective, note, ..
-        }) => {
-            if objective.is_empty()
-                || objective.len() > 65_536
-                || objective.contains('\0')
-                || note.as_ref().is_some_and(|value| {
-                    value.is_empty() || value.len() > 65_536 || value.contains('\0')
-                })
-            {
-                return Err(());
-            }
-        }
-        ToolCall::Task(TaskInput::Finish { state, .. })
-            if !matches!(
-                state,
-                provenant_fabric_runtime::coordination::TaskState::Done
-                    | provenant_fabric_runtime::coordination::TaskState::Cancelled
-            ) =>
-        {
-            return Err(());
-        }
-        ToolCall::Task(TaskInput::Finish { .. } | TaskInput::Release { .. }) => {}
-        ToolCall::Events(EventsInput::Read {
-            after,
-            limit,
-            wait_ms,
-        }) => {
-            if after.is_some_and(|seq| seq < 0) {
-                return Err(());
-            }
-            page(*limit)?;
-            if let Some(milliseconds) = wait_ms {
-                wait(*milliseconds)?;
-            }
-        }
-        ToolCall::Events(EventsInput::Note { note, dedup_key }) => {
-            if note.is_empty()
-                || note.len() > 65_536
-                || note.contains('\0')
-                || dedup_key
-                    .as_ref()
-                    .is_some_and(|key| key.is_empty() || key.len() > 1024 || key.contains('\0'))
-            {
-                return Err(());
-            }
-        }
-        ToolCall::Claim(ClaimInput::Acquire { lease_ms, .. })
-        | ToolCall::Claim(ClaimInput::Renew { lease_ms, .. }) => lease(*lease_ms)?,
-        ToolCall::Claim(ClaimInput::List { after: _, limit }) => page(*limit)?,
-        ToolCall::Claim(ClaimInput::Verify { .. } | ClaimInput::Release { .. }) => {}
-        ToolCall::Landing(LandingInput::Acquire { lease_ms, .. })
-        | ToolCall::Landing(LandingInput::Renew { lease_ms, .. }) => lease(*lease_ms)?,
-        ToolCall::Landing(LandingInput::Wait { wait_ms, .. }) => wait(*wait_ms)?,
-        ToolCall::Landing(LandingInput::Verify { .. } | LandingInput::Release { .. }) => {}
-        ToolCall::Submit(SubmitInput::Submission {
-            tasks, concurrency, ..
-        }) => {
-            if tasks.is_empty()
-                || tasks.len() > 100
-                || *concurrency == 0
-                || usize::from(*concurrency) > tasks.len()
-                || tasks.iter().any(|task| {
-                    task.prompt.is_empty()
-                        || task.prompt.len() > 65_536
-                        || task.prompt.contains('\0')
-                        || task.inputs.len() > 100
-                        || !(1_000..=14_400_000).contains(&task.timeout_ms)
-                })
-            {
-                return Err(());
-            }
-        }
-        ToolCall::Run(RunInput::List { limit, .. }) => page(u64::from(*limit))?,
-        ToolCall::Run(RunInput::Wait {
-            targets, wait_ms, ..
-        }) => {
-            if targets.is_empty() || targets.len() > 100 {
-                return Err(());
-            }
-            wait(*wait_ms)?;
-        }
-        ToolCall::Run(RunInput::Resume { prompt, .. }) => {
-            if prompt.is_empty() || prompt.len() > 65_536 || prompt.contains('\0') {
-                return Err(());
-            }
-        }
-        ToolCall::Run(RunInput::Status { .. } | RunInput::Cancel { .. }) => {}
-        ToolCall::Output(OutputInput::Read { max_bytes, .. }) => {
-            if !(1..=65_536).contains(max_bytes) {
-                return Err(());
-            }
-        }
-        ToolCall::Output(OutputInput::Fetch { max_bytes, .. }) => {
-            if !(1..=1_048_576).contains(max_bytes) {
-                return Err(());
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Common typed seam consumed by the MCP transport and implemented by the
-/// concrete composition below or by focused test fakes.
-pub trait FabricService {
-    fn identity(
-        &mut self,
-        input: IdentityInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn mail(
-        &mut self,
-        input: MailInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn task(
-        &mut self,
-        input: TaskInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn events(
-        &mut self,
-        input: EventsInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn claim(
-        &mut self,
-        input: ClaimInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn landing(
-        &mut self,
-        input: LandingInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn submit(
-        &mut self,
-        input: SubmitInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn run(&mut self, input: RunInput, cancel: &CancelToken) -> Result<ToolResponse, ServiceError>;
-    fn output(
-        &mut self,
-        input: OutputInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
-    fn hosts(
-        &mut self,
-        input: HostsInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError>;
 }
 
 /// One worker's concrete runtime composition. The clock is sampled for each
@@ -357,8 +176,7 @@ impl<'a, F> Service<'a, F> {
         }
     }
 
-    fn budget(&self, wait_ms: Option<u64>) -> Result<WaitBudget, ServiceError> {
-        let milliseconds = wait_ms.unwrap_or(55_000);
+    fn budget(&self, milliseconds: u64) -> Result<WaitBudget, ServiceError> {
         let micros = milliseconds
             .checked_mul(1_000)
             .ok_or(provenant_core::TimeError::Overflow)?;
@@ -367,112 +185,6 @@ impl<'a, F> Service<'a, F> {
             DurationMicros::from_micros(micros),
             WaitTransport::Mcp,
         )?)
-    }
-}
-
-impl<F: F3Facade> FabricService for Service<'_, F> {
-    fn identity(
-        &mut self,
-        input: IdentityInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response(
-            "fabric_identity",
-            self.facade.identity(input, budget, cancel)?,
-        )
-    }
-    fn mail(
-        &mut self,
-        input: MailInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response(
-            "fabric_mail",
-            self.coordination.mail(input, budget, cancel)?,
-        )
-    }
-    fn task(
-        &mut self,
-        input: TaskInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response(
-            "fabric_task",
-            self.coordination.task(input, budget, cancel)?,
-        )
-    }
-    fn events(
-        &mut self,
-        input: EventsInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(match &input {
-            EventsInput::Read { wait_ms, .. } => *wait_ms,
-            _ => None,
-        })?;
-        response(
-            "fabric_events",
-            self.coordination.events(input, budget, cancel)?,
-        )
-    }
-    fn claim(
-        &mut self,
-        input: ClaimInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response(
-            "fabric_claim",
-            self.coordination.claim(input, budget, cancel)?,
-        )
-    }
-    fn landing(
-        &mut self,
-        input: LandingInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(match &input {
-            LandingInput::Wait { wait_ms, .. } => Some(*wait_ms),
-            _ => None,
-        })?;
-        response(
-            "fabric_landing",
-            self.coordination.landing(input, budget, cancel)?,
-        )
-    }
-    fn submit(
-        &mut self,
-        input: SubmitInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response("fabric_submit", self.facade.submit(input, budget, cancel)?)
-    }
-    fn run(&mut self, input: RunInput, cancel: &CancelToken) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(match &input {
-            RunInput::Wait { wait_ms, .. } => Some(*wait_ms),
-            _ => None,
-        })?;
-        response("fabric_run", self.facade.run(input, budget, cancel)?)
-    }
-    fn output(
-        &mut self,
-        input: OutputInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response("fabric_output", self.facade.output(input, budget, cancel)?)
-    }
-    fn hosts(
-        &mut self,
-        input: HostsInput,
-        cancel: &CancelToken,
-    ) -> Result<ToolResponse, ServiceError> {
-        let budget = self.budget(None)?;
-        response("fabric_hosts", self.facade.hosts(input, budget, cancel)?)
     }
 }
 
@@ -501,25 +213,14 @@ pub struct ToolResponse {
     pub structured_content: Value,
 }
 
-/// Fixed catalogue order is part of both MCP profile contracts.
-pub fn catalogue() -> Vec<Value> {
-    schema::catalogue()
+/// One shared construction for all MCP tool errors.
+pub fn tool_error(code: &str, detail: Value) -> Value {
+    serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"structuredContent":detail,"isError":true})
 }
 
-/// Test-only helpers are kept with the tests; this constant ensures the
-/// ten-name public surface stays visible to callers.
-pub const TOOL_NAMES: [&str; 10] = [
-    "fabric_identity",
-    "fabric_mail",
-    "fabric_task",
-    "fabric_events",
-    "fabric_claim",
-    "fabric_landing",
-    "fabric_submit",
-    "fabric_run",
-    "fabric_output",
-    "fabric_hosts",
-];
+pub fn catalogue() -> &'static [Value] {
+    schema::catalogue()
+}
 
 #[cfg(test)]
 #[path = "tools_tests.rs"]

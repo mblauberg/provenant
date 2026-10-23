@@ -462,6 +462,7 @@ dependencies = [
  "provenant-core",
  "provenant-fabric-runtime",
  "provenant-records",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

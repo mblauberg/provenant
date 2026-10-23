@@ -411,7 +411,10 @@ protocol control use a separate bounded control path so long waits cannot block
 them. Saturation returns a typed busy error. Workers own their connections.
 Framing reads at most the cap plus one byte before refusal; no unbounded
 `read_line`. Duplicate live request IDs are refused. The writer serialises whole
-frames with a bounded write deadline; a wedged reader ends this transport. On EOF cancel observations, stop admission, join bounded workers and exit;
+frames with a 30 s write deadline; a wedged reader ends this transport. On EOF
+or a read-side error, stop admission and drain accepted work for at most 55 s,
+writing its replies while stdout is viable; then cancel cooperative observations
+and join within a further 1 s. A write-side error stops all further writes;
 detached owners survive. Stuck transport children are stopped only through their
 supervisor-owned handles. An unreadable stdout ends the MCP transport without
 signalling provider runs. Library code starts no surprise global threads.

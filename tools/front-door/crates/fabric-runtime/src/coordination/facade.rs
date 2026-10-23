@@ -1,5 +1,6 @@
 //! Typed run/identity seam for F3. Runtime implements this trait; MCP consumes
 //! it without a reverse dependency. F9 owns production composition.
+use super::input::bounded_input;
 use provenant_core::{AttemptId, CancelToken, DeliveryId, Digest, HostId, OperationId, WaitBudget};
 use provenant_records::ArtifactRef;
 use serde::{Deserialize, Serialize};
@@ -44,20 +45,20 @@ pub struct SubmittedTask {
     pub delivery_id: Option<DeliveryId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum IdentityInput {
-    Inspect {},
+bounded_input! {
+    pub enum IdentityInput as WireIdentityInput {
+        Inspect {},
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SubmitInput {
-    Submission {
-        operation_id: OperationId,
-        tasks: Vec<SubmittedTask>,
-        concurrency: u16,
-    },
+bounded_input! {
+    pub enum SubmitInput as WireSubmitInput {
+        Submission {
+            operation_id: OperationId,
+            tasks: Vec<SubmittedTask>,
+            concurrency: u16,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,32 +68,27 @@ pub enum WaitCondition {
     All,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RunInput {
-    List {
-        #[serde(default)]
-        after: Option<AttemptTarget>,
-        limit: u16,
-    },
-    Status {
-        target: AttemptTarget,
-    },
-    Wait {
-        targets: Vec<AttemptTarget>,
-        condition: WaitCondition,
-        wait_ms: u64,
-    },
-    Cancel {
-        target: AttemptTarget,
-        operation_id: OperationId,
-    },
-    Resume {
-        target: AttemptTarget,
-        operation_id: OperationId,
-        prompt: String,
-        expected_generation: u64,
-    },
+bounded_input! {
+    pub enum RunInput as WireRunInput {
+        List {
+            #[serde(default)]
+            after: Option<AttemptTarget>,
+            limit: u16,
+        },
+        Status { target: AttemptTarget },
+        Wait {
+            targets: Vec<AttemptTarget>,
+            condition: WaitCondition,
+            wait_ms: u64,
+        },
+        Cancel { target: AttemptTarget, operation_id: OperationId },
+        Resume {
+            target: AttemptTarget,
+            operation_id: OperationId,
+            prompt: String,
+            expected_generation: u64,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,30 +99,30 @@ pub enum OutputPart {
     Combined,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OutputInput {
-    Read {
-        target: AttemptTarget,
-        part: OutputPart,
-        offset: u64,
-        max_bytes: u64,
-    },
-    Fetch {
-        target: AttemptTarget,
-        artifact: ArtifactRef,
-        max_bytes: u64,
-    },
+bounded_input! {
+    pub enum OutputInput as WireOutputInput {
+        Read {
+            target: AttemptTarget,
+            part: OutputPart,
+            offset: u64,
+            max_bytes: u64,
+        },
+        Fetch {
+            target: AttemptTarget,
+            artifact: ArtifactRef,
+            max_bytes: u64,
+        },
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HostsInput {
-    List {
-        #[serde(default)]
-        after: Option<HostId>,
-        limit: u16,
-    },
+bounded_input! {
+    pub enum HostsInput as WireHostsInput {
+        List {
+            #[serde(default)]
+            after: Option<HostId>,
+            limit: u16,
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

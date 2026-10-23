@@ -1,8 +1,6 @@
 //! Bounded newline framing and a four-worker synchronous MCP transport.
-//! F9 supplies deadline-aware stdio handles; blocking `Write` is deliberately
-//! not accepted because it cannot guarantee EOF shutdown under backpressure.
 use crate::protocol::{self, Action, Id, MAX_FRAME, Protocol};
-use crate::tools::{FabricService, ServiceError, ToolCall};
+use crate::tools::{self, F3Facade, Service, ServiceError, ToolCall};
 use provenant_core::CancelToken;
 use serde_json::{Value, json};
 use std::{
@@ -10,7 +8,8 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        mpsc::{self, TrySendError},
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
@@ -18,12 +17,17 @@ use std::{
 
 const WORKERS: usize = 4;
 const QUEUE: usize = 32;
-const POLL: Duration = Duration::from_millis(10);
+const EVENT_QUEUE: usize = QUEUE + WORKERS + 8;
+const INPUT_READ_WAIT: Duration = Duration::from_secs(1);
+const EVENT_WAIT: Duration = Duration::from_secs(1);
+// The design uses a 30s bound for synchronous peer calls and stdout backpressure.
+const WRITE_WAIT: Duration = Duration::from_secs(30);
 const SHUTDOWN: Duration = Duration::from_secs(56);
+const CANCEL_GRACE: Duration = Duration::from_secs(1);
 
 /// An OS boundary must return by `deadline`, using WouldBlock/TimedOut when
 /// no bytes arrive. Zero means EOF. Only the transport's reader calls this.
-pub trait Input {
+pub trait Input: Send {
     fn read(&mut self, bytes: &mut [u8], deadline: Instant) -> io::Result<usize>;
 }
 /// Write one complete frame, including its newline, or fail by `deadline`.
@@ -33,17 +37,21 @@ pub trait Output {
 }
 /// Open each worker's service on that worker, so SQLite never crosses threads.
 pub trait Factory: Send + Sync + 'static {
-    type Service<'a>: FabricService
+    type Facade<'a>: F3Facade
     where
         Self: 'a;
-    fn open(&self) -> Result<Self::Service<'_>, ServiceError>;
+    fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("MCP transport I/O failed")]
     Io(#[from] io::Error),
+    #[error("MCP output I/O failed")]
+    Output(io::Error),
     #[error("MCP request exceeds the frame limit")]
     Oversize,
+    #[error("MCP response exceeds the frame limit")]
+    OversizeReply,
     #[error("MCP worker shutdown deadline exceeded")]
     Shutdown,
     #[error("MCP worker failed")]
@@ -84,6 +92,7 @@ impl Framer {
         !self.bytes.is_empty()
     }
 }
+
 struct Job {
     id: Id,
     modern: bool,
@@ -94,30 +103,135 @@ struct Completion {
     id: Id,
     reply: Value,
 }
-fn tool_error(code: &str) -> Value {
-    json!({"content":[{"type":"text","text":code}],"structuredContent":{"error":{"code":code}},"isError":true})
+enum Event {
+    Frame(Vec<u8>),
+    InputEof(bool),
+    InputError(io::Error),
+    Oversize,
+    Completed(Completion),
+}
+
+fn failure(code: &str) -> Value {
+    tools::tool_error(code, json!({"code":code}))
 }
 fn service_error(error: &ServiceError) -> Value {
-    let mut value = tool_error(error.code());
-    value["structuredContent"] = error.structured_error();
-    value
+    tools::tool_error(error.code(), error.structured_error())
 }
-fn write(output: &mut impl Output, value: &Value) -> Result<(), Error> {
+fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> Result<(), Error> {
     let mut bytes = serde_json::to_vec(value)?;
     if bytes.len() > MAX_FRAME {
-        let id = value
+        let Some(id) = value
             .get("id")
-            .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
-        bytes = serde_json::to_vec(&protocol::error(
-            id.as_ref(),
-            -32603,
-            "Result exceeds frame limit",
+            .cloned()
+            .and_then(|id| serde_json::from_value::<Id>(id).ok())
+        else {
+            return Err(Error::OversizeReply);
+        };
+        let Some(result) = value
+            .get("result")
+            .filter(|result| result.get("content").is_some())
+        else {
+            return Err(Error::OversizeReply);
+        };
+        bytes = serde_json::to_vec(&protocol::result(
+            &id,
+            failure("result_too_large"),
+            result.get("resultType").is_some(),
         ))?;
     }
+    if bytes.len() > MAX_FRAME {
+        return Err(Error::OversizeReply);
+    }
     bytes.push(b'\n');
-    output.write_frame(&bytes, Instant::now() + Duration::from_millis(250))?;
-    Ok(())
+    output.write_frame(&bytes, deadline).map_err(Error::Output)
 }
+fn write(output: &mut impl Output, value: &Value) -> Result<(), Error> {
+    write_before(output, value, Instant::now() + WRITE_WAIT)
+}
+
+struct CompletionGuard {
+    id: Id,
+    modern: bool,
+    events: SyncSender<Event>,
+    response: Option<Value>,
+}
+impl CompletionGuard {
+    fn new(id: Id, modern: bool, events: SyncSender<Event>) -> Self {
+        Self {
+            id,
+            modern,
+            events,
+            response: None,
+        }
+    }
+}
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        let response = self
+            .response
+            .take()
+            .unwrap_or_else(|| failure("worker_panicked"));
+        let reply = protocol::result(&self.id, response, self.modern);
+        let _ = self.events.send(Event::Completed(Completion {
+            id: self.id.clone(),
+            reply,
+        }));
+    }
+}
+
+fn read_input(input: &mut impl Input, events: &SyncSender<Event>, stop: &AtomicBool) {
+    let mut buffer = [0_u8; 8192];
+    let mut framer = Framer::default();
+    while !stop.load(Ordering::Acquire) {
+        let capacity = framer.remaining().min(buffer.len());
+        match input.read(&mut buffer[..capacity], Instant::now() + INPUT_READ_WAIT) {
+            Ok(0) => {
+                let _ = events.send(Event::InputEof(framer.incomplete()));
+                return;
+            }
+            Ok(size) => {
+                let Some(bytes) = buffer.get(..size) else {
+                    let _ = events.send(Event::InputError(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "input returned more bytes than its buffer",
+                    )));
+                    return;
+                };
+                if framer.push(bytes).is_err() {
+                    let _ = events.send(Event::Oversize);
+                    return;
+                }
+                loop {
+                    match framer.next_frame() {
+                        Ok(Some(frame)) => {
+                            if events.send(Event::Frame(frame)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(Error::Oversize) => {
+                            let _ = events.send(Event::Oversize);
+                            return;
+                        }
+                        Ok(None) => break,
+                        Err(_) => return,
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => {
+                let _ = events.send(Event::InputError(error));
+                return;
+            }
+        }
+    }
+}
+
 /// Serve until EOF or an I/O failure. Cancellation affects observations only;
 /// launching and stopping runs remain explicit domain operations.
 pub fn serve(
@@ -128,174 +242,236 @@ pub fn serve(
     let factory = Arc::new(factory);
     let (jobs, receive) = mpsc::sync_channel::<Job>(QUEUE);
     let receive = Arc::new(Mutex::new(receive));
-    let (results, completed) = mpsc::sync_channel::<Completion>(QUEUE + WORKERS);
-    let mut workers = Vec::new();
+    let (events_tx, events) = mpsc::sync_channel::<Event>(EVENT_QUEUE);
+    let reader_events = events_tx.clone();
+    let mut workers = Vec::with_capacity(WORKERS);
     for _ in 0..WORKERS {
-        let (factory, receive, results) = (factory.clone(), receive.clone(), results.clone());
+        let (factory, receive, events) = (factory.clone(), receive.clone(), events_tx.clone());
         workers.push(thread::spawn(move || {
             let mut service = factory.open();
             loop {
-                let job = match receive.lock() {
+                let received = match receive.lock() {
                     Ok(reader) => reader.recv(),
                     Err(_) => return,
                 };
-                let Ok(job) = job else { return };
+                let Ok(job) = received else { return };
+                let mut completion =
+                    CompletionGuard::new(job.id.clone(), job.modern, events.clone());
                 let response = if job.cancel.is_cancelled() {
-                    tool_error("cancelled")
+                    failure("cancelled")
                 } else {
                     match service.as_mut() {
                         Ok(service) => match job.call.execute(service, &job.cancel) {
                             Ok(response) => match serde_json::to_value(response) {
                                 Ok(value) => value,
-                                Err(_) => tool_error("state_corrupt"),
+                                Err(_) => failure("state_corrupt"),
                             },
                             Err(error) => service_error(&error),
                         },
                         Err(error) => service_error(error),
                     }
                 };
-                if results
-                    .try_send(Completion {
-                        id: job.id.clone(),
-                        reply: protocol::result(&job.id, response, job.modern),
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                completion.response = Some(response);
             }
         }));
     }
-    drop(results);
+    drop(events_tx);
+
+    let stop_reader = AtomicBool::new(false);
     let mut live = BTreeMap::<Id, CancelToken>::new();
+    let run_result = thread::scope(|scope| {
+        let reader = scope.spawn(|| read_input(input, &reader_events, &stop_reader));
+        let run = serve_loop(&events, &jobs, output, &mut live, &workers);
+        stop_reader.store(true, Ordering::Release);
+        drop(jobs);
+        let output_failed = matches!(&run, Err(Error::Output(_) | Error::OversizeReply));
+        let shutdown = shutdown_workers(
+            &events,
+            output,
+            &mut live,
+            &mut workers,
+            output_failed || matches!(&run, Err(Error::Worker)),
+        );
+        while !reader.is_finished() {
+            let _ = events.recv_timeout(EVENT_WAIT);
+        }
+        if reader.join().is_err() {
+            return Err(Error::Worker);
+        }
+        match shutdown {
+            Err(error) => Err(error),
+            Ok(()) => run,
+        }
+    });
+    for worker in workers {
+        if worker.is_finished() {
+            let _ = worker.join();
+        }
+    }
+    run_result
+}
+
+fn serve_loop(
+    events: &Receiver<Event>,
+    jobs: &SyncSender<Job>,
+    output: &mut impl Output,
+    live: &mut BTreeMap<Id, CancelToken>,
+    workers: &[thread::JoinHandle<()>],
+) -> Result<(), Error> {
     let mut protocol = Protocol::default();
-    let mut framer = Framer::default();
-    let mut buffer = [0u8; 8192];
-    let run = (|| {
-        loop {
-            while let Ok(done) = completed.try_recv() {
-                if let Some(cancel) = live.remove(&done.id)
-                    && !cancel.is_cancelled()
-                {
-                    write(output, &done.reply)?;
-                }
-            }
-            if let Some(frame) = framer.next_frame()? {
-                match protocol.receive(&frame) {
-                    Action::Ignore => {}
-                    Action::Cancel(id) => {
-                        if let Some(cancel) = live.get(&id) {
-                            cancel.cancel();
-                        }
-                    }
-                    Action::Reply(reply) => {
-                        // Protocol controls cannot reuse a running request ID either.
-                        let id = reply
-                            .get("id")
-                            .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
-                        if id.as_ref().is_some_and(|id| live.contains_key(id)) {
-                            write(
-                                output,
-                                &protocol::error(id.as_ref(), -32600, "Duplicate live request ID"),
-                            )?;
-                        } else {
-                            write(output, &reply)?;
-                        }
-                    }
-                    Action::Call {
-                        id,
-                        modern,
-                        name,
-                        arguments,
-                    } => {
-                        if live.contains_key(&id) {
-                            write(
-                                output,
-                                &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
-                            )?;
-                            continue;
-                        }
-                        let call = match ToolCall::parse(&name, arguments) {
-                            Ok(call) => call,
-                            Err(_) => {
-                                write(
-                                    output,
-                                    &protocol::error(
-                                        Some(&id),
-                                        -32602,
-                                        "Invalid tool name or arguments",
-                                    ),
-                                )?;
-                                continue;
-                            }
-                        };
-                        let cancel = CancelToken::new();
-                        let job = Job {
-                            id: id.clone(),
-                            modern,
-                            call,
-                            cancel: cancel.clone(),
-                        };
-                        match jobs.try_send(job) {
-                            Ok(()) => {
-                                live.insert(id, cancel);
-                            }
-                            Err(TrySendError::Full(_)) => {
-                                write(output, &protocol::result(&id, tool_error("busy"), modern))?
-                            }
-                            Err(TrySendError::Disconnected(_)) => return Err(Error::Worker),
-                        }
+    loop {
+        match events.recv_timeout(EVENT_WAIT) {
+            Ok(Event::Frame(frame)) => match protocol.receive(&frame) {
+                Action::Ignore => {}
+                Action::Cancel(id) => {
+                    if let Some(cancel) = live.get(&id) {
+                        cancel.cancel();
                     }
                 }
-                continue;
-            }
-            let space = framer.remaining().min(buffer.len());
-            match input.read(&mut buffer[..space], Instant::now() + POLL) {
-                Ok(0) => {
-                    if framer.incomplete() {
+                Action::Reply(reply) => {
+                    let id = reply
+                        .get("id")
+                        .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
+                    if id.as_ref().is_some_and(|id| live.contains_key(id)) {
                         write(
                             output,
-                            &protocol::uncorrelated_error(
-                                -32700,
-                                "EOF inside a JSON frame",
-                                protocol.modern(),
-                            ),
+                            &protocol::error(id.as_ref(), -32600, "Duplicate live request ID"),
                         )?;
+                    } else {
+                        write(output, &reply)?;
                     }
-                    return Ok(());
                 }
-                Ok(size) => {
-                    let chunk = buffer.get(..size).ok_or(Error::Worker)?;
-                    framer.push(chunk)?;
+                Action::Call { id, modern, call } => {
+                    if live.contains_key(&id) {
+                        write(
+                            output,
+                            &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
+                        )?;
+                        continue;
+                    }
+                    let cancel = CancelToken::new();
+                    let job = Job {
+                        id: id.clone(),
+                        modern,
+                        call: *call,
+                        cancel: cancel.clone(),
+                    };
+                    match jobs.try_send(job) {
+                        Ok(()) => {
+                            live.insert(id, cancel);
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            write(output, &protocol::result(&id, failure("busy"), modern))?
+                        }
+                        Err(TrySendError::Disconnected(_)) => return Err(Error::Worker),
+                    }
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(error) => return Err(error.into()),
+            },
+            Ok(Event::Oversize) => {
+                write(
+                    output,
+                    &protocol::uncorrelated_error(
+                        -32700,
+                        "Request exceeds the frame limit",
+                        protocol.modern(),
+                    ),
+                )?;
+                return Err(Error::Oversize);
+            }
+            Ok(Event::InputEof(incomplete)) => {
+                if incomplete {
+                    write(
+                        output,
+                        &protocol::uncorrelated_error(
+                            -32700,
+                            "EOF inside a JSON frame",
+                            protocol.modern(),
+                        ),
+                    )?;
+                }
+                return Ok(());
+            }
+            Ok(Event::InputError(error)) => return Err(Error::Io(error)),
+            Ok(Event::Completed(completion)) => {
+                if let Some(cancel) = live.remove(&completion.id)
+                    && !cancel.is_cancelled()
+                {
+                    write(output, &completion.reply)?;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Worker),
+        }
+        if workers.iter().all(thread::JoinHandle::is_finished) {
+            return Err(Error::Worker);
+        }
+    }
+}
+
+fn shutdown_workers(
+    events: &Receiver<Event>,
+    output: &mut impl Output,
+    live: &mut BTreeMap<Id, CancelToken>,
+    workers: &mut Vec<thread::JoinHandle<()>>,
+    cancel_now: bool,
+) -> Result<(), Error> {
+    let deadline = Instant::now() + SHUTDOWN;
+    let mut cancelled = cancel_now;
+    let mut output_error = None;
+    loop {
+        let now = Instant::now();
+        cancelled |= now >= deadline - CANCEL_GRACE;
+        if cancelled {
+            for cancel in live.values() {
+                cancel.cancel();
             }
         }
-    })();
-    // EOF/error closes admission and cancels only cooperative observations.
-    for cancel in live.values() {
-        cancel.cancel();
-    }
-    drop(jobs);
-    let deadline = Instant::now() + SHUTDOWN;
-    while workers.iter().any(|worker| !worker.is_finished()) {
-        if Instant::now() >= deadline {
+        if now >= deadline {
             return Err(Error::Shutdown);
         }
-        // Bounded waits also drain results, allowing workers to retire.
-        let _ = completed.recv_timeout(POLL);
+        let finished = workers.iter().all(thread::JoinHandle::is_finished);
+        // Once every worker has returned, all completion guards have sent.
+        // Drain those queued completions without waiting for another sender.
+        let wake = if cancelled {
+            deadline
+        } else {
+            deadline - CANCEL_GRACE
+        };
+        let event = if finished {
+            events.try_recv().ok()
+        } else {
+            events
+                .recv_timeout(EVENT_WAIT.min(wake.saturating_duration_since(now)))
+                .ok()
+        };
+        match event {
+            Some(Event::Completed(completion)) => {
+                if let Some(cancel) = live.remove(&completion.id)
+                    && !cancel.is_cancelled()
+                    && output_error.is_none()
+                    && let Err(error) = write_before(
+                        output,
+                        &completion.reply,
+                        (Instant::now() + WRITE_WAIT).min(deadline),
+                    )
+                {
+                    output_error = Some(error);
+                    cancelled = true;
+                }
+            }
+            None if finished => break,
+            _ => {}
+        }
     }
-    for worker in workers {
-        worker.join().map_err(|_| Error::Worker)?;
+    let panicked = workers
+        .drain(..)
+        .map(|worker| worker.join().is_err())
+        .filter(|failed| *failed)
+        .count();
+    if !live.is_empty() || panicked == WORKERS {
+        return output_error.map_or(Err(Error::Worker), Err);
     }
-    run
+    output_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

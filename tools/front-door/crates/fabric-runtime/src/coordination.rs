@@ -2,6 +2,10 @@
 #![forbid(unsafe_code)]
 
 pub mod facade;
+pub mod input;
+
+use input::bounded_input;
+pub use input::{InputError, ValidateInput};
 
 use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, DurationMicros, GitOid, MessageId, ProjectId, StateRoot,
@@ -10,7 +14,6 @@ use provenant_core::{
 use provenant_records::{ArtifactRef, RecordHeader};
 use provenant_supervisor::fs::{FsError, LocalFs, SafeFs};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use provenant_fabric_store::{ClaimFence, ClaimRequest, LandingRequest, Request, Store, TaskClaim};
@@ -23,6 +26,8 @@ pub use provenant_fabric_store::{
 pub enum CoordinationError {
     #[error("invalid coordination input: {0}")]
     InvalidInput(&'static str),
+    #[error(transparent)]
+    Input(#[from] InputError),
     #[error("coordination request was cancelled")]
     Cancelled,
     #[error("coordination request exceeded its wait budget")]
@@ -35,8 +40,6 @@ pub enum CoordinationError {
     EntropyEncoding,
     #[error("coordination response could not be encoded")]
     ResponseEncoding(#[source] serde_json::Error),
-    #[error("one coordination result exceeds its response byte budget")]
-    ResponseTooLarge,
     #[error("Fabric store operation failed")]
     Store(#[source] provenant_fabric_store::Error),
     #[error("clock operation failed")]
@@ -46,12 +49,12 @@ pub enum CoordinationError {
 impl CoordinationError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::InvalidInput(_) | Self::Time(_) => "invalid_input",
+            Self::InvalidInput(_) | Self::Input(_) | Self::Time(_) => "invalid_input",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
             Self::Busy => "busy",
             Self::Entropy(_) | Self::EntropyEncoding => "io",
-            Self::ResponseEncoding(_) | Self::ResponseTooLarge => "state_corrupt",
+            Self::ResponseEncoding(_) => "state_corrupt",
             Self::Store(error) => match error {
                 provenant_fabric_store::Error::NotFound => "not_found",
                 provenant_fabric_store::Error::Conflict
@@ -132,24 +135,22 @@ impl std::fmt::Debug for LandingProof {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MailInput {
-    Send {
-        recipients: Vec<ActorId>,
-        kind: MessageKind,
-        body: String,
-        artifacts: Vec<ArtifactRef>,
-        reply_to: Option<MessageRef>,
-        task: Option<TaskRef>,
-    },
-    Read {
-        after: Option<i64>,
-        limit: u64,
-    },
-    MarkRead {
-        through: i64,
-    },
+bounded_input! {
+    pub enum MailInput as WireMailInput {
+        Send {
+            recipients: Vec<ActorId>,
+            kind: MessageKind,
+            body: String,
+            artifacts: Vec<ArtifactRef>,
+            reply_to: Option<MessageRef>,
+            task: Option<TaskRef>,
+        },
+        Read {
+            after: Option<i64>,
+            limit: u64,
+        },
+        MarkRead { through: i64 },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,34 +161,23 @@ pub enum MailResult {
     MarkedRead { cursor: i64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TaskInput {
-    Create {
-        objective: String,
-        note: Option<String>,
-    },
-    List {
-        state: Option<TaskState>,
-        after: Option<TaskId>,
-        limit: u64,
-    },
-    Claim {
-        id: TaskId,
-        lease_ms: u64,
-    },
-    Update {
-        proof: TaskProof,
-        objective: String,
-        note: Option<String>,
-    },
-    Finish {
-        proof: TaskProof,
-        state: TaskState,
-    },
-    Release {
-        proof: TaskProof,
-    },
+bounded_input! {
+    pub enum TaskInput as WireTaskInput {
+        Create { objective: String, note: Option<String> },
+        List {
+            state: Option<TaskState>,
+            after: Option<TaskId>,
+            limit: u64,
+        },
+        Claim { id: TaskId, lease_ms: u64 },
+        Update {
+            proof: TaskProof,
+            objective: String,
+            note: Option<String>,
+        },
+        Finish { proof: TaskProof, state: TaskState },
+        Release { proof: TaskProof },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,18 +191,15 @@ pub enum TaskResult {
     Released { task: Task },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EventsInput {
-    Read {
-        after: Option<i64>,
-        limit: u64,
-        wait_ms: Option<u64>,
-    },
-    Note {
-        note: String,
-        dedup_key: Option<String>,
-    },
+bounded_input! {
+    pub enum EventsInput as WireEventsInput {
+        Read {
+            after: Option<i64>,
+            limit: u64,
+            wait_ms: Option<u64>,
+        },
+        Note { note: String, dedup_key: Option<String> },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,36 +219,36 @@ const MAX_COORDINATION_RESULT_BYTES: usize = 768 * 1024;
 
 fn bounded_page<T: Serialize>(
     items: Vec<T>,
-    mut truncated: bool,
+    truncated: bool,
 ) -> Result<Page<T>, CoordinationError> {
-    let mut bounded = Vec::with_capacity(items.len());
-    let mut encoded_bytes = 0_usize;
+    let mut page = Page {
+        items: Vec::with_capacity(items.len()),
+        truncated,
+    };
+    let mut remaining = MAX_COORDINATION_RESULT_BYTES;
     for item in items {
-        let item_bytes = serde_json::to_vec(&item).map_err(CoordinationError::ResponseEncoding)?;
-        let Some(next_bytes) = encoded_bytes.checked_add(item_bytes.len()) else {
-            return Err(CoordinationError::ResponseTooLarge);
-        };
-        if next_bytes > MAX_COORDINATION_RESULT_BYTES {
-            truncated = true;
+        // Measure each row once, rather than re-encoding the growing page.
+        let size = serde_json::to_vec(&item)
+            .map_err(CoordinationError::ResponseEncoding)?
+            .len();
+        if size > remaining {
+            page.truncated = true;
             break;
         }
-        encoded_bytes = next_bytes;
-        bounded.push(item);
+        remaining -= size;
+        page.items.push(item);
     }
-    Ok(Page {
-        items: bounded,
-        truncated,
-    })
+    Ok(page)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ClaimInput {
-    Acquire { scope: WorkScope, lease_ms: u64 },
-    Renew { proof: ClaimProof, lease_ms: u64 },
-    Verify { proof: ClaimProof },
-    Release { proof: ClaimProof },
-    List { after: Option<ClaimId>, limit: u64 },
+bounded_input! {
+    pub enum ClaimInput as WireClaimInput {
+        Acquire { scope: WorkScope, lease_ms: u64 },
+        Renew { proof: ClaimProof, lease_ms: u64 },
+        Verify { proof: ClaimProof },
+        Release { proof: ClaimProof },
+        List { after: Option<ClaimId>, limit: u64 },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,30 +261,19 @@ pub enum ClaimResult {
     Listed { page: Page<WorkClaim> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LandingInput {
-    Acquire {
-        reference: String,
-        expected: GitOid,
-        candidate: GitOid,
-        lease_ms: u64,
-    },
-    Renew {
-        proof: LandingProof,
-        lease_ms: u64,
-    },
-    Verify {
-        proof: LandingProof,
-    },
-    Release {
-        proof: LandingProof,
-    },
-    Wait {
-        reference: String,
-        generation: u64,
-        wait_ms: u64,
-    },
+bounded_input! {
+    pub enum LandingInput as WireLandingInput {
+        Acquire {
+            reference: String,
+            expected: GitOid,
+            candidate: GitOid,
+            lease_ms: u64,
+        },
+        Renew { proof: LandingProof, lease_ms: u64 },
+        Verify { proof: LandingProof },
+        Release { proof: LandingProof },
+        Wait { reference: String, generation: u64, wait_ms: u64 },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +295,7 @@ pub enum LandingResult {
     },
     Waited {
         landing: Option<Landing>,
+        timed_out: bool,
     },
 }
 
@@ -424,29 +401,33 @@ impl<'a> CoordinationService<'a> {
         Ok(())
     }
 
-    fn lease(milliseconds: u64) -> Result<DurationMicros, CoordinationError> {
-        let micros = milliseconds
-            .checked_mul(1_000)
-            .ok_or(CoordinationError::InvalidInput("lease_ms"))?;
-        if !(1_000_000..=3_600_000_000).contains(&micros) {
-            return Err(CoordinationError::InvalidInput("lease_ms"));
-        }
-        Ok(DurationMicros::from_micros(micros))
+    fn lease_duration(milliseconds: u64) -> DurationMicros {
+        DurationMicros::from_micros(milliseconds * 1_000)
     }
 
-    fn page_limit(limit: u64) -> Result<(), CoordinationError> {
-        if !(1..=provenant_fabric_store::MAX_PAGE_ROWS).contains(&limit) {
-            return Err(CoordinationError::InvalidInput("limit"));
-        }
-        Ok(())
-    }
-
-    fn wait_budget(&self, duration_micros: u64) -> Result<WaitBudget, CoordinationError> {
-        Ok(WaitBudget::new(
+    fn observation_budget(
+        &self,
+        budget: WaitBudget,
+        wait_ms: u64,
+    ) -> Result<WaitBudget, CoordinationError> {
+        let requested = WaitBudget::new(
             self.clock.mono_now(),
-            DurationMicros::from_micros(duration_micros),
+            DurationMicros::from_micros(wait_ms * 1_000),
             WaitTransport::Mcp,
-        )?)
+        )?;
+        Ok(
+            if requested.deadline().as_mono_time() < budget.deadline().as_mono_time() {
+                requested
+            } else {
+                budget
+            },
+        )
+    }
+
+    fn pause(&self, budget: WaitBudget, cancel: &CancelToken) {
+        let left = budget.remaining(self.clock.mono_now()).as_micros();
+        self.backoff
+            .wait(DurationMicros::from_micros(left.min(50_000)), cancel);
     }
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
@@ -510,6 +491,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<MailResult, CoordinationError> {
+        input.validate_input()?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -542,7 +524,6 @@ impl CoordinationApi for CoordinationService<'_> {
                 Ok(MailResult::Sent { id })
             }
             MailInput::Read { after, limit } => {
-                Self::page_limit(limit)?;
                 let prior_cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
                 let page =
                     self.store
@@ -570,6 +551,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<TaskResult, CoordinationError> {
+        input.validate_input()?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -596,7 +578,6 @@ impl CoordinationApi for CoordinationService<'_> {
                 after,
                 limit,
             } => {
-                Self::page_limit(limit)?;
                 let tasks = self
                     .store
                     .tasks(self.project, state, after, limit, &request)?;
@@ -611,7 +592,7 @@ impl CoordinationApi for CoordinationService<'_> {
                         task: id,
                         actor: self.actor,
                         token: Self::new_id_bytes()?,
-                        lease: Self::lease(lease_ms)?,
+                        lease: Self::lease_duration(lease_ms),
                     },
                     &request,
                 )?;
@@ -661,7 +642,27 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<EventsResult, CoordinationError> {
-        self.ensure_active(budget, cancel)?;
+        input.validate_input()?;
+        if let Err(error) = self.ensure_active(budget, cancel) {
+            return match (&error, &input) {
+                (
+                    CoordinationError::Timeout,
+                    EventsInput::Read {
+                        after,
+                        wait_ms: Some(_),
+                        ..
+                    },
+                ) => Ok(EventsResult::Read {
+                    page: Page {
+                        items: Vec::new(),
+                        truncated: false,
+                    },
+                    cursor: after.unwrap_or(0),
+                    timed_out: true,
+                }),
+                _ => Err(error),
+            };
+        }
         let request = self.request(budget, cancel);
         match input {
             EventsInput::Read {
@@ -669,75 +670,32 @@ impl CoordinationApi for CoordinationService<'_> {
                 limit,
                 wait_ms,
             } => {
-                Self::page_limit(limit)?;
-                if wait_ms.is_some_and(|millis| !(1_000..=55_000).contains(&millis)) {
-                    return Err(CoordinationError::InvalidInput("wait_ms"));
-                }
-                // Long-poll reads must be bounded from their first store call,
-                // not only from the later retry loop. Otherwise a busy store
-                // can consume the full tool budget before `wait_ms` applies.
-                let (read_request, wait_cap) = if let Some(wait_ms) = wait_ms {
-                    let input_us = wait_ms
-                        .checked_mul(1_000)
-                        .ok_or(CoordinationError::InvalidInput("wait_ms"))?;
-                    let remaining = budget.remaining(self.clock.mono_now()).as_micros();
-                    let cap_us = input_us.min(remaining);
-                    if cap_us < 1_000_000 {
-                        return Err(CoordinationError::Timeout);
-                    }
-                    (
-                        self.request(self.wait_budget(cap_us)?, cancel),
-                        Some(cap_us),
-                    )
-                } else {
-                    (request, None)
+                let read_budget = match wait_ms {
+                    Some(ms) => self.observation_budget(budget, ms)?,
+                    None => budget,
                 };
-                let started = Instant::now();
-                let prior_cursor =
-                    self.store
-                        .event_cursor(self.project, self.actor, &read_request)?;
-                let start = after.unwrap_or(prior_cursor);
+                let read_request = self.request(read_budget, cancel);
+                // fabric.md CLI and MCP surfaces: events use caller-held cursors.
+                let start = after.unwrap_or(0);
                 let mut page = self
                     .store
                     .events(self.project, start, limit, &read_request)?;
                 let mut timed_out = false;
-                if page.items.is_empty() && wait_cap.is_some() {
-                    let cap_us = wait_cap.ok_or(CoordinationError::InvalidInput("wait_ms"))?;
-                    let cap = Duration::from_micros(cap_us);
-                    loop {
-                        if cancel.is_cancelled() {
-                            return Err(CoordinationError::Cancelled);
-                        }
-                        let left = cap.saturating_sub(started.elapsed());
-                        if left.is_zero() {
-                            timed_out = true;
-                            break;
-                        }
-                        self.backoff.wait(
-                            DurationMicros::from_micros(
-                                u64::try_from(left.min(Duration::from_millis(50)).as_micros())
-                                    .unwrap_or(50_000),
-                            ),
-                            cancel,
-                        );
-                        page = self
-                            .store
-                            .events(self.project, start, limit, &read_request)?;
-                        if !page.items.is_empty() {
-                            break;
-                        }
+                while page.items.is_empty() && wait_ms.is_some() {
+                    if cancel.is_cancelled() {
+                        return Err(CoordinationError::Cancelled);
                     }
+                    self.pause(read_budget, cancel);
+                    if read_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+                        timed_out = true;
+                        break;
+                    }
+                    page = self
+                        .store
+                        .events(self.project, start, limit, &read_request)?;
                 }
                 let page = bounded_page(page.items, page.truncated)?;
-                let cursor = page
-                    .items
-                    .last()
-                    .map(|event| event.seq)
-                    .unwrap_or_else(|| after.unwrap_or(prior_cursor));
-                if after.is_none() && cursor > prior_cursor {
-                    self.store
-                        .mark_events_read(self.project, self.actor, cursor, &read_request)?;
-                }
+                let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
                     page,
                     cursor,
@@ -766,6 +724,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<ClaimResult, CoordinationError> {
+        input.validate_input()?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -776,7 +735,7 @@ impl CoordinationApi for CoordinationService<'_> {
                         project: self.project,
                         actor: self.actor,
                         token: Self::new_id_bytes()?,
-                        lease: Self::lease(lease_ms)?,
+                        lease: Self::lease_duration(lease_ms),
                         scope,
                     },
                     &request,
@@ -789,8 +748,12 @@ impl CoordinationApi for CoordinationService<'_> {
             }
             ClaimInput::Renew { proof, lease_ms } => {
                 let fence = self.claim_fence(&proof);
-                self.store
-                    .renew_claim(self.project, &fence, Self::lease(lease_ms)?, &request)?;
+                self.store.renew_claim(
+                    self.project,
+                    &fence,
+                    Self::lease_duration(lease_ms),
+                    &request,
+                )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
                 Ok(ClaimResult::Renewed { claim })
             }
@@ -807,7 +770,6 @@ impl CoordinationApi for CoordinationService<'_> {
                 Ok(ClaimResult::Released { id })
             }
             ClaimInput::List { after, limit } => {
-                Self::page_limit(limit)?;
                 let page = self.store.claims(self.project, after, limit, &request)?;
                 let page = bounded_page(page.items, page.truncated)?;
                 Ok(ClaimResult::Listed { page })
@@ -821,7 +783,18 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<LandingResult, CoordinationError> {
-        self.ensure_active(budget, cancel)?;
+        input.validate_input()?;
+        if let Err(error) = self.ensure_active(budget, cancel) {
+            return match (&error, &input) {
+                (CoordinationError::Timeout, LandingInput::Wait { .. }) => {
+                    Ok(LandingResult::Waited {
+                        landing: None,
+                        timed_out: true,
+                    })
+                }
+                _ => Err(error),
+            };
+        }
         let request = self.request(budget, cancel);
         match input {
             LandingInput::Acquire {
@@ -843,7 +816,7 @@ impl CoordinationApi for CoordinationService<'_> {
                         reference: reference.clone(),
                         expected,
                         candidate,
-                        lease: Self::lease(lease_ms)?,
+                        lease: Self::lease_duration(lease_ms),
                     },
                     &request,
                 )?;
@@ -858,8 +831,12 @@ impl CoordinationApi for CoordinationService<'_> {
                     .store
                     .lock_landing(self.project, &proof.reference, &request)?;
                 let fence = self.landing_fence(&proof);
-                self.store
-                    .renew_landing(&guard, &fence, Self::lease(lease_ms)?, &request)?;
+                self.store.renew_landing(
+                    &guard,
+                    &fence,
+                    Self::lease_duration(lease_ms),
+                    &request,
+                )?;
                 let landing = self.store.verify_landing(&guard, &fence, &request)?;
                 Ok(LandingResult::Renewed { landing })
             }
@@ -889,50 +866,40 @@ impl CoordinationApi for CoordinationService<'_> {
                 generation,
                 wait_ms,
             } => {
-                if !(1_000..=55_000).contains(&wait_ms) {
-                    return Err(CoordinationError::InvalidInput("wait_ms"));
-                }
-                let input_us = wait_ms
-                    .checked_mul(1_000)
-                    .ok_or(CoordinationError::InvalidInput("wait_ms"))?;
-                let remaining = budget.remaining(self.clock.mono_now()).as_micros();
-                let cap_us = input_us.min(remaining);
-                if cap_us < 1_000_000 {
-                    return Err(CoordinationError::Timeout);
-                }
-                let poll_request = self.request(self.wait_budget(cap_us)?, cancel);
-                let cap = Duration::from_micros(cap_us);
-                let started = Instant::now();
+                let poll_budget = self.observation_budget(budget, wait_ms)?;
+                let poll_request = self.request(poll_budget, cancel);
+                let mut current = None;
                 loop {
                     if cancel.is_cancelled() {
                         return Err(CoordinationError::Cancelled);
                     }
-                    if started.elapsed() >= cap {
-                        return Err(CoordinationError::Timeout);
+                    if poll_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+                        return Ok(LandingResult::Waited {
+                            landing: current,
+                            timed_out: true,
+                        });
                     }
-                    let current = self
+                    current = self
                         .store
                         .landing(self.project, &reference, &poll_request)?;
                     let changed = current.as_ref().is_none_or(|landing| {
                         landing.generation != generation || landing.holder.is_none()
                     });
                     if changed {
-                        return Ok(LandingResult::Waited { landing: current });
+                        return Ok(LandingResult::Waited {
+                            landing: current,
+                            timed_out: false,
+                        });
                     }
-                    let left = cap.saturating_sub(started.elapsed());
-                    self.backoff.wait(
-                        DurationMicros::from_micros(
-                            u64::try_from(left.min(Duration::from_millis(50)).as_micros())
-                                .unwrap_or(50_000),
-                        ),
-                        cancel,
-                    );
+                    self.pause(poll_budget, cancel);
                 }
             }
         }
     }
 }
 
+// TODO(F9 supervisor entropy API, fabric.md owner interface): replace temporary
+// name decoding with supervisor::sys getentropy-backed 16-byte identifiers.
 fn entropy_half() -> Result<[u8; 8], CoordinationError> {
     let name = LocalFs
         .temporary_name()
@@ -1108,25 +1075,42 @@ mod tests {
         };
         assert_eq!(event_page.items.last().map(|event| event.seq), Some(seq));
         assert_eq!(event_cursor, seq);
+        // A lost/suppressed response must be replayable without a mark.
         let EventsResult::Read {
-            page: timeout_page,
-            timed_out: true,
+            page: replay,
+            cursor,
             ..
         } = service
             .events(
                 EventsInput::Read {
                     after: None,
                     limit: 10,
-                    wait_ms: Some(1_000),
+                    wait_ms: None,
                 },
                 fixture.budget(),
                 &cancel,
             )
-            .expect("bounded event wait")
+            .expect("replay events")
         else {
-            panic!("event wait result")
+            panic!("events read")
         };
-        assert!(timeout_page.items.is_empty());
+        assert_eq!(replay, event_page);
+        assert_eq!(cursor, event_cursor);
+        let EventsResult::Read { page, .. } = service
+            .events(
+                EventsInput::Read {
+                    after: Some(cursor),
+                    limit: 10,
+                    wait_ms: None,
+                },
+                fixture.budget(),
+                &cancel,
+            )
+            .expect("caller cursor")
+        else {
+            panic!("events read")
+        };
+        assert!(page.items.is_empty());
     }
 
     #[test]
@@ -1263,11 +1247,137 @@ mod tests {
                 fixture.budget(),
                 &cancel
             ),
-            Ok(LandingResult::Waited { landing: Some(_) })
+            Ok(LandingResult::Waited {
+                landing: Some(_),
+                timed_out: false
+            })
         ));
         assert!(matches!(
             service.landing(LandingInput::Release { proof }, fixture.budget(), &cancel),
             Ok(LandingResult::Released { .. })
+        ));
+    }
+
+    struct SimulatedClock(std::cell::Cell<u64>);
+    impl Clock for SimulatedClock {
+        fn mono_now(&self) -> MonoTime {
+            MonoTime::from_micros(self.0.get())
+        }
+        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+            WallTime::from_micros(2_000_000_000_000_000)
+        }
+    }
+    impl RetryWait for SimulatedClock {
+        fn wait(&self, duration: DurationMicros, _: &CancelToken) {
+            self.0.set(self.0.get() + duration.as_micros());
+        }
+    }
+    #[test]
+    fn expired_event_and_landing_waits_are_data_using_the_injected_clock() {
+        let fixture = Fixture::new();
+        let clock = SimulatedClock(std::cell::Cell::new(0));
+        let cancel = CancelToken::new();
+        let budget = || WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
+        let service = CoordinationService::open(
+            &fixture.root,
+            fixture.project,
+            fixture.actor,
+            &clock,
+            &clock,
+            budget(),
+            &cancel,
+        )
+        .expect("service");
+        let acquired = service
+            .landing(
+                LandingInput::Acquire {
+                    reference: "refs/heads/main".into(),
+                    expected: GitOid::parse(&"a".repeat(40)).expect("oid"),
+                    candidate: GitOid::parse(&"b".repeat(40)).expect("oid"),
+                    lease_ms: 5000,
+                },
+                budget(),
+                &cancel,
+            )
+            .expect("acquire");
+        let LandingResult::Acquired { landing, .. } = acquired else {
+            panic!("landing");
+        };
+        let result = service
+            .landing(
+                LandingInput::Wait {
+                    reference: "refs/heads/main".into(),
+                    generation: landing.generation,
+                    wait_ms: 1000,
+                },
+                budget(),
+                &cancel,
+            )
+            .expect("expired wait is data");
+        let value = serde_json::to_value(result).expect("result");
+        assert_eq!(value["timed_out"], true);
+        assert_eq!(clock.0.get(), 1_000_000);
+        let EventsResult::Read { cursor, .. } = service
+            .events(
+                EventsInput::Read {
+                    after: None,
+                    limit: 100,
+                    wait_ms: None,
+                },
+                budget(),
+                &cancel,
+            )
+            .expect("cursor")
+        else {
+            panic!("events");
+        };
+        assert!(matches!(
+            service.events(
+                EventsInput::Read {
+                    after: Some(cursor),
+                    limit: 100,
+                    wait_ms: Some(1000),
+                },
+                budget(),
+                &cancel
+            ),
+            Ok(EventsResult::Read {
+                timed_out: true,
+                ..
+            })
+        ));
+        assert_eq!(clock.0.get(), 2_000_000);
+        let expired = budget();
+        clock.0.set(7_000_000);
+        assert!(matches!(
+            service.events(
+                EventsInput::Read {
+                    after: Some(cursor),
+                    limit: 100,
+                    wait_ms: Some(1000),
+                },
+                expired,
+                &cancel
+            ),
+            Ok(EventsResult::Read {
+                timed_out: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            service.landing(
+                LandingInput::Wait {
+                    reference: "refs/heads/main".into(),
+                    generation: landing.generation,
+                    wait_ms: 1000,
+                },
+                expired,
+                &cancel
+            ),
+            Ok(LandingResult::Waited {
+                timed_out: true,
+                ..
+            })
         ));
     }
 

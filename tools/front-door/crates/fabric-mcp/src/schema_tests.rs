@@ -1,184 +1,628 @@
 use super::*;
 use crate::tools::ToolCall;
+use regex::Regex;
+use serde_json::{Map, Number, Value, json};
 use std::{fs, path::Path};
-
-fn snapshot(path: &Path, actual: &str, update: bool) {
-    if update {
-        assert!(fs::write(path, actual).is_ok());
-    } else {
-        let expected = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/tool-schemas.json"
-        ));
-        for (index, (actual_line, expected_line)) in actual
-            .trim()
-            .lines()
-            .zip(expected.trim().lines())
-            .enumerate()
-        {
-            assert_eq!(
-                actual_line,
-                expected_line,
-                "schema snapshot line {}",
-                index + 1
-            );
-        }
-        assert_eq!(
-            actual.trim().lines().count(),
-            expected.trim().lines().count(),
-            "schema snapshot line count"
-        );
-    }
-}
 
 #[test]
 fn generated_schema_snapshot_is_checked_in() {
-    let actual_result = serde_json::to_string_pretty(&catalogue());
-    assert!(actual_result.is_ok());
-    let actual = actual_result.unwrap_or_default();
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-schemas.json");
-    snapshot(&path, &actual, false);
+    let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
+    let expected = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tool-schemas.json"
+    ));
+    assert_eq!(actual, expected);
 }
 
 #[test]
 #[ignore = "run explicitly to refresh the checked schema snapshot"]
 fn update_schema_snapshot() {
-    let actual_result = serde_json::to_string_pretty(&catalogue());
-    assert!(actual_result.is_ok());
-    let actual = actual_result.unwrap_or_default();
+    let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-schemas.json");
-    snapshot(&path, &actual, true);
+    fs::write(path, actual).expect("write schema snapshot");
 }
 
-#[test]
-fn every_catalogue_example_is_accepted_by_the_tagged_serde_input() {
-    for (name, arguments) in examples() {
-        assert!(
-            ToolCall::parse(name, arguments).is_ok(),
-            "schema example for {name} did not deserialise"
-        );
+fn deref<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    root.pointer(schema.get("$ref")?.as_str()?.strip_prefix('#')?)
+}
+
+fn integer(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+/// Independent evaluator for the schema keywords emitted by the catalogue.
+/// Unknown keywords fail closed so catalogue growth cannot silently bypass it.
+fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
+    const KEYS: &[&str] = &[
+        "$defs",
+        "$ref",
+        "additionalProperties",
+        "anyOf",
+        "const",
+        "enum",
+        "items",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "oneOf",
+        "pattern",
+        "properties",
+        "required",
+        "type",
+        "uniqueItems",
+        "x-provenant-maxUtf8Bytes",
+    ];
+    if schema
+        .as_object()
+        .is_some_and(|s| s.keys().any(|k| !KEYS.contains(&k.as_str())))
+    {
+        return false;
     }
-}
-
-#[test]
-fn catalogue_examples_reject_unknown_fields_and_unknown_tools() {
-    for (name, mut arguments) in examples() {
-        let object = arguments.as_object_mut();
-        assert!(object.is_some(), "all tool inputs are objects");
-        if let Some(object) = object {
-            object.insert("unexpected".into(), Value::Bool(true));
+    if schema.get("$ref").is_some() {
+        return deref(root, schema).is_some_and(|s| accepts(root, s, value));
+    }
+    if schema
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .is_some_and(|ss| ss.iter().filter(|s| accepts(root, s, value)).count() != 1)
+        || schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|ss| !ss.iter().any(|s| accepts(root, s, value)))
+        || schema.get("const").is_some_and(|v| v != value)
+        || schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|vs| !vs.contains(value))
+    {
+        return false;
+    }
+    let kind = schema.get("type").and_then(Value::as_str);
+    if kind.is_some_and(|k| match k {
+        "object" => !value.is_object(),
+        "array" => !value.is_array(),
+        "string" => !value.is_string(),
+        "integer" => !value.as_number().is_some_and(|n| n.is_i64() || n.is_u64()),
+        "null" => !value.is_null(),
+        _ => true,
+    }) {
+        return false;
+    }
+    if let Some(s) = value.as_str() {
+        let n = s.chars().count() as u64;
+        if schema
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|m| n < m)
+            || schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|m| n > m)
+            || schema
+                .get("x-provenant-maxUtf8Bytes")
+                .and_then(Value::as_u64)
+                .is_some_and(|m| s.len() as u64 > m)
+            || schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|p| Regex::new(p).map_or(true, |r| !r.is_match(s)))
+        {
+            return false;
         }
-        assert!(
-            ToolCall::parse(name, arguments).is_err(),
-            "{name} accepted an unknown field"
-        );
     }
-    assert!(ToolCall::parse("fabric_not_a_tool", serde_json::json!({"op":"inspect"})).is_err());
+    if let Some(n) = integer(value)
+        && (schema
+            .get("minimum")
+            .and_then(integer)
+            .is_some_and(|m| n < m)
+            || schema
+                .get("maximum")
+                .and_then(integer)
+                .is_some_and(|m| n > m))
+    {
+        return false;
+    }
+    if let Some(object) = value.as_object()
+        && let Some(properties) = schema.get("properties").and_then(Value::as_object)
+        && (schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|rs| {
+                rs.iter()
+                    .filter_map(Value::as_str)
+                    .any(|k| !object.contains_key(k))
+            })
+            || (schema["additionalProperties"] == false
+                && object.keys().any(|k| !properties.contains_key(k)))
+            || object
+                .iter()
+                .any(|(k, v)| properties.get(k).is_some_and(|s| !accepts(root, s, v))))
+    {
+        return false;
+    }
+    if let Some(array) = value.as_array()
+        && (schema
+            .get("minItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| (array.len() as u64) < n)
+            || schema
+                .get("maxItems")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| array.len() as u64 > n)
+            || (schema["uniqueItems"] == true
+                && array
+                    .iter()
+                    .enumerate()
+                    .any(|(i, v)| array[..i].contains(v)))
+            || schema
+                .get("items")
+                .is_some_and(|s| array.iter().any(|v| !accepts(root, s, v))))
+    {
+        return false;
+    }
+    true
 }
 
-#[test]
-fn serde_inputs_reject_wrong_types_and_nested_unknown_fields() {
-    for (name, arguments) in [
-        (
-            "fabric_mail",
-            serde_json::json!({"op":"send","recipients":"one","kind":"note","body":"x","artifacts":[]}),
-        ),
-        (
-            "fabric_events",
-            serde_json::json!({"op":"note","detail":"legacy field"}),
-        ),
-        (
-            "fabric_task",
-            serde_json::json!({"op":"update","proof":{"task":"00000000000000000000000000000001","generation":1,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"extra":true},"objective":"x"}),
-        ),
-        (
-            "fabric_identity",
-            serde_json::json!({"op":"inspect","extra":true}),
-        ),
-        (
-            "fabric_claim",
-            serde_json::json!({"op":"acquire","scope":{"kind":"issue","key":"PROV-1"},"lease_ms":"60000"}),
-        ),
-    ] {
-        assert!(
-            ToolCall::parse(name, arguments).is_err(),
-            "{name} accepted malformed input"
-        );
-    }
+fn strings() -> Vec<String> {
+    vec![
+        "x".into(),
+        "a".into(),
+        "0".into(),
+        "0".repeat(32),
+        "0".repeat(40),
+        "0".repeat(64),
+        format!("sha256:{}", "0".repeat(64)),
+        "a".repeat(128),
+        "x".repeat(4096),
+        "x".repeat(65_536),
+    ]
 }
 
-#[test]
-fn schema_constraints_match_request_validation_bounds() {
-    fn field_schema(tool_name: &str, operation: &str, field_name: &str) -> Value {
-        let tools = catalogue();
-        let tool = tools.iter().find(|tool| tool["name"] == tool_name);
-        assert!(tool.is_some());
-        let Some(tool) = tool else {
-            return Value::Null;
-        };
-        let variants = tool["inputSchema"]["oneOf"].as_array();
-        assert!(variants.is_some());
-        let Some(variants) = variants else {
-            return Value::Null;
-        };
-        let variant = variants
+fn sample(root: &Value, schema: &Value) -> Option<Value> {
+    if schema.get("$ref").is_some() {
+        return sample(root, deref(root, schema)?);
+    }
+    if let Some(options) = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+    {
+        return options
             .iter()
-            .find(|variant| variant["properties"]["op"]["const"] == operation);
-        assert!(variant.is_some());
-        let Some(variant) = variant else {
-            return Value::Null;
-        };
-        variant["properties"][field_name].clone()
+            .find_map(|s| sample(root, s).filter(|v| accepts(root, s, v)));
     }
+    if let Some(v) = schema.get("const") {
+        return Some(v.clone());
+    }
+    if let Some(v) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|vs| vs.first())
+    {
+        return Some(v.clone());
+    }
+    match schema.get("type")?.as_str()? {
+        "object" => Some(Value::Object(
+            schema["properties"]
+                .as_object()?
+                .iter()
+                .map(|(k, s)| Some((k.clone(), sample(root, s)?)))
+                .collect::<Option<Map<_, _>>>()?,
+        )),
+        "array" => {
+            let count = schema["minItems"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(1)
+                .min(schema["maxItems"].as_u64().unwrap_or(u64::MAX));
+            Some(Value::Array(vec![
+                sample(root, schema.get("items")?)?;
+                usize::try_from(count).ok()?
+            ]))
+        }
+        "string" => strings()
+            .into_iter()
+            .map(Value::String)
+            .find(|v| accepts(root, schema, v)),
+        "integer" => Some(json!(schema["minimum"].as_u64().unwrap_or(0))),
+        "null" => Some(Value::Null),
+        _ => None,
+    }
+}
 
-    let lease = field_schema("fabric_claim", "acquire", "lease_ms");
-    assert_eq!(lease["minimum"], 1_000);
-    assert_eq!(lease["maximum"], 3_600_000);
-    let concurrency = field_schema("fabric_submit", "submission", "concurrency");
-    assert_eq!(concurrency["minimum"], 1);
-    assert_eq!(concurrency["maximum"], 100);
-    let body = field_schema("fabric_mail", "send", "body");
-    assert_eq!(body["minLength"], 1);
-    assert_eq!(body["maxLength"], 65_536);
-    assert!(body["pattern"].as_str().is_some());
-    let recipients = field_schema("fabric_mail", "send", "recipients");
-    assert_eq!(recipients["uniqueItems"], true);
-    let host_limit = field_schema("fabric_hosts", "list", "limit");
-    assert_eq!(host_limit["minimum"], 1);
-    assert_eq!(host_limit["maximum"], 100);
+fn array_of(root: &Value, item: &Value, count: usize, unique: bool) -> Option<Value> {
+    let item = deref(root, item).unwrap_or(item);
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let value =
+            if unique && item.get("pattern").and_then(Value::as_str) == Some("^[0-9a-f]{32}$") {
+                json!(format!("{index:032x}"))
+            } else if unique && item.get("enum").and_then(Value::as_array).is_some() {
+                item["enum"].get(index)?.clone()
+            } else {
+                sample(root, item)?
+            };
+        values.push(value);
+    }
+    Some(Value::Array(values))
+}
+
+fn candidates(root: &Value, schema: &Value, _value: &Value, valid: bool) -> Vec<Value> {
+    let mut out = Vec::new();
+    if schema.get("const").is_some() {
+        out.push(if valid {
+            schema["const"].clone()
+        } else if schema["const"].is_string() {
+            json!("__not_the_const__")
+        } else {
+            Value::Null
+        });
+    }
+    if let Some(choices) = schema.get("enum").and_then(Value::as_array) {
+        out.extend(if valid {
+            choices.clone()
+        } else {
+            vec![json!("__not_an_enum_value__")]
+        });
+    }
+    match (schema.get("type").and_then(Value::as_str), valid) {
+        (Some("string"), true) => {
+            out.extend(
+                strings()
+                    .into_iter()
+                    .map(Value::String)
+                    .filter(|v| accepts(root, schema, v)),
+            );
+            for n in [schema["minLength"].as_u64(), schema["maxLength"].as_u64()]
+                .into_iter()
+                .flatten()
+            {
+                out.push(json!("x".repeat(n as usize)));
+            }
+            if let Some(n) = schema["x-provenant-maxUtf8Bytes"].as_u64() {
+                let mut s = "é".repeat(n as usize / 2);
+                if n % 2 == 1 {
+                    s.push('x');
+                }
+                out.push(json!(s));
+            }
+        }
+        (Some("string"), false) => {
+            out.extend([json!(1), json!("")]);
+            for n in [
+                schema["maxLength"].as_u64(),
+                schema["x-provenant-maxUtf8Bytes"].as_u64(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                out.push(json!("x".repeat(n.saturating_add(1) as usize)));
+            }
+            if let Some(n) = schema["x-provenant-maxUtf8Bytes"].as_u64() {
+                let mut s = "é".repeat(n as usize / 2);
+                if n % 2 == 0 {
+                    s.push('x');
+                } else {
+                    s.push('é');
+                }
+                out.push(json!(s));
+            }
+            if let Some(p) = schema["pattern"].as_str().and_then(|p| Regex::new(p).ok())
+                && let Some(s) = strings()
+                    .into_iter()
+                    .chain(["\0".into(), "!".into(), "g".into()])
+                    .find(|s| !p.is_match(s))
+            {
+                out.push(json!(s));
+            }
+        }
+        (Some("integer"), true) => {
+            out.extend([schema["minimum"].clone(), schema["maximum"].clone()])
+        }
+        (Some("integer"), false) => {
+            out.push(json!("not an integer"));
+            let min = schema["minimum"].as_u64().unwrap_or(0);
+            out.push(if min == 0 { json!(-1) } else { json!(min - 1) });
+            if let Some(max) = schema["maximum"].as_u64() {
+                if max < u64::MAX {
+                    out.push(json!(max + 1));
+                } else if let Some(n) = Number::from_f64(max as f64 + 4096.0) {
+                    out.push(Value::Number(n));
+                }
+            }
+        }
+        (Some("array"), true) => {
+            for n in [schema["minItems"].as_u64(), schema["maxItems"].as_u64()]
+                .into_iter()
+                .flatten()
+            {
+                if let (Ok(n), Some(items)) = (usize::try_from(n), schema.get("items"))
+                    && let Some(a) = array_of(root, items, n, schema["uniqueItems"] == true)
+                {
+                    out.push(a);
+                }
+            }
+        }
+        (Some("array"), false) => {
+            out.push(json!({"wrong":"type"}));
+            if schema["minItems"].as_u64().unwrap_or(0) > 0 {
+                out.push(json!([]));
+            }
+            if let (Some(max), Some(item)) = (
+                schema["maxItems"].as_u64(),
+                schema.get("items").and_then(|s| sample(root, s)),
+            ) {
+                if let Ok(n) = usize::try_from(max.saturating_add(1)) {
+                    out.push(Value::Array(vec![item.clone(); n]));
+                }
+                if schema["uniqueItems"] == true {
+                    out.push(json!([item, item]));
+                }
+            }
+        }
+        (Some("object"), false) => out.push(json!("wrong type")),
+        (Some("null"), true) => out.push(Value::Null),
+        (Some("null"), false) => out.push(json!({"not":"null"})),
+        _ => {}
+    }
+    out.retain(|v| accepts(root, schema, v) == valid);
+    out.sort_by_key(Value::to_string);
+    out.dedup();
+    out
+}
+
+fn child_path(path: &str, key: &str) -> String {
+    format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
+}
+
+fn replace(request: &Value, path: &str, value: Value) -> Option<Value> {
+    let mut result = request.clone();
+    if path.is_empty() {
+        result = value;
+    } else {
+        *result.pointer_mut(path)? = value;
+    }
+    Some(result)
+}
+
+fn normalise(tool: &str, value: &mut Value) {
+    fn paths(value: &mut Value) {
+        if let Some(object) = value.as_object_mut() {
+            if object.get("encoding") == Some(&json!("native_bytes")) {
+                object.insert("path".into(), json!("ff"));
+            }
+            for child in object.values_mut() {
+                paths(child);
+            }
+        } else if let Some(array) = value.as_array_mut() {
+            for child in array {
+                paths(child);
+            }
+        }
+    }
+    paths(value);
+    if tool == "fabric_submit" && value["op"] == "submission" {
+        let n = value["concurrency"].as_u64().unwrap_or(0) as usize;
+        if let Some(tasks) = value["tasks"].as_array_mut()
+            && tasks.len() < n
+            && let Some(task) = tasks.first().cloned()
+        {
+            tasks.resize(n, task);
+        }
+    }
+}
+
+fn compare(
+    tool: &str,
+    root: &Value,
+    value: &Value,
+    path: &str,
+    valid: bool,
+    counts: &mut (usize, usize),
+) {
+    let schema = accepts(root, root, value);
+    let serde = ToolCall::parse(tool, value.clone()).is_ok();
+    assert_eq!(
+        schema, serde,
+        "schema/serde mismatch at {tool} {path}: {value}"
+    );
+    assert_eq!(
+        schema, valid,
+        "unexpected generated case at {tool} {path}: {value}"
+    );
+    if valid {
+        counts.0 += 1;
+    } else {
+        counts.1 += 1;
+    }
+}
+
+/// Check each node in place. JSON pointers locate the current field in the
+/// whole request, so every generated value is compared immediately.
+fn walk(
+    tool: &str,
+    root: &Value,
+    schema: &Value,
+    request: &Value,
+    path: &str,
+    variants: bool,
+    counts: &mut (usize, usize),
+) {
+    let Some(value) = request.pointer(path) else {
+        panic!("missing generated pointer {path}");
+    };
+    if schema.get("$ref").is_some() {
+        if let Some(s) = deref(root, schema) {
+            walk(tool, root, s, request, path, variants, counts);
+        }
+        return;
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(options) = schema.get(key).and_then(Value::as_array) {
+            let Some((active, selected)) = options
+                .iter()
+                .enumerate()
+                .find(|(_, s)| accepts(root, s, value))
+            else {
+                return;
+            };
+            if variants {
+                for (i, option) in options.iter().enumerate().filter(|(i, _)| *i != active) {
+                    if let Some(v) =
+                        sample(root, option).filter(|v| accepts(root, schema, v) && v != value)
+                        && let Some(mut changed) = replace(request, path, v)
+                    {
+                        normalise(tool, &mut changed);
+                        compare(tool, root, &changed, path, true, counts);
+                        walk(tool, root, schema, &changed, path, false, counts);
+                    }
+                    let _ = i;
+                }
+            }
+            walk(tool, root, selected, request, path, variants, counts);
+            return;
+        }
+    }
+    for candidate in candidates(root, schema, value, true)
+        .into_iter()
+        .filter(|v| v != value)
+    {
+        if let Some(mut changed) = replace(request, path, candidate) {
+            normalise(tool, &mut changed);
+            compare(tool, root, &changed, path, true, counts);
+        }
+    }
+    for candidate in candidates(root, schema, value, false) {
+        if let Some(changed) = replace(request, path, candidate) {
+            compare(tool, root, &changed, path, false, counts);
+        }
+    }
+    if let (Some(object), Some(properties)) = (
+        value.as_object(),
+        schema.get("properties").and_then(Value::as_object),
+    ) {
+        if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+            let mut changed = request.clone();
+            let target = if path.is_empty() {
+                Some(&mut changed)
+            } else {
+                changed.pointer_mut(path)
+            };
+            if let Some(target) = target.and_then(Value::as_object_mut) {
+                target.insert("__schema_probe_unknown".into(), Value::Bool(true));
+                compare(tool, root, &changed, path, false, counts);
+            }
+        }
+        for required in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if object.contains_key(required) {
+                let mut changed = request.clone();
+                let target = if path.is_empty() {
+                    Some(&mut changed)
+                } else {
+                    changed.pointer_mut(path)
+                };
+                if let Some(target) = target.and_then(Value::as_object_mut) {
+                    target.remove(required);
+                    compare(
+                        tool,
+                        root,
+                        &changed,
+                        &child_path(path, required),
+                        false,
+                        counts,
+                    );
+                }
+            }
+        }
+        for (key, child) in properties {
+            if object.contains_key(key) {
+                walk(
+                    tool,
+                    root,
+                    child,
+                    request,
+                    &child_path(path, key),
+                    variants,
+                    counts,
+                );
+            }
+        }
+    }
+    if let (Some(array), Some(items)) = (value.as_array(), schema.get("items")) {
+        for index in 0..array.len() {
+            walk(
+                tool,
+                root,
+                items,
+                request,
+                &child_path(path, &index.to_string()),
+                variants,
+                counts,
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
+    let mut counts = (0, 0);
+    for tool in catalogue() {
+        let name = tool["name"].as_str().expect("tool name");
+        let root = &tool["inputSchema"];
+        for operation in root["oneOf"].as_array().expect("operation schemas") {
+            let mut request = sample(root, operation).expect("generated valid operation");
+            normalise(name, &mut request);
+            compare(name, root, &request, "operation", true, &mut counts);
+            walk(name, root, operation, &request, "", true, &mut counts);
+        }
+    }
+    assert!(
+        counts.0 > 0 && counts.1 > counts.0,
+        "insufficient generated probes: {counts:?}"
+    );
 }
 
 #[test]
 fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
-    let values = catalogue();
-    let names: Vec<_> = values
+    let expected = [
+        "fabric_identity",
+        "fabric_mail",
+        "fabric_task",
+        "fabric_events",
+        "fabric_claim",
+        "fabric_landing",
+        "fabric_submit",
+        "fabric_run",
+        "fabric_output",
+        "fabric_hosts",
+    ];
+    let names: Vec<_> = catalogue()
         .iter()
-        .filter_map(|value| value.get("name").and_then(Value::as_str))
+        .filter_map(|v| v["name"].as_str())
         .collect();
-    assert_eq!(names, crate::tools::TOOL_NAMES);
-    let serialised_result = serde_json::to_string(&values);
-    assert!(serialised_result.is_ok());
-    let serialised = serialised_result.unwrap_or_default();
+    assert_eq!(names, expected);
+    let serialised = serde_json::to_string(catalogue()).expect("catalogue serialises");
     assert!(!serialised.contains("\"detail\""));
+    assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());
 }
 
 #[test]
 fn text_byte_limit_is_enforced_even_when_codepoint_length_is_smaller() {
     let at_limit = "😀".repeat(16_384);
     assert_eq!(at_limit.len(), 65_536);
-    assert!(
-        ToolCall::parse(
-            "fabric_events",
-            serde_json::json!({"op":"note","note":at_limit})
-        )
-        .is_ok()
-    );
+    assert!(ToolCall::parse("fabric_events", json!({"op":"note","note":at_limit})).is_ok());
     let over_limit = "😀".repeat(16_385);
-    assert!(
-        ToolCall::parse(
-            "fabric_events",
-            serde_json::json!({"op":"note","note":over_limit})
-        )
-        .is_err()
-    );
+    assert!(ToolCall::parse("fabric_events", json!({"op":"note","note":over_limit})).is_err());
 }

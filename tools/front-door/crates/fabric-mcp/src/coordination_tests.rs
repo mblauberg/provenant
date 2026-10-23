@@ -71,7 +71,7 @@ impl F3Facade for FakeFacade {
     }
 }
 fn call(
-    service: &mut impl FabricService,
+    service: &mut Service<'_, FakeFacade>,
     name: &str,
     input: Value,
 ) -> Result<Value, Box<dyn Error>> {

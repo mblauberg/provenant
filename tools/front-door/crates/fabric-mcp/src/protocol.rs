@@ -1,4 +1,5 @@
 //! Connection-local MCP lifecycle. No execution or I/O occurs here.
+use crate::tools::{InvalidInput, ToolCall, tool_error};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -6,7 +7,12 @@ pub const LEGACY: &str = "2025-11-25";
 pub const MODERN: &str = "2026-07-28";
 pub const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 pub const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+pub const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+pub const LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
+pub const SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 pub const MAX_FRAME: usize = 1_048_576;
+const TTL_MS: u64 = 300_000;
+const CACHE_SCOPE: &str = "public";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -28,15 +34,18 @@ struct Envelope {
 #[derive(Deserialize)]
 struct Initialise {
     #[serde(rename = "protocolVersion")]
-    version: String,
-    capabilities: BTreeMap<String, Value>,
+    _version: String,
+    #[serde(rename = "capabilities")]
+    _capabilities: BTreeMap<String, Value>,
     #[serde(rename = "clientInfo")]
-    client: Implementation,
+    _client: Implementation,
 }
 #[derive(Deserialize)]
 struct Implementation {
-    name: String,
-    version: String,
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "version")]
+    _version: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,14 +59,18 @@ struct Cancel {
     id: Id,
 }
 #[derive(Debug, Clone, Copy)]
+enum LegacyState {
+    Initialised,
+    Ready,
+}
+#[derive(Debug, Clone, Copy)]
 enum Era {
-    Legacy { ready: bool },
+    Legacy(LegacyState),
     Modern,
 }
 #[derive(Default)]
 pub struct Protocol {
     era: Option<Era>,
-    legacy_initialised: bool,
 }
 pub enum Action {
     Reply(Value),
@@ -65,8 +78,7 @@ pub enum Action {
     Call {
         id: Id,
         modern: bool,
-        name: String,
-        arguments: Value,
+        call: Box<ToolCall>,
     },
     Cancel(Id),
 }
@@ -83,6 +95,7 @@ pub fn uncorrelated_error(code: i64, message: &str, modern: bool) -> Value {
 pub fn result(id: &Id, mut value: Value, modern: bool) -> Value {
     if modern && let Some(object) = value.as_object_mut() {
         object.insert("resultType".into(), json!("complete"));
+        object.entry("_meta").or_insert_with(|| json!({}))[SERVER_INFO] = server_info();
     }
     json!({"jsonrpc":"2.0","id":id,"result":value})
 }
@@ -142,10 +155,10 @@ impl Protocol {
     fn notification(&mut self, method: &str, params: BTreeMap<String, Value>) -> Action {
         match method {
             "notifications/initialized" => {
-                if self.legacy_initialised
-                    && let Some(Era::Legacy { ready }) = &mut self.era
+                if let Some(Era::Legacy(state)) = &mut self.era
+                    && matches!(*state, LegacyState::Initialised)
                 {
-                    *ready = true;
+                    *state = LegacyState::Ready;
                 }
                 Action::Ignore
             }
@@ -157,17 +170,15 @@ impl Protocol {
     fn request(&mut self, id: Id, method: &str, mut params: BTreeMap<String, Value>) -> Action {
         let modern_meta = params.get("_meta").and_then(|m| m.get(VERSION));
         let selected = if method == "initialize" {
-            Some(Era::Legacy { ready: false })
+            Some(Era::Legacy(LegacyState::Initialised))
         } else if modern_meta.is_some() {
             Some(Era::Modern)
         } else {
             None
         };
-        if self.era.is_none() {
-            self.era = selected;
-        }
         let refuse = |code, message| Action::Reply(error(Some(&id), code, message));
-        let Some(era) = self.era else {
+        let newly_selected = self.era.is_none();
+        let Some(era) = self.era.or(selected) else {
             return refuse(-32600, "First request must select a protocol era");
         };
         let modern = matches!(era, Era::Modern);
@@ -181,13 +192,36 @@ impl Protocol {
             let Some(version) = meta.get(VERSION).and_then(Value::as_str) else {
                 return refuse(-32602, "Protocol version must be a string");
             };
+            if !meta.get(CAPABILITIES).is_some_and(Value::is_object) {
+                return refuse(-32602, "Required client capabilities missing");
+            }
+            if let Some(client_info) = meta.get(CLIENT_INFO)
+                && serde_json::from_value::<Implementation>(client_info.clone()).is_err()
+            {
+                return refuse(-32602, "Invalid client information metadata");
+            }
+            if let Some(log_level) = meta.get(LOG_LEVEL) {
+                let Some(log_level) = log_level.as_str() else {
+                    return refuse(-32602, "Log level metadata must be a string");
+                };
+                if !matches!(
+                    log_level,
+                    "debug"
+                        | "info"
+                        | "notice"
+                        | "warning"
+                        | "error"
+                        | "critical"
+                        | "alert"
+                        | "emergency"
+                ) {
+                    return refuse(-32602, "Invalid log level metadata");
+                }
+            }
             if version != MODERN {
                 let mut reply = error(Some(&id), -32022, "Unsupported protocol version");
                 reply["error"]["data"] = json!({"supported":[MODERN,LEGACY],"requested":version});
                 return Action::Reply(reply);
-            }
-            if !meta.get(CAPABILITIES).is_some_and(Value::is_object) {
-                return refuse(-32602, "Required client capabilities missing");
             }
             if matches!(method, "ping" | "notifications/initialized") {
                 return refuse(-32601, "Method unavailable in this protocol era");
@@ -197,31 +231,20 @@ impl Protocol {
             params.remove("_meta");
         }
         if method == "initialize" {
-            if !matches!(era, Era::Legacy { ready: false }) {
+            if !newly_selected || !matches!(era, Era::Legacy(_)) {
                 return refuse(-32600, "Already initialized");
             }
-            // A successful initialize is distinct from the initialized notification.
-            if self.initialised() {
-                return refuse(-32600, "Already initialized");
+            if serde_json::from_value::<Initialise>(json!(params)).is_err() {
+                return refuse(-32602, "Invalid initialize parameters");
             }
-            let init: Initialise = match serde_json::from_value(json!(params)) {
-                Ok(init) => init,
-                Err(_) => return refuse(-32602, "Invalid initialize parameters"),
-            };
-            let _ = (
-                init.version,
-                init.capabilities,
-                init.client.name,
-                init.client.version,
-            );
-            self.legacy_initialised = true;
+            self.era = Some(Era::Legacy(LegacyState::Initialised));
             return Action::Reply(result(
                 &id,
                 json!({"protocolVersion":LEGACY,"capabilities":{"tools":{}},"serverInfo":server_info()}),
                 false,
             ));
         }
-        if !modern && method != "ping" && !matches!(era, Era::Legacy { ready: true }) {
+        if !modern && method != "ping" && !matches!(era, Era::Legacy(LegacyState::Ready)) {
             return refuse(-32600, "Initialisation incomplete");
         }
         let value = match method {
@@ -235,7 +258,7 @@ impl Protocol {
                 if !params.is_empty() {
                     return refuse(-32602, "Unexpected discovery parameters");
                 }
-                json!({"supportedVersions":[MODERN,LEGACY],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":server_info()},"ttlMs":300000,"cacheScope":"public"})
+                json!({"supportedVersions":[MODERN,LEGACY],"capabilities":{"tools":{}},"ttlMs":TTL_MS,"cacheScope":CACHE_SCOPE})
             }
             "tools/list" => {
                 if !params.is_empty() {
@@ -243,8 +266,8 @@ impl Protocol {
                 }
                 let mut list = json!({"tools":crate::tools::catalogue()});
                 if modern {
-                    list["ttlMs"] = json!(300000);
-                    list["cacheScope"] = json!("public");
+                    list["ttlMs"] = json!(TTL_MS);
+                    list["cacheScope"] = json!(CACHE_SCOPE);
                 }
                 list
             }
@@ -253,19 +276,35 @@ impl Protocol {
                     Ok(call) => call,
                     Err(_) => return refuse(-32602, "Invalid tool call envelope"),
                 };
+                let call = match ToolCall::parse(&call.name, call.arguments) {
+                    Ok(call) => call,
+                    Err(InvalidInput::UnknownTool) => return refuse(-32602, "Unknown tool name"),
+                    Err(InvalidInput::Arguments { path }) => {
+                        return Action::Reply(result(
+                            &id,
+                            tool_error(
+                                "invalid_input",
+                                json!({"code":"invalid_input","path":path}),
+                            ),
+                            modern,
+                        ));
+                    }
+                };
+                if newly_selected {
+                    self.era = Some(Era::Modern);
+                }
                 return Action::Call {
                     id,
                     modern,
-                    name: call.name,
-                    arguments: call.arguments,
+                    call: Box::new(call),
                 };
             }
             _ => return refuse(-32601, "Method not found"),
         };
+        if newly_selected {
+            self.era = Some(era);
+        }
         Action::Reply(result(&id, value, modern))
-    }
-    fn initialised(&self) -> bool {
-        self.legacy_initialised
     }
 }
 #[cfg(test)]
