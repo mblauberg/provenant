@@ -4,7 +4,7 @@ Run from this directory with the repository root as argv[1]. No pytest needed.
 Tests run with their original assertions; only pytest's parametrisation data is
 expanded here. Filesystem/registry drift tests are outside this pure boundary.
 """
-import ast
+import importlib.util
 import itertools
 import json
 from pathlib import Path
@@ -24,10 +24,12 @@ def parametrise(names, cases):
 pytest = SimpleNamespace(mark=SimpleNamespace(parametrize=parametrise), param=lambda *values, **kw: values)
 for unit, function_name in [("review_ladder", "check_review_ladder"), ("review_terminal", "normalise_dispatch_review")]:
     source = root / f"tests/test_{unit}.py"
-    tree = ast.parse(source.read_text())
-    tree.body = [node for node in tree.body if not (isinstance(node, ast.Import) and any(n.name == "pytest" for n in node.names))]
-    namespace = {"pytest": pytest, "__file__": str(source)}
-    exec(compile(tree, str(source), "exec"), namespace)
+    # Load the test module normally, with the pytest stub standing in for pytest.
+    sys.modules["pytest"] = pytest
+    spec = importlib.util.spec_from_file_location(f"policy_{unit}", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    namespace = vars(module)
     original = namespace[function_name]
     fixtures = []
     def record(*args, **kwargs):
