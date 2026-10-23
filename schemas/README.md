@@ -2,10 +2,10 @@
 
 These files are language independent JSON Schema Draft 2020-12 contracts.
 `test_record_schemas.py` validates the checked-in config examples and records
-written by isolated dispatch, batch, watchdog, quota, and telemetry flows.
+written by isolated dispatch, batch, watchdog and quota flows.
 Dispatch cases cover success, provider failure, timeout, quota exhaustion and
 questions. Each subprocess has a fresh home, instance root, state root and
-Codex home. Telemetry checks validate every row in primary-key order. Test
+Codex home. Test
 cases are the actual JSON values paired with the schema selected by the record path or
 its `schema` / `record_type` discriminator. Markdown manifest rows and the
 plain text digest sidecar are converted to their documented column values
@@ -32,11 +32,7 @@ before validation.
 | `watchdog-observation.schema.json` | `watchdog.json`; observation writer in `skills/orchestrate/scripts/stall_watchdog.py` (`fabric.watchdog.v1`). |
 | `wip-checkpoint.schema.json` | `wip-checkpoint.json`; checkpoint writer in `stall_watchdog.py` (`fabric.wip.v1`). |
 | `quota-snapshot.schema.json` | Per-account quota cache JSON; `blank` / `save_snapshot` in `scripts/provider_quota.py` (`provenant.quota.v1`). |
-| `telemetry-usage-row.schema.json` | `usage` ledger rows; table declaration in `scripts/telemetry.py`, populated by `scripts/telemetry_ingest.py`. |
-| `telemetry-event-row.schema.json` | `events` ledger rows; `put_event` in `scripts/telemetry.py`. |
-| `telemetry-quota-series-row.schema.json` | `quota_series` ledger rows; `put_quota_series` in `scripts/telemetry.py`. |
-| `telemetry-quota-event-row.schema.json` | `quota_events` ledger rows; quota transition ingestion in `scripts/telemetry.py`. |
-| `model-routing.schema.json` | `config/model-routing.json`; read by `scripts/model_route.py` and `scripts/telemetry_costs.py`. |
+| `model-routing.schema.json` | `config/model-routing.json`; read by `scripts/model_route.py`. |
 | `model-preferences.schema.json` | `config/model-preferences.json`; read and updated by `scripts/model_route_preferences.py`. |
 | `graph-reservation.schema.json` | Git worktree reservation; `reserve` in `runtime/fabric/src/graph/store.ts`. |
 | `graph-node-receipt.schema.json` | Graph node attempt `receipt.json`; `#receipt` in `runtime/fabric/src/graph/owner.ts`. |
@@ -110,3 +106,6 @@ For a new CLI/report identifier, add an explicit reason to
 `NON_RECORD_SCHEMAS`. Keep both inventory directions passing. Date and date-time
 formats are enforced by `FormatChecker`; the test dependency group includes
 `rfc3339-validator` for date-time checks.
+
+Telemetry ledger schemas retired with the Python collector. The Rust reducer consumes
+validated `AttemptFact` values from records; state loads its TOML price asset.

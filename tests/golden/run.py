@@ -96,18 +96,6 @@ VERBS: dict[str, list[tuple[str, list[str]]]] = {
         ('help', ['graph', '--help']),
         ('help', ['graph', '--bad-golden-flag']),
     ],
-    "telemetry": [
-        ('help', ['telemetry', '--help']),
-        ('help', ['telemetry', 'invalid-action']),
-    ],
-    "stats": [
-        ('help', ['stats', '--help']),
-        ('help', ['stats', '--bad-golden-flag']),
-    ],
-    "retro": [
-        ('help', ['retro', '--help']),
-        ('help', ['retro', '--bad-golden-flag']),
-    ],
     "quota": [
         ('help', ['quota', '--help']),
         ('help', ['quota', '--bad-golden-flag']),

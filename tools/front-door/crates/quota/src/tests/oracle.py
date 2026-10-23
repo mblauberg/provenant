@@ -1,11 +1,7 @@
 """Isolated, fixture-only differential oracle. Never probes providers or live stores."""
-import contextlib
-import importlib.util
-import io
 import json
 from pathlib import Path
 import sys
-from datetime import timezone
 
 ROOT = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -59,14 +55,6 @@ elif operation == 'freshest':
 elif operation == 'report':
     result = display.report(vars(quota), json.loads(request['values_json']) if 'values_json' in request else request['values'], now,
                             refreshing=context.get('refreshing', []), activity=context.get('activity', {}))
-elif operation == 'render':
-    # Load only the pure table formatter; telemetry's state never opens.
-    import telemetry_report
-    quota._telemetry = lambda: type('Telemetry', (), {'report_owner': staticmethod(lambda: telemetry_report)})()
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        display.render(vars(quota), request['value'], request.get('verbose', False))
-    result = output.getvalue()
 elif operation == 'schedule':
     config, notes = schedule.resolve(request['provider'], request.get('account_quota'), context.get('settings'))
     block, due = schedule.plan(provider=request['provider'], account_id=request['account_id'],
