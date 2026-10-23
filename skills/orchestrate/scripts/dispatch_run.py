@@ -63,6 +63,7 @@ from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from _shared import harness_profile
 from layout import run_workspace, run_root, contains_run
 import provider_exec
+import provider_output
 import memory_admission
 import secret_scan
 import exec_routing
@@ -765,7 +766,7 @@ def reap_attempts(run_dir: Path) -> list[str]:
                             row["error"] = "host_disk_full"
                             row["fix"] = "host_disk_full: free disk space or lower the mode's disk_floor_bytes in .agents/fabric-policy.json."
                         row.update(state="terminal", status=status, ended_at=now(), retryable=status == "lost",
-                                   error_class=provider_exec.error_class(status, reason))
+                                   error_class=provider_output.error_class(status, reason))
                         row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
                                            "excerpt": disk_error if reason == "host_disk_full" else
                                            "Attempt process group is gone" if reason == "pgid_gone"
@@ -1249,7 +1250,7 @@ def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
         status = "model_unavailable"
-        fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+        fix = provider_output._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
         if signature in {"model_ambiguous", "model_not_found"} and isinstance(message, str) and message:
             fix = message[:600]
     elif signature in PLANNER_TRANSIENT_STATUSES:
@@ -2081,7 +2082,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
-    row["usage_source"] = adapter.get("usage_source") or provider_exec.context_usage.usage_source(row.get("context") or {})
+    row["usage_source"] = adapter.get("usage_source") or context_usage.usage_source(row.get("context") or {})
     if legacy.get("process_error") and legacy["outcome"] in {"provider_lost", "host_disk_full", "process_spawn_error"}:
         row["evidence"] = {**row["evidence"], "signature": legacy["outcome"],
                            "excerpt": legacy["process_error"][:400]}
@@ -2093,7 +2094,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
             except ValueError:
                 pass  # Keep the contract path when the adapter's lies outside the run.
     row["evidence"].update(process_evidence(run_dir, row))
-    row["error_class"] = provider_exec.error_class(status, row["evidence"].get("signature"))
+    row["error_class"] = provider_output.error_class(status, row["evidence"].get("signature"))
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
     row["requested_route"]=legacy["requested_route"]
@@ -3118,8 +3119,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         **run_lineage.fields(run_dir),
         "children": run_lineage.children(run_dir, args.task_id, attempt_number),
         **attempt_scope(args, attempt_number),
-        "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
-        "error_class": provider_exec.error_class(status, outcome if process_error else (adapter.get("evidence") or {}).get("signature")),
+        "usage_source": adapter.get("usage_source") or context_usage.usage_source(adapter.get("context") or {}),
+        "error_class": provider_output.error_class(status, outcome if process_error else (adapter.get("evidence") or {}).get("signature")),
         **({"result_partial": True} if adapter.get("result_partial") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
@@ -3206,7 +3207,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
-        record["error_class"] = provider_exec.error_class(record["status"], (adapter.get("evidence") or {}).get("signature"))
+        record["error_class"] = provider_output.error_class(record["status"], (adapter.get("evidence") or {}).get("signature"))
         record["outcome"] = "manifest_write_error"
         record["failure_code"] = "manifest_write_error"
         record["manifest_error"] = str(exc)

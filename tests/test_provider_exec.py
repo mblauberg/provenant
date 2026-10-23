@@ -2161,6 +2161,10 @@ def supervisor():
     return importlib.import_module("skills.orchestrate.scripts.provider_exec")
 
 
+def provider_output():
+    return importlib.import_module("skills.orchestrate.scripts.provider_output")
+
+
 def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_path, monkeypatch, capsys):
     router = importlib.import_module('scripts.model_route')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
@@ -2247,9 +2251,9 @@ _CLASSIFIER_QUOTA_CASES = [
      "ERROR src/a.ts(3,1): error TS2769: No overload matches this call.", 1, "ok", "exit_after_output", "none"),
 ])
 def test_classifier_contract(adapter, stdout, stderr, exit_code, status, signature, expected_class):
-    parsed = supervisor().parse_output(adapter, stdout, stderr, exit_code)
+    parsed = provider_output().parse_output(adapter, stdout, stderr, exit_code)
     assert (parsed["status"], parsed["signature"]) == (status, signature)
-    assert supervisor().error_class(parsed["status"], parsed["signature"]) == expected_class
+    assert provider_output().error_class(parsed["status"], parsed["signature"]) == expected_class
     assert len(parsed["excerpt"]) <= 200
     if "RESOURCE_EXHAUSTED" in stderr:
         assert stderr in parsed["excerpt"]
@@ -2309,7 +2313,7 @@ def test_invalid_effort_is_rejected_with_cli_fix_and_no_cooldown(tmp_path):
 def test_provider_golden(fixture):
     data = json.loads(fixture.read_text())
     for case in [data, *data.get("cases", [])]:
-        result = supervisor().parse_output(
+        result = provider_output().parse_output(
             case["adapter"], case["stdout"], case.get("stderr", ""), case["exit"]
         )
         for key, value in case["expected"].items():
@@ -2363,7 +2367,7 @@ def test_structured_result_and_question_take_precedence_over_prose():
             ],
         )
     )
-    parsed = supervisor().parse_output("claude", events)
+    parsed = provider_output().parse_output("claude", events)
     assert parsed["status"] == "input_required"
     assert parsed["question"] == "Target main or release/3?"
     assert parsed["session_id"] == "s1"
@@ -2377,7 +2381,7 @@ def test_claude_session_comes_only_from_its_own_events_not_nested_tool_output():
         {"type": "user", "message": {"content": [{"type": "tool_result", "content": {"session_id": "other"}}]},
          "tool_use_result": {"session_id": "other"}, "session_id": "s1"},
     ]
-    parsed = supervisor().parse_output("claude", "\n".join(map(json.dumps, events)))
+    parsed = provider_output().parse_output("claude", "\n".join(map(json.dumps, events)))
     assert parsed["session_id"] == "s1"
 
 
@@ -2398,7 +2402,7 @@ def test_reconnecting_is_nonfatal_and_quota_discussion_is_not_an_error():
             ],
         )
     )
-    assert supervisor().parse_output("codex", events)["status"] == "ok"
+    assert provider_output().parse_output("codex", events)["status"] == "ok"
 
 
 def test_reset_evidence_uses_provider_time_units():
@@ -2406,7 +2410,7 @@ def test_reset_evidence_uses_provider_time_units():
 
     at = datetime(2026, 9, 23, 1, tzinfo=UTC)
     assert (
-        supervisor().parse_output(
+        provider_output().parse_output(
             "claude",
             json.dumps(
                 {
@@ -2421,13 +2425,13 @@ def test_reset_evidence_uses_provider_time_units():
         == "2026-09-23T10:00:00Z"
     )
     assert (
-        supervisor().parse_output(
+        provider_output().parse_output(
             "agy", "", "RESOURCE_EXHAUSTED Resets in 167h", 3, at=at
         )["reset_at"]
         == "2026-09-30T00:00:00Z"
     )
     assert (
-        supervisor().parse_output(
+        provider_output().parse_output(
             "codex", "", "Usage limit; try again at 2:00 AM", 1, at=at
         )["reset_at"]
         == "2026-09-23T02:00:00Z"
@@ -2712,7 +2716,7 @@ def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_pa
     ("future_status", "future_signature", "unknown"),
 ])
 def test_terminal_error_class_is_derived_from_status_and_signature(status, signature, expected):
-    assert supervisor().error_class(status, signature) == expected
+    assert provider_output().error_class(status, signature) == expected
 
 
 def test_attempt_private_temp_and_cache_environment(tmp_path):
@@ -6531,9 +6535,9 @@ def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
 
 def test_opencode_bad_variant_fix_names_the_variant_to_drop():
     event = json.dumps({"type": "error", "error": {"type": "provider.no-route", "message": "Variant unavailable for opencode/x: high"}})
-    fix = supervisor()._variant_fix(event)
+    fix = provider_output()._variant_fix(event)
     assert fix.startswith("opencode/x has no `high` variant; drop --effort or `#high`")
-    assert supervisor()._variant_fix("plain input error") == "plain input error"
+    assert provider_output()._variant_fix("plain input error") == "plain input error"
 
 
 def test_opencode_v2_events_yield_text_session_and_terminal():
@@ -6543,19 +6547,19 @@ def test_opencode_v2_events_yield_text_session_and_terminal():
         {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}},
         {"type": "step_finish", "sessionID": "ses_9", "part": {"type": "step-finish", "reason": "stop"}},
     ]
-    parsed = supervisor().parse_output("opencode", "\n".join(map(json.dumps, lines)) + "\n", "", 0)
+    parsed = provider_output().parse_output("opencode", "\n".join(map(json.dumps, lines)) + "\n", "", 0)
     assert (parsed["status"], parsed["text"], parsed["session_id"], parsed["terminal"]) == ("ok", "PONG", "ses_9", True)
 
 
 def test_opencode_v2_single_text_event_without_step_events_is_ok():
     event = {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}}
-    assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
+    assert provider_output().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
 
 
 @pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n",
                                     json.dumps({"type": "step_finish", "part": None}) + "\n"])
 def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
-    parsed = supervisor().parse_output("opencode", stdout, "", 0)
+    parsed = provider_output().parse_output("opencode", stdout, "", 0)
     assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
 
 
@@ -6614,7 +6618,7 @@ def test_kiro_acp_stream_captures_text_session_and_model():
         },
         {"jsonrpc": "2.0", "id": 1, "result": {"stopReason": "end_turn"}},
     ]
-    parsed = supervisor().parse_output("kiro", "\n".join(map(json.dumps, events)))
+    parsed = provider_output().parse_output("kiro", "\n".join(map(json.dumps, events)))
     assert parsed["text"] == "DONE"
     assert parsed["session_id"] == "kiro-1"
     assert parsed["observed_model"] == "kiro-auto"
@@ -6690,7 +6694,7 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
 
 
 def test_question_example_in_middle_of_answer_does_not_suspend():
-    parsed = supervisor().parse_output('claude', json.dumps({'type':'result','result':'Example:\n```\nQUESTION: Which?\n```\nEnd of explanation.'}))
+    parsed = provider_output().parse_output('claude', json.dumps({'type':'result','result':'Example:\n```\nQUESTION: Which?\n```\nEnd of explanation.'}))
     assert parsed['status'] == 'ok'
 
 
@@ -6747,7 +6751,7 @@ def test_kiro_tool_echo_does_not_override_observed_model():
         {'type':'tool_result','data':{'model':'echoed'}},
         {'type':'result','result':'DONE'},
     ]))
-    assert supervisor().parse_output('kiro', output)['observed_model'] == 'actual'
+    assert provider_output().parse_output('kiro', output)['observed_model'] == 'actual'
 
 
 def test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result(tmp_path):
@@ -7037,7 +7041,7 @@ def test_agy_nested_result_envelope_is_success_with_observed_model():
         {"event": "result", "result": {"conversation_id": "c1", "status": "SUCCESS",
          "response": "PONG\n", "num_turns": 1}},
     ]
-    parsed = supervisor().parse_output("agy", "\n".join(map(json.dumps, events)))
+    parsed = provider_output().parse_output("agy", "\n".join(map(json.dumps, events)))
     assert parsed["status"] == "ok"
     assert parsed["text"] == "PONG\n"
     assert parsed["observed_model"] == "gemini-3.8-flash-high"
@@ -7048,7 +7052,7 @@ def test_agy_nested_result_failure_keeps_provider_error():
         {"event": "result", "result": {"status": "FAILED", "response": "",
          "error": "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 29m44s."}},
     ]
-    parsed = supervisor().parse_output("agy", "\n".join(map(json.dumps, events)), exit_code=3)
+    parsed = provider_output().parse_output("agy", "\n".join(map(json.dumps, events)), exit_code=3)
     assert parsed["status"] != "ok"
     assert "quota" in parsed["excerpt"].lower()
 
@@ -7074,7 +7078,7 @@ def test_kiro_stream_json_selects_the_v3_engine():
     ],
 )
 def test_alias_and_display_names_are_not_substitutions(adapter, resolved, observed, same):
-    assert supervisor()._same_model(adapter, resolved, observed) is same
+    assert provider_output()._same_model(adapter, resolved, observed) is same
 
 
 def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
@@ -7086,7 +7090,7 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
         {"type": "runFinished", "data": {"sessionId": "k2", "status": "success",
          "stopReason": "end_turn", "finalText": "PONG"}},
     ]
-    parsed = supervisor().parse_output("kiro", "\n".join(map(json.dumps, events)))
+    parsed = provider_output().parse_output("kiro", "\n".join(map(json.dumps, events)))
     assert (parsed["status"], parsed["text"], parsed["session_id"]) == ("ok", "PONG", "k2")
     from adapters import kiro
     command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
@@ -7095,7 +7099,7 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
 
 
 def test_claude_reported_ids_match_their_aliases():
-    module = supervisor()
+    module = provider_output()
     assert module._same_model("claude", "haiku", "claude-haiku-5-5")
     assert not module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
     assert module._same_model("claude", "claude-haiku-4-5", "claude-haiku-4-5-20251001")
