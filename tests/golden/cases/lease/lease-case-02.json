@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "lease",
+    "invalid"
+  ],
+  "class": "help",
+  "exit_code": 2,
+  "files": [],
+  "stderr": "usage: provenant lease <acquire|release|verify|status|push> ...\n",
+  "stdin": "",
+  "stdout": ""
+}
