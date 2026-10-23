@@ -2,9 +2,10 @@ use super::*;
 
 #[test]
 fn registered_and_live_model_choices_match_python_including_ambiguity_and_retirement() {
-    let catalog: Value = serde_json::from_str(include_str!(
-        "../../../../../../../../config/model-routing.json"
-    ))
+    let catalog: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../config/model-routing.json"
+    )))
     .unwrap();
     let cached = BTreeMap::from([
         (

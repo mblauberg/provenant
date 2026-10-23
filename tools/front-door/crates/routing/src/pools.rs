@@ -721,9 +721,10 @@ mod model_policy_tests {
     use serde_json::json;
     #[test]
     fn adapter_paths_and_live_inherited_privacy_match_python() {
-        let mut catalog: Value = serde_json::from_str(include_str!(
-            "../../../../../../../config/model-routing.json"
-        ))
+        let mut catalog: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../config/model-routing.json"
+        )))
         .unwrap();
         catalog["model_traits"] =
             json!({"codex/gpt-6.1-sol":["trains-on-prompts"],"agy/gemini-3.8-flash":["private"]});
