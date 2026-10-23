@@ -85,10 +85,12 @@ internal diagnostics are bounded, redacted stderr under R8.
 Run owns `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>`,
 built from its durable store (`run.sqlite3`, a run implementation detail).
 Telemetry reads only through that reader; it never opens the database, crawls
-`runs/` or reads referenced output paths. CLI composes run's reader with
-telemetry's reducer and propagates read errors without publishing partial
-totals. Admission and operation insertion remain atomic in run's store;
-fabric-runtime owns identity and federation routing.
+`runs/` or reads referenced output paths. CLI asks the reader to select the
+project/window and collects at most **100,001** facts, propagating any read
+error before calling `stats`. The 100,001st fact returns `TooLarge`; otherwise
+CLI passes the bounded collection's iterator of `AttemptFact` to the reducer.
+No partial totals are published. Admission and operation insertion remain
+atomic in run's store; fabric-runtime owns identity and federation routing.
 
 `AttemptFact` lives in **records** and implements **Serialize only**. Run builds
 it from decoded, validated stored records. Its fields are task, attempt number,
@@ -230,7 +232,8 @@ where useful; **no insta** dependency.
 - CLI integration at tree landing: real envelope/exits, unsupported versions
   exit 2, missing store creates nothing, corrupt store refuses, partial coverage
   exits 0 with coverage in `data`, 1 MiB cap including envelope, cancellation
-  exits 130 and deterministic human rows. Test isolated HOME/state/config only.
+  exits 130, deterministic human rows, reader failure before reduction and
+  the 100,001st-fact refusal. Test isolated HOME/state/config only.
   Old-root tripwires prove stats never opens old stores or transcripts.
 - Installer integration: isolated fixtures for both Macs' collector/config
   retirement plans, user-authorisation boundary, unrelated configuration
