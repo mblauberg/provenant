@@ -68,7 +68,7 @@ The crate owns routing, resolution and exec coverage. The stale-checkout
 advisory remains covered against the binary in `tests/test_stale.py`:
 
 ```sh
-cargo test --manifest-path tools/front-door/Cargo.toml
+(cd tools/front-door && cargo test --locked)
 TMPDIR=/tmp .venv/bin/python -m pytest tests/test_stale.py -q
 ```
 
