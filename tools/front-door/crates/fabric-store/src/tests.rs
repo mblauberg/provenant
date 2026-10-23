@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     CancelToken, Clock, DurationMicros, MessageId, MonoTime, PathResolver, RootInputs, StateRoot,
-    TaskId, TestClock, WaitBudget,
+    TaskId, TestClock, TimeError, WaitBudget,
 };
 use provenant_records::{ArtifactRef, PathWire, RecordHeader};
 use std::{
@@ -57,7 +57,7 @@ impl Fixture {
         self.root.as_path().join("fabric/fabric.sqlite3")
     }
     fn now(&self) -> WallTime {
-        self.clock.wall_now()
+        self.clock.wall_now().unwrap()
     }
 }
 fn project() -> ProjectId {
@@ -486,7 +486,7 @@ fn busy_retries_after_reserved_lock_release_without_sleep_or_open_transaction() 
 }
 struct AdvancingClock(std::cell::RefCell<TestClock>);
 impl Clock for AdvancingClock {
-    fn wall_now(&self) -> WallTime {
+    fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
         self.0.borrow().wall_now()
     }
     fn mono_now(&self) -> MonoTime {

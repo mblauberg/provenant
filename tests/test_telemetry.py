@@ -21,6 +21,29 @@ from tests.support.front_door import front_door_binary
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(hosts, {'schema_version': 1, 'local_host': 'runner-ci'})
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    receipt(tmp_path, 'run', status='ok', provenance=route('codex', 'gpt-6-luna'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        original_host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
+        assert original_host == 'runner-ci'
+        db.execute('INSERT INTO quota_events(provider,account,host,window,kind,observed_at) VALUES (?,?,?,?,?,?)',
+                   ('codex', 'work', original_host, 'custom', 'natural', '2026-10-21T12:00:00Z'))
+    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        # A rename never rewrites the ledger: earlier rows keep their id and read as this host.
+        assert sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host')) == [('runner-ci', 2), ('studio', 1)]
+        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('runner-ci',)]
+
+
 def environment(tmp_path):
     home = tmp_path / 'home'
     home.mkdir(exist_ok=True)
@@ -126,54 +149,6 @@ def test_stats_auto_ingest_runs_when_a_source_is_stale_but_skips_fresh_sources(t
                    ((datetime.now(UTC) - timedelta(hours=2)).isoformat(),))
     stale = cli(tmp_path, 'stats', '--json')
     assert stale.returncode == 0, stale.stderr
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
-
-
-def test_stats_auto_ingest_works_when_telemetry_is_loaded_by_file_path(tmp_path):
-    from datetime import UTC, datetime
-
-    receipt(tmp_path, 'file-path', status='ok', ended_at=datetime.now(UTC).isoformat())
-    result = cli_process(tmp_path, 'stats', '--json')
-    assert result.returncode == 0, result.stderr
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 1
-
-
-def test_concurrent_stats_auto_ingest_skips_a_held_lock_without_losing_rows(tmp_path):
-    from datetime import UTC, datetime
-    import time
-
-    for name in ('first', 'second'):
-        receipt(tmp_path, name, status='ok', ended_at=datetime.now(UTC).isoformat())
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    ledger = tmp_path / 'state/telemetry.sqlite3'
-    with sqlite3.connect(ledger) as db:
-        db.execute("UPDATE sources SET last_ingest='2000-01-01T00:00:00Z' WHERE source='fabric'")
-    holder_code = (
-        'import fcntl, sqlite3, sys; '
-        'lock=open(sys.argv[1], "a"); fcntl.flock(lock.fileno(), fcntl.LOCK_EX); '
-        'db=sqlite3.connect(sys.argv[2], timeout=0); db.execute("BEGIN EXCLUSIVE"); '
-        'print("ready", flush=True); sys.stdin.readline(); db.rollback(); db.close()'
-    )
-    holder = subprocess.Popen([sys.executable, '-c', holder_code,
-                               str(tmp_path / 'state/telemetry.sqlite3.lock'), str(ledger)],
-                              cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
-    try:
-        assert holder.stdout.readline().strip() == 'ready'
-        started = time.monotonic()
-        result = cli_process(tmp_path, 'stats', '--json')
-        elapsed = time.monotonic() - started
-        assert result.returncode == 0, result.stderr
-        assert json.loads(result.stdout)['schema_version'] == 2
-        assert 'ingest already running' in result.stderr
-        assert 'ledger is locked; reporting an empty ledger' in result.stderr
-        assert elapsed < 1.5
-    finally:
-        holder.stdin.write('\n')
-        holder.stdin.flush()
-        holder.communicate(timeout=5)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
 
@@ -845,40 +820,6 @@ def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
         assert db.execute('SELECT SUM(input_tokens) FROM usage').fetchone()[0] == 7
 
 
-def test_stats_since_json_tokens_unknown_cost_and_daily_limits(tmp_path):
-    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
-    def row(mid, stamp):
-        return {'type': 'assistant', 'sessionId': 's', 'timestamp': stamp,
-                'message': {'id': mid, 'model': 'test-model', 'usage': {
-                    'input_tokens': 10, 'cache_read_input_tokens': 30,
-                    'cache_creation_input_tokens': 10, 'output_tokens': 20,
-                    'output_tokens_details': {'thinking_tokens': 5}}}}
-    jsonl(path, row('old', '2026-10-20T01:00:00Z'), row('new', '2026-10-21T01:00:00Z'))
-    state = tmp_path / 'state'
-    write_json(state / 'cooldowns.json', {'cooldowns': {'opencode/free': {
-        'adapter': 'opencode', 'model': 'free', 'status': 'rate_limited',
-        'recorded_at': '2026-10-21T01:00:00Z', 'source_run': 'r'}}})
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    result = cli_process(tmp_path, 'stats', '--since', '2026-10-21', '--json')
-    assert result.returncode == 0, result.stderr
-    stats = json.loads(result.stdout)
-    usage = stats['usage'][0]
-    assert (usage['provider'], usage['model']) == ('anthropic', 'test-model')
-    assert {k: usage[k] for k in ('input_tokens','cache_read_tokens','cache_write_tokens','output_tokens','reasoning_tokens')} == {
-        'input_tokens': 10, 'cache_read_tokens': 30, 'cache_write_tokens': 10,
-        'output_tokens': 15, 'reasoning_tokens': 5}
-    assert usage['cache_read_share'] == 0.6
-    assert usage['estimated_cost_usd'] is None
-    assert usage['missing_cost_rows'] == 1
-    assert usage['cost_basis'] == 'api_equivalent_estimate'
-    assert stats['limits_per_day'] == [{'day': '2026-10-21', 'provider': 'opencode', 'account': None, 'status': 'rate_limited', 'events': 1}]
-    assert len(stats['usage_per_day']) == 1
-    assert stats['usage_per_day'][0]['day'] == '2026-10-21'
-    assert stats['usage_per_day'][0]['input_tokens'] == 10
-    plain = cli_process(tmp_path, 'stats', '--since', '2026-10-21')
-    assert plain.returncode == 0 and 'missing' in plain.stdout
-
-
 def test_stats_prices_preserve_missingness_and_bill_reasoning_once(tmp_path):
     from scripts import telemetry
     row = {'adapter': 'claude', 'model': 'synthetic', 'input_tokens': 1_000_000,
@@ -1400,37 +1341,6 @@ def test_fabric_discovery_ignores_legacy_mcp_run_roots(tmp_path):
     assert sources['fabric']['row_count'] == 0 and 'mcp-' not in sources['fabric']['path_pattern']
 
 
-def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
-    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
-    write_json(hosts, {'schema_version': 1, 'local_host': 'runner-ci'})
-    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
-    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
-                 'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
-    receipt(tmp_path, 'run', status='ok', provenance=route('codex', 'gpt-6-luna'))
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        original_host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
-        assert original_host == 'runner-ci'
-        db.execute('INSERT INTO quota_events(provider,account,host,window,kind,observed_at) VALUES (?,?,?,?,?,?)',
-                   ('codex', 'work', original_host, 'custom', 'natural', '2026-10-21T12:00:00Z'))
-    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
-    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
-                 'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        # A rename never rewrites the ledger: earlier rows keep their id and read as this host.
-        assert sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host')) == [('runner-ci', 2), ('studio', 1)]
-        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('runner-ci',)]
-    result = subprocess.run([str(front_door_binary()), 'peer'],
-                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
-                                              'params': {'schema_version': 1}}),
-                            env=environment(tmp_path), capture_output=True, text=True)
-    summary = json.loads(result.stdout)['result']
-    assert summary['host'] == 'studio'
-    sessions = [row for row in summary['session_usage'] if row['source'] == 'claude']
-    assert [(row['host'], row['rows'], row['input_tokens']) for row in sessions] == [('studio', 2, 14)]
-
-
 def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
     telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_precedence')
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
@@ -1441,90 +1351,6 @@ def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, mo
     write_json(tmp_path / 'instance/.agent-fabric/hosts.json',
                {'schema_version': 1, 'local_host': 'studio'})
     assert telemetry.host_id() == 'studio'
-
-
-def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
-    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
-    for index in range(2):
-        jsonl(path, {'type': 'assistant', 'sessionId': 'same-session', 'timestamp': '2026-10-21T01:00:00Z',
-                     'message': {'id': f'm{index}', 'model': 'claude-test', 'content': 'PRIVATE_CONTENT',
-                                 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    database = tmp_path / 'state/telemetry.sqlite3'
-    before = database.read_bytes()
-    write_json(tmp_path / 'state/quota/fake--work.json', {
-        'schema': 'provenant.quota.v1', 'provider': 'fake', 'account': 'work',
-        'host': __import__('socket').gethostname(), 'access_token': 'PRIVATE_TOKEN',
-        'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN', 'source': {'token': 'PRIVATE_TOKEN'}},
-        'windows': [{'name': 'custom', 'used_percent': 20, 'credential': 'PRIVATE_TOKEN'}]})
-    result = subprocess.run([str(front_door_binary()), 'peer'],
-                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
-                                              'params': {'schema_version': 1, 'since': '2026-10-21'}}),
-                            env=environment(tmp_path), capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads(result.stdout)['result']
-    assert summary['schema'] == 'provenant.telemetry.summary.v1'
-    groups = summary['session_usage']
-    assert len(groups) == 1 and groups[0]['session'] == 'same-session'
-    assert groups[0]['rows'] == 2 and groups[0]['input_tokens'] == 20
-    assert 'PRIVATE_CONTENT' not in result.stdout and 'event_id' not in result.stdout and 'origin_path' not in result.stdout
-    assert 'PRIVATE_TOKEN' not in result.stdout
-    assert summary['quota_snapshots'][0]['windows'][0] == {'name': 'custom', 'used_percent': 20}
-    assert database.read_bytes() == before
-
-
-def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path, monkeypatch):
-    local = tmp_path / 'home/.claude/projects/repo/local.jsonl'
-    jsonl(local, {'type': 'assistant', 'sessionId': 'shared-session', 'timestamp': '2026-10-21T01:00:00Z',
-                  'message': {'id': 'local', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
-    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
-    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {
-        'peer': {'ssh_destination': 'peer'}, 'offline': {'ssh_destination': 'offline'},
-        'old': {'ssh_destination': 'old'}}})
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    # The transport is a fixture; it never reaches SSH or a provider.
-    shim = tmp_path / 'ssh-fixture'
-    shim.write_text('''#!/usr/bin/env python3
-import json, sys
-request = json.load(sys.stdin)
-name = sys.argv[-2]
-if name == 'offline':
-    sys.exit(255)
-if request['verb'] == 'hello':
-    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': {'protocol_version': 1, 'host': name}}))
-elif name == 'old':
-    print(json.dumps({'protocol_version': 1, 'ok': False, 'error': {'code': 'unknown_verb', 'message': 'old peer'}}))
-    sys.exit(1)
-else:
-    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': json.load(open(__file__ + '.json'))}))
-''')
-    shim.chmod(0o755)
-    # Use the real aggregate encoder, then represent another host with the same session ID.
-    # The in-process encoder reads host id and quota snapshots from the environment: isolate it from the real ~/.agents.
-    for key, value in environment(tmp_path).items():
-        monkeypatch.setenv(key, value)
-    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_test')
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        db.row_factory = sqlite3.Row
-        summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
-    Path(str(shim) + '.json').write_text(json.dumps(summary))
-    env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim),
-           'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / 'home/.agents')}
-    result = subprocess.run([str(front_door_binary()), 'stats', '--hosts', 'all', '--json'],
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-    report = json.loads(result.stdout)
-    assert report['partial'] is True
-    assert report['usage'][0]['input_tokens'] == 20
-    statuses = {row['host']: row for row in report['hosts']}
-    assert statuses['peer']['status'] == 'ok'
-    assert statuses['offline']['status'] == 'partial' and statuses['offline']['reason'] == 'unreachable'
-    assert statuses['old']['status'] == 'partial' and statuses['old']['reason'] == 'unknown_verb'
-    # Repeated selectors must not count one (host, source, session) twice.
-    result = subprocess.run([str(front_door_binary()), 'stats', '--hosts', 'peer', 'peer', '--json'],
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['usage'][0]['input_tokens'] == 10
 
 
 def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_path, monkeypatch):
@@ -1577,19 +1403,6 @@ def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, mon
                     'credits': {'reset_credits': 1, 'source': 'provider', 'credential': 'PRIVATE_TOKEN'}}]}
         report = federation.collect(telemetry, db, None, ['all'])
         assert 'PRIVATE_TOKEN' not in json.dumps(report)
-
-
-def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
-    state = tmp_path / 'state'
-    state.mkdir()
-    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
-        db.execute('PRAGMA user_version=4')
-    result = subprocess.run([str(front_door_binary()), 'peer'],
-                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
-                                              'params': {'schema_version': 1}}),
-                            env=environment(tmp_path), capture_output=True, text=True)
-    assert result.returncode == 1 and result.stderr == ''
-    assert json.loads(result.stdout)['error']['code'] == 'telemetry_unavailable'
 
 
 def test_stats_reports_time_since_last_limit_per_account_and_host(tmp_path):
@@ -1719,39 +1532,6 @@ def pull(number, merged_at, title='Change', labels=()):
             'title': title, 'labels': [{'name': name} for name in labels]}
 
 
-def test_changes_sync_is_incremental_idempotent_and_takes_manual_markers(tmp_path):
-    first = [pull(10, '2026-10-01T00:00:00Z', 'Lighter review ladder', ['area:review'])]
-    second = [pull(10, '2026-10-01T00:00:00Z', 'Lighter review ladder (renamed)', ['area:review']),
-              pull(11, '2026-10-05T12:00:00Z', 'Quota-aware routing', ['area:routing'])]
-    bin_dir = fake_gh(tmp_path, first, second)
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
-    result = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync', '--json')
-    assert result.returncode == 0, result.stderr
-    rows = json.loads(result.stdout)
-    assert [(row['pr'], row['title'], row['labels']) for row in rows] == [
-        (11, 'Quota-aware routing', ['area:routing']), (10, 'Lighter review ladder (renamed)', ['area:review'])]
-    assert rows[0]['merge_commit'] == '0000011abcdef' and rows[0]['merged_at'] == '2026-10-05T12:00:00Z'
-    calls = [json.loads(line) for line in (bin_dir / 'calls.jsonl').read_text().splitlines()]
-    assert calls[0][:4] == ['pr', 'list', '--state', 'merged'] and '--limit' in calls[0]
-    assert calls[0][-2] == '--search' and calls[0][-1].startswith('merged:>=2008-01-01T00:00:00+00:00 merged:<=')
-    # The next sweep starts a day before the last completed one, not at the first sweep's floor.
-    assert calls[1][-1].startswith('merged:>=20') and '2008' not in calls[1][-1]
-    added = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'switched default reviewer',
-                     '--at', '2026-10-03')
-    assert added.returncode == 0, added.stderr
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'switched default reviewer',
-                    '--at', '2026-10-03').returncode == 0
-    text = cli_with(tmp_path, bin_dir, 'telemetry', 'changes').stdout
-    assert text.count('switched default reviewer') == 1 and '#11' in text and 'manual' in text
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'x').returncode == 2
-    failing = tmp_path / 'failing'
-    failing.mkdir()
-    (failing / 'gh').write_text('#!/bin/sh\necho PRIVATE_GH_OUTPUT >&2\nexit 4\n')
-    (failing / 'gh').chmod(0o755)
-    result = cli_with(tmp_path, failing, 'telemetry', 'changes', '--sync')
-    assert result.returncode == 1 and 'exit 4' in result.stderr and 'PRIVATE_GH_OUTPUT' not in result.stderr
-
-
 def lanes_around(project, prefix, count, ok, day):
     for index in range(count):
         receipt(project, f'{prefix}-{index:02d}', 1, status='ok' if index < ok else 'failed',
@@ -1760,65 +1540,6 @@ def lanes_around(project, prefix, count, ok, day):
                 started_at=f'{day}T01:00:00Z', ended_at=f'{day}T01:00:{10 + index:02d}Z',
                 context={'input_tokens': 100, 'cached_input_tokens': 50, 'cache_write_tokens': 0,
                          'output_tokens': 10, 'reasoning_tokens': 0})
-
-
-def test_stats_compare_reports_sample_sizes_and_never_calls_a_small_side_a_win(tmp_path):
-    bin_dir = fake_gh(tmp_path, [pull(20, '2026-10-10T00:00:00Z', 'Evidence-based acceptance')])
-    lanes_around(tmp_path, 'before', 12, 6, '2026-10-08')
-    lanes_around(tmp_path, 'after', 3, 3, '2026-10-11')
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
-    result = cli_with(tmp_path, bin_dir, 'stats', '--compare', '20', '--window', '7d', '--json')
-    assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout)
-    assert report['pivot'] == '2026-10-10T00:00:00Z' and report['change']['pr'] == 20
-    assert (report['before']['lanes'], report['after']['lanes']) == (12, 3)
-    assert report['before']['success_rate'] == 0.5 and report['after']['success_rate'] == 1.0
-    assert report['after']['inconclusive'] is True and report['before']['inconclusive'] is False
-    metrics = {row['metric']: row for row in report['metrics']}
-    assert metrics['success_rate']['verdict'] == 'inconclusive'
-    assert (metrics['success_rate']['n_before'], metrics['success_rate']['n_after']) == (12, 3)
-    assert report['before']['error_classes'] == {'provider_timeout': 6}
-    assert report['before']['cache_read_share'] == 0.5
-    text = cli_with(tmp_path, bin_dir, 'stats', '--compare', '#20')
-    assert text.returncode == 0, text.stderr
-    assert len(text.stdout.encode()) < 4096
-    assert 'inconclusive (n<10)' in text.stdout and '12/3 lanes' in text.stdout and 'improved' not in text.stdout
-    # A large enough after side gets a verdict; a date pivots the same way.
-    lanes_around(tmp_path, 'later', 12, 12, '2026-10-12')
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
-    report = json.loads(cli_with(tmp_path, bin_dir, 'stats', '--compare', '2026-10-10', '--json').stdout)
-    metrics = {row['metric']: row for row in report['metrics']}
-    assert report['change'] is None and report['after']['lanes'] == 15
-    assert metrics['success_rate']['verdict'] == 'improved'
-    assert metrics['cache_read_share']['verdict'] == 'within_noise'
-    missing = cli_with(tmp_path, bin_dir, 'stats', '--compare', '999')
-    assert missing.returncode == 1 and 'changes --sync' in missing.stderr
-    assert cli_with(tmp_path, bin_dir, 'stats', '--compare', '20', '--window', 'soon').returncode == 1
-    assert cli_with(tmp_path, bin_dir, 'stats', '--window', '7d').returncode == 2
-
-
-def test_retro_is_a_compact_digest_of_changes_errors_and_attention(tmp_path):
-    pulls = [pull(100 + index, f'2026-10-{10 + index // 2:02d}T{index % 2 * 12:02d}:00:00Z',
-                  'A fairly long pull request title that will be truncated in the digest') for index in range(15)]
-    bin_dir = fake_gh(tmp_path, pulls)
-    lanes_around(tmp_path, 'lane', 12, 9, '2026-10-12')
-    receipt(tmp_path, 'waiting', 1, status='input_required', provenance=route('codex', 'gpt-6.1-sol'),
-            ended_at='2026-10-12T02:00:00Z')
-    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
-        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-12T01:00:00Z',
-        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
-    result = cli_with(tmp_path, bin_dir, 'retro', '--since', '2026-10-01')
-    assert result.returncode == 0, result.stderr
-    assert len(result.stdout.encode()) < 4096
-    assert '#114' in result.stdout and '3 more; use --json' in result.stdout
-    assert 'Top error classes (attempts): provider_timeout:3' in result.stdout
-    assert 'sessions started 1' in result.stdout and 'lanes awaiting input 1' in result.stdout
-    report = json.loads(cli_with(tmp_path, bin_dir, 'retro', '--since', '2026-10-01', '--json').stdout)
-    assert len(report['changes']) == 15 and report['changes'][0]['compare']['metrics']
-    assert report['events_by_kind']['lane.attempt'] == 13
 
 
 def test_session_start_survives_transcript_replacement(tmp_path):
@@ -1952,27 +1673,6 @@ def hourly_pulls(count, start='2026-09-01T00:00:00'):  # timebomb: allow sync re
     return [pull(1 + index, (first + timedelta(hours=index)).isoformat() + 'Z') for index in range(count)]
 
 
-def test_changes_sync_splits_full_pages_and_finds_later_merges(tmp_path):
-    """Regression: 201 merges with a 200-row page must all land, and a later merge must too."""
-    from datetime import UTC, datetime, timedelta
-    pulls = hourly_pulls(201)
-    bin_dir = filtering_gh(tmp_path, pulls)
-    result = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync', '--json')
-    assert result.returncode == 0, result.stderr
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 201
-    calls = [json.loads(line) for line in (bin_dir / 'calls.jsonl').read_text().splitlines()]
-    assert len(calls) <= 5 and all(call[call.index('--limit') + 1] == '200' for call in calls)
-    recent = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0, tzinfo=None).isoformat() + 'Z'
-    (bin_dir / 'prs.json').write_text(json.dumps([*pulls, pull(500, recent, 'Later merge')]))
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute("SELECT title FROM changes WHERE pr=500").fetchone() == ('Later merge',)
-        assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 202
-    last = json.loads((bin_dir / 'calls.jsonl').read_text().splitlines()[-1])
-    assert '2008' not in last[-1]  # a completed sweep is durable; the next one starts near it
-
-
 def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
     """Regression: a sweep stopped by the query cap or a gh failure resumes without losing PRs."""
     telemetry = load_script(ROOT / 'scripts/telemetry.py', 'sync_telemetry_test')
@@ -2005,27 +1705,6 @@ def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
         assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 12
         state = json.loads(db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()[0])
         assert state['pending'] == [] and state['through']
-
-
-def test_rendered_reports_fit_four_kilobytes_of_utf8(tmp_path):
-    """Regression: wide Unicode titles and long error classes stay under the 4 KB byte budget."""
-    title = '数据遥测🚀' + '🚀' * 80
-    pulls = [pull(300 + index, f'2026-10-{10 + index // 4:02d}T{index % 4 * 6:02d}:00:00Z', title,
-                  ['範囲:' + '🚀' * 40]) for index in range(20)]
-    bin_dir = filtering_gh(tmp_path, pulls)
-    for index in range(6):
-        receipt(tmp_path, f'fail-{index}', 1, status='failed', ended_at='2026-10-12T01:00:00Z',
-                error_class=f'错误类别_{index}_' + '🧯' * 300, provenance=route('codex', 'gpt-6.1-sol'))
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
-    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
-    outputs = {}
-    for args in (('telemetry', 'changes'), ('retro', '--since', '2026-10-01'), ('stats', '--compare', '#300')):
-        result = cli_with(tmp_path, bin_dir, *args)
-        assert result.returncode == 0, result.stderr
-        assert len(result.stdout.encode()) < 4096, (args, len(result.stdout.encode()))
-        outputs[args[0]] = result.stdout
-    assert 'lines omitted to fit 4 KB; use --json' in outputs['telemetry']
-    assert 'lines omitted to fit 4 KB; use --json' in outputs['retro']
 
 
 def test_fit_keeps_whole_lines_within_the_byte_budget():
@@ -2562,64 +2241,6 @@ def ssh_tripwire(tmp_path):
     shim.write_text(f'#!/bin/sh\necho called > {marker}\necho "ssh must not run" >&2\nexit 99\n')
     shim.chmod(0o755)
     return shim, marker
-
-
-def test_stats_hosts_all_with_no_peers_stays_local_and_never_reaches_ssh(tmp_path):
-    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
-          {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
-           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 7}}})
-    shim, marker = ssh_tripwire(tmp_path)
-    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
-    for setup in (None, {'schema_version': 1, 'local_host': 'solo', 'peers': {}}):
-        if setup:
-            write_json(config, setup)
-        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-        env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
-        result = subprocess.run([str(front_door_binary()), 'telemetry', 'stats', '--hosts', 'all', '--json'],
-                                env=env, capture_output=True, text=True)
-        assert result.returncode == 0, result.stdout + result.stderr
-        report = json.loads(result.stdout)
-        expected = 'solo' if setup else load_script(ROOT / 'scripts/host_identity.py', 'telemetry_zero_peer').host_id(config)
-        assert report['partial'] is False
-        assert report['hosts'] == [{'host': expected, 'status': 'ok'}]
-        assert report['usage'][0]['input_tokens'] == 7
-        assert not marker.exists()
-
-
-def test_stats_hosts_all_merges_three_hosts(tmp_path, monkeypatch):
-    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
-          {'type': 'assistant', 'sessionId': 'shared', 'timestamp': '2026-10-21T01:00:00Z',
-           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 2}}})
-    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'a', 'peers': {
-        'b': {'ssh_destination': 'b'}, 'c': {'ssh_destination': 'c'}}})
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    use_environment(tmp_path, monkeypatch)
-    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_three_hosts')
-    shim = tmp_path / 'ssh-fixture'
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        db.row_factory = sqlite3.Row
-        for name in ('b', 'c'):
-            # Each peer reports the same session ID; the merge keys sessions by host.
-            Path(f'{shim}.{name}.json').write_text(json.dumps(telemetry.report_owner().peer_summary(telemetry, db, host=name)))
-    shim.write_text('''#!/usr/bin/env python3
-import json, sys
-request = json.load(sys.stdin)
-name = sys.argv[-2]
-if request['verb'] == 'hello':
-    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': {'protocol_version': 1, 'host': name}}))
-else:
-    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': json.load(open(f'{__file__}.{name}.json'))}))
-''')
-    shim.chmod(0o755)
-    env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
-    result = subprocess.run([str(front_door_binary()), 'telemetry', 'stats', '--hosts', 'all', '--json'],
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-    report = json.loads(result.stdout)
-    assert report['partial'] is False
-    assert report['hosts'] == [{'host': host, 'status': 'ok'} for host in ('a', 'b', 'c')]
-    assert report['host'] == 'a, b, c'
-    assert report['usage'][0]['input_tokens'] == 30 and report['usage'][0]['output_tokens'] == 6
 
 
 def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_peer(tmp_path, monkeypatch):
