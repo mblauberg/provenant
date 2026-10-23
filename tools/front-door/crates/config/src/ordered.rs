@@ -280,3 +280,109 @@ pub(crate) fn dumps(value: &Json, pretty: bool, sorted: bool) -> crate::Result<S
     encode(value, pretty, sorted, 0, &mut out)?;
     Ok(out)
 }
+
+pub(crate) fn serialize_pairs<S: Serializer, T: Serialize>(
+    items: &[(String, T)],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    let mut map = s.serialize_map(Some(items.len()))?;
+    for (k, v) in items {
+        map.serialize_entry(k, v)?;
+    }
+    map.end()
+}
+pub(crate) fn deserialize_pairs<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Vec<(String, T)>, D::Error> {
+    struct Pairs<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Pairs<T> {
+        type Value = Vec<(String, T)>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+            let mut items: Vec<(String, T)> = vec![];
+            while let Some((k, v)) = a.next_entry()? {
+                if let Some((_, old)) = items.iter_mut().find(|(key, _)| *key == k) {
+                    *old = v;
+                } else {
+                    items.push((k, v));
+                }
+            }
+            Ok(items)
+        }
+    }
+    d.deserialize_map(Pairs(std::marker::PhantomData))
+}
+
+pub(crate) fn entries<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    original: Option<&'a Json>,
+) -> Vec<(&'a str, &'a Value)> {
+    if let Some(items) = original.and_then(Json::object) {
+        items
+            .iter()
+            .filter_map(|(k, _)| map.get(k).map(|v| (k.as_str(), v)))
+            .collect()
+    } else {
+        map.iter().map(|(k, v)| (k.as_str(), v)).collect()
+    }
+}
+
+// port: belongs in provenant-records
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(serialize = "T: Serialize", deserialize = "T: Deserialize<'de>"))]
+pub struct OrderedMap<T>(
+    #[serde(
+        serialize_with = "serialize_pairs",
+        deserialize_with = "deserialize_pairs"
+    )]
+    Vec<(String, T)>,
+);
+impl<T> Default for OrderedMap<T> {
+    fn default() -> Self {
+        Self(vec![])
+    }
+}
+impl<T> OrderedMap<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn get(&self, key: &str) -> Option<&T> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+    pub fn insert(&mut self, key: String, value: T) -> Option<T> {
+        if let Some((_, old)) = self.0.iter_mut().find(|(k, _)| k == &key) {
+            Some(std::mem::replace(old, value))
+        } else {
+            self.0.push((key, value));
+            None
+        }
+    }
+    pub fn remove(&mut self, key: &str) -> Option<T> {
+        let position = self.0.iter().position(|(k, _)| k == key)?;
+        Some(self.0.remove(position).1)
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, (String, T)> {
+        self.0.iter()
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().map(|(k, _)| k)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+impl<'a, T> IntoIterator for &'a OrderedMap<T> {
+    type Item = &'a (String, T);
+    type IntoIter = std::slice::Iter<'a, (String, T)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}

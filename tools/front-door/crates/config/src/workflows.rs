@@ -75,7 +75,13 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
             extra: BTreeMap::from([("updated_at".into(), Value::from(now))]),
         });
     }
-    let value = pending::read_json(&path, "installation manifest is unreadable")?;
+    let bytes = fs::read(&path).map_err(|source| crate::Error::Read {
+        context: "installation manifest is unreadable",
+        path: path.clone(),
+        source,
+    })?;
+    let original = crate::ordered::decode(&bytes, "installation manifest is unreadable", &path)?;
+    let value = original.value();
     let valid_header = value.is_object()
         && pending::schema_one(&value["schema_version"])
         && value["owner"] == "agent-harness"
@@ -87,7 +93,17 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
         return Err(invalid("workflow installation manifest is invalid"));
     }
     if let Some(entries) = value["managed"].as_object() {
-        for (name, value) in entries {
+        for (name, value) in crate::ordered::entries(entries, original.get("managed")) {
+            if value.as_object().is_none_or(|v| {
+                v.len() != 4
+                    || !["owner", "source_target", "source_sha256", "installed_at"]
+                        .iter()
+                        .all(|k| v.contains_key(*k))
+            }) {
+                return Err(invalid(format!(
+                    "workflow installation manifest entry is invalid: {name}"
+                )));
+            }
             let entry: Entry = serde_json::from_value(value.clone()).map_err(|_| {
                 invalid(format!(
                     "workflow installation manifest entry is invalid: {name}"
@@ -571,5 +587,42 @@ mod tests {
                 serde_json::json!([result.exit_code, result.stdout, result.stderr])
             );
         }
+    }
+}
+
+#[derive(Debug, clap::Parser)]
+#[command(name = "install-workflows")]
+pub struct Arguments {
+    #[arg(long)]
+    pub target: PathBuf,
+    #[arg(long)]
+    pub preflight: bool,
+}
+impl Arguments {
+    pub fn run(&self, source: &Path, now: &str) -> CommandResult {
+        run(source, &self.target, self.preflight, now)
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn invalid_receipt_uses_first_inserted_entry_not_alphabetical_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("workflows");
+        let value=format!("{{\"schema_version\":1,\"owner\":\"agent-harness\",\"surface\":\"claude-workflows\",\"target_root\":{},\"managed\":{{\"z.js\":{{}},\"a.js\":{{}}}}}}",serde_json::to_string(&target).unwrap());
+        fs::write(manifest_path(&target), value).unwrap();
+        let Some(old) = crate::oracle::python(
+            "scripts/install-workflows",
+            "try: m._load_manifest(p)\nexcept m.InstallError as e: print(str(e))",
+            &target,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            format!("{}\n", load(&target, "NOW").unwrap_err()).as_bytes(),
+            old
+        );
     }
 }
