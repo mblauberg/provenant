@@ -1,8 +1,9 @@
 # Rust port rulebook
 
-Version: **3**. Status: accepted 2026-10-23 with
+Version: **4**. Status: accepted 2026-10-23 with
 [ADR 0028](../../adr/0028-rust-port-dependencies.md); version 3 scopes the
-judge gates to cut-over. Applies to every port lane. The [plan](README.md) owns the boundary, phases and landing method.
+judge gates to cut-over, version 4 fixes number, timestamp and differential
+rules from wave-1 review. Applies to every port lane. The [plan](README.md) owns the boundary, phases and landing method.
 
 ## R1. Version the rules and regenerate their consequences
 
@@ -92,6 +93,18 @@ paths as OS strings until a record's encoding rule applies. Cover Unicode,
 non-UTF-8 names, escaped text, negative/fractional numbers and large integers.
 Python and JavaScript number behaviour is not automatically reproduced by
 `serde_json`.
+
+Numbers are exact. A Python `int` maps to `i64` or `u64`, never `f64`: `300`
+must not become `300.0` in output, records or hashed identities. Integers
+outside the `i64`/`u64` range are refused with a typed `NumberOutOfRange`
+error, never rounded through `f64`; this is a recorded `improvement`
+divergence. Do not enable `serde_json`'s `arbitrary_precision`: Cargo unifies
+it across the workspace and it breaks untagged, flattened and internally
+tagged enums. Until `provenant-records` owns the checked codec, use a
+`pending` copy. Float-second timestamps convert to datetimes through one
+shared helper (owner `provenant-core`) that reproduces CPython's
+`datetime.fromtimestamp` rounding (`modf`, then round-half-even to
+microseconds); `(s * 1e6).round()` differs by 1 µs on a large share of stamps.
 
 Schema equivalence does not prove canonical bytes. Use explicit encoders for
 sorted keys, float spelling, escaping, whitespace and final newlines where
@@ -205,6 +218,15 @@ retire only under the named deletion criteria. Do not count deleted tests as
 passing tests. Each judge must pass against old code and reject relevant
 mutants such as a changed exit code, missing record field, reordered terminal
 publication, weakened tool schema or a silence-triggered kill.
+
+Differential and record comparisons are exact, including number spelling;
+no epsilon or `f64` equality in test helpers. Each crate runs its oracles
+through one helper that takes the interpreter from `PROVENANT_PORT_PYTHON`
+(default `python3`, at least 3.12) or `PROVENANT_PORT_NODE` (default `node`,
+at least 24). A missing or older interpreter skips with a `skip:` line, but
+fails the test when `PROVENANT_PORT_DIFF_REQUIRED=1`, which CI sets. On macOS
+`/var` is a symlink to `/private/var`: compare canonicalized temporary paths,
+because CI runs the Rust job on Linux only.
 
 Locally run only targeted tests, fmt, lint/type checks and the graph fixtures.
 Full suites, `scripts/check-harness`, platform conformance and stress run in CI.
