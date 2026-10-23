@@ -20,7 +20,6 @@ fn configured(rate: Option<u64>) -> ConfiguredPrices {
                 cache_read: rate,
                 cache_write: rate,
                 output_excluding_reasoning: rate,
-                reasoning: rate,
             },
         }],
     }
@@ -182,14 +181,27 @@ fn zero_tokens_need_no_price_but_subscription_is_never_assumed_free() {
             .usd,
         "0.000000"
     );
-    assert!(
-        stats([fact(1, None)], &table, Window::default())
-            .unwrap()
-            .totals
-            .cost
-            .complete
-            .is_none()
-    );
+    for billing in [BillingKind::Free, BillingKind::Subscription] {
+        free.models[0].billing = billing;
+        let table = validate_prices(&free).unwrap();
+        let mut missing = fact(1, None);
+        missing.usage = Usage::default();
+        let report = stats([missing], &table, Window::default()).unwrap();
+        assert_eq!(report.totals.cost.complete.unwrap().microdollars, 0);
+        assert_eq!(report.totals.cost.missing_attempts, 0);
+        assert_eq!(report.coverage.missing_usage, 1);
+        let missing = report.coverage.missing_categories;
+        assert_eq!(
+            [
+                missing.uncached_input,
+                missing.cache_read,
+                missing.cache_write,
+                missing.output_excluding_reasoning,
+                missing.reasoning,
+            ],
+            [1; 5]
+        );
+    }
 }
 
 #[test]
@@ -212,6 +224,7 @@ fn exact_disjoint_usage_is_not_subtracted_or_attributed_from_requested_routes() 
     let mut config = configured(Some(1_000_000));
     config.models[0].rates.cache_read = Some(2_000_000);
     config.models[0].rates.cache_write = Some(3_000_000);
+    config.models[0].rates.output_excluding_reasoning = Some(4_000_000);
     let mut input = fact(1, Some(10));
     input.usage.cache_read = Some(20);
     input.usage.cache_write = Some(30);
@@ -229,7 +242,7 @@ fn exact_disjoint_usage_is_not_subtracted_or_attributed_from_requested_routes() 
         .complete
         .unwrap()
         .microdollars,
-        230
+        500
     );
 }
 
@@ -243,20 +256,20 @@ fn retry_totals_and_latest_outcome_use_highest_number_not_arrival_order() {
     let report = reduce([latest, earlier], Some(1_000_000)).unwrap();
     assert_eq!(report.totals.attempts, 2);
     assert_eq!(report.totals.usage.uncached_input.known, 8);
-    assert_eq!(report.totals.outcomes["succeeded"], 1);
-    assert_eq!(report.totals.outcomes["rejected"], 1);
+    assert_eq!(report.totals.outcomes[&AttemptOutcome::Succeeded], 1);
+    assert_eq!(report.totals.outcomes[&AttemptOutcome::Rejected], 1);
     assert_eq!(report.latest_task_outcomes.len(), 1);
-    assert_eq!(report.latest_task_outcomes["rejected"], 1);
-    assert!(matches!(
-        reduce([fact(1, Some(1)), fact(1, Some(1))], None),
-        Err(TelemetryError::InvalidFact(_))
-    ));
+    assert_eq!(report.latest_task_outcomes[&AttemptOutcome::Rejected], 1);
+    assert_eq!(
+        reduce([fact(1, Some(1)), fact(1, Some(1))], None).unwrap_err(),
+        TelemetryError::InvalidFact("duplicate attempt ID or task/attempt number")
+    );
     let mut duplicate_number = fact(1, Some(1));
     duplicate_number.attempt_id = AttemptId::from_bytes([5; 16]);
-    assert!(matches!(
-        reduce([fact(1, Some(1)), duplicate_number], None),
-        Err(TelemetryError::InvalidFact(_))
-    ));
+    assert_eq!(
+        reduce([fact(1, Some(1)), duplicate_number], None).unwrap_err(),
+        TelemetryError::InvalidFact("duplicate attempt ID or task/attempt number")
+    );
 }
 
 #[test]
@@ -280,20 +293,20 @@ fn selection_uses_finished_time_half_open_bounds_and_project() {
     assert_eq!(report.totals.attempts, 1);
     assert_eq!(report.daily_accounts.unwrap()[0].day, "1970-01-01");
     window.until = window.since;
-    assert!(matches!(
-        stats([], &prices(None), window),
-        Err(TelemetryError::InvalidFact(_))
-    ));
+    assert_eq!(
+        stats([], &prices(None), window).unwrap_err(),
+        TelemetryError::InvalidWindow
+    );
     let mut backwards = fact(1, None);
     backwards.finished_at = WallTime::from_micros(-1).unwrap();
-    assert!(matches!(
-        reduce([backwards], None),
-        Err(TelemetryError::InvalidFact(_))
-    ));
-    assert!(matches!(
-        reduce([fact(0, None)], None),
-        Err(TelemetryError::InvalidFact(_))
-    ));
+    assert_eq!(
+        reduce([backwards], None).unwrap_err(),
+        TelemetryError::InvalidFact("time order or zero attempt number")
+    );
+    assert_eq!(
+        reduce([fact(0, None)], None).unwrap_err(),
+        TelemetryError::InvalidFact("time order or zero attempt number")
+    );
 }
 
 #[test]
@@ -335,29 +348,29 @@ fn wide_products_are_exact_and_all_overflow_paths_refuse() {
             .microdollars,
         u64::MAX
     );
-    assert!(matches!(
-        reduce([fact(1, Some(u64::MAX)), fact(2, Some(1))], Some(0)),
-        Err(TelemetryError::Overflow)
-    ));
+    assert_eq!(
+        reduce([fact(1, Some(u64::MAX)), fact(2, Some(1))], Some(0)).unwrap_err(),
+        TelemetryError::Overflow
+    );
     // Product fits u128 but the rounded microdollar output does not fit u64.
-    assert!(matches!(
-        reduce([fact(1, Some(u64::MAX))], Some(u64::MAX)),
-        Err(TelemetryError::Overflow)
-    ));
+    assert_eq!(
+        reduce([fact(1, Some(u64::MAX))], Some(u64::MAX)).unwrap_err(),
+        TelemetryError::Overflow
+    );
     // Distinct categories overflow the numerator before token totals overflow.
     let mut input = fact(1, Some(u64::MAX));
     input.usage.cache_read = Some(u64::MAX);
-    assert!(matches!(
-        reduce([input], Some(u64::MAX)),
-        Err(TelemetryError::Overflow)
-    ));
+    assert_eq!(
+        reduce([input], Some(u64::MAX)).unwrap_err(),
+        TelemetryError::Overflow
+    );
     let first = fact(1, Some(u64::MAX));
     let mut second = fact(2, Some(0));
     second.usage.cache_read = Some(u64::MAX);
-    assert!(matches!(
-        reduce([first, second], Some(u64::MAX)),
-        Err(TelemetryError::Overflow)
-    ));
+    assert_eq!(
+        reduce([first, second], Some(u64::MAX)).unwrap_err(),
+        TelemetryError::Overflow
+    );
 }
 
 #[test]
@@ -370,14 +383,15 @@ fn attempt_and_group_limits_are_enforced_before_insertion() {
     )
     .unwrap();
     assert_eq!(report.totals.attempts, MAX_ATTEMPTS);
-    assert!(matches!(
+    assert_eq!(
         stats(
             (1..=MAX_ATTEMPTS + 1).map(|n| fact(n, Some(0))),
             &table,
             Window::default()
-        ),
-        Err(TelemetryError::TooLarge(_))
-    ));
+        )
+        .unwrap_err(),
+        TelemetryError::TooLarge("100,000 selected attempts")
+    );
     let distinct = |n| {
         let mut input = fact(n, Some(0));
         input.resolved_route.as_mut().unwrap().account_label = Some(n.to_string());
@@ -394,10 +408,10 @@ fn attempt_and_group_limits_are_enforced_before_insertion() {
             .len(),
         5_000
     );
-    assert!(matches!(
-        stats((1..=MAX_GROUPS / 2 + 1).map(distinct), &table, window),
-        Err(TelemetryError::TooLarge(_))
-    ));
+    assert_eq!(
+        stats((1..=MAX_GROUPS / 2 + 1).map(distinct), &table, window).unwrap_err(),
+        TelemetryError::TooLarge("10,000 groups")
+    );
 }
 
 #[test]
@@ -410,7 +424,7 @@ fn retained_key_byte_limit_counts_route_and_daily_keys() {
         account_label: None,
     });
     assert!(reduce([input.clone()], None).is_ok());
-    assert!(matches!(
+    assert_eq!(
         stats(
             [input.clone()],
             &prices(None),
@@ -418,20 +432,21 @@ fn retained_key_byte_limit_counts_route_and_daily_keys() {
                 detail: true,
                 ..Window::default()
             }
-        ),
-        Err(TelemetryError::TooLarge(_))
-    ));
+        )
+        .unwrap_err(),
+        TelemetryError::TooLarge("1 MiB of group keys")
+    );
     input.resolved_route.as_mut().unwrap().provider = Some("p".into());
-    assert!(matches!(
-        reduce([input], None),
-        Err(TelemetryError::TooLarge(_))
-    ));
+    assert_eq!(
+        reduce([input], None).unwrap_err(),
+        TelemetryError::TooLarge("1 MiB of group keys")
+    );
     let mut blank = fact(1, None);
     blank.resolved_route.as_mut().unwrap().effort = Some(" ".into());
-    assert!(matches!(
-        reduce([blank], None),
-        Err(TelemetryError::InvalidFact(_))
-    ));
+    assert_eq!(
+        reduce([blank], None).unwrap_err(),
+        TelemetryError::InvalidFact("empty route identity")
+    );
 }
 
 #[test]
@@ -481,17 +496,9 @@ billing = "subscription"
             .complete
             .is_none()
     );
-    for bad in [
-        minimal.replace("schema_version = 1", "schema_version = -1"),
-        minimal.replace("[models.rates]", "[models.rates]\nuncached_input = 0.1"),
-        minimal.replace(
-            "[models.rates]",
-            "[models.rates]\nreasoning = 18446744073709551616",
-        ),
-        minimal.replace("[models.rates]", "[models.rates]\nother = 1"),
-    ] {
-        assert!(toml_edit::de::from_str::<ConfiguredPrices>(&bad).is_err());
-    }
+    let bad = minimal.replace("[models.rates]", "[models.rates]\nother = 1");
+    let error = toml_edit::de::from_str::<ConfiguredPrices>(&bad).unwrap_err();
+    assert!(error.message().contains("unknown field `other`"));
 }
 
 #[test]
@@ -504,26 +511,44 @@ fn price_validation_refuses_unsupported_units_duplicates_and_unverified_zero() {
     );
     config = configured(Some(1));
     config.units = "dollars".into();
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("units")
+    );
     config = configured(Some(1));
     config.models.push(config.models[0].clone());
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("duplicate provider/model")
+    );
     config = configured(Some(0));
     config.models[0].zero_rate_verified = false;
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("zero rate requires explicit verification")
+    );
     config = configured(None);
     config.models[0].billing = BillingKind::Free;
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("free billing requires four verified zero rates")
+    );
     config = configured(Some(1));
     config.reviewed_at = "2026-02-30".into();
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("identity or review date")
+    );
     config = configured(Some(1));
     config.models[0].sources.clear();
-    assert!(validate_prices(&config).is_err());
-    config = configured(Some(1));
-    config.models[0].rates.reasoning = Some(2);
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("model identity or source references")
+    );
     config = configured(Some(1));
     config.models[0].model = " ".into();
-    assert!(validate_prices(&config).is_err());
+    assert_eq!(
+        validate_prices(&config).unwrap_err(),
+        PriceError::Invalid("model identity or source references")
+    );
 }

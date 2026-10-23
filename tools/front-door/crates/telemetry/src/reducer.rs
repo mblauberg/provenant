@@ -1,6 +1,6 @@
 use crate::{Categories, PriceError, PriceIdentity, PriceTable};
 use provenant_core::{AttemptId, ProjectId, TaskId, WallTime};
-use provenant_records::{AttemptFact, AttemptOutcome, Usage};
+use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
 use serde::Serialize;
 use std::{
     cmp::Ordering,
@@ -18,6 +18,8 @@ pub enum TelemetryError {
     TooLarge(&'static str),
     #[error("invalid terminal attempt or selection: {0}")]
     InvalidFact(&'static str),
+    #[error("since must precede until")]
+    InvalidWindow,
     #[error(transparent)]
     InvalidPrice(#[from] PriceError),
     #[error("telemetry arithmetic overflow")]
@@ -36,7 +38,7 @@ pub struct Window {
 impl Window {
     fn validate(&self) -> Result<(), TelemetryError> {
         if self.since.zip(self.until).is_some_and(|(s, u)| s >= u) {
-            return Err(TelemetryError::InvalidFact("since must precede until"));
+            return Err(TelemetryError::InvalidWindow);
         }
         Ok(())
     }
@@ -86,59 +88,34 @@ pub struct Totals {
     pub attempts: u64,
     pub usage: Categories<TokenTotal>,
     pub cost: CostTotal,
-    pub outcomes: BTreeMap<String, u64>,
+    pub outcomes: BTreeMap<AttemptOutcome, u64>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct RouteKey {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub account_label: Option<String>,
+fn route_fields(route: &RouteFact) -> [&Option<String>; 4] {
+    [
+        &route.provider,
+        &route.model,
+        &route.effort,
+        &route.account_label,
+    ]
 }
-impl RouteKey {
-    fn from_fact(fact: &AttemptFact) -> Self {
-        let route = fact.resolved_route.as_ref();
-        Self {
-            provider: route.and_then(|r| r.provider.clone()),
-            model: route.and_then(|r| r.model.clone()),
-            effort: route.and_then(|r| r.effort.clone()),
-            account_label: route.and_then(|r| r.account_label.clone()),
+fn report_order(a: &RouteFact, b: &RouteFact) -> Ordering {
+    for (a, b) in route_fields(a).into_iter().zip(route_fields(b)) {
+        let ordering = a.is_none().cmp(&b.is_none()).then_with(|| a.cmp(b));
+        if ordering != Ordering::Equal {
+            return ordering;
         }
     }
-    fn fields(&self) -> [&Option<String>; 4] {
-        [
-            &self.provider,
-            &self.model,
-            &self.effort,
-            &self.account_label,
-        ]
-    }
-    fn bytes(&self) -> Result<u64, TelemetryError> {
-        self.fields().iter().try_fold(0u64, |sum, s| {
-            let bytes = u64::try_from(s.as_ref().map_or(0, String::len))
-                .map_err(|_| TelemetryError::Overflow)?;
-            sum.checked_add(bytes).ok_or(TelemetryError::Overflow)
-        })
-    }
-    fn report_order(&self, other: &Self) -> Ordering {
-        for (a, b) in self.fields().into_iter().zip(other.fields()) {
-            let ordering = a.is_none().cmp(&b.is_none()).then_with(|| a.cmp(b));
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        Ordering::Equal
-    }
+    Ordering::Equal
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RouteGroup {
-    pub route: RouteKey,
+    pub route: RouteFact,
     pub totals: Totals,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct DailyGroup {
     pub day: String,
-    pub route: RouteKey,
+    pub route: RouteFact,
     pub totals: Totals,
 }
 #[derive(Clone, Debug, Default, Serialize)]
@@ -161,7 +138,7 @@ pub struct StatsReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_accounts: Option<Vec<DailyGroup>>,
     /// Highest numbered selected terminal attempt per task; never active work.
-    pub latest_task_outcomes: BTreeMap<String, u64>,
+    pub latest_task_outcomes: BTreeMap<AttemptOutcome, u64>,
     pub coverage: Coverage,
 }
 
@@ -171,31 +148,13 @@ struct Accumulator {
     usage: Categories<TokenTotal>,
     numerator: u128,
     missing_cost: u64,
-    outcomes: BTreeMap<String, u64>,
+    outcomes: BTreeMap<AttemptOutcome, u64>,
 }
 fn add(value: &mut u64, increment: u64) -> Result<(), TelemetryError> {
     *value = value
         .checked_add(increment)
         .ok_or(TelemetryError::Overflow)?;
     Ok(())
-}
-fn outcome(state: AttemptOutcome) -> &'static str {
-    use AttemptOutcome::*;
-    match state {
-        Succeeded => "succeeded",
-        Failed => "failed",
-        Rejected => "rejected",
-        Cancelled => "cancelled",
-        TimedOut => "timed_out",
-        RateLimited => "rate_limited",
-        QuotaLimited => "quota_limited",
-        AuthRequired => "auth_required",
-        ModelUnavailable => "model_unavailable",
-        PermissionDenied => "permission_denied",
-        Quarantined => "quarantined",
-        Lost => "lost",
-        InputRequired => "input_required",
-    }
 }
 fn counts(usage: &Usage) -> [Option<u64>; 5] {
     [
@@ -225,12 +184,7 @@ impl Accumulator {
             .checked_add(numerator)
             .ok_or(TelemetryError::Overflow)?;
         add(&mut self.missing_cost, u64::from(missing))?;
-        add(
-            self.outcomes
-                .entry(outcome(fact.terminal_state).into())
-                .or_default(),
-            1,
-        )
+        add(self.outcomes.entry(fact.terminal_state).or_default(), 1)
     }
     fn finish(self) -> Result<Totals, TelemetryError> {
         let known_lower_bound = Money::from_numerator(self.numerator)?;
@@ -280,8 +234,8 @@ pub fn stats(
 ) -> Stats {
     window.validate()?;
     let mut total = Accumulator::default();
-    let mut routes = BTreeMap::<RouteKey, Accumulator>::new();
-    let mut daily = BTreeMap::<(String, RouteKey), Accumulator>::new();
+    let mut routes = BTreeMap::<RouteFact, Accumulator>::new();
+    let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
     let mut attempts = BTreeSet::<AttemptId>::new();
     let mut numbers = BTreeSet::new();
     let mut latest = BTreeMap::<(ProjectId, TaskId), (u64, AttemptOutcome)>::new();
@@ -308,7 +262,7 @@ pub fn stats(
         }
         // Check retained bytes before cloning a potentially large route key.
         let route_ref = fact.resolved_route.as_ref();
-        let fields = route_ref.map(|r| [&r.provider, &r.model, &r.effort, &r.account_label]);
+        let fields = route_ref.map(route_fields);
         let bytes = fields.into_iter().flatten().try_fold(0u64, |sum, field| {
             if field.as_ref().is_some_and(|s| s.trim().is_empty()) {
                 return Err(TelemetryError::InvalidFact("empty route identity"));
@@ -322,26 +276,35 @@ pub fn stats(
         if bytes > MAX_KEY_BYTES {
             return Err(TelemetryError::TooLarge("1 MiB of group keys"));
         }
-        let key = RouteKey::from_fact(&fact);
+        let key = fact.resolved_route.clone().unwrap_or(RouteFact {
+            provider: None,
+            model: None,
+            effort: None,
+            account_label: None,
+        });
         let price = key
             .provider
             .as_deref()
             .zip(key.model.as_deref())
             .and_then(|(p, m)| prices.get(p, m));
-        let unknown_rates = Categories::default();
+        let unknown_rates = crate::Rates::default();
         let rates = price.map_or(&unknown_rates, |p| &p.rates);
+        let verified_free = price.is_some_and(|p| {
+            p.billing == crate::BillingKind::Free
+                || p.rates.values().iter().all(|rate| **rate == Some(0))
+        });
         let mut numerator = 0u128;
         let mut missing_price = false;
         let mut missing_cost = false;
         for ((count, rate), missing) in counts(&fact.usage)
             .into_iter()
-            .zip(rates.values())
+            .zip(rates.usage_rates())
             .zip(coverage.missing_categories.values_mut())
         {
             match (count, rate) {
                 (None, _) => {
                     add(missing, 1)?;
-                    missing_cost = true;
+                    missing_cost |= !verified_free;
                 }
                 (Some(0), _) => {}
                 (Some(n), Some(r)) => {
@@ -365,7 +328,7 @@ pub fn stats(
             u64::from(key.account_label.is_none()),
         )?;
         if !routes.contains_key(&key) {
-            budget.reserve(key.bytes()?)?;
+            budget.reserve(bytes)?;
         }
         routes
             .entry(key.clone())
@@ -405,12 +368,7 @@ pub fn stats(
     coverage.selected_attempts = total.attempts;
     let mut latest_task_outcomes = BTreeMap::new();
     for (_, state) in latest.into_values() {
-        add(
-            latest_task_outcomes
-                .entry(outcome(state).into())
-                .or_default(),
-            1,
-        )?;
+        add(latest_task_outcomes.entry(state).or_default(), 1)?;
     }
     let mut routes = routes
         .into_iter()
@@ -421,7 +379,7 @@ pub fn stats(
             })
         })
         .collect::<Result<Vec<_>, TelemetryError>>()?;
-    routes.sort_by(|a, b| a.route.report_order(&b.route));
+    routes.sort_by(|a, b| report_order(&a.route, &b.route));
     let daily_accounts = if window.detail {
         let mut groups = daily
             .into_iter()
@@ -436,7 +394,7 @@ pub fn stats(
         groups.sort_by(|a, b| {
             a.day
                 .cmp(&b.day)
-                .then_with(|| a.route.report_order(&b.route))
+                .then_with(|| report_order(&a.route, &b.route))
         });
         Some(groups)
     } else {

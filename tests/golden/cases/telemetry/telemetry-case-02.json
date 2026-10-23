@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "telemetry",
+    "invalid-action"
+  ],
+  "class": "help",
+  "exit_code": 2,
+  "files": [],
+  "stderr": "usage: telemetry.py [-h] [--json] [--detail] [--since SINCE]\n                    [--hosts HOSTS [HOSTS ...]] [--compare PR|REV|DATE]\n                    [--window WINDOW] [--sync] [--add LABEL] [--at ISO]\n                    {ingest,sources,stats,changes,retro,accepted}\ntelemetry.py: error: argument command: invalid choice: 'invalid-action' (choose from ingest, sources, stats, changes, retro, accepted)\n",
+  "stdin": "",
+  "stdout": ""
+}

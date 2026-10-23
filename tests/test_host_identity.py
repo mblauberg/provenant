@@ -1,4 +1,4 @@
-"""One local host id for fabric hosts, telemetry, quota and cooldowns."""
+"""One local host id for fabric hosts, quota and cooldowns."""
 import json
 import socket
 import sys
@@ -18,7 +18,7 @@ def load(name, path):
 @pytest.fixture
 def owners(tmp_path, monkeypatch):
     """Each layer's view of the host id, isolated from the real ~/.agents."""
-    for name in ('host_identity_fabric_hosts', 'host_identity_provider_identity', 'host_identity_telemetry'):
+    for name in ('host_identity_fabric_hosts', 'host_identity_provider_identity'):
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
@@ -27,8 +27,7 @@ def owners(tmp_path, monkeypatch):
     identity = load('host_identity_provider_identity', 'scripts/provider_identity.py')
 
     def views():
-        telemetry = load('host_identity_telemetry', 'scripts/telemetry.py')  # fresh: its id is cached
-        return {'telemetry': telemetry.host_id(), 'identity': identity.host_id(),
+        return {'identity': identity.host_id(),
                 'fabric': hosts.HostsConfig().local_host}
     return hosts, views, tmp_path / 'instance/.agent-fabric/hosts.json'
 
@@ -82,15 +81,14 @@ def test_empty_peers_keeps_the_configured_id_and_runs_local_only(owners):
 
 
 @pytest.mark.parametrize('local_host', ['My Mac', 'Studio', 'studio.local', '', 7, None, 'a' * 64])
-def test_an_invalid_local_host_fails_the_same_way_in_every_layer(owners, capfd, local_host):
+def test_an_invalid_local_host_fails_the_same_way_in_every_layer(owners, local_host):
     hosts, views, path = owners
     write(path, {'schema_version': 1, 'local_host': local_host, 'peers': {}})
     with pytest.raises(hosts.HostError) as raised:
         hosts.load_config()
     assert raised.value.code == 'invalid_config'
-    # No layer accepts the bad value; all use the hostname's slug and telemetry says why.
+    # No layer accepts the bad value; all use the hostname's slug.
     assert set(views().values()) == {'anes-macbook-pro'}
-    assert 'telemetry: invalid_config: local_host must be' in capfd.readouterr().err
 
 
 def test_a_malformed_hosts_file_falls_back_to_the_slug(owners):

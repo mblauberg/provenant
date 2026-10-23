@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "retro",
+    "--help"
+  ],
+  "class": "help",
+  "exit_code": 0,
+  "files": [],
+  "stderr": "",
+  "stdin": "",
+  "stdout": "usage: telemetry.py [-h] [--json] [--detail] [--since SINCE]\n                    [--hosts HOSTS [HOSTS ...]] [--compare PR|REV|DATE]\n                    [--window WINDOW] [--sync] [--add LABEL] [--at ISO]\n                    {ingest,sources,stats,changes,retro,accepted}\n\nLocal, metadata-only provider usage ledger.\n\npositional arguments:\n  {ingest,sources,stats,changes,retro,accepted}\n\noptions:\n  -h, --help            show this help message and exit\n  --json\n  --detail\n  --since SINCE\n  --hosts HOSTS [HOSTS ...]\n                        all or configured host names (stats only)\n  --compare PR|REV|DATE\n                        before/after metrics around a change (stats only)\n  --window WINDOW       each side of --compare, or retro compares: 24h, 7d, 2w\n  --sync                read merged PRs with gh (changes only)\n  --add LABEL           manual change marker (changes only; needs --at)\n  --at ISO              time of a manual marker\n"
+}

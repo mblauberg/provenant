@@ -481,6 +481,8 @@ acceptance criterion pending; the loopback shim does not prove it.
 
 ## Telemetry summaries
 
+Retired: the peer telemetry verbs below; [Fabric integration step 2](../specs/rust-port/design/telemetry.md#tests-and-build-sequence) owns their removal.
+
 `provenant stats --hosts all` or `--hosts <host…>` reads local and peer usage
 aggregates through the existing SSH transport. The read-only `telemetry.stats`
 verb takes `params: {"schema_version": 1, "since": "2026-10-21"}`; `since` is

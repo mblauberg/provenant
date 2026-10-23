@@ -15,15 +15,6 @@ pub struct Categories<T> {
     pub reasoning: T,
 }
 impl<T> Categories<T> {
-    pub(crate) fn values(&self) -> [&T; 5] {
-        [
-            &self.uncached_input,
-            &self.cache_read,
-            &self.cache_write,
-            &self.output_excluding_reasoning,
-            &self.reasoning,
-        ]
-    }
     pub(crate) fn values_mut(&mut self) -> [&mut T; 5] {
         [
             &mut self.uncached_input,
@@ -34,7 +25,34 @@ impl<T> Categories<T> {
         ]
     }
 }
-pub type Rates = Categories<Option<u64>>;
+/// Four independent prices; reasoning tokens use the output rate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rates {
+    pub uncached_input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    pub output_excluding_reasoning: Option<u64>,
+}
+impl Rates {
+    pub(crate) fn values(&self) -> [&Option<u64>; 4] {
+        [
+            &self.uncached_input,
+            &self.cache_read,
+            &self.cache_write,
+            &self.output_excluding_reasoning,
+        ]
+    }
+    pub(crate) fn usage_rates(&self) -> [&Option<u64>; 5] {
+        [
+            &self.uncached_input,
+            &self.cache_read,
+            &self.cache_write,
+            &self.output_excluding_reasoning,
+            &self.output_excluding_reasoning,
+        ]
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,12 +143,7 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
         }
         if model.billing == BillingKind::Free && rates.iter().any(|r| **r != Some(0)) {
             return Err(PriceError::Invalid(
-                "free billing requires five verified zero rates",
-            ));
-        }
-        if model.rates.reasoning != model.rates.output_excluding_reasoning {
-            return Err(PriceError::Invalid(
-                "reasoning must use the reviewed output rate",
+                "free billing requires four verified zero rates",
             ));
         }
         let key = (model.provider.clone(), model.model.clone());

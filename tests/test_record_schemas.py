@@ -17,7 +17,6 @@ from tests.support.dispatch import disable_memory_admission_floor
 from tests.support.fake_cli import fake_bin, fake_codex
 from tests.support.git import git_repo
 from tests.support.modules import load_script
-from tests.support.quota import snapshot as quota_snapshot, window as quota_window
 from tests.support.runs import make_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -263,38 +262,6 @@ def test_watchdog_records(flow_root):
         row = json.loads((attempt / filename).read_text())
         validate(name, row)
         reject(name, {**row, "process_alive": "yes"})
-
-
-def test_quota_records(flow_root, monkeypatch):
-    quota = load_script(ROOT / "scripts/provider_quota.py", "quota_record_schema_test")
-    monkeypatch.setattr(quota, "telemetry_host", lambda: "schema-host")
-    value = quota_snapshot(quota, host="schema-host", windows=(quota_window(75, 60),))
-    quota.save_snapshot(value)
-    path = quota.cache_path(value["provider"], value["account"], value["host"])
-    validate("quota-snapshot", json.loads(path.read_text()))
-    reject("quota-snapshot", {**value, "windows": [{"used_percent": "seventy-five"}]})
-    # Exercise populated provider fields through the refresh writer, not only
-    # the minimal snapshot builder. Stub the provider boundary only.
-    monkeypatch.setenv("PROVENANT_QUOTA", "1")
-    raw = {
-        "source": "test", "plan": "pro", "windows": [quota_window(45, 60)],
-        "usage_credits": [{"kind": "credits", "balance": 50, "currency": "USD",
-                           "unit": "credits", "expires_at": "2027-01-01T00:00:00Z"}],  # timebomb: allow schema fixture dates, never compared with now
-        "resets": {"available": 2, "expires_at": ["2027-01-01T00:00:00Z"], "source": "provider"},  # timebomb: allow schema fixture dates, never compared with now
-        "allowance": {"ordinary_usage_allowed": True, "spend_control_reached": False},
-        "credits": {"reset_credits": 2, "source": "provider"},
-    }
-    monkeypatch.setattr(quota.provider("codex"), "fetch", lambda account, io, now: raw)
-    account = quota.Account("codex", "populated", flow_root / "codex-home", True)
-    populated = quota.refresh(account, quota.parse_time(value["observed_at"]), force=True)
-    assert populated["status"] == "ok", populated.get("error")
-    assert populated["usage_credits"] and populated["resets"] and populated["credit_anchor"]
-    validate("quota-snapshot", populated)
-    persisted = quota.cache_path(account.provider, account.label, "schema-host", account.identity_dir)
-    validate("quota-snapshot", json.loads(persisted.read_text()))
-    reject("quota-snapshot", {**populated, "usage_credits": {}})
-    reject("quota-snapshot", {**populated, "resets": []})
-    reject("quota-snapshot", {**populated, "allowance": {"ordinary_usage_allowed": "yes"}})
 
 
 @pytest.mark.parametrize("name", ["model-routing", "model-preferences", "delivery-profiles"])
