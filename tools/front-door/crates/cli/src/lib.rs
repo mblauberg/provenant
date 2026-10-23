@@ -4,7 +4,7 @@ mod grammar;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-use provenant_records::{HelpArgument, HelpCatalog, HelpCommand, HelpGroup};
+use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
 use thiserror::Error;
@@ -21,19 +21,19 @@ pub enum ParseOutcome {
     Invocation(Invocation),
     Help {
         text: String,
-        catalog: HelpCatalog,
-        json: bool,
+        catalog: HelpCatalogue,
+        globals: Globals,
     },
     Version {
-        json: bool,
+        globals: Globals,
     },
     Invalid {
         error: CliError,
-        json: bool,
+        globals: Globals,
     },
 }
 /// Iterator contains arguments after argv[0]. Only the JSON transport bit is
-/// pre-scanned: values and command semantics belong to Clap and typed validation.
+/// pre-scanned; Clap owns option values, including recovery for help and errors.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     let args: Vec<_> = args.into_iter().collect();
     let json = args
@@ -43,35 +43,99 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     let mut model = command_model();
     let mut argv = vec![OsString::from("provenant")];
     argv.extend(args);
-    let matches = match model.try_get_matches_from_mut(argv) {
+    let matches = match model.try_get_matches_from_mut(&argv) {
         Ok(matches) => matches,
         Err(error) => {
+            // Help/version short-circuit Clap. A passive, tolerant pass recovers
+            // only values Clap accepted, without interpreting option text here.
+            let recovered = build_model(true)
+                .ignore_errors(true)
+                .try_get_matches_from(&argv)
+                .ok();
+            let (globals, duplicate) = recovered
+                .as_ref()
+                .map(|matches| parsed_globals(matches, json))
+                .unwrap_or((
+                    Globals {
+                        json,
+                        ..Globals::default()
+                    },
+                    None,
+                ));
+            if let Some(error) = duplicate {
+                return ParseOutcome::Invalid { error, globals };
+            }
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => ParseOutcome::Help {
                     text: error.to_string(),
                     catalog: catalog(&model),
-                    json,
+                    globals,
                 },
-                clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { json },
+                clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
-                    error: CliError::Invalid(error.to_string()),
-                    json,
+                    error: clap_error(error),
+                    globals,
                 },
             };
         }
     };
-    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
-        Ok(value) => value,
+    let (globals, duplicate) = parsed_globals(&matches, json);
+    if let Some(error) = duplicate {
+        return ParseOutcome::Invalid { error, globals };
+    }
+    let invocation = match RawInvocation::from_arg_matches(&matches) {
+        Ok(value) => Invocation {
+            globals,
+            command: value.command,
+        },
         Err(error) => {
             return ParseOutcome::Invalid {
-                error: CliError::Invalid(error.to_string()),
-                json,
+                error: clap_error(error),
+                globals,
             };
         }
     };
-    // Globals are local copies at every node so Clap does not overwrite a
-    // parent's singleton with a child's. Collect the parsed values, not argv.
-    fn globals(matches: &clap::ArgMatches, into: &mut RawGlobals) {
+    if let Command::Help { command } = &invocation.command {
+        let mut selected = &mut model;
+        for component in command {
+            selected = match selected.find_subcommand_mut(component) {
+                Some(child) if !child.is_hide_set() => child,
+                _ => {
+                    return ParseOutcome::Invalid {
+                        error: CliError::Invalid("unknown help command".into()),
+                        globals: invocation.globals,
+                    };
+                }
+            };
+        }
+        return ParseOutcome::Help {
+            text: selected.render_long_help().to_string(),
+            catalog: catalog(&command_model()),
+            globals: invocation.globals,
+        };
+    }
+    match validate(&invocation) {
+        Ok(()) => ParseOutcome::Invocation(invocation),
+        Err(error) => ParseOutcome::Invalid {
+            error,
+            globals: invocation.globals,
+        },
+    }
+}
+fn clap_error(error: clap::Error) -> CliError {
+    let text = error.to_string();
+    let message = text
+        .split("\nUsage:")
+        .next()
+        .unwrap_or(&text)
+        .split("\nFor more information")
+        .next()
+        .unwrap_or(&text)
+        .trim();
+    CliError::Invalid(message.strip_prefix("error: ").unwrap_or(message).into())
+}
+fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<CliError>) {
+    fn collect(matches: &clap::ArgMatches, into: &mut RawGlobals) {
         if let Some(values) = matches.get_many::<bool>("json") {
             into.json.extend(values.copied());
         }
@@ -82,57 +146,38 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             into.project.extend(values.cloned());
         }
         if let Some((_, child)) = matches.subcommand() {
-            globals(child, into);
+            collect(child, into);
         }
     }
-    invocation.globals = RawGlobals {
+    let mut raw = RawGlobals {
         json: Vec::new(),
         state_dir: Vec::new(),
         project: Vec::new(),
     };
-    globals(&matches, &mut invocation.globals);
-    if invocation.globals.json.len() > 1
-        || invocation.globals.state_dir.len() > 1
-        || invocation.globals.project.len() > 1
-    {
-        return ParseOutcome::Invalid {
-            error: CliError::Invalid("global options may occur only once".into()),
-            json,
-        };
-    }
-    let invocation = Invocation {
-        globals: Globals {
-            json: !invocation.globals.json.is_empty(),
-            state_dir: invocation.globals.state_dir.into_iter().next(),
-            project: invocation.globals.project.into_iter().next(),
-        },
-        command: invocation.command,
-    };
-    if let Command::Help { command } = &invocation.command {
-        let mut selected = &mut model;
-        for component in command {
-            selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() => child,
-                _ => {
-                    return ParseOutcome::Invalid {
-                        error: CliError::Invalid("unknown help command".into()),
-                        json,
-                    };
-                }
-            };
+    collect(matches, &mut raw);
+    let duplicate = (raw.json.len() > 1 || raw.state_dir.len() > 1 || raw.project.len() > 1)
+        .then(|| CliError::Invalid("global options may occur only once".into()));
+    fn unique<T>(mut values: Vec<T>) -> Option<T> {
+        if values.len() == 1 {
+            values.pop()
+        } else {
+            None
         }
-        return ParseOutcome::Help {
-            text: selected.render_long_help().to_string(),
-            catalog: catalog(&command_model()),
+    }
+    (
+        Globals {
             json,
-        };
-    }
-    match validate(&invocation) {
-        Ok(()) => ParseOutcome::Invocation(invocation),
-        Err(error) => ParseOutcome::Invalid { error, json },
-    }
+            state_dir: unique(raw.state_dir),
+            project: unique(raw.project),
+        },
+        duplicate,
+    )
 }
+
 pub fn command_model() -> clap::Command {
+    build_model(false)
+}
+fn build_model(passive: bool) -> clap::Command {
     fn configure(mut command: clap::Command, globals: &[Arg]) -> clap::Command {
         for global in globals {
             if command
@@ -207,13 +252,21 @@ pub fn command_model() -> clap::Command {
             Arg::new("help")
                 .long("help")
                 .global(true)
-                .action(ArgAction::HelpLong),
+                .action(if passive {
+                    ArgAction::SetTrue
+                } else {
+                    ArgAction::HelpLong
+                }),
         )
         .arg(
             Arg::new("version")
                 .long("version")
                 .global(true)
-                .action(ArgAction::Version),
+                .action(if passive {
+                    ArgAction::SetTrue
+                } else {
+                    ArgAction::Version
+                }),
         )
         .version(env!("CARGO_PKG_VERSION"));
     command.build();
@@ -223,9 +276,6 @@ fn invalid(message: &str) -> Result<(), CliError> {
     Err(CliError::Invalid(message.into()))
 }
 fn route_valid(route: &RouteRequest) -> Result<(), CliError> {
-    if route.model.is_none() && route.route.is_none() {
-        return invalid("one of --model or --route is required");
-    }
     if route.fallback.len() > 2
         || (route.fallback.len() == 2 && route.fallback.first() == route.fallback.last())
     {
@@ -246,30 +296,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         Command::Route(Route::Resolve(route)) => route_valid(route)?,
         Command::Dispatch(dispatch) => {
             let access = &dispatch.access;
-            if dispatch.input.manifest.is_some() {
-                if dispatch.task_id.is_some()
-                    || dispatch.delivery_id.is_some()
-                    || dispatch.provider_timeout.is_some()
-                    || dispatch.route.model.is_some()
-                    || dispatch.route.route.is_some()
-                    || dispatch.route.effort.is_some()
-                    || !dispatch.route.fallback.is_empty()
-                    || access.mode.is_some()
-                    || access.network.is_some()
-                    || access.worktree.is_some()
-                    || !access.read_root.is_empty()
-                    || !access.capability.is_empty()
-                {
-                    return invalid(
-                        "manifest conflicts with per-task route, access, prompt metadata and provider timeout",
-                    );
-                }
-            } else {
-                if dispatch.concurrency.is_some() {
-                    return invalid("--concurrency requires --manifest");
-                }
-                route_valid(&dispatch.route)?;
-            }
+            route_valid(&dispatch.route)?;
             if (access.mode() == Mode::WorktreeWrite) != access.worktree.is_some() {
                 return invalid(
                     "--worktree is required with, and only valid for, --mode worktree-write",
@@ -299,7 +326,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
     }
     Ok(())
 }
-fn catalog(model: &clap::Command) -> HelpCatalog {
+fn catalog(model: &clap::Command) -> HelpCatalogue {
     fn walk(command: &clap::Command, path: String, commands: &mut Vec<HelpCommand>) {
         if command.is_hide_set() {
             return;
@@ -310,7 +337,11 @@ fn catalog(model: &clap::Command) -> HelpCatalog {
             .map(|arg| {
                 let name = arg.get_id().to_string();
                 HelpArgument {
-                    bounds: bounds(&path, &name),
+                    bounds: arg
+                        .get_num_args()
+                        .filter(|range| range.max_values() > 1 && range.max_values() < usize::MAX)
+                        .map(|range| (range.min_values() as u64, range.max_values() as u64))
+                        .or_else(|| bounds(&path, &name)),
                     conditional_defaults: if name == "provider_timeout" {
                         vec![
                             ("read-only".into(), "3600".into()),
@@ -329,26 +360,11 @@ fn catalog(model: &clap::Command) -> HelpCatalog {
                             || arg
                                 .get_num_args()
                                 .is_some_and(|range| range.max_values() > 1)),
-                    defaults: {
-                        let mut values: Vec<_> = arg
-                            .get_default_values()
-                            .iter()
-                            .map(|value| value.to_string_lossy().into_owned())
-                            .collect();
-                        if values.is_empty()
-                            && let Some(value) = match arg.get_id().as_str() {
-                                "mode" => Some("read-only"),
-                                "network" => Some("off"),
-                                "concurrency" => Some("4"),
-                                "condition" => Some("any"),
-                                "offset" => Some("0"),
-                                _ => None,
-                            }
-                        {
-                            values.push(value.into());
-                        }
-                        values
-                    },
+                    defaults: arg
+                        .get_default_values()
+                        .iter()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .collect(),
                     values: arg
                         .get_value_parser()
                         .possible_values()
@@ -383,7 +399,7 @@ fn catalog(model: &clap::Command) -> HelpCatalog {
     }
     let mut commands = Vec::new();
     walk(model, "provenant".into(), &mut commands);
-    HelpCatalog { commands }
+    HelpCatalogue { commands }
 }
 fn constraints(path: &str) -> Vec<String> {
     let values: &[&str] = match path {
@@ -430,7 +446,6 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
         {
             Some((0, 100))
         }
-        "paths" => Some((1, 256)),
         "reason" => Some((0, 256)),
         _ => None,
     }
@@ -467,6 +482,18 @@ mod tests {
             matches!(parsed(words), ParseOutcome::Invalid { .. }),
             "{words:?}"
         );
+    }
+    #[test]
+    fn writing_paths_and_private_descriptors_are_bounded() {
+        let mut words = vec!["check", "writing"];
+        words.extend(std::iter::repeat_n("fixture.md", 256));
+        valid(&words);
+        words.push("overflow.md");
+        invalid(&words);
+        valid(&["internal", "supervise"]);
+        valid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "3"]);
+        invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
     }
     #[test]
     fn bounded_waits_counts_and_byte_windows() {
@@ -532,7 +559,7 @@ mod tests {
             panic!("dispatch")
         };
         assert_eq!(request.provider_timeout(), 3600);
-        assert_eq!(request.concurrency(), 4);
+        assert_eq!(request.concurrency, Some(4));
         let mut words = base.to_vec();
         words.extend(["--mode", "worktree-write"]);
         invalid(&words);
@@ -644,6 +671,52 @@ mod tests {
         ]);
     }
     #[test]
+    fn parsed_globals_survive_help_version_and_failures() {
+        for tail in [
+            vec!["lanes", "--help"],
+            vec!["--version"],
+            vec!["help", "lanes"],
+            vec!["lanes", "--limit", "0"],
+        ] {
+            let mut words = vec![
+                "--state-dir",
+                "/fixture/state",
+                "--project",
+                "/fixture/project",
+                "--json",
+            ];
+            words.extend(tail);
+            let globals = match parsed(&words) {
+                ParseOutcome::Help { globals, .. }
+                | ParseOutcome::Version { globals }
+                | ParseOutcome::Invalid { globals, .. } => globals,
+                other => panic!("unexpected parse result: {other:?}"),
+            };
+            assert!(globals.json);
+            assert_eq!(
+                globals.state_dir.as_deref(),
+                Some(std::path::Path::new("/fixture/state"))
+            );
+            assert_eq!(
+                globals.project.as_deref(),
+                Some(std::path::Path::new("/fixture/project"))
+            );
+        }
+        let ParseOutcome::Invalid { globals, .. } =
+            parsed(&["--state-dir", "/fixture/state", "--json", "lanes", "--json"])
+        else {
+            panic!("invalid")
+        };
+        assert_eq!(
+            globals.state_dir.as_deref(),
+            Some(std::path::Path::new("/fixture/state"))
+        );
+        let ParseOutcome::Invalid { error, .. } = parsed(&["--json", "lanes", "--unknown"]) else {
+            panic!("invalid")
+        };
+        assert!(!error.to_string().contains("Usage:"));
+    }
+    #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [
             &["lanes", "--json", "--limit", "0"][..],
@@ -651,16 +724,25 @@ mod tests {
         ] {
             assert!(matches!(
                 parsed(words),
-                ParseOutcome::Invalid { json: true, .. }
+                ParseOutcome::Invalid {
+                    globals: Globals { json: true, .. },
+                    ..
+                }
             ));
         }
         assert!(matches!(
             parsed(&["help", "--", "--json"]),
-            ParseOutcome::Invalid { json: false, .. }
+            ParseOutcome::Invalid {
+                globals: Globals { json: false, .. },
+                ..
+            }
         ));
         assert!(matches!(
             parsed(&["hook", "claude", "pre-tool-use", "--help", "--json"]),
-            ParseOutcome::Help { json: true, .. }
+            ParseOutcome::Help {
+                globals: Globals { json: true, .. },
+                ..
+            }
         ));
         invalid(&["hook", "claude", "pre-tool-use", "--json"]);
         invalid(&["internal", "supervise", "--json"]);

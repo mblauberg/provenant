@@ -1,6 +1,7 @@
 //! Frozen CLI-owned grammar. Owner subtrees mount only when their owners land.
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
+pub use provenant_records::Harness;
 use std::{path::PathBuf, str::FromStr};
 
 #[derive(Debug, Parser)]
@@ -16,7 +17,7 @@ pub struct Invocation {
     pub globals: Globals,
     pub command: Command,
 }
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Globals {
     pub json: bool,
     pub state_dir: Option<PathBuf>,
@@ -76,7 +77,7 @@ pub enum Fabric {
 pub struct Install {
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
     pub source: PathBuf,
-    #[arg(long, required = true, value_enum)]
+    #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
     pub bin_dir: Option<PathBuf>,
@@ -91,16 +92,12 @@ pub struct Install {
 }
 #[derive(Debug, Args)]
 pub struct Uninstall {
-    #[arg(long, required = true, value_enum)]
+    #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
 }
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Harness {
-    Claude,
-    Codex,
-    Cursor,
-    Agy,
-    Opencode,
+fn harness_parser() -> impl TypedValueParser<Value = Harness> {
+    clap::builder::PossibleValuesParser::new(["claude", "codex", "cursor", "agy", "opencode"])
+        .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
 }
 #[derive(Debug, Subcommand)]
 pub enum Route {
@@ -149,13 +146,13 @@ pub enum Switch {
 }
 #[derive(Debug, Args)]
 pub struct Access {
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value = "read-only")]
     pub mode: Option<Mode>,
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     #[arg(long)]
     pub read_root: Vec<PathBuf>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value = "off")]
     pub network: Option<Switch>,
     #[arg(long)]
     pub capability: Vec<String>,
@@ -163,9 +160,6 @@ pub struct Access {
 impl Access {
     pub fn mode(&self) -> Mode {
         self.mode.unwrap_or(Mode::ReadOnly)
-    }
-    pub fn network(&self) -> Switch {
-        self.network.unwrap_or(Switch::Off)
     }
 }
 #[derive(Debug, Args)]
@@ -192,9 +186,9 @@ pub struct Dispatch {
     pub route: RouteRequest,
     #[command(flatten)]
     pub access: Access,
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub provider_timeout: Option<u64>,
-    #[arg(long, requires = "manifest", value_parser = clap::value_parser!(u64).range(1..=8))]
+    #[arg(long, default_value = "4", requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=8))]
     pub concurrency: Option<u64>,
     #[arg(long)]
     pub host: Option<String>,
@@ -202,9 +196,6 @@ pub struct Dispatch {
     pub wait: Option<u64>,
 }
 impl Dispatch {
-    pub fn concurrency(&self) -> u64 {
-        self.concurrency.unwrap_or(4)
-    }
     pub fn provider_timeout(&self) -> u64 {
         self.provider_timeout
             .unwrap_or(if self.access.mode() == Mode::WorktreeWrite {
@@ -274,7 +265,7 @@ pub struct Lanes {
     pub cursor: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,
-    #[arg(long, requires = "wait", value_enum)]
+    #[arg(long, default_value = "any", requires = "wait", value_enum)]
     pub condition: Option<Condition>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -289,7 +280,7 @@ pub struct Output {
     pub attempt: Attempt,
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
-    #[arg(long, conflicts_with = "tail")]
+    #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: Option<u64>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=500))]
     pub tail: Option<u64>,

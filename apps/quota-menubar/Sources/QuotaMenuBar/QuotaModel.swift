@@ -327,23 +327,11 @@ enum CLI {
     static func resolve() -> Launcher? {
         let environment = ProcessInfo.processInfo.environment
         if let bin = environment["PROVENANT_BIN"], !bin.isEmpty {
-            return owner(Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true))
+            return Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true)
         }
-        if let shell = loginShell(environment), let found = lookup(shell), let direct = owner(found) { return direct }
+        if let shell = loginShell(environment), let found = lookup(shell) { return found }
         let local = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/provenant")
-        return FileManager.default.isExecutableFile(atPath: local.path) ? owner(Launcher(url: local, path: nil, custom: false)) : nil
-    }
-
-    /// The Python quota owner remains live during the Rust rewrite. Resolve its
-    /// asset path once, then invoke it directly; the Rust tree has no forwarding route.
-    static func owner(_ binary: Launcher) -> Launcher? {
-        guard let run = try? exec(binary.url, ["root"], path: binary.path, limit: 20),
-              run.status == 0, !run.timedOut,
-              let root = String(data: run.out, encoding: .utf8)?.trimmingCharacters(in: .newlines),
-              root.hasPrefix("/"), !root.contains("\n") else { return nil }
-        let url = URL(fileURLWithPath: root).appending(path: "scripts/provenant-quota")
-        guard FileManager.default.isExecutableFile(atPath: url.path) else { return nil }
-        return Launcher(url: url, path: binary.path, custom: binary.custom)
+        return FileManager.default.isExecutableFile(atPath: local.path) ? Launcher(url: local, path: nil, custom: false) : nil
     }
 
     /// $SHELL, else the account's shell; nil when neither is an absolute executable.

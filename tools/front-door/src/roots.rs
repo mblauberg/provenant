@@ -19,7 +19,7 @@ pub enum RootError {
     Uninstalled,
     #[error("HOME must be an absolute directory")]
     Home,
-    #[error("check requires a Provenant Git checkout with HARNESS.md and scripts/check-harness")]
+    #[error("project must be a Git checkout")]
     Checkout,
     #[error("invalid state root: {0}")]
     State(#[from] provenant_core::RootError),
@@ -53,16 +53,6 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
         // reporting remains process-free.
         // The isolated Git environment ignores inherited redirects and config.
         let root = git_checkout(&path)?;
-        if check {
-            let checker = root.join("scripts/check-harness");
-            if !fs::symlink_metadata(root.join("HARNESS.md")).is_ok_and(|m| m.is_file())
-                || !fs::symlink_metadata(&checker).is_ok_and(|m| m.is_file())
-                || !provenant_supervisor::sys::is_executable(&checker)
-                || !fs::canonicalize(&checker)?.starts_with(&root)
-            {
-                return Err(RootError::Checkout);
-            }
-        }
         return Ok(root);
     }
     Ok(path)
@@ -135,6 +125,21 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
         return Err(RootError::Checkout);
     }
     Ok(fs::canonicalize(root)?)
+}
+/// Validate caller-selected roots before composing any leaf. This creates no
+/// state and does not require a product installation for an unavailable owner.
+pub fn validate_globals(globals: &provenant_cli::Globals) -> Result<(), RootError> {
+    let project = if globals.project.is_some() {
+        Some(selected_project(globals.project.as_deref(), false)?)
+    } else {
+        None
+    };
+    if globals.state_dir.is_some() {
+        let project = project.unwrap_or(std::env::current_dir()?);
+        let assets = product_root().unwrap_or_else(|_| project.clone());
+        roots(globals, &assets, &project)?;
+    }
+    Ok(())
 }
 struct Resolver;
 impl PathResolver for Resolver {

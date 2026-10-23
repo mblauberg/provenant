@@ -137,12 +137,21 @@ fn suite() -> Result {
     rig.assert_legacy_unchanged()
 }
 fn main() -> ExitCode {
-    let result = match std::env::args_os().nth(1) {
-        Some(name) => name
-            .to_str()
-            .ok_or_else(|| "fixture scenario must be UTF-8".into())
-            .and_then(scenario),
-        None => suite().map(|()| 0),
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let result = if args.is_empty() || args[0].as_encoded_bytes().starts_with(b"--") {
+        provenant_supervisor::fixture::run_libtest(&args, &["fake_provider"], |_| {
+            suite().map_err(|error| io::Error::other(error.to_string()))
+        })
+        .map(|()| 0)
+        .map_err(Into::into)
+    } else {
+        match args.first() {
+            Some(name) => name
+                .to_str()
+                .ok_or_else(|| "fixture scenario must be UTF-8".into())
+                .and_then(scenario),
+            None => suite().map(|()| 0),
+        }
     };
     match result {
         Ok(code) => ExitCode::from(code),

@@ -5,13 +5,6 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 
 # Multi-agent orchestration
 
-During the Rust rewrite, the Python owner commands below run from the product
-checkout. CLI forwarding is retired. Fabric CLI/MCP mounts and run bindings
-remain unavailable until their owner slices land. The lane/status/wait examples
-below describe that later binding and cannot currently be executed through
-`provenant`; no legacy TS owner remains to invoke directly.
-
-
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
@@ -24,8 +17,8 @@ below describe that later binding and cannot currently be executed through
    stable unique `session_id`; renew it while work continues and release it when
    finished. Do not dispatch against a conflicting live claim; dispatch does not
    enforce claims.
-4. After dispatch, keep one `provenant lanes --wait` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
-5. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_status` and copy its `Route:` provenance line. Use `events --follow` only for foreground streaming.
+4. After dispatch, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
+5. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_status` and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`; pass one `session` name to continue a provider conversation across turns or agents.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
 
@@ -44,8 +37,8 @@ below describe that later binding and cannot currently be executed through
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
-  - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
-  - Wait with `provenant lanes --wait` or `scripts/provenant-pr checks --wait` as a background command; never a bare sleep or a manual polling loop.
+  - Wait once: run one `provenant lanes --wait N` in the background, or one status wait. Never sleep or poll loops.
+  - Wait with `provenant lanes --wait N` or `scripts/provenant-pr checks --wait` as a background command; never a bare sleep or a manual polling loop.
   - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. Cache lifetimes vary by provider (Anthropic's default is five minutes; others differ), so keep waits short and let receipts record cache reads.
   - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
   - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.

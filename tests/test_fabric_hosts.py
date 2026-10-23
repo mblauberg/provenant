@@ -203,7 +203,8 @@ class ClientContracts(unittest.TestCase):
                 'peers': {'workshop': {'ssh_destination': 'workshop', 'response_deadline': 5}}}))
             pid_file, shim = root / 'ssh.pid', root / 'ssh'
             shim.write_text('#!' + sys.executable + '\nimport os,time\n'
-                            'open(' + repr(str(pid_file)) + ',"w").write(str(os.getpid()))\n'
+                            'with open(' + repr(str(pid_file) + '.tmp') + ',"w") as output: output.write(str(os.getpid()))\n'
+                            'os.replace(' + repr(str(pid_file) + '.tmp') + ',' + repr(str(pid_file)) + ')\n'
                             'time.sleep(30)\n')
             shim.chmod(0o755)
             owner = subprocess.Popen([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'),
@@ -387,16 +388,15 @@ class ClientContracts(unittest.TestCase):
             self.assertEqual(parsed.returncode, 0, parsed.stderr)
             self.assertIn('hostname workshop', parsed.stdout.lower())
 
-    def test_peer_command_is_required(self):
+    def test_peer_command_defaults_to_the_direct_owner(self):
         import fabric_hosts as hosts
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'hosts.json'
             path.write_text(json.dumps({'schema_version': 1, 'local_host': 'laptop',
                 'peers': {'workshop': {'ssh_destination': 'workshop'}}}))
-            with self.assertRaises(hosts.HostError) as error:
-                hosts.load_config(path)
-            self.assertEqual(error.exception.code, 'invalid_config')
-            self.assertIn('configure peer_command', str(error.exception))
+            config = hosts.load_config(path)
+            self.assertEqual(config.peers['workshop'].peer_command,
+                             'Repos/provenant/scripts/fabric-hosts peer')
 
     def test_peer_command_and_destination_cannot_start_with_an_ssh_option(self):
         import fabric_hosts as hosts

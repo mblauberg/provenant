@@ -1,14 +1,10 @@
 """Supervisor exit records preserve the adapter receipt contract."""
 
 import json
-from pathlib import Path
-import sys
 
 import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"
-from skills.orchestrate.scripts import provider_exec as supervisor
-lane_exit = supervisor.lane_exit
+from skills.orchestrate.scripts import lane_exit, provider_exec as supervisor
 
 
 def exit_record(**extra):

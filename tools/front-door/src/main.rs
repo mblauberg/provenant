@@ -20,17 +20,13 @@ fn identity() -> Result<VersionInfo, Box<dyn std::error::Error>> {
         config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
     })
 }
-fn emit<T: Serialize>(result: &CommandResult<T>, json: bool, human: &str, read_only: bool) -> u8 {
-    emit_bound(result, json, human, read_only, None)
-}
-fn emit_bound<T: Serialize>(
+fn emit<T: Serialize>(
     result: &CommandResult<T>,
-    json: bool,
+    globals: &provenant_cli::Globals,
     human: &str,
     read_only: bool,
-    globals: Option<&provenant_cli::Globals>,
 ) -> u8 {
-    let mode = if json {
+    let mode = if globals.json {
         RenderMode::Json
     } else {
         RenderMode::Human {
@@ -38,17 +34,12 @@ fn emit_bound<T: Serialize>(
             read_only,
         }
     };
-    let defaults = provenant_cli::Globals {
-        json,
-        state_dir: None,
-        project: None,
-    };
     let rendered = provenant_cli::render_or_publish(
         result,
         mode,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
-        |value| overflow::publish(value, globals.unwrap_or(&defaults)),
+        |value| overflow::publish(value, globals),
     );
     match rendered {
         Ok(status) => provenant_cli::exit_status(&status),
@@ -57,7 +48,7 @@ fn emit_bound<T: Serialize>(
             Outcome::Error,
             "RESULT_TOO_LARGE",
             "result exceeds 1 MiB; request a smaller page or read the owner-published artifact",
-            json,
+            globals,
         ),
         Err(_) => {
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
@@ -65,7 +56,13 @@ fn emit_bound<T: Serialize>(
         }
     }
 }
-fn fail(command: &str, status: Outcome, code: &str, message: &str, json: bool) -> u8 {
+fn fail(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    message: &str,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let mut result = CommandResult::new(command, status, ());
     result.error = Some(CommandError {
         code: code.into(),
@@ -73,20 +70,29 @@ fn fail(command: &str, status: Outcome, code: &str, message: &str, json: bool) -
         cause: None,
         repair: None,
     });
-    emit(&result, json, "", false)
+    emit(&result, globals, "", false)
 }
-fn unavailable(command: &str, owner: &'static str, json: bool) -> u8 {
+fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Globals) -> u8 {
     let error = provenant_cli::CliError::OwnerUnavailable { owner };
     fail(
         command,
         Outcome::Unavailable,
         "OWNER_UNAVAILABLE",
         &error.to_string(),
-        json,
+        globals,
     )
 }
 fn run(inv: provenant_cli::Invocation) -> u8 {
-    let json = inv.globals.json;
+    let globals = &inv.globals;
+    if let Err(error) = roots::validate_globals(globals) {
+        return fail(
+            "parse",
+            Outcome::Invalid,
+            "INVALID",
+            &error.to_string(),
+            globals,
+        );
+    }
     match inv.command {
         Command::Root => {
             #[derive(Serialize)]
@@ -119,14 +125,13 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ))
             })();
             match result {
-                Ok((data, human)) => emit_bound(
+                Ok((data, human)) => emit(
                     &CommandResult::new("root", Outcome::Ok, data),
-                    json,
+                    globals,
                     &human,
                     true,
-                    Some(&inv.globals),
                 ),
-                Err(error) => fail("root", Outcome::Error, "ROOT", &error.to_string(), json),
+                Err(error) => fail("root", Outcome::Error, "ROOT", &error.to_string(), globals),
             }
         }
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
@@ -141,7 +146,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                     Outcome::Error,
                     "SUPERVISOR",
                     &error.to_string(),
-                    false,
+                    globals,
                 ),
             }
         }
@@ -150,36 +155,38 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             Outcome::Invalid,
             "INVALID",
             "help must be resolved by the parser",
-            json,
+            globals,
         ),
-        Command::Config(provenant_cli::Config::Show) => unavailable("config show", "config", json),
-        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", json),
-        Command::Install(_) => unavailable("install", "config", json),
-        Command::Uninstall(_) => unavailable("uninstall", "config", json),
+        Command::Config(provenant_cli::Config::Show) => {
+            unavailable("config show", "config", globals)
+        }
+        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", globals),
+        Command::Install(_) => unavailable("install", "config", globals),
+        Command::Uninstall(_) => unavailable("uninstall", "config", globals),
         Command::Route(route) => match route {
-            provenant_cli::Route::List(_) => unavailable("route list", "routing", json),
-            provenant_cli::Route::Resolve(_) => unavailable("route resolve", "routing", json),
+            provenant_cli::Route::List(_) => unavailable("route list", "routing", globals),
+            provenant_cli::Route::Resolve(_) => unavailable("route resolve", "routing", globals),
         },
-        Command::Dispatch(_) => unavailable("dispatch", "run", json),
-        Command::Lanes(_) => unavailable("lanes", "run", json),
-        Command::Output(_) => unavailable("output", "run", json),
-        Command::Cancel(_) => unavailable("cancel", "run", json),
-        Command::Resume(_) => unavailable("resume", "run", json),
-        Command::Reconcile(_) => unavailable("reconcile", "run", json),
+        Command::Dispatch(_) => unavailable("dispatch", "run", globals),
+        Command::Lanes(_) => unavailable("lanes", "run", globals),
+        Command::Output(_) => unavailable("output", "run", globals),
+        Command::Cancel(_) => unavailable("cancel", "run", globals),
+        Command::Resume(_) => unavailable("resume", "run", globals),
+        Command::Reconcile(_) => unavailable("reconcile", "run", globals),
         Command::Telemetry(provenant_cli::Telemetry::Stats(_)) => {
-            unavailable("telemetry stats", "telemetry", json)
+            unavailable("telemetry stats", "telemetry", globals)
         }
         Command::Quota(quota) => match quota {
-            provenant_cli::Quota::Show(_) => unavailable("quota show", "quota", json),
-            provenant_cli::Quota::Tick { .. } => unavailable("quota tick", "quota", json),
+            provenant_cli::Quota::Show(_) => unavailable("quota show", "quota", globals),
+            provenant_cli::Quota::Tick { .. } => unavailable("quota tick", "quota", globals),
         },
         Command::Worktree(worktree) => match worktree {
             provenant_cli::Worktree::Create { .. } => {
-                unavailable("worktree create", "confinement", json)
+                unavailable("worktree create", "confinement", globals)
             }
-            provenant_cli::Worktree::List => unavailable("worktree list", "confinement", json),
+            provenant_cli::Worktree::List => unavailable("worktree list", "confinement", globals),
             provenant_cli::Worktree::Remove(_) => {
-                unavailable("worktree remove", "confinement", json)
+                unavailable("worktree remove", "confinement", globals)
             }
         },
         Command::Check(check) => {
@@ -193,24 +200,30 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             if checkout
                 && let Err(error) = roots::selected_project(inv.globals.project.as_deref(), true)
             {
-                return fail(name, Outcome::Invalid, "CHECKOUT", &error.to_string(), json);
+                return fail(
+                    name,
+                    Outcome::Invalid,
+                    "CHECKOUT",
+                    &error.to_string(),
+                    globals,
+                );
             }
-            unavailable(name, owner, json)
+            unavailable(name, owner, globals)
         }
         Command::Hook(hook) => match hook {
             provenant_cli::Hook::Claude(hook) => match hook {
                 provenant_cli::ClaudeHook::PreToolUse => {
-                    unavailable("hook claude pre-tool-use", "confinement hook", json)
+                    unavailable("hook claude pre-tool-use", "confinement hook", globals)
                 }
                 provenant_cli::ClaudeHook::PreCompact => {
-                    unavailable("hook claude pre-compact", "workflow hook", json)
+                    unavailable("hook claude pre-compact", "workflow hook", globals)
                 }
                 provenant_cli::ClaudeHook::Compact => {
-                    unavailable("hook claude compact", "workflow hook", json)
+                    unavailable("hook claude compact", "workflow hook", globals)
                 }
             },
             provenant_cli::Hook::Git(provenant_cli::GitHook::PrePush { .. }) => {
-                unavailable("hook git pre-push", "confinement hook", json)
+                unavailable("hook git pre-push", "confinement hook", globals)
             }
         },
     }
@@ -218,24 +231,24 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
 fn main() -> ExitCode {
     let status = match provenant_cli::parse(std::env::args_os().skip(1)) {
         ParseOutcome::Invocation(inv) => run(inv),
-        ParseOutcome::Invalid { error, json } => fail(
+        ParseOutcome::Invalid { error, globals } => fail(
             "parse",
             Outcome::Invalid,
             "INVALID",
             &error.to_string(),
-            json,
+            &globals,
         ),
         ParseOutcome::Help {
             text,
             catalog,
-            json,
+            globals,
         } => emit(
             &CommandResult::new("help", Outcome::Ok, catalog),
-            json,
+            &globals,
             &text,
             true,
         ),
-        ParseOutcome::Version { json } => match identity() {
+        ParseOutcome::Version { globals } => match identity() {
             Ok(identity) => {
                 #[derive(Serialize)]
                 struct BuildIdentity {
@@ -252,7 +265,7 @@ fn main() -> ExitCode {
                             installation: identity,
                         },
                     ),
-                    json,
+                    &globals,
                     concat!(
                         "provenant ",
                         env!("CARGO_PKG_VERSION"),
@@ -268,7 +281,7 @@ fn main() -> ExitCode {
                 Outcome::Error,
                 "IDENTITY",
                 &error.to_string(),
-                json,
+                &globals,
             ),
         },
     };

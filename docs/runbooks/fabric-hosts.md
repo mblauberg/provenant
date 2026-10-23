@@ -59,7 +59,7 @@ and work claims follow in slice 5.
    duplicate keys, non-finite numbers (including exponent overflow) and invalid
    versions are refused. Both timeouts must be positive and at most 86,400
    seconds; connect timeout is an integer.
-   `peer_command` is required and names the direct owner executable followed by `peer`. Both timeouts are optional.
+   `peer_command` defaults to `Repos/provenant/scripts/fabric-hosts peer`, relative to the remote home directory. Set it to the direct owner executable followed by `peer` for other checkout locations. Both timeouts are optional.
    A custom peer command must name one executable followed by `peer`, with
    no shell expansion or parent traversal. An explicit executable may be absolute or relative
    to the remote user's home and needs no login shell.

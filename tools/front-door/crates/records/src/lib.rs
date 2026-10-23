@@ -37,5 +37,5 @@ pub use install::{
 
 mod command_result;
 pub use command_result::{
-    CommandError, CommandResult, HelpArgument, HelpCatalog, HelpCommand, HelpGroup, Outcome,
+    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpGroup, Outcome,
 };

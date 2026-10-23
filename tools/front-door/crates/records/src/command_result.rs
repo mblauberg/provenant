@@ -39,7 +39,7 @@ impl<T> CommandResult<T> {
     }
 }
 #[derive(Debug, Serialize)]
-pub struct HelpCatalog {
+pub struct HelpCatalogue {
     pub commands: Vec<HelpCommand>,
 }
 #[derive(Debug, Serialize)]

@@ -635,7 +635,7 @@ removes it, so no `hosts add` command is needed.
 |---|---|---|
 | `hosts.local_host` | `hosts.json` | name matching `[a-z0-9-]+`; default from the host identity owner |
 | `hosts.peers.<name>.ssh_destination` | `hosts.json` | string, required |
-| `hosts.peers.<name>.peer_command` | `hosts.json` | required string; explicit remote owner command, e.g. `/absolute/product/scripts/fabric-hosts peer` |
+| `hosts.peers.<name>.peer_command` | `hosts.json` | optional string; defaults to `Repos/provenant/scripts/fabric-hosts peer` from the remote home; override for other checkout locations |
 | `hosts.peers.<name>.connect_timeout` | `hosts.json` | seconds, 1 to 60, default 5 |
 | `hosts.peers.<name>.response_deadline` | `hosts.json` | seconds, 1 to 120, default 15 |
 | `hosts.peers.<name>.allow_content_reads` | `hosts.json` | bool, default false; lets this host read that peer's session context and state text on demand |

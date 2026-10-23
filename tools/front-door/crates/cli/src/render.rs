@@ -4,7 +4,6 @@ use serde::Serialize;
 use std::io::{self, Write};
 use thiserror::Error;
 pub const MAX_RESULT_BYTES: usize = 1024 * 1024;
-pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Copy)]
 pub enum RenderMode<'a> {
     Json,

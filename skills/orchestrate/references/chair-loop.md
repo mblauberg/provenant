@@ -70,15 +70,15 @@ code — independently of this lane id.
 
 ## Waiting
 
-After dispatch, keep one `provenant lanes --wait` running in the background.
-Without `--all` it exits at the first finisher, so the chair acts on each lane
-as it lands and re-arms; the next wait reports any lane that finished in
-between. Add `--all --timeout N` only to hold the report until a whole fan-out
-is terminal. Add `--summary` for a bounded one-line-per-lane report. Read one lane's status and result tail with `skills/orchestrate/scripts/run_controls.py show <run-id|task-id> --tail N`. For CI, `scripts/provenant-pr checks <pr> --wait` exits 0 green, 1 failed, 4 when the required set is unreadable (not success), 124 on timeout. Do not start one wait per lane. `provenant lanes` is
-the source of truth after compaction or restart (by default showing active
-lanes plus the 5 most recent terminal ones, with `--all` listing all lanes). Use `provenant events --follow`
-only for foreground streaming; it replays retained events without a cursor and
-does not exit on its own.
+After dispatch, use one `provenant lanes --wait N` to wait up to N seconds
+for any selected lane. Add `--condition all` to wait for the whole selection;
+`--all` selects all lanes. Re-arm after each result. Use `--limit N` to bound
+the report and `provenant output RUN/TASK/ATTEMPT --tail N` to read a result
+tail. For CI, `scripts/provenant-pr checks <pr> --wait` exits 0 green, 1 failed,
+4 when the required set is unreadable, and 124 on timeout. Do not start one
+wait per lane. `provenant lanes` is the source of truth after compaction or
+restart; page further results with its cursor. Read retained events with
+`provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Registered worktrees share the

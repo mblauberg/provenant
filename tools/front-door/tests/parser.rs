@@ -7,6 +7,12 @@ fn invalid_json_is_an_envelope_and_unbuilt_owners_never_succeed() -> Result {
     assert_eq!(code(&invalid), 2);
     let value: serde_json::Value = serde_json::from_slice(&invalid.stdout.bytes)?;
     assert_eq!(value["status"], "invalid");
+    assert!(
+        !value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Usage:")
+    );
     let unavailable = rig.command(&["lanes", "--json"])?;
     assert_eq!(code(&unavailable), 4);
     let value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
@@ -112,9 +118,9 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
         ],
         None,
     )?;
-    assert_eq!(code(&out), 3);
+    assert_eq!(code(&out), 2);
     let invalid = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&invalid), 2);
+    assert_eq!(code(&invalid), 4);
     fs::write(rig.project.join("HARNESS.md"), "# fixture")?;
     fs::create_dir_all(rig.project.join("scripts"))?;
     let checker = rig.project.join("scripts/check-harness");
@@ -155,7 +161,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
         ],
         None,
     )?;
-    assert_eq!(code(&invalid_project), 3);
+    assert_eq!(code(&invalid_project), 2);
     let hook = rig.command(&["hook", "claude", "pre-tool-use", "--json"])?;
     assert_eq!(code(&hook), 2);
     let mcp = rig.command(&["fabric", "mcp", "--json"])?;
@@ -179,6 +185,7 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
         "33".repeat(16)
     );
     let leaves: Vec<Vec<&str>> = vec![
+        vec!["root"],
         vec!["config", "show"],
         vec!["fabric", "mcp"],
         vec!["install", "--source", "/fixture", "--harness", "claude"],
@@ -221,6 +228,22 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
         vec!["hook", "git", "pre-push", "origin", "/fixture/remote"],
     ];
     for leaf in leaves {
+        for (flag, path) in [
+            ("--project", rig.root.join("missing")),
+            ("--state-dir", rig.home.join(".agents")),
+        ] {
+            let mut args: Vec<_> = leaf.iter().map(std::ffi::OsString::from).collect();
+            args.extend([flag.into(), path.into_os_string()]);
+            let out = rig.execute_os(
+                std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+                &args,
+                None,
+            )?;
+            assert_eq!(code(&out), 2, "{leaf:?} {flag}");
+        }
+        if leaf == ["root"] {
+            continue;
+        }
         let out = rig.command(&leaf)?;
         assert_eq!(
             code(&out),

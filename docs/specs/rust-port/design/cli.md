@@ -189,7 +189,7 @@ satisfied as the run grammar states. Two shorthands recur:
 
 | Leaf | Grammar | Owner request type | Bounds, conflicts and reason |
 | --- | --- | --- | --- |
-| `help` | `help [COMMAND…]` | records `HelpCatalog` | Pure; no root, SQLite, threads or probes. |
+| `help` | `help [COMMAND…]` | records `HelpCatalogue` | Pure; no root, SQLite, threads or probes. |
 | `root` | `root` | core `Roots` plus config installation identity | No flags. Reports asset root, state directory, selected project and installation together; state's `--kind` is dropped because `--json` already separates fields and global `--project` selects. |
 | `config show` | `config show` | config `load` → `ResolvedConfig` | No flags; secrets redacted. |
 | `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
@@ -399,7 +399,7 @@ state import is Fabric's open/blocked tasks and unacknowledged requests from
 the last 14 days, read-only at cut-over; cursors start after import. No ledger
 import. Old telemetry history stays on disk and OTel retires at cut-over.
 
-`CommandResult<T>`, `Finding` and `HelpCatalog` are version-1 records-owned
+`CommandResult<T>`, `Finding` and `HelpCatalogue` are version-1 records-owned
 transport types. Strict owned input rejects unknown fields unless its owner
 specifies otherwise; additive output fields are allowed within v1. Fact types
 implement `Serialize` only. Owners commit atomic/transactional outcomes before
@@ -584,8 +584,10 @@ lines removed. Further router/oracle/test simplification is uncredited upside.
 Recount the actual diff in each PR; budget growth needs an explanation.
 
 Step 1 also retires the remaining `tests/golden/` CLI judge with its router/help
-subjects under R10. Its CI invocation and oracle environment variables need
-workflow cleanup before landing; workflow edits are outside this parser lane.
+subjects under R10. This step removes its CI invocation, golden variables
+and unused Python-shard release build under the shared deletion rule. The
+`PROVENANT_PORT_*` variables remain for live domain oracles; `ci-status`
+continues to depend on every surviving job.
 
 ## Build order
 
@@ -617,8 +619,9 @@ supervisor's worktree flags. Step 1 freezes the parser from that table.
 5. **Final CI/cut-over gate.** Replace custody invariants before deleting
    `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
    `tests/test_record_schemas.py` with their subjects. Remove their judge CI
-   steps and all `PROVENANT_PORT_*` oracle variables in
-   `.github/workflows/ci.yml`. Assert no `// Rewrite pending` allow remains.
+   steps and their subject-specific variables in `.github/workflows/ci.yml`.
+   Keep `PROVENANT_PORT_*` while quota, routing, workflow and fabric-runtime
+   differential oracles still use them. Assert no `// Rewrite pending` allow remains.
    When Python/TS target sets empty, remove their security/date/layering tools,
    interpreter helpers, npm retry/jobs and obsolete setup/smokes. Rust negative
    lint fixtures, integration/MCP/install smokes and both-OS custody tests must
