@@ -133,3 +133,22 @@ fn tempfile_is_allowed_only_for_dev_dependencies() -> Result<(), Box<dyn Error>>
     }
     Ok(())
 }
+
+#[test]
+fn supervisor_mirrors_workspace_lints_except_for_its_unsafe_boundary() -> Result<(), Box<dyn Error>>
+{
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = read_manifest(&root.join("Cargo.toml"))?;
+    let supervisor = read_manifest(&root.join("crates/supervisor/Cargo.toml"))?;
+    let mut expected = workspace["workspace"]["lints"].clone();
+    assert_eq!(expected["rust"]["unsafe_code"].as_str(), Some("forbid"));
+    expected["rust"]["unsafe_code"] = toml_edit::value("deny");
+    // Compare parsed values, so key order, comments and whitespace do not matter.
+    let expected: serde_json::Value = toml_edit::de::from_str(&expected.to_string())?;
+    let actual: serde_json::Value = toml_edit::de::from_str(&supervisor["lints"].to_string())?;
+    assert_eq!(
+        actual, expected,
+        "supervisor must mirror the workspace lint policy"
+    );
+    Ok(())
+}

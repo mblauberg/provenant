@@ -419,6 +419,7 @@ name = "provenant"
 version = "0.1.0"
 dependencies = [
  "provenant-supervisor",
+ "serde_json",
  "toml_edit",
 ]
 

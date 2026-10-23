@@ -89,6 +89,7 @@ fault-injection = ["provenant-supervisor/fault-injection"]
 provenant-supervisor = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
 
