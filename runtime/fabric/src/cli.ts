@@ -15,10 +15,9 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { databasePath, identify, runRoot, withoutGitRedirects } from "./identity.js";
-import {
-  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot,
-  type BatchInput, type DispatchInput,
-} from "./execution.js";
+import { dispatchConfiguredProvider, hostOwnersInThemselves, type BatchInput, type DispatchInput } from "./execution.js";
+import { dispatchConfiguredBatch } from "./batch-execution.js";
+import { productRoot } from "./run-root.js";
 import type { RouteInput } from "./execution-input.js";
 import { findRecordedRun, listRecordedRuns, retentionHours } from "./run-registry.js";
 import { terminateRecordedRun } from "./process-identity.js";
@@ -227,7 +226,7 @@ if (command === "cancel" || command === "output") {
     const tail = argv.includes("--tail");
     const rest = argv.slice(1).filter((value) => !["--json", "--tail"].includes(value));
     if (rest.length !== 1 || rest[0]!.startsWith("--")) throw new Error("Pass exactly one lane ID");
-    const { cancelConfiguredRun } = await import("./execution.js");
+    const { cancelConfiguredRun } = await import("./batch-execution.js");
     const { fabricOutput } = await import("./run-status.js");
     const result = command === "cancel"
       ? await cancelConfiguredRun(rest[0]!, who, reason, process.env, operationId)

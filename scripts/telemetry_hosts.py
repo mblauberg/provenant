@@ -6,6 +6,12 @@ import math
 from pathlib import Path
 import sys
 
+quota_display = sys.modules.get('quota_display')
+if quota_display is None:
+    _display_spec = importlib.util.spec_from_file_location('quota_display', Path(__file__).with_name('quota_display.py'))
+    quota_display = importlib.util.module_from_spec(_display_spec)
+    sys.modules['quota_display'] = quota_display
+    _display_spec.loader.exec_module(quota_display)
 
 USAGE_KEYS = ('provider', 'adapter', 'model')
 DAY_KEYS = ('day', 'provider', 'adapter', 'account')
@@ -49,7 +55,7 @@ def merge(telemetry, summaries, statuses, since):
             result['excluded_rows'][reason] = result['excluded_rows'].get(reason, 0) + count
     result['receipt_usage_rows_excluded'] = sum(report['receipt_usage_rows_excluded'] for report in reports.values())
     quota = telemetry.quota_owner()
-    result['quota'] = quota.report([value for report in reports.values() for value in report.get('quota_snapshots', [])])
+    result['quota'] = quota_display.report(vars(quota), [value for report in reports.values() for value in report.get('quota_snapshots', [])])
     result['pending_source_rebuilds'] = [f'{host}/{source}' for host, report in reports.items()
                                         for source in report['pending_source_rebuilds']]
     return result

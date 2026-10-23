@@ -2588,7 +2588,7 @@ def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
     summary = {'host': 'h1', 'session_usage': [group('a'), group('b')], 'excluded_rows': {},
                'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': [],
                'compactions_per_lane': [{'lane': 'lane-a', 'compactions': 2}]}
-    monkeypatch.setattr(telemetry, 'quota_owner', lambda: types.SimpleNamespace(report=lambda values: {}))
+    monkeypatch.setattr(hosts.quota_display, 'report', lambda quota, values: {})
     merged = hosts.merge(telemetry, [summary], [{'host': 'h1', 'status': 'ok'}], None)
     assert merged['usage'][0]['estimated_cost_usd'] == 1e-6
     assert merged['usage'][0]['reported_cost_usd'] == 1e-6

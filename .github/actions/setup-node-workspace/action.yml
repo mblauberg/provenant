@@ -21,9 +21,9 @@ runs:
         # only pay for the install on mismatch. The assertion keeps the
         # contract either way.
         if [ "$(npm --version)" != "11.12.1" ]; then
-          npm install --global npm@11.12.1
+          python3 scripts/retry-npm-install.py -- npm install --global npm@11.12.1
         fi
         test "$(npm --version)" = "11.12.1"
     - name: Install locked workspace dependencies
       shell: bash
-      run: npm ci
+      run: python3 scripts/retry-npm-install.py -- npm ci

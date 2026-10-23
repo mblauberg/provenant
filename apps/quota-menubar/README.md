@@ -58,7 +58,7 @@ Two environment variables change its behaviour:
 .build/debug/quota-menubar --render Fixtures/tall.json tall.png --screen-height 760
 ```
 
-`Fixtures/` holds reports that `Fixtures/make_fixtures.py` writes with `provider_quota.report()` from synthetic readings: `current.json` has one account of each kind, `tall.json` scrolls, and `old.json` is the same report without the fields an older CLI leaves out, to check that it still decodes.
+`Fixtures/` holds reports that `Fixtures/make_fixtures.py` writes with `quota_display.report()` from synthetic readings: `current.json` has one account of each kind, `tall.json` scrolls, and `old.json` is the same report without the fields an older CLI leaves out, to check that it still decodes.
 
 ## Start at login
 

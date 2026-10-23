@@ -1,7 +1,8 @@
 /** Fixed peer boundary. Provider mechanics remain with the local owners. */
 import { closeSync, readFileSync, writeFileSync } from "node:fs";
 import { identify, databasePath } from "./identity.js";
-import { dispatchConfiguredProvider, dispatchConfiguredBatch, cancelConfiguredRun, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
+import { dispatchConfiguredProvider, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
+import { dispatchConfiguredBatch, cancelConfiguredRun } from "./batch-execution.js";
 import { statusRows, fabricOutput } from "./run-status.js";
 import { readRuns } from "./run-reader.js";
 import { resumeConfiguredProvider, handoffDispatch } from "./resume.js";

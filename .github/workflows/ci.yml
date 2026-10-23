@@ -219,6 +219,9 @@ jobs:
               - 'tests/support/**'
               - 'tests/cf_dispatch_support.py'
               - 'tests/conftest.py'
+              - 'config/model-routing.json'
+              - 'scripts/lib/jsonc.py'
+              - 'scripts/fabric_hosts.py'
               - 'pyproject.toml'
               - 'uv.lock'
             workflows:
@@ -247,9 +250,10 @@ jobs:
           # (`git show <baseline>:skills/ui-ux-design/...` in
           # tests/test_ui_ux_provenance_contract.py). A depth-1 checkout of
           # this job was verified to fail exactly those four tests while
-          # 1891 others passed, so the fetch-depth stays 0. Only the
-          # split-root job below, whose narrowed contract set is HEAD-local,
-          # checks out shallow.
+          # 1891 others passed. This harness job uses fetch-depth 0 because
+          # PR-scoped timebomb fixture lint needs origin/main for its
+          # changed-context diff. Only the split-root job below, whose
+          # narrowed contract set is HEAD-local, checks out shallow.
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: $/.github/actions/setup-node-workspace

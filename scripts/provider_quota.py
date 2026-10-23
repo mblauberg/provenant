@@ -32,6 +32,7 @@ from time import monotonic
 from urllib.error import HTTPError, URLError
 
 
+
 _OPENER = []
 
 
@@ -77,21 +78,6 @@ WAIT_HOURS = 6
 # How routing treats an account whose allowance is spent but whose credits keep it usable (`quota.credits_policy`).
 CREDITS_POLICIES = ('last_resort', 'normal', 'never')
 UNKNOWN_RESET_SECONDS = 3600  # How long a refused allowance cools when no reset time is known.
-# Providers name some windows by codename; `quota.window_labels` in telemetry.json adds or overrides labels.
-WINDOW_LABELS = {'iguana_necktie': 'Cloud session credits'}
-# One display vocabulary for every reader of the report: the menu bar, `provenant quota` and the console.
-# An unknown provider or plan falls back to title case.
-PROVIDER_NAMES = {'agy': 'Antigravity', 'claude': 'Claude', 'codex': 'Codex', 'copilot': 'Copilot',
-                  'cursor': 'Cursor', 'kiro': 'Kiro', 'opencode': 'OpenCode'}
-PLAN_NAMES = {'prolite': 'Pro Lite', 'pro_lite': 'Pro Lite', 'pro_student': 'Pro (Student)'}
-LENGTH_LABELS = {60: 'Hourly', 300: '5-hour', 1440: 'Daily', 10080: 'Weekly'}
-MONTH_MINUTES = (28 * 1440, 31 * 1440)  # a calendar month or billing cycle
-# Name parts that only restate a window's length or slot; what remains qualifies its label, as in `Weekly (Opus)`.
-LENGTH_WORDS = frozenset({'five', 'seven', 'thirty', 'hour', 'hours', 'day', 'days', 'week', 'month', 'hourly',
-                          'daily', 'weekly', 'monthly', 'primary', 'secondary', 'billing', 'cycle', 'session',
-                          'all', 'scoped', 'window', 'limit'})
-SHORT_WINDOW_ALERT = 90  # a shorter window this used is shown instead of the longest (`quota.display`)
-HEADLINES = ('recent', 'worst', 'none')  # `quota.menubar.headline`, or a pinned `<provider>/<account>`
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
 _identity_spec = importlib.util.spec_from_file_location('provider_identity', HERE / 'provider_identity.py')
 identity = sys.modules.get('provider_identity')
@@ -107,6 +93,12 @@ if schedule is None:
     schedule = importlib.util.module_from_spec(_schedule_spec)
     sys.modules['quota_schedule'] = schedule
     _schedule_spec.loader.exec_module(schedule)
+quota_display = sys.modules.get('quota_display')
+if quota_display is None:
+    _display_spec = importlib.util.spec_from_file_location('quota_display', HERE / 'quota_display.py')
+    quota_display = importlib.util.module_from_spec(_display_spec)
+    sys.modules['quota_display'] = quota_display
+    _display_spec.loader.exec_module(quota_display)
 RETRY_AFTER_CAP = 86400
 TRACE_RETENTION_DAYS = 30
 TRACE_TEXT = 200
@@ -218,10 +210,6 @@ def duration(seconds):
     if hours < 48:
         return f'{hours}h' + (f' {minutes % 60}m' if minutes % 60 else '')
     return f'{hours // 24}d' + (f' {hours % 24}h' if hours % 24 else '')
-
-
-def window_length(minutes):
-    return duration(minutes * 60) if minutes else '-'
 
 
 # Configuration, registry and accounts --------------------------------------------------------
@@ -1143,121 +1131,6 @@ def reset_passed(row, now):
     return bool(reset and reset <= now)
 
 
-def display(rows, now, alert=SHORT_WINDOW_ALERT):
-    """The window a reader should see: an exhausted one binds; else a shorter window at `alert`% or more, the
-    most used, even when the longest is higher, since the short one runs out first; else the longest, since
-    weekly and monthly headroom decides more than a 5-hour window does. A window whose reset has passed is never
-    shown as current."""
-    current = [row for row in rows if sets_state(row) and not reset_passed(row, now)]
-    spent = [row for row in current if row['pace']['state'] == 'exhausted']
-    if spent:
-        return max(spent, key=lambda row: row.get('reset_at') or '9999')
-    longest = max(current, key=lambda row: (row['window_minutes'] or 0, row['used_percent']), default=None)
-    alerts = [row for row in current if row['used_percent'] >= alert and row is not longest and
-              (row['window_minutes'] or 0) < (longest['window_minutes'] or 0)]
-    if alerts:
-        return max(alerts, key=lambda row: (row['used_percent'], -(row['window_minutes'] or 0)))
-    return longest
-
-
-def alert_percent():
-    value = number(setting_map('display').get('short_window_alert_percent'))
-    return value if value is not None and 0 < value <= 100 else SHORT_WINDOW_ALERT
-
-
-# Display vocabulary --------------------------------------------------------------------------
-
-def words(text):
-    return [word for word in re.split(r'[\s_.:-]+', str(text)) if word]
-
-
-def title_case(text):
-    """`pro_student` reads `Pro Student`; text that already has capitals is kept as written."""
-    text = str(text).strip()
-    return text if any(char.isupper() for char in text) else ' '.join(word[:1].upper() + word[1:] for word in words(text))
-
-
-def sentence_case(text):
-    text = str(text).strip() if any(char.isupper() for char in str(text)) else ' '.join(words(text))
-    return text[:1].upper() + text[1:]
-
-
-def provider_name(name):
-    return PROVIDER_NAMES.get(name) or title_case(name)
-
-
-def plan_label(plan):
-    return (PLAN_NAMES.get(str(plan).strip().lower()) or title_case(plan)) if plan else None
-
-
-def length_label(minutes):
-    """`Weekly` for 10080 minutes; an unnamed length reads `3-day` or `90-minute`."""
-    if not minutes:
-        return None
-    minutes = round(minutes)
-    if minutes in LENGTH_LABELS:
-        return LENGTH_LABELS[minutes]
-    if MONTH_MINUTES[0] <= minutes <= MONTH_MINUTES[1]:
-        return 'Monthly'
-    for unit, size in (('day', 1440), ('hour', 60)):
-        if minutes % size == 0:
-            return f'{minutes // size}-{unit}'
-    return f'{minutes}-minute'
-
-
-def window_label(row, labels):
-    """A label a provider or `quota.window_labels` gives wins. Otherwise the length names the window, so Codex's
-    `primary` of 10080 minutes reads `Weekly`, and what the name adds qualifies it: `seven_day_opus` reads
-    `Weekly (Opus)`. An untimed window keeps its own name in sentence case."""
-    if labels.get(row['name']):
-        return labels[row['name']]
-    length = length_label(row.get('window_minutes'))
-    if not length:
-        return sentence_case(row['name'])
-    base, _, tag = row['name'].partition(':')
-    extra = [word for word in words(base) if word.lower() not in LENGTH_WORDS and word != row.get('pool')
-             and not re.fullmatch(r'\d+[mhdw]', word.lower())]
-    extra += words(tag) if tag and not tag.isdigit() else []
-    return length + (f" ({sentence_case(' '.join(extra))})" if extra else '')
-
-
-def pool_of(provider_name, row):
-    hook = getattr(provider(provider_name), 'window_pool', None) if provider_name in registered() else None
-    value = row.get('pool') or (hook(row['name']) if hook else None)
-    return value if isinstance(value, str) and LABEL.fullmatch(value) else None
-
-
-def display_name(provider_name, label, entries):
-    """`accounts.<provider>.<label>.display_name`, else the label in title case. The CLI's `default` and a
-    discovered fingerprint name no one, so they read as the provider alone (None)."""
-    entry = (entries.get(provider_name) or {}).get(label)
-    named = entry.get('display_name') if isinstance(entry, dict) else None
-    if isinstance(named, str) and named.strip():
-        return named.strip()[:64]
-    shared = getattr(provider(provider_name), 'fingerprinted', None) if provider_name in registered() else None
-    return None if label == 'default' or (shared and shared(label)) else title_case(label)
-
-
-def configured_entries():
-    try:
-        return configured()
-    except ValueError:
-        return {}
-
-
-def repeats(window, windows):
-    """A `limits` entry (`weekly_all:2`) that restates a named window (`seven_day`): same pool, length, use and
-    reset. Only such an entry is dropped, never a named window, so two distinct limits that happen to match
-    both stay."""
-    def stamp(row):
-        return parse_time(row['reset_at'])
-    return ':' in window['name'] and any(
-        ':' not in other['name'] and other.get('pool') == window.get('pool') and
-        other['window_minutes'] == window['window_minutes'] and
-        other['used_percent'] == window['used_percent'] and stamp(other) and stamp(window) and
-        abs((stamp(other) - stamp(window)).total_seconds()) <= 60 for other in windows)
-
-
 def credits(*, raw=False):
     try:
         value = json.loads((state_root() / 'quota/credits.json').read_text())
@@ -1326,11 +1199,6 @@ def freshest(values):
     return [best[key] for key in sorted(best, key=lambda key: tuple(str(part) for part in key))]
 
 
-def window_labels():
-    configured = setting_map('window_labels')
-    return {**WINDOW_LABELS, **{str(key): value for key, value in configured.items() if isinstance(value, str)}}
-
-
 def credits_policy():
     value = setting('credits_policy')
     return value if value in CREDITS_POLICIES else CREDITS_POLICIES[0]
@@ -1365,75 +1233,6 @@ def burn_rate(value, entry):
     return round(spent / hours, 2) if spent > 0 and hours > 0 else None
 
 
-def summary(value, worst, spent, drawing, rate):
-    if not worst:
-        return value.get('error') or 'unreported'
-    if spent and not drawing and worst['pace']['state'] != 'exhausted':
-        return f"{worst['name']}: allowance spent; {value.get('provider')} refuses ordinary use"
-    if not drawing:
-        return f"{worst['name']}: {worst['pace']['summary']}"
-    return (f"{worst['name']}: allowance spent; drawing on credits, {credit_text(drawing)}"
-            + (f', about {rate:,.0f}/h' if rate else ''))
-
-
-def describe(value, banked, now, entries=None, alert=None):
-    labels, name = window_labels(), value.get('provider')
-    rows = []
-    for row in value.get('windows') or []:
-        pool = pool_of(name, row)
-        row = {**row, 'pace': pace(row, now), **({'pool': pool, 'pool_label': f'{title_case(pool)} models'} if pool else {}),
-               **({'reset_passed': True} if reset_passed(row, now) else {})}
-        rows.append({**row, 'label': window_label(row, labels)})
-    # A restated window would show twice and count twice; the report keeps the named one.
-    rows = [row for row in rows if not repeats(row, rows)]
-    # A window whose reset has passed is history: it never makes the account exhausted or binds it, unless the
-    # provider still refuses ordinary use, which the next reading settles.
-    refused = (value.get('allowance') or {}).get('ordinary_usage_allowed') is False
-    worst = binding([row for row in rows if not row.get('reset_passed')]) or (binding(rows) if refused else None)
-    spent = allowance_spent(value, worst)
-    drawing = credit_draw(value, spent)
-    rate = burn_rate(value, drawing) if drawing else None
-    unreported = list(value.get('unreported') or [])
-    dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
-    longest = max(dated, key=lambda row: row['window_minutes'], default=None)
-    signed_out = value.get('status') == 'signed_out'
-    state = 'signed_out' if signed_out else 'credit_only' if drawing else 'exhausted' if spent else \
-        worst['pace']['state'] if worst else 'unreported'
-    shown = display([row for row in rows if row.get('pool') in (None, (worst or {}).get('pool'))], now,
-                    alert_percent() if alert is None else alert)
-    # A signed-out account's return is history too: "back since" once its reset has passed.
-    back = binding(rows) if signed_out else worst if spent else None
-    back = back if back and back['pace']['state'] == 'exhausted' else None
-    return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
-                                            'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
-        'provider_name': provider_name(name),
-        'display_name': display_name(name, value.get('account'), configured_entries() if entries is None else entries),
-        'plan_label': plan_label(value.get('plan')), 'display_window': shown['name'] if shown else None,
-        'back_at': back.get('reset_at') if back else None,
-        'state': state,
-        'summary': f"signed out; last read {value.get('observed_at') or 'never'}" if signed_out else
-                   summary(value, worst, spent, drawing, rate),
-        'windows': rows, 'unreported': unreported,
-        'coverage_note': f"{', '.join(unreported)} not reported by {value.get('provider')}; missing does not mean 0%"
-                         if unreported else '',
-        'credits': value.get('credits') or banked, 'credit_advice': credit_advice(rows, value.get('credits') or banked, now),
-        'use_it_or_lose_it': {'window': longest['name'], 'reset_at': longest['reset_at'],
-                              'unused_percent': longest['pace']['headroom_percent'],
-                              'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
-                             if longest else None} | optional_credits(value, banked) | (
-        {'drawing_credits': True, 'credit_burn_per_hour': rate} if drawing else {}) | (
-        {'schedule': value['schedule']} if isinstance(value.get('schedule'), dict) else {})
-
-
-def optional_credits(value, banked):
-    """Usage credits and banked resets, present only when an account has some."""
-    counted = value.get('credits') or banked or {}
-    resets = (normalise_resets(value.get('resets')) or
-              normalise_resets({'available': counted.get('reset_credits'), 'source': counted.get('source', 'manual')}))
-    extras = {'usage_credits': normalise_usage_credits(value.get('usage_credits')), 'resets': resets}
-    return {key: extra for key, extra in extras.items() if extra}
-
-
 def local_activity(found=None):
     """The latest local use per account id, from identity file times; a signed-out account has none, since the
     shared store's activity belongs to whoever is signed in."""
@@ -1443,61 +1242,6 @@ def local_activity(found=None):
         return {}
     return {account_id(account): schedule.activity(account.provider, account.identity_dir)
             for account in found if not account.signed_out}
-
-
-def usable(row):
-    return row['status'] in ('ok', 'stale') and row['display_window'] and row['state'] not in (
-        'exhausted', 'credit_only', 'signed_out', 'unreported')
-
-
-def headline(rows, activity):
-    """The account the menu bar shows (`quota.menubar.headline`): `recent`, the usable account used most recently
-    here, falling back to the highest priority; `worst`, the usable account with the highest binding use; a
-    pinned `<provider>/<account>`; or `none`, the icon alone. None when nothing usable remains."""
-    mode = setting_map('menubar').get('headline')
-    mode = mode if mode in HEADLINES or isinstance(mode, str) and '/' in mode else 'recent'
-    rows = [row for row in rows if mode != 'none']
-    pinned = next((row for row in rows if f"{row['provider']}/{row['account']}" == mode), None)
-    candidates = [row for row in rows if usable(row)]
-    if pinned:
-        return {'mode': mode, 'account': mode, 'window': pinned['display_window']}
-    if mode == 'worst':
-        peaks = [(row, binding([item for item in row['windows'] if not item.get('reset_passed')]))
-                 for row in candidates]
-        row, peak = max(peaks, key=lambda item: item[1]['used_percent'], default=(None, None))
-        return {'mode': mode, 'account': row and f"{row['provider']}/{row['account']}", 'window': peak and peak['name']}
-    used = [row for row in candidates if activity.get(f"{row['provider']}/{row['account']}")]
-    row = (max(used, key=lambda row: activity[f"{row['provider']}/{row['account']}"]) if used else
-           min(candidates, key=lambda row: row['priority'] if row['priority'] is not None else 100, default=None))
-    return {'mode': mode, 'account': row and f"{row['provider']}/{row['account']}", 'window': row and row['display_window']}
-
-
-def report(values, now=None, refreshing=(), activity=None):
-    now = now or utcnow()
-    banked = credits()
-    entries, alert = configured_entries(), alert_percent()
-    rows = [describe(value, banked.get((value.get('provider'), value.get('account'), telemetry_host())), now,
-                     entries, alert)
-            for value in freshest(values)]
-    preference = {}
-    for row in rows:
-        if row['state'] != 'signed_out':  # routing never places work on an account that is not signed in
-            preference.setdefault(row['provider'], []).append(row)
-
-    def order(row):
-        # Spend the account whose longest window resets soonest first, so its headroom is not lost.
-        longest = max(row['windows'], key=lambda window: window['window_minutes'] or 0, default=None)
-        spare = row['state'] == 'credit_only' and credits_policy() == 'last_resort'
-        return (row['state'] == 'exhausted', spare, row['priority'] if row['priority'] is not None else 100,
-                (longest or {}).get('reset_at') or '9999', row['account'])
-    due = [row['schedule']['next_due_at'] for row in rows if row.get('schedule', {}).get('next_due_at')]
-    return {'schema': REPORT_SCHEMA, 'generated_at': iso(now), 'host': telemetry_host(), 'enabled': enabled(),
-            'next_due_at': min(due, key=parse_time) if due else None, 'refreshing': sorted(refreshing),
-            'providers': registered(), 'accounts': rows,
-            'display': {'short_window_alert_percent': alert},
-            'headline': headline(rows, local_activity() if activity is None else activity),
-            'placement_preference': {name: [row['account'] for row in sorted(group, key=order)]
-                                     for name, group in sorted(preference.items())}}
 
 
 def gather(now=None, force=False):
@@ -1546,7 +1290,7 @@ def _tick(trigger, power, ignore_backoff):
     activity = local_activity([account for account, _, _ in rows])
     due = [account for account, _, is_due in rows if is_due]
     if not due:
-        value = report(list(values.values()), now, activity=activity)
+        value = quota_display.report(globals(), list(values.values()), now, activity=activity)
         written = current_report()
         # The fast path writes only when the earliest due time or the headline moved, or no report exists yet.
         if written is None or any(written.get(key) != value[key] for key in ('next_due_at', 'headline')):
@@ -1557,7 +1301,7 @@ def _tick(trigger, power, ignore_backoff):
     guard, refreshing, kinds = threading.Lock(), {account_id(account) for account in due}, []
 
     def publish():
-        atomic_json(report_path(), report(list(values.values()), utcnow(), refreshing, activity))
+        atomic_json(report_path(), quota_display.report(globals(), list(values.values()), utcnow(), refreshing, activity))
 
     def run(account):
         try:
@@ -1583,7 +1327,7 @@ def _tick(trigger, power, ignore_backoff):
             run(account)
     finally:  # Even after a crash, readers never see a fetch left marked as running.
         with guard:
-            value = report(list(values.values()), utcnow(), activity=activity)
+            value = quota_display.report(globals(), list(values.values()), utcnow(), activity=activity)
             if kinds and len(kinds) == len(due) and all(kind == 'network' for kind in kinds):
                 value['offline'] = True  # every fetch failed to connect
             atomic_json(report_path(), value)
@@ -1623,7 +1367,7 @@ def route_states(now=None, *, selected_accounts=None):
         if not active or not value or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
-        row = describe(value, None, now)
+        row = quota_display.describe(globals(), value, None, now)
         current = [window for window in row['windows'] if not window.get('reset_passed')]
         exhausted = [window['reset_at'] for window in current
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
@@ -1677,76 +1421,6 @@ def apply_to_cooldowns(records, now=None, *, selected_accounts=None, include_exh
 
 
 # Command line --------------------------------------------------------------------------------
-
-def day(stamp):
-    moment = parse_time(stamp).astimezone()
-    return f'{moment.day} {moment:%b}'
-
-
-def amount(value, currency):
-    return f'${value:,.0f}' if currency == 'USD' else f'{value:,.0f}' + (f' {currency}' if currency else '')
-
-
-def used_text(window):
-    """`$136 of $250` for a budget window, otherwise the reported percentage."""
-    if window.get('limit_amount'):
-        currency = window.get('currency')
-        return f"{amount(window['used_amount'], currency)} of {amount(window['limit_amount'], currency)}"
-    return f"{window['used_percent']:g}%"
-
-
-def credit_text(entry):
-    text = 'unlimited credits' if entry['unlimited'] else \
-        f"{amount(entry['balance'], entry['currency'])} credit" if entry['currency'] else \
-        f"{entry['balance']:,.0f} {entry['unit'] or 'credits'}"
-    return text + ' available' + (f" (expires {day(entry['expires_at'])})" if entry['expires_at'] else '')
-
-
-def reset_text(resets):
-    count, expiries = resets['available'], resets['expires_at']
-    lead = 'next expires' if len(expiries) > 1 else 'expires'
-    return f"{count} banked reset{'s' if count != 1 else ''}" + (f' ({lead} {day(expiries[0])})' if expiries else '')
-
-
-def render(value, verbose=False):
-    table = _telemetry().report_owner().table
-    lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
-    rows = []
-    for row in value['accounts']:
-        head = (row['provider'], row['account'] + ('*' if row['active'] else ''), row.get('plan_label') or row['plan'] or '-')
-        for window in row['windows']:
-            pace_state, detail, used = window['pace']['state'], window['pace']['summary'], used_text(window)
-            if window.get('limit_amount') and not window['window_minutes']:  # a dollar budget has no pace
-                pace_state = '-'
-                detail = f"{amount(window['limit_amount'] - window['used_amount'], window.get('currency'))} left; " + \
-                    detail.removesuffix('; window length unreported')
-            if window.get('reset_passed'):  # a passed reset makes the reading history, never current use
-                pace_state, used, detail = '-', '-', f"reset since {window['reset_at'][:16].replace('T', ' ')}"
-            if row['state'] == 'signed_out':
-                pace_state = 'signed out'
-            label = window.get('label') or window['name']
-            rows.append((*head, f"{window['pool_label']} · {label}" if window.get('pool_label') else label, used,
-                         window_length(window['window_minutes']),
-                         (window['reset_at'] or '-')[:16].replace('T', ' '), pace_state, detail))
-        if not row['windows']:
-            rows.append((*head, '-', '-', '-', '-', row['status'].replace('_', ' '), row['error'] or ''))
-    lines += table(('provider', 'account', 'plan', 'window', 'used', 'length', 'resets', 'pace', 'detail'), rows)
-    # A plan lacks many optional windows, so absence alone is not news: list them only on request.
-    for row in value['accounts'] if verbose else []:
-        if row['unreported']:
-            lines.append(f"{row['provider']}/{row['account']}: {len(row['unreported'])} window(s) not reported "
-                         "(missing does not mean 0%)")
-    # Credits and banked resets appear only for an account that has some.
-    for row in value['accounts']:
-        parts = [credit_text(entry) for entry in row.get('usage_credits') or []]
-        parts += [reset_text(row['resets'])] if row.get('resets') else []
-        advice = row['credit_advice']
-        parts += [f"{advice['action']}: {advice['reason']}"] if advice['action'] != 'none' else []
-        if parts:
-            lines.append(f"{row['provider']}/{row['account']}: " + '; '.join(parts))
-    lines.append('* active account (the CLI default identity); routing reads only cached readings')
-    print('\n'.join(lines))
-
 
 def since_time(text, now):
     """`24h`, `30m`, `7d` or an ISO time."""
@@ -1811,7 +1485,7 @@ def tick_main(argv):
     try:
         value = tick(args.trigger, args.power, args.ignore_backoff)
         # Another tick holds the lock: show what it last wrote and leave the fetching to it.
-        value = value or current_report() or report([row for _, row, _ in plans(utcnow())])
+        value = value or current_report() or quota_display.report(globals(), [row for _, row, _ in plans(utcnow())])
     except (OSError, ValueError) as exc:
         print(f'quota: {exc}', file=sys.stderr)
         return 1
@@ -1849,7 +1523,7 @@ def main(argv=None):
         args = parser.parse_args(argv[1:])
         try:
             message = forget(args.account)
-            value = report([row for _, row, _ in plans(utcnow())]) if args.json else None
+            value = quota_display.report(globals(), [row for _, row, _ in plans(utcnow())]) if args.json else None
             if value is not None:
                 atomic_json(report_path(), value)
         except (OSError, ValueError) as exc:
@@ -1889,14 +1563,14 @@ def main(argv=None):
     parser.add_argument('--verbose', action='store_true', help='also list windows the provider did not report')
     args = parser.parse_args(argv)
     try:
-        value = report(gather(force=args.refresh))
+        value = quota_display.report(globals(), gather(force=args.refresh))
     except (OSError, ValueError) as exc:
         print(f'quota: {exc}', file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(value, indent=2))
     else:
-        render(value, args.verbose)
+        quota_display.render(globals(), value, args.verbose)
     return 0
 
 
