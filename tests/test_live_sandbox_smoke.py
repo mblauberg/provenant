@@ -30,7 +30,7 @@ def test_requires_execute_flag():
 
 
 def test_fixture_branch_follows_repository_convention():
-    pattern = importlib.import_module("skills.orchestrate.scripts.dispatch_run").BRANCH_PATTERN
+    pattern = importlib.import_module("skills.orchestrate.scripts.writer_lease").BRANCH_PATTERN
     assert pattern.fullmatch(load_script(SMOKE, "live_sandbox_smoke").BRANCH)
 
 

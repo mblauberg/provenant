@@ -1274,6 +1274,7 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
         'adapter': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'task_class': 'review',
         'route': 'senior', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
         'retries': 1, 'error_classes': {'provider_timeout': 1},
+        'known_cost_usd': 0, 'missing_cost_rows': 3, 'cost_per_success_usd': None,
         'latency_samples': 3, 'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
     table = cli(tmp_path, 'stats').stdout
     assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
@@ -1287,6 +1288,40 @@ def test_ingest_records_classifier_stage_confidence_and_shadow_answers(tmp_path)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         row = db.execute('SELECT classified_by,classifier_confidence,shadow_answers FROM usage').fetchone()
     assert row == ('rules', 0.9, '{"model": {"class": "review", "confidence": 0.7}}')
+
+def test_outcomes_report_api_cost_per_success_and_unknown_costs(tmp_path):
+    def usage(input_tokens=1_000_000, output_tokens=1_000_000):
+        return {'input_tokens': input_tokens, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                'output_tokens': output_tokens}
+
+    # A retry is a separate API attempt and contributes to cost, while success
+    # is counted once for the lane's latest attempt.
+    for attempt, status in ((1, 'failed'), (2, 'ok')):
+        receipt(tmp_path, 'priced-retry', attempt, status=status,
+                provenance=route('codex', 'gpt-6-luna'), context=usage())
+    receipt(tmp_path, 'priced-single', status='ok', provenance=route('codex', 'gpt-6-luna'),
+            context=usage())
+    receipt(tmp_path, 'unpriced', status='ok', provenance=route('codex', 'unlisted-model'),
+            context=usage())
+    receipt(tmp_path, 'failed-only', status='failed', provenance=route('codex', 'gpt-6-luna'),
+            requested_route={'task_class': 'failed-only'}, context=usage())
+
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    outcomes = {(row['model'], row['task_class'], row['route']): row for row in report['outcomes']}
+    priced = outcomes[('gpt-6-luna', None, None)]
+    assert priced['attempts'] == 3 and priced['succeeded'] == 2
+    assert priced['known_cost_usd'] == pytest.approx(1.8)
+    assert priced['missing_cost_rows'] == 0
+    assert priced['cost_per_success_usd'] == pytest.approx(0.9)
+    unpriced = outcomes[('unlisted-model', None, None)]
+    assert unpriced['missing_cost_rows'] == 1 and unpriced['cost_per_success_usd'] is None
+    failed = outcomes[('gpt-6-luna', 'failed-only', None)]
+    assert failed['succeeded'] == 0 and failed['cost_per_success_usd'] is None
+
+    table = cli(tmp_path, 'stats').stdout
+    assert 'cost_usd' in table and '$/ok' in table
+    assert '1.80' in table and '0.90' in table
 
 
 def test_price_table_is_dated_sourced_and_marks_free_and_subscription_routes(tmp_path):
@@ -1990,6 +2025,11 @@ def test_peer_outcomes_carry_latency_samples_and_old_peers_still_validate(tmp_pa
     with telemetry.connect() as db:
         summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
     assert summary['outcomes'] and summary['outcomes'][0]['latency_samples'] == 1
+    rendered = io.StringIO()
+    with contextlib.redirect_stdout(rendered):
+        telemetry.report_owner().render_stats(telemetry, summary)
+    assert 'Outcomes by route' in rendered.getvalue()
+    assert 'cost_usd' in rendered.getvalue() and '$/ok' in rendered.getvalue()
     hosts.validate(telemetry, json.loads(json.dumps(summary)), 'peer')
     old = json.loads(json.dumps(summary))
     for row in old['outcomes']:
@@ -2682,10 +2722,11 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
             'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
             'usage_by_parent': aggregate([row for row in attributed if row['source'] == 'fabric' and row.get('parent_run_id')],
                                          ('parent_run_id', 'parent_task_id', 'parent_attempt'), prices, free_patterns),
-            'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
+            'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric'],
+                                 this(), costs, prices, free_patterns),
             # One overall group each, for before/after comparison; percentiles are never averaged.
-            'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}
-                                     for row in attributed if row['source'] == 'fabric']),
+            'lane_totals': outcomes([row for row in attributed if row['source'] == 'fabric'],
+                                    this(), costs, prices, free_patterns, outcome_keys=()),
             'usage_totals': combine((unit(row, (), prices, free_patterns) for row in usage), ()),
             'lanes': [{'status': status, 'error_class': error, 'lanes': count}
                       for (status, error), count in sorted(lanes.items(), key=str)],
@@ -2721,6 +2762,7 @@ def load_telemetry(tmp_path, monkeypatch):
              'load_prices': partial(costs.load_prices, module), 'catalogue': partial(costs.catalogue, module),
              'aggregate': partial(costs.aggregate, module), 'unit': partial(costs.unit, module),
              'normalise_model': costs.normalise_model, 'classify': costs.classify, 'combine': costs.combine,
+             'costs': costs,
              'outcomes': report.outcomes, 'OUTCOME_KEYS': report.OUTCOME_KEYS}
     module.legacy_stats = types.FunctionType(legacy_stats.__code__, names, argdefs=legacy_stats.__defaults__)
     module.legacy_stats.__kwdefaults__ = legacy_stats.__kwdefaults__
