@@ -1,7 +1,9 @@
 //! Identity-bound publication over the supervisor's safe filesystem API.
 use crate::pending::{python_decimal_digit, python_repr_os};
 use provenant_core::py::python_repr;
-pub use provenant_supervisor::fs::{FileKind, LocalFs, Metadata, SafeDir, SafeFile, SafeFs};
+pub use provenant_supervisor::fs::{
+    FileKind, FsError, LocalFs, Metadata, Result as FsResult, SafeDir, SafeFile, SafeFs,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
