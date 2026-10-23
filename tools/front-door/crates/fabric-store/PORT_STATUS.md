@@ -109,3 +109,12 @@ Local required checks: fmt, Clippy with `-D warnings`, the fabric-store suite
 (32 tests, including 16 Node differentials; zero doc tests), and both R2 layering
 checks. The layering functions were invoked directly because pytest is absent.
 The chair's cross-family review and exact-head CI remain pending.
+
+Repair review: **clean** at `f98c3e14`, with the same supplied native route.
+The reviewer independently ran the persisted-path required Node differential
+(1 passed, 31 filtered) and confirmed main `b527d675` is a byte-for-byte ledger
+prefix, no main completion IDs were lost, and only units 02/03 were added.
+Final crate run after that source repair:
+`test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.81s`
+Doc tests: 0 passed, 0 failed. Native review artifacts are retained at
+`/tmp/fs3-native-review.md` and `/tmp/fs3-native-rereview.md` for this run.
