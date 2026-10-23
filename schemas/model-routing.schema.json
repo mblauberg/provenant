@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/model-routing.schema.json",
+  "title": "Model Routing",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "catalog_date",
+    "context",
+    "rate_limit_pacing",
+    "routes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "catalog_date": {},
+    "context": {},
+    "rate_limit_pacing": {},
+    "routes": {}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/adapter-receipt.schema.json",
+  "title": "Adapter Receipt",
+  "type": "object",
+  "properties": {
+    "tool": {},
+    "adapter": {},
+    "execution_intent": {},
+    "resolved_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_family": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_family": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpoint_provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "identity_source": {},
+    "output_path": {
+      "type": "string"
+    },
+    "output_digest": {
+      "type": "string"
+    },
+    "read_only_guarantee": {},
+    "status": {},
+    "exit": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cross_family": {},
+    "certification_eligible": {
+      "type": "boolean"
+    },
+    "fix": {}
+  },
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": [
+        "tool",
+        "adapter",
+        "execution_intent",
+        "resolved_model",
+        "provider_family",
+        "model_family",
+        "endpoint_provider",
+        "identity_source",
+        "output_path",
+        "output_digest",
+        "read_only_guarantee",
+        "status",
+        "exit",
+        "cross_family",
+        "certification_eligible"
+      ]
+    },
+    {
+      "required": [
+        "status",
+        "fix",
+        "output_path",
+        "output_digest",
+        "certification_eligible"
+      ]
+    },
+    {
+      "maxProperties": 0
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/launch-spec.schema.json",
+  "title": "Launch Spec",
+  "type": "object",
+  "required": [
+    "schema",
+    "argv",
+    "cwd",
+    "env",
+    "stdin",
+    "attempt_dir",
+    "run_token",
+    "capture",
+    "silence_observation_ms",
+    "timeouts_ms",
+    "progress",
+    "cancel_markers",
+    "observer",
+    "spare"
+  ],
+  "properties": {
+    "schema": {
+      "const": "provenant.lane.launch.v1"
+    },
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {},
+    "env": {
+      "type": "object"
+    },
+    "stdin": {},
+    "attempt_dir": {},
+    "run_token": {},
+    "capture": {},
+    "silence_observation_ms": {},
+    "timeouts_ms": {},
+    "progress": {},
+    "cancel_markers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "observer": {},
+    "spare": {}
+  },
+  "additionalProperties": true
+}

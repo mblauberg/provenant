@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/telemetry-quota-event-row.schema.json",
+  "title": "Telemetry Quota Event Row",
+  "type": "object",
+  "required": [
+    "provider",
+    "account",
+    "host",
+    "window",
+    "kind",
+    "observed_at",
+    "previous_observed_at",
+    "previous_used_percent",
+    "used_percent",
+    "previous_reset_at",
+    "reset_at"
+  ],
+  "properties": {
+    "provider": {},
+    "account": {},
+    "host": {},
+    "window": {},
+    "kind": {},
+    "observed_at": {},
+    "previous_observed_at": {},
+    "previous_used_percent": {},
+    "used_percent": {},
+    "previous_reset_at": {},
+    "reset_at": {}
+  },
+  "additionalProperties": true
+}

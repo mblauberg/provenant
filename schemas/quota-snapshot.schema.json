@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/quota-snapshot.schema.json",
+  "title": "Quota Snapshot",
+  "type": "object",
+  "required": [
+    "schema",
+    "provider",
+    "account",
+    "plan",
+    "host",
+    "active",
+    "priority",
+    "observed_at",
+    "attempted_at",
+    "source",
+    "status",
+    "error",
+    "unreported",
+    "credits",
+    "windows"
+  ],
+  "properties": {
+    "schema": {
+      "const": "provenant.quota.v1"
+    },
+    "provider": {},
+    "account": {},
+    "plan": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "host": {},
+    "active": {},
+    "priority": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "observed_at": {},
+    "attempted_at": {},
+    "source": {},
+    "status": {},
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "unreported": {},
+    "credits": {},
+    "windows": {}
+  },
+  "additionalProperties": true
+}

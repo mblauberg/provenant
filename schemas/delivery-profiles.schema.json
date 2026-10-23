@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/delivery-profiles.schema.json",
+  "title": "Delivery Profiles",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "profiles",
+    "artifact_type_surfaces"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profiles": {},
+    "artifact_type_surfaces": {}
+  },
+  "additionalProperties": true
+}

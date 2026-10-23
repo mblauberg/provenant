@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/canonical-attempt.schema.json",
+  "title": "Canonical Attempt",
+  "type": "object",
+  "required": [
+    "schema",
+    "run_id",
+    "task_id",
+    "task_class",
+    "profile",
+    "attempt",
+    "state",
+    "status",
+    "usage_source",
+    "mode",
+    "cwd",
+    "workspace_root",
+    "worktree",
+    "started_at",
+    "ended_at",
+    "last_progress_at",
+    "pgid",
+    "pgid_started_at",
+    "session_id",
+    "retryable",
+    "reset_at",
+    "retry_after",
+    "fix",
+    "evidence",
+    "question",
+    "applied",
+    "warnings",
+    "provenance",
+    "secret_scan",
+    "timing",
+    "paths",
+    "digest",
+    "run_dir"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fabric.attempt.v1"
+    },
+    "run_id": {},
+    "task_id": {},
+    "task_class": {},
+    "profile": {},
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "enum": [
+        "running",
+        "terminal"
+      ]
+    },
+    "status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "usage_source": {},
+    "mode": {},
+    "cwd": {},
+    "workspace_root": {},
+    "worktree": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {},
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_progress_at": {},
+    "pgid": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "pgid_started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retryable": {},
+    "reset_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retry_after": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "fix": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence": {
+      "type": "object"
+    },
+    "question": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "applied": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array"
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "secret_scan": {
+      "type": "object"
+    },
+    "timing": {
+      "type": "object"
+    },
+    "paths": {
+      "type": "object"
+    },
+    "digest": {},
+    "run_dir": {}
+  },
+  "additionalProperties": true
+}

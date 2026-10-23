@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/run-receipt.schema.json",
+  "title": "Run Receipt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "created_at",
+    "closed_at",
+    "owner",
+    "task",
+    "retention_policy",
+    "terminal_reason",
+    "review_plan",
+    "pair",
+    "owned_panes",
+    "closed_panes",
+    "handed_off_panes",
+    "unclassified_paths",
+    "pruned_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {},
+    "created_at": {},
+    "closed_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "owner": {},
+    "task": {},
+    "retention_policy": {},
+    "terminal_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "review_plan": {},
+    "pair": {},
+    "owned_panes": {},
+    "closed_panes": {},
+    "handed_off_panes": {},
+    "unclassified_paths": {},
+    "pruned_paths": {}
+  },
+  "additionalProperties": true
+}

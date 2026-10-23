@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/telemetry-quota-series-row.schema.json",
+  "title": "Telemetry Quota Series Row",
+  "type": "object",
+  "required": [
+    "provider",
+    "account",
+    "host",
+    "window",
+    "observed_at",
+    "last_seen_at",
+    "source",
+    "used_percent",
+    "window_minutes",
+    "reset_at",
+    "plan",
+    "plan_detected",
+    "plan_tier",
+    "credit_balance",
+    "reset_credits"
+  ],
+  "properties": {
+    "provider": {},
+    "account": {},
+    "host": {},
+    "window": {},
+    "observed_at": {},
+    "last_seen_at": {},
+    "source": {},
+    "used_percent": {},
+    "window_minutes": {},
+    "reset_at": {},
+    "plan": {},
+    "plan_detected": {},
+    "plan_tier": {},
+    "credit_balance": {},
+    "reset_credits": {}
+  },
+  "additionalProperties": true
+}

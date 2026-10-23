@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/telemetry-event-row.schema.json",
+  "title": "Telemetry Event Row",
+  "type": "object",
+  "required": [
+    "event_id",
+    "host",
+    "kind",
+    "ts",
+    "session",
+    "run_id",
+    "lane",
+    "task_id",
+    "pr",
+    "provider",
+    "account",
+    "model",
+    "harness_rev",
+    "attrs",
+    "source_ref"
+  ],
+  "properties": {
+    "event_id": {},
+    "host": {},
+    "kind": {},
+    "ts": {},
+    "session": {},
+    "run_id": {},
+    "lane": {},
+    "task_id": {},
+    "pr": {},
+    "provider": {},
+    "account": {},
+    "model": {},
+    "harness_rev": {},
+    "attrs": {},
+    "source_ref": {}
+  },
+  "additionalProperties": true
+}

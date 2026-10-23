@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/batch-summary.schema.json",
+  "title": "Batch Summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "record_type",
+    "batch_id",
+    "status",
+    "task_count",
+    "concurrency",
+    "counts",
+    "source_manifest",
+    "tasks",
+    "reducer_inputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "record_type": {
+      "const": "dispatch-batch"
+    },
+    "batch_id": {},
+    "status": {},
+    "task_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "counts": {},
+    "source_manifest": {},
+    "tasks": {},
+    "reducer_inputs": {}
+  },
+  "additionalProperties": true
+}

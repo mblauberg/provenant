@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/worker-terminal-envelope.schema.json",
+  "title": "Worker Terminal Envelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "record_type",
+    "classification",
+    "question"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "record_type": {
+      "const": "provenant-worker-terminal"
+    },
+    "classification": {
+      "const": "question"
+    },
+    "question": {}
+  },
+  "additionalProperties": true
+}

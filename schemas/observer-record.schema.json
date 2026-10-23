@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/observer-record.schema.json",
+  "title": "Observer Record",
+  "type": "object",
+  "required": [
+    "session_id",
+    "observed_model",
+    "reset",
+    "retry",
+    "live_failure",
+    "semantic_lines"
+  ],
+  "properties": {
+    "session_id": {},
+    "observed_model": {},
+    "reset": {},
+    "retry": {},
+    "live_failure": {},
+    "semantic_lines": {}
+  },
+  "additionalProperties": true
+}

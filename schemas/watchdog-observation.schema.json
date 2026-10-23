@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/watchdog-observation.schema.json",
+  "title": "Watchdog Observation",
+  "type": "object",
+  "required": [
+    "schema",
+    "checked_at",
+    "pid",
+    "process_alive",
+    "silent_seconds",
+    "last_event_at",
+    "last_output_at",
+    "last_worktree_write_at",
+    "worktree_scan_complete"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fabric.watchdog.v1"
+    },
+    "checked_at": {},
+    "pid": {},
+    "process_alive": {
+      "type": "boolean"
+    },
+    "silent_seconds": {
+      "type": "number"
+    },
+    "last_event_at": {},
+    "last_output_at": {},
+    "last_worktree_write_at": {},
+    "worktree_scan_complete": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/dispatch-attempt.schema.json",
+  "title": "Dispatch Attempt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "record_type",
+    "run_id",
+    "task_id",
+    "attempt_id",
+    "retry_of",
+    "intent",
+    "requested_route",
+    "secret_scan",
+    "route",
+    "outcome",
+    "failure_code",
+    "status",
+    "started_at",
+    "finished_at",
+    "duration_seconds",
+    "workspace",
+    "prompt",
+    "result",
+    "stderr",
+    "process",
+    "attempt_path",
+    "attempt_digest_path"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "record_type": {
+      "const": "dispatch-attempt"
+    },
+    "run_id": {},
+    "task_id": {},
+    "attempt_id": {},
+    "retry_of": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "intent": {},
+    "requested_route": {},
+    "secret_scan": {},
+    "route": {},
+    "outcome": {},
+    "failure_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {},
+    "started_at": {},
+    "finished_at": {},
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "workspace": {},
+    "prompt": {},
+    "result": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "stderr": {},
+    "process": {},
+    "attempt_path": {},
+    "attempt_digest_path": {}
+  },
+  "additionalProperties": true
+}
