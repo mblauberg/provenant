@@ -672,7 +672,7 @@ pub struct ChangeRecord {
     pub merge_commit: Option<String>,
     pub merged_at: String,
     pub title: Option<String>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Value>,
     pub added_at: String,
 }
 
@@ -979,15 +979,8 @@ fn change_from_row(row: &rusqlite::Row<'_>) -> ChangeResult<ChangeRecord> {
     let labels: Value = crate::decode_json(labels.as_bytes())?;
     let labels = labels
         .as_array()
-        .ok_or(ChangeError::MalformedState)?
-        .iter()
-        .map(|label| {
-            label
-                .as_str()
-                .map(str::to_owned)
-                .ok_or(ChangeError::MalformedState)
-        })
-        .collect::<ChangeResult<Vec<_>>>()?;
+        .cloned()
+        .ok_or(ChangeError::MalformedState)?;
     Ok(ChangeRecord {
         change_id: row.get(0)?,
         kind: row.get(1)?,
@@ -1269,6 +1262,103 @@ fn date_error(value: &str, what: &str) -> ChangeError {
     ))
 }
 
+fn python_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_f64() => "float",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn python_less(left: &Value, right: &Value) -> ChangeResult<bool> {
+    let incompatible = || {
+        ChangeError::Invalid(format!(
+            "'<' not supported between instances of '{}' and '{}'",
+            python_type(left),
+            python_type(right)
+        ))
+    };
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => Ok(left < right),
+        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
+            let number = |value: &Value| -> Option<crate::Numeric> {
+                match value {
+                    Value::Bool(value) => Some(crate::Numeric::from(i32::from(*value))),
+                    Value::Number(value) => Some(crate::Numeric::from(value.clone())),
+                    _ => None,
+                }
+            };
+            number(left)
+                .zip(number(right))
+                .and_then(|(left, right)| left.partial_cmp(&right))
+                .map(|order| order.is_lt())
+                .ok_or_else(incompatible)
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                if crate::pending::python_equal(left, right) {
+                    continue;
+                }
+                return python_less(left, right);
+            }
+            Ok(left.len() < right.len())
+        }
+        _ => Err(incompatible()),
+    }
+}
+
+fn python_sort_labels(labels: &mut [Value]) -> ChangeResult<()> {
+    // Insertion sort returns Python's comparison failure instead of using a
+    // Rust total order for mixed JSON types.
+    for index in 1..labels.len() {
+        let mut current = index;
+        while current > 0 && python_less(&labels[current], &labels[current - 1])? {
+            labels.swap(current, current - 1);
+            current -= 1;
+        }
+    }
+    Ok(())
+}
+
+/// Bind a scalar into a SQLite TEXT-affinity column and retain the text SQLite
+/// stores. Python sqlite3 rejects containers and over-range integers here.
+fn sqlite_text_binding(value: Option<&Value>, parameter: usize) -> ChangeResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value.clone())),
+        Value::Bool(value) => Ok(Some(if *value { "1" } else { "0" }.into())),
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                return Ok(Some(value.to_string()));
+            }
+            if let Some(value) = number.as_u64() {
+                return i64::try_from(value)
+                    .map(|value| Some(value.to_string()))
+                    .map_err(|_| ChangeError::NumberOutOfRange);
+            }
+            let value = number.as_f64().ok_or(ChangeError::NumberOutOfRange)?;
+            let connection = Connection::open_in_memory()?;
+            let text = connection.query_row(
+                "SELECT CAST(?1 AS TEXT)",
+                [rusqlite::types::Value::Real(value)],
+                |row| row.get(0),
+            )?;
+            Ok(Some(text))
+        }
+        Value::Array(_) | Value::Object(_) => Err(ChangeError::Invalid(format!(
+            "Error binding parameter {parameter}: type '{}' is not supported",
+            python_type(value)
+        ))),
+    }
+}
+
 /// Upsert well-formed GitHub rows and report the count of newly inserted PRs.
 pub fn upsert<S: ChangeStore, C: ChangeClock>(
     clock: &C,
@@ -1305,6 +1395,45 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
         else {
             continue;
         };
+        let mut labels = Vec::new();
+        if let Some(raw_labels) = object
+            .get("labels")
+            .filter(|value| crate::pending::python_truthy(value))
+        {
+            match raw_labels {
+                Value::Array(entries) => {
+                    for entry in entries {
+                        if let Some(label) = entry.as_object() {
+                            labels.push(label.get("name").cloned().unwrap_or(Value::Null));
+                        }
+                    }
+                }
+                // Python iterates dict keys and string characters here; neither
+                // is a label object, so they are ignored by the comprehension.
+                Value::Object(_) | Value::String(_) => {}
+                value => {
+                    return Err(ChangeError::Invalid(format!(
+                        "'{}' object is not iterable",
+                        python_type(value)
+                    )));
+                }
+            }
+        }
+        python_sort_labels(&mut labels)?;
+        let merge_commit_value = match object
+            .get("mergeCommit")
+            .filter(|value| crate::pending::python_truthy(value))
+        {
+            Some(Value::Object(merge)) => merge.get("oid"),
+            Some(value) => {
+                return Err(ChangeError::Invalid(format!(
+                    "'{}' object has no attribute 'get'",
+                    python_type(value)
+                )));
+            }
+            None => None,
+        };
+        let merge_commit = sqlite_text_binding(merge_commit_value, 4)?;
         let Some(merged_at) = merged_at_value.as_str() else {
             return Err(ChangeError::Invalid(
                 "mergedAt must be an ISO timestamp".into(),
@@ -1312,44 +1441,7 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
         };
         let parsed = clock.parse_time(merged_at)?;
         let stamp = clock.iso(parsed);
-        let mut labels = Vec::new();
-        if let Some(entries) = object
-            .get("labels")
-            .filter(|value| crate::pending::python_truthy(value))
-            .and_then(Value::as_array)
-        {
-            for entry in entries {
-                if let Some(label) = entry.as_object() {
-                    if let Some(name) = label.get("name") {
-                        match name {
-                            Value::String(name) => labels.push(name.clone()),
-                            Value::Null => {
-                                return Err(ChangeError::Invalid(
-                                    "labels must contain sortable names".into(),
-                                ));
-                            }
-                            _ => {
-                                return Err(ChangeError::Invalid(
-                                    "labels must contain string names".into(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        labels.sort();
-        let merge_commit = object
-            .get("mergeCommit")
-            .filter(|value| crate::pending::python_truthy(value))
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("oid"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let title = object
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let title = sqlite_text_binding(object.get("title"), 6)?;
         let change = ChangeRecord {
             change_id: format!("pr:{id_number}"),
             kind: "pr".into(),
@@ -2125,8 +2217,25 @@ pub fn render_retro(report: &RetroReport, limit: usize) -> ChangeResult<String> 
 pub fn render_changes(rows: &[ChangeRecord], limit: usize) -> ChangeResult<String> {
     let cells = rows
         .iter()
-        .map(|row| {
-            vec![
+        .map(|row| -> ChangeResult<Vec<Option<String>>> {
+            let labels = row
+                .labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    label.as_str().ok_or_else(|| {
+                        ChangeError::Invalid(format!(
+                            "sequence item {index}: expected str instance, {} found",
+                            python_type(label)
+                        ))
+                    })
+                })
+                .collect::<ChangeResult<Vec<_>>>()?
+                .join(",")
+                .chars()
+                .take(30)
+                .collect::<String>();
+            Ok(vec![
                 Some(row.merged_at.clone()),
                 Some(if row.pr.is_some() {
                     reference(row)
@@ -2137,10 +2246,7 @@ pub fn render_changes(rows: &[ChangeRecord], limit: usize) -> ChangeResult<Strin
                     .as_deref()
                     .map(|commit| commit.chars().take(10).collect::<String>())
                     .filter(|commit| !commit.is_empty()),
-                {
-                    let labels = row.labels.join(",").chars().take(30).collect::<String>();
-                    (!labels.is_empty()).then_some(labels)
-                },
+                (!labels.is_empty()).then_some(labels),
                 Some(
                     row.title
                         .as_deref()
@@ -2149,9 +2255,9 @@ pub fn render_changes(rows: &[ChangeRecord], limit: usize) -> ChangeResult<Strin
                         .take(60)
                         .collect(),
                 ),
-            ]
+            ])
         })
-        .collect::<Vec<_>>();
+        .collect::<ChangeResult<Vec<_>>>()?;
     let mut lines = if rows.is_empty() {
         vec!["No change markers; run `provenant telemetry changes --sync`.".into()]
     } else {
@@ -2631,7 +2737,9 @@ for index, row in enumerate(input.get('events', [])):
                 {"number":5.0,"mergedAt":"2026-10-08T00:00:00Z","title":"float PR"},
                 {"number":"6","mergedAt":"2026-10-09T00:00:00Z","title":"string PR"},
                 {"number":7,"mergedAt":"","title":"empty timestamp"},
-                {"number":8,"mergeCommit":null,"mergedAt":"2026-10-10T00:00:00Z","title":"no commit","labels":["ignored",{"name":"x"}]}
+                {"number":8,"mergeCommit":null,"mergedAt":"2026-10-10T00:00:00Z","title":"no commit","labels":["ignored",{"name":"x"}]},
+                {"number":9,"mergeCommit":{"oid":123},"mergedAt":"2026-10-11T00:00:00Z","title":1.0,"labels":[{}]},
+                {"number":10,"mergeCommit":{"oid":false},"mergedAt":"2026-10-12T00:00:00Z","title":false,"labels":[{"name":true},{"name":false}]}
             ]
         });
         let oracle = python_oracle(
@@ -2669,6 +2777,27 @@ for index, row in enumerate(input.get('events', [])):
                 {"change":commit,"at":clock.iso(commit_at)},
                 {"change":date,"at":clock.iso(date_at)}
             ]
+        });
+        if let Some(oracle) = oracle {
+            crate::differential::equal(&rust, &oracle);
+        }
+    }
+
+    #[test]
+    fn upsert_malformed_values_match_python_sort_and_attribute_errors() {
+        let clock = clock();
+        let input = json!({"now":"2026-10-23T00:00:00Z"});
+        let oracle = python_oracle(
+            "def error(row):\n try: owner.upsert(t,db,[row])\n except Exception as exc: return str(exc)\n raise AssertionError('expected error')\nbase={'number':21,'mergedAt':'2026-10-06T00:00:00Z'}\nerrors={'mixed_labels':error({**base,'labels':[{'name':None},{'name':'x'}]}),'bad_merge_commit':error({**base,'mergeCommit':'bad'})}\nprint(json.dumps(errors))",
+            &input,
+        );
+        let mut store = MemoryStore::default();
+        let mixed_labels = json!({"number":21,"mergedAt":"2026-10-06T00:00:00Z","labels":[{"name":null},{"name":"x"}]});
+        let bad_merge_commit =
+            json!({"number":21,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":"bad"});
+        let rust = json!({
+            "mixed_labels":upsert(&clock, &mut store, &[mixed_labels]).unwrap_err().to_string(),
+            "bad_merge_commit":upsert(&clock, &mut store, &[bad_merge_commit]).unwrap_err().to_string()
         });
         if let Some(oracle) = oracle {
             crate::differential::equal(&rust, &oracle);
