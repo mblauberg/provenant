@@ -31,7 +31,7 @@
    "display_window": "claude.weekly",
    "back_at": null,
    "state": "on_pace",
-   "summary": "claude.weekly: on pace; runs out in 6d 12h",
+   "summary": "claude.weekly: on pace; allowance lasts about 6d 12h at this rate",
    "windows": [
     {
      "name": "gemini.weekly",
@@ -69,7 +69,7 @@
       "runs_out_at": "2030-03-20T13:40:00Z",
       "headroom_percent": 94.0,
       "expiring_headroom_percent": 0,
-      "summary": "on pace; runs out in 6d 12h"
+      "summary": "on pace; allowance lasts about 6d 12h at this rate"
      },
      "pool": "claude",
      "pool_label": "Claude models",
@@ -90,7 +90,7 @@
       "runs_out_at": null,
       "headroom_percent": 88.0,
       "expiring_headroom_percent": 70.0,
-      "summary": "28% in reserve; lasts until reset"
+      "summary": "28% in reserve; allowance lasts until reset"
      },
      "pool": "claude",
      "pool_label": "Claude models",
@@ -290,7 +290,7 @@
    "display_window": "seven_day",
    "back_at": null,
    "state": "on_pace",
-   "summary": "five_hour: on pace; lasts until reset",
+   "summary": "five_hour: on pace; allowance lasts until reset",
    "windows": [
     {
      "name": "five_hour",
@@ -307,7 +307,7 @@
       "runs_out_at": null,
       "headroom_percent": 97.0,
       "expiring_headroom_percent": 55.0,
-      "summary": "on pace; lasts until reset"
+      "summary": "on pace; allowance lasts until reset"
      },
      "label": "5-hour"
     },
@@ -491,7 +491,7 @@
    "display_window": "seven_day",
    "back_at": null,
    "state": "reserve",
-   "summary": "seven_day: 5% in reserve; lasts until reset",
+   "summary": "seven_day: 5% in reserve; allowance lasts until reset",
    "windows": [
     {
      "name": "seven_day",
@@ -508,7 +508,7 @@
       "runs_out_at": null,
       "headroom_percent": 59.0,
       "expiring_headroom_percent": 11.7,
-      "summary": "5% in reserve; lasts until reset"
+      "summary": "5% in reserve; allowance lasts until reset"
      },
      "label": "Weekly"
     }
@@ -545,7 +545,7 @@
    "display_window": "seven_day",
    "back_at": null,
    "state": "reserve",
-   "summary": "seven_day: 35% in reserve; lasts until reset",
+   "summary": "seven_day: 35% in reserve; allowance lasts until reset",
    "windows": [
     {
      "name": "five_hour",
@@ -562,7 +562,7 @@
       "runs_out_at": null,
       "headroom_percent": 71.0,
       "expiring_headroom_percent": 63.8,
-      "summary": "51% in reserve; lasts until reset"
+      "summary": "51% in reserve; allowance lasts until reset"
      },
      "label": "5-hour"
     },
@@ -581,7 +581,7 @@
       "runs_out_at": null,
       "headroom_percent": 64.0,
       "expiring_headroom_percent": 49.6,
-      "summary": "35% in reserve; lasts until reset"
+      "summary": "35% in reserve; allowance lasts until reset"
      },
      "label": "Weekly"
     }
@@ -618,7 +618,7 @@
    "display_window": "seven_day",
    "back_at": null,
    "state": "reserve",
-   "summary": "seven_day: 15% in reserve; lasts until reset",
+   "summary": "seven_day: 15% in reserve; allowance lasts until reset",
    "windows": [
     {
      "name": "five_hour",
@@ -635,7 +635,7 @@
       "runs_out_at": null,
       "headroom_percent": 62.0,
       "expiring_headroom_percent": 36.7,
-      "summary": "22% in reserve; lasts until reset"
+      "summary": "22% in reserve; allowance lasts until reset"
      },
      "label": "5-hour"
     },
@@ -654,7 +654,7 @@
       "runs_out_at": null,
       "headroom_percent": 58.0,
       "expiring_headroom_percent": 26.5,
-      "summary": "15% in reserve; lasts until reset"
+      "summary": "15% in reserve; allowance lasts until reset"
      },
      "label": "Weekly"
     }
@@ -690,8 +690,8 @@
    "plan_label": "Max",
    "display_window": "seven_day",
    "back_at": null,
-   "state": "deficit",
-   "summary": "seven_day: 5% in deficit; runs out in 3d 6h",
+   "state": "ahead_of_pace",
+   "summary": "seven_day: ahead of pace; allowance lasts about 3d 6h at this rate",
    "windows": [
     {
      "name": "five_hour",
@@ -701,14 +701,14 @@
      "reset_at": "2030-03-14T04:00:00Z",
      "window_start": "2030-03-13T23:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 40.0,
       "delta_percent": 7.0,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-14T03:15:19.148936Z",
       "headroom_percent": 53.0,
       "expiring_headroom_percent": 0,
-      "summary": "7% in deficit; runs out in 2h 15m"
+      "summary": "ahead of pace; allowance lasts about 2h 15m at this rate"
      },
      "label": "5-hour"
     },
@@ -720,14 +720,14 @@
      "reset_at": "2030-03-18T01:00:00Z",
      "window_start": "2030-03-11T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 42.9,
       "delta_percent": 5.1,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-17T07:00:00Z",
       "headroom_percent": 52.0,
       "expiring_headroom_percent": 0,
-      "summary": "5% in deficit; runs out in 3d 6h"
+      "summary": "ahead of pace; allowance lasts about 3d 6h at this rate"
      },
      "label": "Weekly"
     }
@@ -763,8 +763,8 @@
    "plan_label": "Max",
    "display_window": "seven_day",
    "back_at": null,
-   "state": "deficit",
-   "summary": "five_hour: 36% in deficit; runs out in 47m",
+   "state": "ahead_of_pace",
+   "summary": "five_hour: ahead of pace; allowance lasts about 47m at this rate",
    "windows": [
     {
      "name": "five_hour",
@@ -774,14 +774,14 @@
      "reset_at": "2030-03-14T05:00:00Z",
      "window_start": "2030-03-14T00:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 20.0,
       "delta_percent": 36.0,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-14T01:47:08.571429Z",
       "headroom_percent": 44.0,
       "expiring_headroom_percent": 0,
-      "summary": "36% in deficit; runs out in 47m"
+      "summary": "ahead of pace; allowance lasts about 47m at this rate"
      },
      "label": "5-hour"
     },
@@ -793,14 +793,14 @@
      "reset_at": "2030-03-19T01:00:00Z",
      "window_start": "2030-03-12T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 28.6,
       "delta_percent": 25.4,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-15T17:53:20Z",
       "headroom_percent": 46.0,
       "expiring_headroom_percent": 0,
-      "summary": "25% in deficit; runs out in 40h 53m"
+      "summary": "ahead of pace; allowance lasts about 40h 53m at this rate"
      },
      "label": "Weekly"
     }
@@ -836,8 +836,8 @@
    "plan_label": "Max",
    "display_window": "seven_day",
    "back_at": null,
-   "state": "deficit",
-   "summary": "seven_day: 46% in deficit; runs out in 16h",
+   "state": "ahead_of_pace",
+   "summary": "seven_day: ahead of pace; allowance lasts about 16h at this rate",
    "windows": [
     {
      "name": "five_hour",
@@ -866,14 +866,14 @@
      "reset_at": "2030-03-20T01:00:00Z",
      "window_start": "2030-03-13T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 14.3,
       "delta_percent": 45.7,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-14T17:00:00Z",
       "headroom_percent": 40.0,
       "expiring_headroom_percent": 0,
-      "summary": "46% in deficit; runs out in 16h"
+      "summary": "ahead of pace; allowance lasts about 16h at this rate"
      },
      "label": "Weekly"
     }
@@ -982,8 +982,8 @@
    "plan_label": "Pro Lite",
    "display_window": "primary",
    "back_at": null,
-   "state": "deficit",
-   "summary": "primary: 52% in deficit; runs out in 12h 24m",
+   "state": "ahead_of_pace",
+   "summary": "primary: ahead of pace; allowance lasts about 12h 24m at this rate",
    "windows": [
     {
      "name": "primary",
@@ -993,14 +993,14 @@
      "reset_at": "2030-03-19T05:00:00Z",
      "window_start": "2030-03-12T05:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 26.2,
       "delta_percent": 51.8,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-14T13:24:36.923077Z",
       "headroom_percent": 22.0,
       "expiring_headroom_percent": 0,
-      "summary": "52% in deficit; runs out in 12h 24m"
+      "summary": "ahead of pace; allowance lasts about 12h 24m at this rate"
      },
      "label": "Weekly"
     }
@@ -1038,8 +1038,8 @@
    "plan_label": "Pro",
    "display_window": "secondary",
    "back_at": null,
-   "state": "deficit",
-   "summary": "secondary: 18% in deficit; runs out in 46h 1m",
+   "state": "ahead_of_pace",
+   "summary": "secondary: ahead of pace; allowance lasts about 46h 1m at this rate",
    "windows": [
     {
      "name": "primary",
@@ -1056,7 +1056,7 @@
       "runs_out_at": null,
       "headroom_percent": 65.0,
       "expiring_headroom_percent": 41.7,
-      "summary": "25% in reserve; lasts until reset"
+      "summary": "25% in reserve; allowance lasts until reset"
      },
      "label": "5-hour"
     },
@@ -1068,14 +1068,14 @@
      "reset_at": "2030-03-18T01:00:00Z",
      "window_start": "2030-03-11T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 42.9,
       "delta_percent": 18.1,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-15T23:01:58.032787Z",
       "headroom_percent": 39.0,
       "expiring_headroom_percent": 0,
-      "summary": "18% in deficit; runs out in 46h 1m"
+      "summary": "ahead of pace; allowance lasts about 46h 1m at this rate"
      },
      "label": "Weekly"
     }
@@ -1111,8 +1111,8 @@
    "plan_label": "Pro",
    "display_window": "premium_interactions",
    "back_at": null,
-   "state": "deficit",
-   "summary": "premium_interactions: 22% in deficit; runs out in 43h 49m",
+   "state": "ahead_of_pace",
+   "summary": "premium_interactions: ahead of pace; allowance lasts about 43h 49m at this rate",
    "windows": [
     {
      "name": "premium_interactions",
@@ -1122,14 +1122,14 @@
      "reset_at": "2030-03-23T01:00:00Z",
      "window_start": "2030-02-21T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 70.0,
       "delta_percent": 22.0,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-15T20:49:33.913043Z",
       "headroom_percent": 8.0,
       "expiring_headroom_percent": 0,
-      "summary": "22% in deficit; runs out in 43h 49m"
+      "summary": "ahead of pace; allowance lasts about 43h 49m at this rate"
      },
      "label": "Monthly (Premium interactions)"
     }
@@ -1230,14 +1230,14 @@
      "reset_at": "2030-03-16T01:00:00Z",
      "window_start": "2030-03-13T01:00:00Z",
      "pace": {
-      "state": "deficit",
+      "state": "ahead_of_pace",
       "expected_used_percent": 33.3,
       "delta_percent": 6.7,
       "will_last_to_reset": false,
       "runs_out_at": "2030-03-15T13:00:00Z",
       "headroom_percent": 60.0,
       "expiring_headroom_percent": 0,
-      "summary": "7% in deficit; runs out in 36h"
+      "summary": "ahead of pace; allowance lasts about 36h at this rate"
      },
      "label": "3-day (Odd)"
     },
@@ -1293,7 +1293,7 @@
    "display_window": "monthly",
    "back_at": null,
    "state": "reserve",
-   "summary": "monthly: 15% in reserve; lasts until reset",
+   "summary": "monthly: 15% in reserve; allowance lasts until reset",
    "windows": [
     {
      "name": "monthly",
@@ -1310,7 +1310,7 @@
       "runs_out_at": null,
       "headroom_percent": 82.0,
       "expiring_headroom_percent": 46.0,
-      "summary": "15% in reserve; lasts until reset"
+      "summary": "15% in reserve; allowance lasts until reset"
      },
      "label": "Monthly"
     }
@@ -1383,7 +1383,7 @@
       "runs_out_at": null,
       "headroom_percent": 81.0,
       "expiring_headroom_percent": 59.3,
-      "summary": "28% in reserve; lasts until reset"
+      "summary": "28% in reserve; allowance lasts until reset"
      },
      "label": "Monthly"
     },
