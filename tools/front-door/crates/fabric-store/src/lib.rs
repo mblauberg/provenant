@@ -7,6 +7,8 @@ mod messages;
 mod pending;
 mod sessions;
 mod tasks;
+mod work;
+pub use work::*;
 mod backend;
 pub use backend::*;
 
@@ -29,6 +31,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    CheckedJson(#[from] provenant_records::checked_json::DecodeError),
+    #[error("stale work claim")]
+    StaleWork,
+    #[error("claim requires an issue or paths")]
+    EmptyWorkScope,
+    #[error("at most 100 paths may be claimed")]
+    TooManyPaths,
+    #[error("invalid repository-relative path: {path}")]
+    InvalidWorkPath {path:String},
+    #[error("work already claimed by {holder} until {until}")]
+    WorkHeld {holder:String,until:String},
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]

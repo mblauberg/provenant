@@ -486,6 +486,7 @@ name = "provenant-fabric-store"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "provenant-records",
  "rusqlite",
  "serde",
  "serde_json",

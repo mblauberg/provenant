@@ -10,12 +10,11 @@ there was no batch-1 status or implementation on main.
 
 ## Unit status
 
-- `runtime/fabric/src/store.ts#unit-01`: **partial**. Only `Store::open`,
-  `restore_default_busy_timeout`, shared typed records and `announce` are
-  implemented. Remaining: `agents`, `projects`, `close`, `laneTaskId`,
-  `workClaims`, `acquireWork`, `renewWork`, `verifyWork`, `releaseWork`, and
-  safe recursive parent creation in the constructor.
-
+- `runtime/fabric/src/store.ts#unit-01`: **partial**. Agent/project listing,
+  explicit close, issue/path work claims, renewal, verification and release are
+  implemented with generation fencing, rollback and checked JSON from records.
+  Remaining: safe recursive parent creation in `Store::open`, awaiting the
+  supervisor API, and `laneTaskId` (covered with unit-03's dynamic row boundary).
 - `runtime/fabric/src/store.ts#unit-02`: **partial**. Landing reads, acquire,
   verify, renewal, push hold, release, bounded polling and named-session
   policy are implemented. Message send/inbox policy is implemented with explicit recipient context and

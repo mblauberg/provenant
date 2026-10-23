@@ -795,3 +795,38 @@ fn cross_thread_sqlite_contention_differential() {
     capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
     compare("thread-contention",snapshot(&store,out));
 }
+
+#[test]
+fn work_claim_fencing_paths_errors_and_rollback_differential() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
+    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let other=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids=FixtureIds::default();let mut out=Vec::new();
+    store.announce(&a()).unwrap();store.announce(&b()).unwrap();store.announce(&Identity {project:"z".into(),..a()}).unwrap();
+    capture(&mut out,store.agents("p"));capture(&mut out,store.projects());
+    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some(" #869 "),paths:&["Runtime\\Fabric/".into(),"runtime/fabric".into()]},1,1000,&ids));
+    capture(&mut out,store.verify_work(&a(),"s","fixture-1",1,1000));
+    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {issue:Some("869"),..Default::default()},60,1000,&ids));
+    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {paths:&["RUNTIME/FABRIC/SRC".into()],..Default::default()},60,1000,&ids));
+    capture(&mut out,store.renew_work(&a(),"wrong","fixture-1",1,60,1000));
+    capture(&mut out,store.renew_work(&a(),"s","fixture-1",1,1,1000));
+    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {paths:&["runtime/fabric/src".into()],..Default::default()},60,2000,&ids));
+    capture(&mut out,store.renew_work(&a(),"s","fixture-1",1,60,2000));
+    capture(&mut out,store.verify_work(&a(),"s","fixture-1",1,2000));
+    capture(&mut out,store.release_work(&a(),"s","fixture-1",1,2000));
+    capture(&mut out,store.work_claims("p",2000));
+    capture(&mut out,other.release_work(&b(),"s","fixture-4",2,2000));
+    for path in ["","/","a//b","a/../b","./a","a//"] {
+        capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&[path.into()],..Default::default()},60,2000,&ids));
+    }
+    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some("#"),..Default::default()},60,2000,&ids));
+    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&vec!["a".into();101],..Default::default()},60,2000,&ids));
+    capture(&mut out,store.acquire_work(&a(),"bad/session",WorkScope {issue:Some("x"),..Default::default()},60,2000,&ids));
+    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some("x"),..Default::default()},0,2000,&ids));
+    store.db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END").unwrap();
+    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&["different".into()],..Default::default()},60,2000,&ids));
+    store.db.execute_batch("DROP TRIGGER fail_log").unwrap();
+    capture(&mut out,store.work_claims("p",2000));
+    compare("work",snapshot(&store,out));
+    store.close().unwrap();other.close().unwrap();
+}

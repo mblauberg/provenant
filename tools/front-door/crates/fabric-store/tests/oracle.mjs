@@ -29,7 +29,31 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if (scenario === 'review') {
+if (scenario === 'work') {
+  store.announce(a); store.announce(b); store.announce({...a,project:'z'});
+  capture(() => store.agents('p')); capture(() => store.projects());
+  capture(() => store.acquireWork(a,'s',{issue:' #869 ',paths:['Runtime\\Fabric/','runtime/fabric']},1,1000));
+  capture(() => store.verifyWork(a,'s','fixture-1',1,1000));
+  capture(() => other.acquireWork(b,'s',{issue:'869'},60,1000));
+  capture(() => other.acquireWork(b,'s',{paths:['RUNTIME/FABRIC/SRC']},60,1000));
+  capture(() => store.renewWork(a,'wrong','fixture-1',1,60,1000));
+  capture(() => store.renewWork(a,'s','fixture-1',1,1,1000));
+  capture(() => other.acquireWork(b,'s',{paths:['runtime/fabric/src']},60,2000));
+  capture(() => store.renewWork(a,'s','fixture-1',1,60,2000));
+  capture(() => store.verifyWork(a,'s','fixture-1',1,2000));
+  capture(() => store.releaseWork(a,'s','fixture-1',1,2000));
+  capture(() => store.workClaims('p',2000));
+  capture(() => other.releaseWork(b,'s','fixture-4',2,2000));
+  for (const path of ['', '/', 'a//b','a/../b','./a','a//']) capture(() => store.acquireWork(a,'s',{paths:[path]},60,2000));
+  capture(() => store.acquireWork(a,'s',{issue:'#'},60,2000));
+  capture(() => store.acquireWork(a,'s',{paths:Array(101).fill('a')},60,2000));
+  capture(() => store.acquireWork(a,'bad/session',{issue:'x'},60,2000));
+  capture(() => store.acquireWork(a,'s',{issue:'x'},0,2000));
+  raw.exec("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END");
+  capture(() => store.acquireWork(a,'s',{paths:['different']},60,2000));
+  raw.exec('DROP TRIGGER fail_log');
+  capture(() => store.workClaims('p',2000));
+} else if (scenario === 'review') {
   store.announce(a);
   capture(() => store.announce({...a, provider:'claude'}));
   capture(() => store.createTeam(a, 'future', ['alice']));
