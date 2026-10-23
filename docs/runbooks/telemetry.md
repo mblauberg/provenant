@@ -145,10 +145,9 @@ source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
 `provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
-by risk tier and harness digest. The digest is null until lanes carry a delivery
-link. `--since` filters on the run's earliest recorded timestamp, falling back
-to the `RUN.json` mtime when no timestamp is recorded. Folder names and ingest
-time are not used. A run is accepted when its `RUN.json` has
+by risk tier and harness digest (currently null). `--since` filters on the run's
+earliest recorded timestamp, falling back to the `RUN.json` mtime when no
+timestamp is recorded. Folder names and ingest time are not used. A run is accepted when its `RUN.json` has
 `delivery_acceptance` with basis `checks-and-review`, `project-landing` or
 `user`. A run is merged only when the commit on its
 `software_delivery.canonical_artifact_id` artifact matches a
@@ -158,12 +157,17 @@ Runs without acceptance stay in the run count and never enter the accepted
 denominator. The ledger stores receipt facts in `deliveries`; `accepted` and
 `merged` are report labels.
 
-Cost per accepted is not reported yet because lanes carry no delivery link.
-Cost fields are null with `cost_basis: "unlinked"`; `usage_rows` and
-`unpriced_rows` are zero. Follow-up
-[#1202](https://github.com/mblauberg/provenant/issues/1202)
-will stamp an owner-supplied `delivery_run_id` in `attempt.json` so the ledger
-can link recorded facts.
+The chair passes `delivery_run_id` equal to the delivery's `RUN.json` run_id on
+each dispatch, including reviewers (`provenant fabric dispatch --delivery-run-id ID`).
+Batch tasks inherit the batch-level id unless they supply their own; retries
+keep the id. The dispatcher stamps it into `attempt.json`, and the ledger joins
+lane usage to deliveries on that fact. `cost_usd_lower_bound` sums known priced
+cost across linked attempts, including retries and unaccepted runs;
+`unpriced_rows` counts attempts with unknown cost. `usage_rows` counts linked
+attempts once across host aliases. Cost per accepted divides that total by the
+accepted count, or stays null when none are accepted. `--since` selects deliveries,
+including their lanes that started earlier. Groups with any linked usage report
+`cost_basis: "linked"`; otherwise cost fields stay null with `cost_basis: "unlinked"`.
 
 
 ## Events, change markers and comparison

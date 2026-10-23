@@ -688,7 +688,8 @@ def _dispatch_command(run_dir: Path, task_id: str, prompt: Path | None, route: d
     command.extend((f"--{selector.replace('_', '-')}", value))
     for key, flag in (("orchestrator_family", "--orchestrator-family"), ("risk_tier", "--risk-tier"),
                       ("model_override_tier", "--model-override-tier"),
-                      ("reviewer_id", "--reviewer-id"), ("effort", "--effort")):
+                      ("reviewer_id", "--reviewer-id"), ("effort", "--effort"),
+                      ("delivery_run_id", "--delivery-run-id")):
         if route.get(key):
             command.extend((flag, str(route[key])))
     if retry_of:
@@ -880,8 +881,9 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
             raise ControlError(f"batch attempt has invalid observed completion: {item['task_id']}")
         if process.get("observed_exit") is not True and not (
             status == "failed"
-            and record.get("outcome") == "process_spawn_error"
-            and process.get("pid") is None
+            and (record.get("outcome") == "process_spawn_error" and process.get("pid") is None
+                 or record.get("outcome") == "host_disk_full"
+                 or record.get("outcome") == "provider_lost" and process.get("pid") is not None)
             and process.get("exit_code") is None
         ):
             raise ControlError(f"batch attempt lacks observed completion: {item['task_id']}")
@@ -935,8 +937,9 @@ def validate_retained_dispatch(run_dir: Path) -> list[str]:
                     raise ControlError("attempt has invalid observed completion")
                 if process.get("observed_exit") is not True and not (
                     record.get("status") == "failed"
-                    and record.get("outcome") == "process_spawn_error"
-                    and process.get("pid") is None
+                    and (record.get("outcome") == "process_spawn_error" and process.get("pid") is None
+                         or record.get("outcome") == "host_disk_full"
+                         or record.get("outcome") == "provider_lost" and process.get("pid") is not None)
                     and process.get("exit_code") is None
                 ):
                     raise ControlError("attempt does not prove observed completion")
@@ -1048,6 +1051,9 @@ def _reduce(args: argparse.Namespace) -> int:
                   "", "## Operator prompt", "", prompt_bytes.decode("utf-8", errors="replace")])
     route = {"adapter": args.adapter, "role": args.role, "intent": "ordinary",
              "orchestrator_family": args.orchestrator_family or ""}
+    delivery_ids = [record.get("delivery_run_id") for record, _, _ in selected]
+    if delivery_ids and isinstance(delivery_ids[0], str) and all(value == delivery_ids[0] for value in delivery_ids):
+        route["delivery_run_id"] = delivery_ids[0]
     for key in ("alias", "task_class", "model"):
         value = getattr(args, key)
         if value:

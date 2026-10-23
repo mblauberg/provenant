@@ -304,7 +304,7 @@ def reference_run(*arguments: str, env: dict[str, str] | None = None) -> Result:
     return Result(done.returncode, done.stdout, done.stderr)
 
 
-HELP_BUDGET = 1100
+HELP_BUDGET = 1150
 
 
 def assert_matches_reference(actual: Result, expected: Result) -> None:

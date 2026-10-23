@@ -50,6 +50,9 @@ const FABRIC_CLI: &str = "runtime/fabric/bin/fabric";
 /// Owner paths by verb, relative to the selected root. Verbs listed in
 /// `PREFIXED` also pass their own name as the first owner argument.
 const OWNERS: &[(&str, &str)] = &[
+    ("digest", "scripts/utility.py"),
+    ("classify", "scripts/utility.py"),
+    ("extract", "scripts/utility.py"),
     ("route", "scripts/model-route"),
     ("capabilities", "skills/orchestrate/scripts/capabilities.py"),
     ("worktree", "scripts/worktree"),
@@ -71,7 +74,9 @@ const OWNERS: &[(&str, &str)] = &[
     ("batch", "skills/orchestrate/scripts/batch_run.py"),
     ("run", "skills/orchestrate/scripts/run_controls.py"),
 ];
-const PREFIXED: [&str; 4] = ["stats", "retro", "hosts", "peer"];
+const PREFIXED: [&str; 7] = [
+    "stats", "retro", "hosts", "peer", "digest", "classify", "extract",
+];
 
 /// What a command line asks for, decided without touching the filesystem.
 #[derive(Debug, PartialEq)]
@@ -341,6 +346,12 @@ mod tests {
 
     #[test]
     fn verbs_pass_arguments_unchanged_or_with_their_prefix() {
+        for verb in ["digest", "classify", "extract"] {
+            assert_eq!(
+                route(&args(&[verb, "file", "arg"]), false),
+                owner("scripts/utility.py", &[verb, "file", "arg"])
+            );
+        }
         assert_eq!(
             route(&args(&["route", "a", ""]), false),
             owner("scripts/model-route", &["a", ""])
@@ -391,6 +402,9 @@ mod tests {
     fn every_help_verb_has_an_owner_or_special_route() {
         for verb in [
             "route",
+            "digest",
+            "classify",
+            "extract",
             "capabilities",
             "worktree",
             "clean",
@@ -456,7 +470,9 @@ mod tests {
         assert_eq!(route(&args(&["help", "bogus"]), false), usage());
         assert_eq!(route(&args(&["help", "a", "b"]), false), usage());
         assert_eq!(route(&args(&["-h", "bogus"]), false), usage());
-        for topic in ["root", "lint", "lease", "help", "check"] {
+        for topic in [
+            "root", "lint", "lease", "help", "check", "digest", "classify", "extract",
+        ] {
             let Route::Print { text, .. } = route(&args(&["help", topic]), false) else {
                 panic!()
             };

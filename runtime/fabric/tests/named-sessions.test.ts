@@ -214,7 +214,7 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
     });
 
     // fresh hands off the last clean attempt's result, not a later failed one.
-    const marks = await chair.call("dispatch", { session: "marks", prompt: "mark", wait_seconds: 5 });
+    const marks = await chair.call("dispatch", { session: "marks", prompt: "mark", delivery_run_id: "delivery:marks", wait_seconds: 5 });
     expect(await chair.call("dispatch", { session: "marks", prompt: "mark-fail", wait_seconds: 5 }))
       .toMatchObject({ status: "failed", attempt: 2 });
     const handed = await chair.call("dispatch", { session: "marks", prompt: "next", fresh: true, wait_seconds: 5 });
@@ -227,6 +227,8 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
       return ["--adapter", "--model"].map((flag) => args[args.indexOf(flag) + 1]);
     };
     expect(flags(handed)).toEqual(flags(marks));
+    expect(JSON.parse(readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-args-1.json`), "utf8")))
+      .toEqual(expect.arrayContaining(["--delivery-run-id", "delivery:marks"]));
     // An explicit Claude route started elsewhere stays Claude, model included, when a Claude seat hands it off.
     const codexSeat = await project.connect(project.linked, "codex-seat", "codex");
     try {
