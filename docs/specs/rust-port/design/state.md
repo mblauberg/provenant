@@ -412,7 +412,7 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 | supervisor | Production `SystemClock` (`jiff` wall time), entropy, safe no-follow FS/locks/publication and bounded version/help smoke processes. `run_utility` for fixed Git/gh reads; test-only fixture binary with a scoped `Command::new` allow for process tests. |
 | confinement | `discover_project(Workspace, &DiscoveryAuthority) -> Result<ProjectLocation>` using supervisor Git reads; validates Git object format, repository/path membership and authority. Config consumes the result without a reverse dependency. |
 | fabric-runtime | Cross-host project key, `bind_federated_project`, external address-to-actor binding and federation routing of run queries. Fabric owns its read-only import and receipt. |
-| run | Registry, admission, attempts/status and atomic admission/operation insertion in run's durable store; top-level runs layout, `completed_attempt(AttemptId) -> AttemptFact`, `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` and `snapshot` with active count. State owns no duplicate registry. |
+| run | Registry, admission, attempts/status and atomic admission/operation insertion in run's durable store; top-level runs layout, `AttemptReader::attempt(AttemptId) -> AttemptFact`, `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` and `snapshot` with active count. State owns no duplicate registry. |
 
 `AttemptFact` lives in records and derives `Serialize` only. Run constructs
 it from its store: task, attempt number, operation, project, terminal state,
