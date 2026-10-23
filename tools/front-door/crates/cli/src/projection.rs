@@ -22,6 +22,12 @@ pub enum Error {
         start_marker: String,
         end_marker: String,
     },
+    #[error("projection UTF-8 decode at {path}: {source}")]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
     #[error("projection I/O at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -67,8 +73,12 @@ pub fn project(
     check: bool,
     source: Option<&str>,
 ) -> Result<Vec<String>, Error> {
-    let current = fs::read_to_string(path)
-        .map_err(|source| Error::Io {
+    let bytes = fs::read(path).map_err(|source| Error::Io {
+        path: path.into(),
+        source,
+    })?;
+    let current = String::from_utf8(bytes)
+        .map_err(|source| Error::Decode {
             path: path.into(),
             source,
         })?
@@ -312,6 +322,16 @@ mod tests {
     const DOC: &str = "# Title\n\n<!-- sample:start -->\nold body\n<!-- sample:end -->\n\ntail\n";
 
     #[test]
+    fn invalid_utf8_is_a_decode_error_and_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, b"\xff").unwrap();
+        let error = project(&path, "sample", DOC, false, None).unwrap_err();
+        assert!(!matches!(error, Error::Io { .. }));
+        assert_eq!(fs::read(path).unwrap(), b"\xff");
+    }
+
+    #[test]
     fn split_partitions_and_requires_exactly_one_ordered_pair() {
         let (head, body, tail) = split_marked_region(DOC, "sample", "document").unwrap();
         assert_eq!(format!("{head}{body}{tail}"), DOC);
@@ -361,10 +381,6 @@ mod tests {
 
     #[test]
     fn reports_match_python_difflib_on_repeated_lines_and_hunk_boundaries() {
-        use std::{
-            io::Write,
-            process::{Command, Stdio},
-        };
         let mut cases = vec![
             ("".to_owned(), "x".to_owned()),
             ("x\ny\n".into(), "y\nx\n".into()),
@@ -393,24 +409,9 @@ mod tests {
             };
             cases.push((make(), make()));
         }
-        let child = Command::new("python3").args(["-c", "import difflib,json,sys; print(json.dumps([list(difflib.unified_diff(a.splitlines(True),b.splitlines(True),fromfile='old',tofile='new')) for a,b in json.load(sys.stdin)]))"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("skip: python3 absent");
-                return;
-            }
-            Err(e) => panic!("{e}"),
-        };
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&serde_json::to_vec(&cases).unwrap())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success());
-        let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
+            "import difflib,json,sys; print(json.dumps([list(difflib.unified_diff(a.splitlines(True),b.splitlines(True),fromfile='old',tofile='new')) for a,b in json.load(sys.stdin)]))", &serde_json::json!(cases)
+        ) else { return; };
         for ((before, after), expected) in cases.iter().zip(expected) {
             assert_eq!(
                 unified_diff(before, after, "old", "new"),

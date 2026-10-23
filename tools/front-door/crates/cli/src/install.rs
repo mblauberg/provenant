@@ -8,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Parser)]
 #[command(name = "check-provenant-install", args_override_self = true)]
 pub struct Arguments {
-    /// Fail on routing or provider warnings.
+    /// fail on routing or provider warnings
     #[arg(long)]
     pub strict: bool,
 }
@@ -37,8 +37,11 @@ pub enum Failure {
     NotExecutable(PathBuf),
     #[error("installed front door has no Rust source identity; re-run install-harness")]
     MissingIdentity,
-    #[error("installed front door was built from different sources than tools/front-door (embeds {stamped}, checkout is {current}); rebuild: re-run install-harness")]
-    StaleIdentity { stamped: String, current: String },
+    #[error("installed front door was built from different sources than tools/front-door (embeds {stamped}, checkout is {}); rebuild: re-run install-harness", current.as_deref().unwrap_or("None"))]
+    StaleIdentity {
+        stamped: String,
+        current: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -117,6 +120,155 @@ pub fn render(status: &Status, strict: bool, advisories: &[String]) -> CommandOu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_checkout_identity_renders_python_none() {
+        let out = render(
+            &Status::Failed(Failure::StaleIdentity {
+                stamped: "abc".into(),
+                current: None,
+            }),
+            false,
+            &[],
+        );
+        assert!(out.stderr.contains("checkout is None)"));
+    }
+
+    #[test]
+    fn installation_failure_streams_and_provider_rows_match_source() {
+        use serde_json::json;
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../scripts")
+            .canonicalize()
+            .unwrap();
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::copy(
+            source.join("check-provenant-install.py"),
+            scripts.join("check-provenant-install.py"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(source.join("lib"), scripts.join("lib")).unwrap();
+        std::os::unix::fs::symlink(
+            source.join("instance_installation.py"),
+            scripts.join("instance_installation.py"),
+        )
+        .unwrap();
+        let instance = dir.path().join("instance");
+        let pointer = instance.join(".agent-fabric/product-root.json");
+        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+        let Some(expected): Option<Vec<(String, String, u8)>> = crate::oracle::python(
+            r#"
+import json,sys,os,subprocess
+from pathlib import Path
+x=json.load(sys.stdin); root=Path(x['root']); p=root/'scripts/check-provenant-install.py'; instance=root/'instance'
+base={'PATH':os.environ.get('PATH',''),'HOME':str(root/'home'),'AGENT_FABRIC_INSTANCE_ROOT':str(instance),'PROVENANT_STALE_CHECKED':'1'}
+results=[]
+for mode in ['relative','invalid','unowned','binrelative','unmanaged','notexec','unstamped','stale','ok','warn','warn_strict']:
+    env=dict(base)
+    if mode=='relative': env['AGENT_FABRIC_INSTANCE_ROOT']='relative'
+    pointer=instance/'.agent-fabric/product-root.json'
+    if mode=='invalid': pointer.write_text('not json')
+    if mode=='unowned': pointer.unlink()
+    env['PROVENANT_BIN_DIR']=str(root/'bin')
+    if mode not in {'relative','invalid','unowned'}: pointer.write_text(json.dumps({'schema_version':1,'product_root':str(root)}))
+    if mode=='binrelative': env['PROVENANT_BIN_DIR']='relative'
+    command=root/'bin/provenant'
+    if mode in {'notexec','unstamped','stale'}:
+        command.parent.mkdir(exist_ok=True); command.write_text('provenant-front-door source-sha256='+'0'*64+'\n' if mode=='stale' else 'no identity\n'); command.chmod(0o644 if mode=='notexec' else 0o755)
+    if mode=='ok':
+        from scripts.lib.front_door_build import source_digest
+        crate=root/'tools/front-door';(crate/'src').mkdir(parents=True);(crate/'Cargo.toml').write_text('[package]\nname="fixture"\n');(crate/'src/main.rs').write_text('fn main() {}\n')
+        command.write_text('provenant-front-door source-sha256='+source_digest(crate)+'\n')
+    if mode=='warn': (root/'home/.codex').mkdir(parents=True)
+    code='import sys,runpy; sys.path.insert(0,sys.argv[1]); script=sys.argv[2]; sys.argv=[script,*sys.argv[3:]]; runpy.run_path(script,run_name="__main__")' 
+    r=subprocess.run([sys.executable,'-I','-c',code,str(p.parent),str(p),*(['--strict'] if mode=='warn_strict' else [])],env=env,capture_output=True,text=True,timeout=10)
+    results.append((r.stdout,r.stderr,r.returncode))
+print(json.dumps(results))
+"#,
+            &json!({"root":dir.path()}),
+        ) else {
+            return;
+        };
+        let statuses = [
+            Status::Failed(Failure::RelativeInstance),
+            Status::Failed(Failure::InvalidPointer(pointer)),
+            Status::NotOwned,
+            Status::Failed(Failure::RelativeBin),
+            Status::Failed(Failure::Unmanaged(dir.path().join("bin/provenant"))),
+            Status::Failed(Failure::NotExecutable(dir.path().join("bin/provenant"))),
+            Status::Failed(Failure::MissingIdentity),
+            Status::Failed(Failure::StaleIdentity {
+                stamped: "0".repeat(64),
+                current: None,
+            }),
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: [ProviderStatus::default(); 6],
+                routing: Ok(vec![]),
+            },
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
+                routing: Ok(vec![]),
+            },
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
+                routing: Ok(vec![]),
+            },
+        ];
+        assert_eq!(statuses.len(), expected.len());
+        for (index, (status, (stdout, stderr, exit_code))) in
+            statuses.iter().zip(expected).enumerate()
+        {
+            assert_eq!(
+                render(status, index == 10, &[]),
+                CommandOutput {
+                    stdout,
+                    stderr,
+                    exit_code
+                }
+            );
+        }
+        let Some(expected): Option<(Vec<String>, bool)> = crate::oracle::python(
+            r#"
+import json,sys,importlib.util
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1])/'scripts'))
+spec=importlib.util.spec_from_file_location('install_oracle',Path(sys.argv[1])/'scripts/check-provenant-install.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
+"#,
+            &json!({"home":dir.path().join("home")}),
+        ) else {
+            return;
+        };
+        assert!(expected.1);
+        let output = render(
+            &Status::Installed {
+                command: "/bin/provenant".into(),
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
+                routing: Ok(vec![]),
+            },
+            false,
+            &[],
+        );
+        assert_eq!(
+            output.stdout.lines().skip(2).collect::<Vec<_>>(),
+            expected.0
+        );
+    }
 
     #[test]
     fn ownership_and_failures_have_stable_exit_and_streams() {
