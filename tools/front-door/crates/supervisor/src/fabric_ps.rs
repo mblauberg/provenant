@@ -7,16 +7,24 @@ use std::ffi::OsString;
 use std::path::Path;
 use thiserror::Error;
 
+/// Child error evidence, keeping normal exit and signal termination separate.
+/// The bounded spool can truncate stdout on overflow; exact Node maxBuffer
+/// failure bytes and a pipe-based hard cap remain unported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PsFailure {
+    pub code: Option<&'static str>,
+    pub status: Option<i32>,
+    pub signal: Option<&'static str>,
+    pub stdout: String,
+    pub stdout_bytes: u64,
+    pub stdout_truncated: bool,
+}
 #[derive(Debug, Error)]
 pub enum PsError {
     #[error("ps could not start or be observed")]
     Execution(#[from] BoundedError),
-    #[error("ps exited with status {returncode}")]
-    Exit { returncode: i32, stdout: String },
-    #[error("ps timed out")]
-    Timeout,
-    #[error("ps output exceeded 1048576 bytes")]
-    OutputLimit,
+    #[error("ps child failed: {0:?}")]
+    Child(PsFailure),
 }
 
 /// Paths are values so isolated installations and OS fixtures need no globals.
@@ -76,17 +84,24 @@ fn execute(
     options.merge_stderr = false;
     options.null_stdin = true;
     let result = run_bounded_limited(&command, options)?;
-    if result.timed_out {
-        return Err(PsError::Timeout);
-    }
-    if result.output_truncated {
-        return Err(PsError::OutputLimit);
-    }
-    if result.returncode != 0 {
-        return Err(PsError::Exit {
-            returncode: result.returncode,
+    let code = if result.timed_out {
+        Some("ETIMEDOUT")
+    } else if result.output_truncated {
+        Some("ENOBUFS")
+    } else {
+        None
+    };
+    if code.is_some() || result.returncode != 0 {
+        return Err(PsError::Child(PsFailure {
+            code,
+            status: (result.returncode >= 0).then_some(result.returncode),
+            signal: result
+                .terminating_signal()
+                .and_then(crate::sys::process::signal_name),
             stdout: result.output,
-        });
+            stdout_bytes: result.output_bytes,
+            stdout_truncated: result.output_truncated,
+        }));
     }
     Ok(result.output)
 }
@@ -168,7 +183,7 @@ mod tests {
         );
         let shim = script(temp.path(), "shim", "printf 'incorrect fallback'");
         assert!(
-            matches!(PsPrograms { system: &failed, shim: &shim }.output(&[], &[]), Err(PsError::Exit { returncode: 7, stdout }) if stdout == "failure")
+            matches!(PsPrograms { system: &failed, shim: &shim }.output(&[], &[]), Err(PsError::Child(PsFailure { status: Some(7), stdout, .. })) if stdout == "failure")
         );
         let missing = temp.path().join("missing");
         assert!(matches!(
@@ -177,7 +192,10 @@ mod tests {
                 shim: &failed
             }
             .output(&[], &[]),
-            Err(PsError::Exit { returncode: 7, .. })
+            Err(PsError::Child(PsFailure {
+                status: Some(7),
+                ..
+            }))
         ));
         let signal = script(temp.path(), "signal", "kill -TERM $$");
         assert!(matches!(
@@ -186,10 +204,11 @@ mod tests {
                 shim: &shim
             }
             .output(&[], &[]),
-            Err(PsError::Exit {
-                returncode: -15,
+            Err(PsError::Child(PsFailure {
+                status: None,
+                signal: Some("SIGTERM"),
                 ..
-            })
+            }))
         ));
     }
     #[test]
@@ -223,7 +242,10 @@ mod tests {
                 shim: &shim
             }
             .output(&[], &[]),
-            Err(PsError::OutputLimit)
+            Err(PsError::Child(PsFailure {
+                code: Some("ENOBUFS"),
+                ..
+            }))
         ));
     }
     #[test]
@@ -258,12 +280,56 @@ console.log(JSON.stringify(cases.map(args => {{
             .into_iter()
             .map(|args| match ps_output(&args, &env, &shim) {
                 Ok(output) => serde_json::json!({"ok": output}),
-                Err(PsError::Exit { returncode, stdout }) => {
-                    serde_json::json!({"status": returncode, "stdout": stdout})
+                Err(PsError::Child(failure)) => {
+                    serde_json::json!({"status": failure.status, "stdout": failure.stdout})
                 }
                 Err(error) => panic!("unexpected ps oracle error: {error}"),
             })
             .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+    #[test]
+    fn differential_signal_and_timeout_retain_node_child_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let fifo = temp.path().join("blocked-input");
+        let made = crate::bounded::run_bounded(
+            &["/usr/bin/mkfifo".into(), fifo.as_os_str().to_owned()],
+            crate::bounded::Options::new(temp.path(), 5.0),
+        )
+        .unwrap();
+        assert_eq!(made.returncode, 0);
+        let signal = script(temp.path(), "signal", "printf before; kill -TERM $$");
+        let command = crate::process_info::shell_join_os([
+            std::ffi::OsStr::new("/bin/cat"),
+            fifo.as_os_str(),
+        ]);
+        let timeout = script(
+            temp.path(),
+            "timeout",
+            &format!("printf before; exec {}", command.to_str().unwrap()),
+        );
+        let paths = serde_json::to_string(&[&signal, &timeout]).unwrap();
+        let js = format!(
+            r#"
+import {{ execFileSync }} from 'node:child_process';
+const results = {paths}.map(path => {{
+  try {{ return {{ok: execFileSync(path, [], {{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','ignore'],env:process.env}})}}; }}
+  catch (e) {{ return {{code:e.code || null,status:e.status,signal:e.signal,stdout:e.stdout}}; }}
+}});
+console.log(JSON.stringify(results));
+"#
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::node(&root, &js) else {
+            return;
+        };
+        let env = crate::test_support::environment();
+        let actual: Vec<_> = [signal, timeout].iter().map(|system| {
+            match (PsPrograms { system, shim: Path::new("/absent") }).output(&[], &env) {
+                Err(PsError::Child(failure)) => serde_json::json!({"code":failure.code,"status":failure.status,"signal":failure.signal,"stdout":failure.stdout}),
+                other => panic!("expected child failure, got {other:?}"),
+            }
+        }).collect();
         assert_eq!(serde_json::json!(actual), expected);
     }
 }
