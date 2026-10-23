@@ -1195,6 +1195,68 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
+## RP-CLI2-01: typed cleanup and PID integer bounds
+
+- Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
+- Units: `scripts/clean.py#interface`, `scripts/lane_safety_guard.py#unit-01`.
+  Source oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6` (unchanged through
+  `cffeb4a54b6a702a008dbfee92bef5177803e8f3`). Author route:
+  `codex/gpt-6.1-sol@high`.
+- Python accepts `18446744073709551616d` and the PID string
+  `18446744073709551616`. Rust returns typed `IntegerError::NumberOutOfRange`
+  instead of storing unbounded decimal strings or rounding through f64.
+  Accepted day values now remain u64. Hour durations retain Python's float
+  multiplication after the exact integer range check.
+- Python's separate 4300-digit conversion guard is preserved, including
+  leading zeros and Unicode decimal digits, as `IntegerError::DigitLimit`.
+  `4301` decimal digits fail in both sources; this is not an improvement
+  divergence. Tests cover both typed failure classes and the accepted u64 edge.
+
+## RP-CLI2-02: batch-1 compatibility repairs
+
+- Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
+- Wrapper assignment stripping now rejects embedded or trailing LF in the
+  value, matching Python's fullmatch `=.*`. Differential wrapper tests include
+  LF, CR and Unicode options.
+- Installation stale identity renders missing current sources as `None`;
+  `--strict` help starts with lowercase `fail on`. Eleven source scenarios
+  cover install failures, matching identity and strict provider warnings.
+- Sidecar non-string prompts use Python `None`/`True` representation for token
+  membership. Invalid-YAML diagnostics have a typed rendering branch. YAML
+  decoding itself remains unported; its diagnostic is an explicit owner input.
+- Invalid projection UTF-8 returns a typed decode error, preserving the file,
+  rather than being classified as filesystem I/O.
+- All CLI differential tests use one isolated, interpreter-selectable bounded
+  helper. Stale-checkout parity exercises the Rust Git collector on a real
+  fixture repository rather than manually constructing its expected snapshot.
+
+## RP-CLI2-03: incomplete Python path and hook codecs
+
+- Class: `library`; open and blocking completion/cut-over of the affected
+  interfaces. Same rulebook/oracle/route as RP-CLI2-01.
+- POSIX Python paths can contain surrogateescaped non-UTF-8 bytes. The current
+  cleanup record strings and install/stale output strings cannot represent
+  all of those values. `Path::display` is lossy and serde_json rejects lone
+  surrogate code points. Keep `clean.py#interface`,
+  `check-provenant-install.py#interface` and `lib/stale_checkout.py#interface`
+  partial; they are excluded from this PR's `Units:` and completion ledger.
+- Guard unit-02 also stays partial pending the raw hook JSON codec/main,
+  including lone-surrogate inputs. The complete unit-01 parser accepts Rust
+  Unicode shell text; no hook command has switched ownership.
+- Disposition: require the owning Python-compatible path/text/JSON boundary,
+  then add non-UTF-8/surrogate differentials before claiming these units.
+
+## RP-CLI2-04: retry boundary counterexamples
+
+- Class: `bug`; caught and fixed in the inert retry policy during this batch.
+- A consuming substitute for Python's zero-width `\b` matched
+  `npm error \nE503`, crossing the source's newline-bounded suffix. The policy
+  now checks token positions against an explicit line tail. Source/Rust
+  differentials include this counterexample and adjacent word characters.
+- Rust's derived Alphabetic property also includes combining characters such
+  as U+0345/U+05BF that Python `\w` excludes. Guard/retry boundaries now use
+  generated Python Unicode 16 alphanumeric ranges, with explicit cases in the
+  guard differential. No intended behaviour change remains.
 
 ## RP-core-2-01 — shared Python compatibility ownership and ISO repairs
 
@@ -1344,88 +1406,52 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
 
 
-### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
+## RP-CLI2-05: wrapper command boundaries and large literal PIDs
 
-- Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
-  rulebook v4. `process_info.processes()` consumes the `/proc` iterator outside
-  its open-error fallback. A later iteration OSError propagates to callers.
-- Rust used `ReadDir::flatten()`, silently converting an incomplete census to
-  success. It now preserves the underlying I/O error through the observation
-  decoder. A fixture with one readable PID followed by EACCES failed before
-  repair and passes afterwards; it runs on macOS as well as Linux.
-- No intentional source behavior change. The wider RP-1302 fallback error and
-  size-bound differences remain open; this does not complete the unit.
+- Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
+- The split wrapper search restarted its suffix match beyond command boundaries.
+  `sudo ls; echo pkill` and `sudo ls\necho pkill` now remain allowed, matching
+  Python's single regex. The suffix is anchored at both ends and checked for
+  each candidate name at a Python word boundary. Differential neighbours cover
+  semicolons, LF, pipes, ampersands, path prefixes and non-boundary names.
+- Supersedes RP-CLI2-01's PID bounds/digit-limit claims: those cleanup integer
+  limits do not apply to the repaired PID policy.
+- `99999999999999999999` is a nonzero literal PID in Python. Rust now checks
+  decimal digit values directly instead of parsing a u64. Differentials include
+  huge nonzero values and 4300-digit zero/nonzero ASCII and Unicode decimals.
+- Sidecar oracle tests probe PyYAML before importing the source: missing `yaml`
+  prints `skip:` and skips in optional mode, but fails when
+  `PROVENANT_PORT_DIFF_REQUIRED=1`. Required runs with PyYAML still check decoded
+  sidecar policy and the source's invalid-YAML diagnostics.
 
-### RP-SUP-PS-BUFFER: Fabric ps maxBuffer capture (open partial scope)
+## RP-CLI2-06: Python PID conversion digit-limit crash
 
-- Class: `library`; not accepted. Source/oracle baseline:
-  `7475ff01e437ec51c760b852516c21a5281cf9c6`, Node 24.21.0, rulebook v4.
-- Node `execFileSync` uses a pipe and exposes overflow-buffer bytes plus
-  `code`, `status`, `signal` and `stdout` on ENOBUFS. A 1,048,577-byte fixture
-  exposed status 0 and 1,048,577 captured bytes. The Rust utility runner uses
-  a file-backed spool, polls its size and retains a capped head/tail view.
-  It can overshoot the threshold on disk between polls and does not reproduce
-  Node's exact overflow stdout or associated termination observation.
-- Native review reproduced the mismatch and blocked a full claim for
-  `runtime/fabric/src/ps.mjs#unit-01`. Typed child errors now retain code,
-  exit status separately from signal, stdout size and truncation evidence;
-  signal/timeout fixtures compare directly against Node. This does not fix
-  the remaining maxBuffer mismatch. Signal-name mapping currently covers
-  common POSIX signals; platform-specific extensions also remain incomplete.
-- Disposition: keep the unit partial and absent from `ported.txt`/PR `Units:`.
-  No command uses the crate. Completing the unit requires a bounded pipe
-  adapter and exact overflow/failure differentials before cut-over; no
-  behavior change is accepted here.
+- Class: `python-bug`; explicit Rust improvement. Same rulebook/oracle/route as
+  RP-CLI2-01; unit `scripts/lane_safety_guard.py#unit-01`.
+- Under the oracle's default 4300-digit limit, Python's `int(target)` raises
+  `ValueError` for 4301-digit decimal PIDs, including all zeros and Unicode
+  decimals. The exception escapes the hook; Python makes no allow/deny decision.
+- Rust uses a decimal zero check with no conversion or digit limit. It allows
+  every nonzero literal PID and denies every all-zero PID with the normal
+  process-group reason, including values above 4300 digits. This decision does
+  not validate whether the operating system has a corresponding PID.
+- Evidence: `python_digit_limit_crash_has_an_explicit_safe_decision` checks both
+  source exceptions against Rust's explicit decisions; the adjacent regression
+  checks arbitrarily long and mixed Unicode zero/nonzero inputs.
 
-### RP-SUP-FS-ERRNO: portable filesystem error contract (fixed)
+## RP-CLI2-07: shared Python helper migration and cleanup context drift
 
-- Class: `bug`; ungraphed supervisor filesystem foundation, PR #1328 repair.
-  Author route: `codex/gpt-6.1-sol@high`. Main baseline:
-  `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
-- Reproducer: no-follow directory open on a final symlink reports ENOTDIR on
-  Linux and ELOOP on macOS. The previous tests asserted only failure, leaving
-  consumers unable to distinguish links from ordinary non-directories.
-- Fixed contract: classify ENOTDIR/ELOOP with no-follow fstatat in the syscall
-  layer; a positively observed final symlink returns typed `FsError::Symlink`
-  and canonical ELOOP. Ordinary non-directories retain ENOTDIR. `io::Error`
-  conversion preserves the resulting errno/kind; typed errors retain complete
-  anchor-relative diagnostics. Observed anchor-device crossings report EXDEV.
-- Evidence: `directory_symlinks_have_a_portable_typed_errno_and_nested_context`,
-  `typed_error_predicates_and_io_conversion_preserve_errno_and_kind`, and
-  tightened final-link/anchor fixtures assert variants and errno. Publication
-  and regular-file flag regressions cover the same repair. Required local
-  supervisor tests pass on macOS; Linux execution remains a CI gate because
-  the cross-compilation target is not installed.
-- Scope: public filesystem traits and durable publication helpers now support
-  adapters for the pending confinement/records/config/core contracts. Consumers
-  remain unchanged; no graph unit or full conformance claim is added. README
-  maps the remaining pending run and UUID contracts explicitly.
-
-### RP-FS3-004 extension: dynamic terminal rows
-
-- The deliberate ECMAScript Number exception also covers `Number` coercion of
-  legacy terminal attempts, SQLite binding of those numbers and comparisons
-  against observation values. Fractional and infinite attempts are preserved;
-  NaN binds NULL and fails the source's NOT NULL constraint. Integer wire
-  fields remain serde integers. The legacy-row differential compares failures,
-  absent/null fallbacks, arrays, booleans, radix strings, decimal/scientific
-  String spellings, fractional cursor reads and all database rows.
-
-### RP-FS3-005 deterministic-clock refinement
-
-- The final implementation uses the cumulative poll budget as an iteration
-  ceiling (at most 3,600,000 one-millisecond polls). It does not use a real-time
-  deadline to shorten virtual-clock fixtures. This still bounds frozen or
-  backwards clocks and preserves deterministic finite-clock results.
-
-## RP-FS3-006: safe diagnostic copies and filesystem diagnostics (library, partial)
-
-- Unit-04 adopts supervisor's safe filesystem API from main at `7021182d`.
-  Stat errors for common errno values retain Node wording; snapshot version
-  checks exclude ctime and retries/cleanup match source policy.
-- The API can stat a final symlink with follow=true but its regular-file
-  read-open always uses O_NOFOLLOW. TypeScript copyFileSync follows the final
-  symlink. Unit-04 stays partial until supervisor exposes an explicitly
-  link-following regular-file read. Source/binding-only copy errors (including
-  destination-path text) also remain a cut-over gap. This is not an approved
-  symlink refusal or a claim of full error-text parity.
+- Class: `bug`; fixed in Rust. Same rulebook/author route as RP-CLI2-01.
+- After merging main through `a05bcb46` (#1329), CLI depends on the workspace's
+  `provenant-core` and uses `py::python_repr`, `py::python_strip`, and
+  `py::python_str` (including shared value repr). The equivalent pending bodies
+  and local printable table and its generator section were removed. The existing repr/strip
+  differential now exercises the shared exports.
+- Pending decimal/digit conversion, splitlines and word-character helpers keep
+  their owner markers because `provenant_core::py` has no equivalent exports.
+  The local Unicode 16 alphanumeric table remains for Python word boundaries.
+- Merging main also exposed `scripts/clean.py` context drift from `f0661f88`
+  (#1323). The existing exact saved/public-record differential failed because
+  Rust dropped `prune_merged` and `since_revision`; `PlanContext` now retains
+  both source fields. This updates only the retained shape, not cleanup policy
+  or process/deletion ownership.

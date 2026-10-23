@@ -426,6 +426,8 @@ name = "provenant-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "provenant-core",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
