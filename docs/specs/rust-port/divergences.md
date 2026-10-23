@@ -1524,3 +1524,15 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+### RP-WF2-006 repair evidence and claim correction
+
+Independent repair review found two further bugs, now fixed with raw-wire
+Python comparisons: receipt warning dictionaries and nested reaped/capture
+objects retain insertion order; `signal: -9223372036854775808` negates to the
+valid unsigned integer 9223372036854775808. The checked ordered decoder also
+applies the shared owner's integer `-0` normalisation without sorting objects.
+The review-panel and authority-mapping unit claims hold. All three cycle
+interfaces are deliberately partial: observer.json restoration/replay,
+supervisor return codes 64 and 75, and the full dynamic observer record domain
+are not yet proved exact. Their IDs are removed from the completion ledger.

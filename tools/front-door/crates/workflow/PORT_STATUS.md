@@ -2,7 +2,7 @@
 
 Rulebook: PORTING.md version 4. Batch 2 source/oracle revision:
 `600dec09bcda3b6a86272e391420e89d38777953`. The assigned Python sources are
-unchanged through merged main `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
+unchanged through merged main `7021182d535f6c730c29713e77d5bca76893fd06`.
 Batch 1 oracle remains `e897b10d58b27a46544969594eed08a5ed64c72c`.
 These are inert libraries: no command switches owner, no Python or TypeScript
 source is removed, and no stable install or provider configuration is used.
@@ -15,14 +15,14 @@ Only these IDs are appended to `ported.txt` and listed in the PR's `Units:`.
 |---|---|
 | `skills/_shared/review_panel.py#unit-01` | Panel specifications, stable slot resolution, override validation, registry extensions, shortfalls, council/breadth reducers and exact policy errors. |
 | `skills/deliver/scripts/authority_mapping.py#unit-02` | Containment across every mapped authority dimension, denials, budgets and expiry, preserving short-circuit precedence. Malformed mapped records return typed errors. |
-| `skills/orchestrate/scripts/lane_exit.py#interface` | Actual receipt and process evidence shapes, including missing versus null members and bool/count or row forms. No process or filesystem effects. |
-| `skills/orchestrate/scripts/lane_launch.py#interface` | Actual launch specification, environment object, optional nonempty stdin path, progress and notification shapes. No launch effects. |
-| `skills/orchestrate/scripts/provider_observer.py#interface` | Plan, line, stream, reply and summary contracts; exact integers, required nullable fields, insertion-ordered semantic failures, literal terminal true and permitted stop events. |
 
 ## Batch 2 partial units
 
 | Unit | Implemented part and remaining work |
 |---|---|
+| `skills/orchestrate/scripts/lane_exit.py#interface` | Checked process and supervisor evidence, open legacy receipt collections and ordered translation are ported. The `observer.json` input accepted by `settle_observer`, malformed restoration/replay paths and complete error domain lack exact contract evidence. |
+| `skills/orchestrate/scripts/lane_launch.py#interface` | Ordered string environment pairs, argv, positive capture limits, ceil/finite-positive durations, batch identity validation and notifications are ported. Full supervisor result protocol, including 64 unsupported and 75 stdout fallback, lacks differential evidence. |
+| `skills/orchestrate/scripts/provider_observer.py#interface` | Ordered retained summaries and failures, checked u64 token fields and nullable fields are ported. Stderr/retry/large-integer wires have differentials, but all dynamic semantic values, non-finite JSON and lone surrogates are not proved exact. |
 | `skills/_shared/portable_workflow.py#unit-01` | Batch 1 identity, digest, context and finite scalar JSON effects remain. Non-finite numbers, lone surrogates and CLI parsing remain (RP-1003). |
 | `skills/_shared/review_terminal.py#unit-01` | Batch 1 validation and decisions remain. Generic Python JSON and registry/YAML integration remain (RP-1003). |
 | `skills/autopilot/scripts/validate_idle_pause.py#unit-01` | Text fields, heartbeat fallback, queue escaping and fail-closed pause policy are ported. Source reader error aggregation/rendering and CLI remain. |
@@ -51,25 +51,25 @@ Only these IDs are appended to `ported.txt` and listed in the PR's `Units:`.
 
 ## Shared owners and pending copies
 
-Main now exposes `provenant-core::py` and `provenant_records::checked_json`.
-The root manifest has no internal workspace dependency aliases, however, and
-this lane may only add `{ workspace = true }` dependencies to its own manifest.
-The chair has been notified of that wiring gap. Until aliases are available,
-marked private copies remain; no path dependency or root edit is introduced.
+After #1329, workflow depends on `provenant-core` and `provenant-records`
+with `{ workspace = true }`. Python strip, whitespace, repr, exact JSON equality
+and checked JSON decoding use those owners; their local copies are deleted.
 
-- `provenant-core`: Python strip/whitespace, repr and Unicode classification,
-  decimal/digit and word predicates, splitlines and exact JSON equality.
-  The word predicate table is CPython 3.14.3 / Unicode 16.0.0; core does not yet
-  expose that predicate. No local float-second timestamp conversion is added.
-- `provenant-records`: checked finite JSON decoder (copied from main), Python
-  JSON encoder, ordered object/value containers and required-nullable serde hook.
+Retained marked copies have no equivalent API on this main revision:
+
+- `provenant-core`: decimal/digit and word predicates, splitlines. The word
+  predicate table is CPython 3.14.3 / Unicode 16.0.0.
+- `provenant-records`: Python JSON encoding, ordered maps/values/typed retained
+  records, required-nullable serde hook, and an order-preserving adapter that
+  applies the shared checked decoder's integer normalisation.
 - `provenant-config`: temporary Python object reader.
 - `provenant-confinement`: `OwnedFileError` for existing contained path policy.
 
 Custody unit 01 remains partial from batch 1: only `contained_regular_path`.
-The supervisor still has no safe descriptor-relative open/mkdir/no-replace
-rename/unlink/directory-sync/bounded-read API. Path checks are not race-free
-open authority. No local unsafe or pathname-based substitute is introduced.
+Main now has supervisor safe filesystem traits and implementations (#1328),
+but workflow has not integrated them through its permitted confinement owner.
+Path checks do not grant race-free open authority. No local unsafe substitute
+is introduced, and this repair does not claim custody effects complete.
 
 ## Retained batch 1 scope
 
@@ -95,13 +95,23 @@ its name; Linux/macOS integration coverage remains outstanding for that case.
 Native adversarial source review and repair-delta review found boundary and
 notification defects, now fixed with regressions; its remaining raw route JSON
 finding is retained as partial. No reviewer model identity is inferred.
-RP-WF2-001 through RP-WF2-004 record remaining gaps and repairs.
+RP-WF2-001 through RP-WF2-007 record remaining gaps and repairs.
+Independent repair review additionally caught collection-order loss and the
+i64::MIN signal-negation edge; raw-wire regressions now cover both, plus -0.
 
 `cargo fmt --all`, `cargo clippy -p provenant-workflow --all-targets -- -D warnings`
 and `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-workflow` are the
-required local checks. The latest required run has 52 passing Rust tests, no
+required local checks. The latest required run has 63 passing Rust tests, no
 failures or ignored tests, and zero doctests. PR CI remains the merge gate.
 J1 CLI/help/environment, J2 schema/canonical-byte mutants, J3 MCP transcripts,
 platform conformance and catalogue drift remain cut-over/integration gates.
 The launch and supervisor draft schemas differ from actual source records
 (RP-WF2-002); those schema gaps are not silently treated as cut-over passes.
+
+## Review repair disposition
+
+The confirmed review-panel and mapped-authority units remain complete. All
+three cycle interfaces are deliberately removed from `ported.txt` and the PR's
+`Units:` line until their entire source contracts have differential evidence.
+No runtime owner changes and no auto-merge is armed. Each numbered repair has
+a separate commit; the PR body maps the repairs and review follow-ups.
