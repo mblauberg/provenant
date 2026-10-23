@@ -156,21 +156,44 @@ def summary(quota, value, worst, spent, drawing, rate):
             + (f', about {rate:,.0f}/h' if rate else ''))
 
 
+def runway(quota, value, extras):
+    """Separate reserve resources from the allowance estimate; never infer a credit conversion rate."""
+    parts = []
+    credit = quota['credit_draw'](value, True)
+    if credit:
+        rate = quota['burn_rate'](value, credit)
+        if credit['unlimited']:
+            parts.append('then unlimited credits')
+        elif rate:
+            floor = quota['number'](quota['setting']('credit_floor')) or 0
+            seconds = max(0, credit['balance'] - floor) / rate * 3600
+            parts.append(f"then about {quota['duration'](seconds)} on credits at the measured credit burn rate")
+        else:
+            parts.append(f"then {credit_text(quota, credit)}; credit runway unknown")
+    if extras.get('resets'):
+        parts.append(reset_text(quota, extras['resets']))
+    return '; '.join(parts)
+
+
 def describe(quota, value, banked, now, entries=None, alert=None):
     labels, name = window_labels(quota), value.get('provider')
     rows = []
+    extras = optional_credits(quota, value, banked)
+    reserves = runway(quota, value, extras)
     for row in value.get('windows') or []:
         pool = pool_of(quota, name, row)
         row = {**row, 'pace': quota['pace'](row, now), **({'pool': pool, 'pool_label': f'{title_case(pool)} models'} if pool else {}),
                **({'reset_passed': True} if quota['reset_passed'](row, now) else {})}
+        if row['pace']['state'] == 'ahead_of_pace' and reserves:
+            row['pace']['summary'] += '; ' + reserves
         rows.append({**row, 'label': window_label(row, labels)})
     # A restated window would show twice and count twice; the report keeps the named one.
     rows = [row for row in rows if not repeats(quota, row, rows)]
-    # A window whose reset has passed is history: it never makes the account exhausted or binds it, unless the
-    # provider still refuses ordinary use, which the next reading settles.
-    refused = (value.get('allowance') or {}).get('ordinary_usage_allowed') is False
-    worst = quota['binding']([row for row in rows if not row.get('reset_passed')]) or (quota['binding'](rows) if refused else None)
-    spent = quota['allowance_spent'](value, worst)
+    # A refusal belongs to its reading's windows; after a reset it needs fresh evidence.
+    stale = any(row.get('reset_passed') and quota['sets_state'](row) for row in rows)
+    allowance = {**value, 'allowance': {}} if stale else value
+    worst = quota['binding']([row for row in rows if not row.get('reset_passed')])
+    spent = quota['allowance_spent'](allowance, worst)
     drawing = quota['credit_draw'](value, spent)
     rate = quota['burn_rate'](value, drawing) if drawing else None
     unreported = list(value.get('unreported') or [])
@@ -178,12 +201,17 @@ def describe(quota, value, banked, now, entries=None, alert=None):
     longest = max(dated, key=lambda row: row['window_minutes'], default=None)
     signed_out = value.get('status') == 'signed_out'
     state = 'signed_out' if signed_out else 'credit_only' if drawing else 'exhausted' if spent else \
-        worst['pace']['state'] if worst else 'unreported'
+        worst['pace']['state'] if worst else 'unknown' if stale else 'unreported'
     shown = display(quota, [row for row in rows if row.get('pool') in (None, (worst or {}).get('pool'))], now,
                     alert_percent(quota) if alert is None else alert)
     # A signed-out account's return is history too: "back since" once its reset has passed.
-    back = quota['binding'](rows) if signed_out else worst if spent else None
-    back = back if back and back['pace']['state'] == 'exhausted' else None
+    history = [{**row, 'pace': {**row['pace'], 'state': 'exhausted'}}
+               if row['used_percent'] >= 100 else row for row in rows] if signed_out else []
+    back = quota['binding'](history) if signed_out else worst if spent else None
+    back = back if back and back['used_percent'] >= 100 else None
+    detail = summary(quota, value, worst, spent, drawing, rate)
+    if stale:
+        detail = 'stale; window reset since reading; ' + (detail if worst else 'awaiting a fresh reading')
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
         'provider_name': provider_name(name),
@@ -191,8 +219,9 @@ def describe(quota, value, banked, now, entries=None, alert=None):
         'plan_label': plan_label(value.get('plan')), 'display_window': shown['name'] if shown else None,
         'back_at': back.get('reset_at') if back else None,
         'state': state,
+        'status': 'stale' if stale and not signed_out else value.get('status'),
         'summary': f"signed out; last read {value.get('observed_at') or 'never'}" if signed_out else
-                   summary(quota, value, worst, spent, drawing, rate),
+                   detail,
         'windows': rows, 'unreported': unreported,
         'coverage_note': f"{', '.join(unreported)} not reported by {value.get('provider')}; missing does not mean 0%"
                          if unreported else '',
@@ -200,7 +229,7 @@ def describe(quota, value, banked, now, entries=None, alert=None):
         'use_it_or_lose_it': {'window': longest['name'], 'reset_at': longest['reset_at'],
                               'unused_percent': longest['pace']['headroom_percent'],
                               'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
-                             if longest else None} | optional_credits(quota, value, banked) | (
+                             if longest else None} | extras | (
         {'drawing_credits': True, 'credit_burn_per_hour': rate} if drawing else {}) | (
         {'schedule': value['schedule']} if isinstance(value.get('schedule'), dict) else {})
 

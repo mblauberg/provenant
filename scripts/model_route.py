@@ -2428,7 +2428,7 @@ def _main(argv: list[str] | None = None) -> int:
                 if quota:
                     pick["quota"] = {key: quota[key] for key in
                                       ("account", "state", "summary", "observed_at") if key in quota}
-                    if quota.get("state") in ("deficit", "credit_only"):
+                    if quota.get("state") in ("ahead_of_pace", "deficit", "credit_only"):
                         pick_result.setdefault("warnings", []).append(
                             f"{pick['adapter']} quota: {quota['summary']}"
                         )

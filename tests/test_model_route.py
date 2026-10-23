@@ -4901,7 +4901,8 @@ def test_legwork_synonym_resolves_through_the_configured_route_pool(tmp_path):
 
 
 @pytest.mark.parametrize("tier,route", [("junior", "junior"), ("legwork", "junior")])
-def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkeypatch, capsys):
+@pytest.mark.parametrize("state", ["ahead_of_pace", "deficit", "credit_only"])
+def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, state, monkeypatch, capsys):
     router = load_router()
     calls = []
 
@@ -4913,7 +4914,7 @@ def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkey
 
     monkeypatch.setattr(router, "route_pick", route_pick)
     monkeypatch.setattr(router, "_quota_states", lambda: {"codex": {
-        "account": "work", "state": "deficit", "summary": "window over pace", "observed_at": "now"
+        "account": "work", "state": state, "summary": "window over pace", "observed_at": "now"
     }})
     assert router.main([tier]) == 0
     result = json.loads(capsys.readouterr().out)
