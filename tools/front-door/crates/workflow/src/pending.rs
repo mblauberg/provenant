@@ -360,3 +360,16 @@ pub(crate) fn equals_one(value: &serde_json::Value) -> bool {
         _ => false,
     }
 }
+
+// port: belongs in provenant-core
+pub(crate) fn splitlines(text: &str) -> Vec<&str> {
+    let mut result=Vec::new(); let mut start=0; let mut chars=text.char_indices().peekable();
+    while let Some((i,c))=chars.next() {
+        if matches!(c,'\n'|'\r'|'\u{b}'|'\u{c}'|'\u{1c}'|'\u{1d}'|'\u{1e}'|'\u{85}'|'\u{2028}'|'\u{2029}') {
+            result.push(&text[start..i]); start=i+c.len_utf8();
+            if c=='\r' && chars.peek().is_some_and(|(_,c)|*c=='\n') {chars.next();start+=1;}
+        }
+    }
+    if start<text.len() {result.push(&text[start..]);}
+    result
+}

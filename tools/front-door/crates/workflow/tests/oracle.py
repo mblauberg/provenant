@@ -8,6 +8,8 @@ root, unit = Path(sys.argv[1]), sys.argv[2]
 source = root / ("skills/autopilot/scripts/bootstrap-autopilot.py" if unit == "bootstrap" else f"skills/_shared/{unit}.py")
 if unit in {"git_evidence_packet", "git_evidence_header"}:
     source = root / "skills/orchestrate/scripts/git_evidence_packet.py"
+if unit == "idle_pause":
+    source = root / "skills/autopilot/scripts/validate_idle_pause.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -23,7 +25,15 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "git_evidence_packet":
+    if unit == "idle_pause":
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "STATE.md"
+            queue = Path(directory) / "QUEUE.md"
+            state.write_text(case["text"])
+            queue.write_text(case["queue"])
+            results.append(module.validate(state, queue))
+    elif unit == "git_evidence_packet":
         scanner = module.PacketScanner(ValueError, case["limit"], validate_on_feed=case["validate"])
         try:
             for chunk in case["chunks"]:
