@@ -23,8 +23,9 @@ session checkpoint is only a bounded resume aid.
 
 ## Retention
 
-Use `provenant clean` to inspect the available retention plan. Apply only the
-exact paths covered by explicit authority. Never delete unknown, user-owned,
+Run scratch is settled by the run guardian; prune merged worktrees with
+`provenant worktree remove --merged`. Remove only the exact paths covered by
+explicit authority. Never delete unknown, user-owned,
 pre-existing, or old-root state, and do not treat a temporary path as disposable
 without proving its ownership. A failed or unavailable review leg stays visible
 with its reason and evidence pointer.

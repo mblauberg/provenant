@@ -48,9 +48,9 @@ tracker that owns it. External tracker changes need their own authority. A
 session handoff should link to evidence and state what remains; it should not
 copy the project record.
 
-When context or run artifacts need retention review, use `provenant clean` to
-inspect the proposed plan. Remove only paths that are in scope and explicitly
-authorised; never delete unknown, user-owned, or pre-existing files. Do not
+Run scratch is settled by the run guardian, and merged worktrees are pruned
+with `provenant worktree remove --merged`. Remove only paths that are in scope
+and explicitly authorised; never delete unknown, user-owned, or pre-existing files. Do not
 migrate old state roots as part of a fresh session.
 
 After changed work, run the checks assigned to this role or cite the owning
