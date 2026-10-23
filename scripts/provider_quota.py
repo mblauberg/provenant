@@ -652,13 +652,40 @@ def claude_account_exhausted(value, now):
                for row in (value or {}).get('windows', []))
 
 
-def choose_claude_account(snapshots, now):
-    """Use cached windows: usable allowance first, then unknown readings.
+def allowance_runway_covered(value, window, budget, now, banked=None):
+    """Whether allowance and usable reserves cover the estimate through the natural reset."""
+    if budget.get('will_last_to_reset') is True:
+        return True
+    reset, runs_out = parse_time(window.get('reset_at')), parse_time(budget.get('runs_out_at'))
+    headroom = budget.get('headroom_percent') or 0
+    if not reset or not runs_out or runs_out <= now or not headroom:
+        return False
+    counted = value.get('credits') or banked or {}
+    resets = normalise_resets(value.get('resets')) or normalise_resets({'available': counted.get('reset_credits')})
+    extra = (runs_out - now).total_seconds() * 100 / headroom * (resets['available'] if resets else 0)
+    gap = (reset - runs_out).total_seconds() - extra
+    if gap <= 0:
+        return True
+    credit = credit_draw(value, True)
+    if not credit or (parse_time(credit.get('expires_at')) or reset) < reset:
+        return False
+    if credit['unlimited']:
+        return True
+    drawing = credit_draw(value, allowance_spent(value, {'pace': budget}))
+    rate = burn_rate(value, credit) if drawing else None
+    floor = number(setting('credit_floor')) or 0
+    return bool(rate and (credit['balance'] - floor) / rate * 3600 >= gap)
 
-    Exhausted accounts cannot launch. Spend projected weekly waste first among
-    healthy accounts, preferring Pro on ties, then use labels for stable ordering.
+
+def choose_claude_account(snapshots, now):
+    """Prefer covered weekly runway, then unknown readings, then the smallest shortage.
+
+    Exhausted accounts cannot launch. Among covered accounts, spend projected
+    weekly waste first, then prefer Pro, then labels. Shortages sort by pace delta,
+    then labels; unknown readings sort by labels.
     """
     ranked = []
+    banked = credits()
     for label, value in snapshots.items():
         windows = {row.get('name'): row for row in (value or {}).get('windows', [])}
         short, weekly = windows.get('five_hour'), windows.get('seven_day')
@@ -673,9 +700,11 @@ def choose_claude_account(snapshots, now):
         budget = pace(weekly, now)
         if budget['state'] in ('unknown', 'unreported'):
             score = (1, 0, 0, label)
+        elif budget.get('will_last_to_reset') is False and not allowance_runway_covered(
+                value, weekly, budget, now, banked.get(('claude', label, telemetry_host()))):
+            score = (2, max(0, budget.get('delta_percent') or 0), 0, label)
         else:
-            score = (0, -budget.get('expiring_headroom_percent', 0), max(0, budget.get('delta_percent') or 0),
-                     value.get('plan') != 'pro', label)
+            score = (0, -budget.get('expiring_headroom_percent', 0), value.get('plan') != 'pro', label)
         ranked.append((score, label))
     if snapshots and not ranked:
         raise ClaudeAccountsExhaustedError('claude_accounts_exhausted: all Claude accounts have an exhausted window')
@@ -1056,11 +1085,11 @@ def pace(window, now):
               'will_last_to_reset': None, 'runs_out_at': None, 'headroom_percent': round(100 - actual, 1),
               'expiring_headroom_percent': 0, 'summary': ''}
     remaining = (reset - now).total_seconds() if reset else None
-    if remaining is not None and remaining <= 0:
-        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if actual >= 100:
         return {**result, 'state': 'exhausted', 'will_last_to_reset': False, 'runs_out_at': iso(now),
                 'summary': 'exhausted' + (f'; resets in {duration(remaining)}' if remaining and remaining > 0 else '')}
+    if remaining is not None and remaining <= 0:
+        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if actual == 0 and (reset is None or remaining <= 0 or
                         minutes and remaining > minutes * 60 + CLOCK_SKEW_SECONDS):
         return {**result, 'state': 'not_started', 'summary': 'window starts on first use'}
@@ -1368,12 +1397,16 @@ def route_states(now=None, *, selected_accounts=None):
         banked = credits().get((name, label, telemetry_host()))
         row = quota_display.describe(globals(), value, banked, now)
         current = [window for window in row['windows'] if not window.get('reset_passed')]
+        worst = binding(current)
+        headroom = bool(worst and (worst['pace'].get('will_last_to_reset') is True
+                                  or worst['used_percent'] < NEAR_EXHAUSTED))
         exhausted = [window['reset_at'] for window in current
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
-        if row['state'] == 'exhausted' and not exhausted:
+        if row['state'] == 'exhausted' and (not exhausted or
+                all(exhausted) and max(parse_time(reset) for reset in exhausted) <= now):
             exhausted = [refused_until(binding(current) or binding(row['windows']), value, now)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'covers': list(getattr(module, 'COVERS', ())),
-                        'account': label, 'host': telemetry_host(), 'state': row['state'],
+                        'account': label, 'host': telemetry_host(), 'state': row['state'], 'has_headroom': headroom,
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
                         # Pools pick a last-resort adapter only when nothing with allowance qualifies.
@@ -1399,7 +1432,8 @@ def apply_to_cooldowns(records, now=None, *, selected_accounts=None, include_exh
         # An account drawing on credits adds no cooldown and clears only the ones quota set. A real
         # refusal stays until it expires or a reading shows allowance again: credits may be switched off.
         drawing = state['state'] == 'credit_only'
-        if observed and (drawing or state['state'] in ('ahead_of_pace', 'reserve', 'on_pace', 'early', 'not_started')):
+        if observed and (drawing or state['has_headroom'] and
+                         state['state'] in ('ahead_of_pace', 'reserve', 'on_pace', 'early', 'not_started')):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
                 if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')

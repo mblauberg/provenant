@@ -559,9 +559,9 @@ All of it is additive to `provenant.quota.report.v1`.
   first pool's return.
 - `display_window` names the window to show: an exhausted one; else one at or
   above `quota.display.short_window_alert_percent` (default 90, echoed in the
-  report's `display`); else the longest. A window whose reset has passed
-  carries `reset_passed: true` and never shows as current use; the table shows
-  `-` and "reset since".
+  report's `display`); else the longest. A window whose reset passed after
+  `observed_at` carries `reset_passed: true` and never shows as current use;
+  the table shows `-` and "reset since".
 - `headline` names the account the menu bar shows, set by
   `quota.menubar.headline`: `recent` (default), the usable account with the
   latest local activity, or the highest priority without any; `worst`, the
@@ -643,23 +643,27 @@ configured accounts by priority and reset proximity as
 placement advice; it never switches credentials. An exhausted selected account
 blocks that adapter until the latest exhausted window resets. A newer provider
 reading with a reset date updates that account and host's adapter cooldown. Exhaustion without a
-reset date preserves existing usage cooldowns. Ahead-of-pace, reserve, on-pace, early and
-not-started readings clear older contradictory usage cooldowns in the same
-account and host; unknown readings
-preserve them. Short-term `rate_limited` cooldowns remain.
+reset date preserves existing usage cooldowns. Ahead-of-pace, reserve, on-pace,
+early and not-started readings clear older contradictory usage cooldowns in the
+same account and host only when allowance lasts until reset or use is below 95%.
+Unknown readings preserve them. Short-term `rate_limited` cooldowns remain.
 Usage above even pace with allowance remaining is `ahead_of_pace`, not a shortage.
 The summary estimates how long the allowance lasts at the observed rate, then
-includes usable credits and banked resets. Credit hours require a measured credit
-burn rate; without one, the balance is shown with `credit runway unknown`.
-Banked resets are advice only; agents never redeem them. Pace does not lower
-routing weights or put an account behind an unknown cache. Exhaustion without
-usable credits still blocks routing, and `credit_only` keeps its policy below.
+includes usable credits and banked resets when allowance would run out first.
+Credit hours require a measured burn rate while credits are being drawn;
+otherwise, the balance is shown with `credit runway unknown`. Banked resets are
+advice only; agents never redeem them. Pace does not lower routing weights.
+Account selection ranks a known weekly shortage below an unknown cache unless
+usable reserves cover the estimated gap to reset. Exhaustion without usable
+credits still blocks routing, and `credit_only` keeps its policy below.
 Readers retain `deficit` for old receipts; new readings do not emit it.
 
-A window whose `reset_at` has passed is history, including a provider refusal
-cached with that reading. The report marks it stale and awaits a fresh reading;
-it never claims that expired allowance is spent or drawing on credits. Other
-current windows still bind.
+A window is stale only when `observed_at < reset_at <= now`: its reset passed
+after the reading. A fresh reading with a past reset remains evidence of usage
+and refusal. A cached refusal expires with its named window, or, when no window
+is named, after every reported window has reset and none is unreported. Spend
+caps and refusals for unreported windows remain. Other current windows still
+bind.
 
 An account whose allowance is spent can stay usable on credits. The allowance is
 spent when a window is exhausted or the provider reports `ordinary_usage_allowed:

@@ -134,7 +134,7 @@ def test_the_alert_threshold_is_a_quota_setting(quota, tmp_path):
 
 def test_a_window_whose_reset_passed_is_never_shown_as_current(quota):
     claude = row(quota, value(quota, 'claude', 'anese', [window(95, 300, timedelta(minutes=-5), 'five_hour'),
-                                                          window(30, WEEK, timedelta(days=2))]))
+                                                          window(30, WEEK, timedelta(days=2))], observed=NOW - timedelta(minutes=10)))
     passed = next(item for item in claude['windows'] if item['name'] == 'five_hour')
     assert passed['reset_passed'] is True and claude['display_window'] == 'seven_day'
     only = row(quota, value(quota, 'claude', 'anese', [window(40, WEEK, timedelta(minutes=-5))]))
@@ -379,7 +379,7 @@ def test_local_activity_never_credits_a_signed_out_account(quota, monkeypatch, t
 
 def test_an_expired_exhausted_window_never_makes_the_account_exhausted(quota):
     reading = value(quota, 'claude', 'anese', [window(100, WEEK, timedelta(hours=-1)),
-                                                window(20, 300, timedelta(hours=2), 'five_hour')])
+                                                window(20, 300, timedelta(hours=2), 'five_hour')], observed=NOW - timedelta(hours=2))
     report = quota_display.report(vars(quota), [reading], NOW, activity={})
     claude = report['accounts'][0]
     assert claude['state'] != 'exhausted' and claude['back_at'] is None
@@ -477,7 +477,8 @@ def test_post_reset_burst_summary_includes_credit_and_banked_reset_runway(quota,
     assert account['state'] == 'ahead_of_pace'
     summary = account['summary']
     assert 'ahead of pace; allowance lasts about 18h' in summary
-    assert ('then about 26h on credits' if measured else 'credit runway unknown') in summary
+    assert 'credit runway unknown' in summary
+    assert '26h on credits' not in summary
     assert '1 banked reset' in summary
     assert 'deficit' not in summary and 'runs out' not in summary
     assert account['windows'][0]['pace']['summary'] in summary
@@ -491,7 +492,7 @@ def test_pre_reset_refusal_is_stale_and_never_claims_allowance_spent(quota, rese
         windows.append(window(20, 300, timedelta(hours=2), 'secondary'))
     reading = value(quota, 'codex', 'default', windows, observed=NOW - timedelta(hours=2),
                     usage_credits=[{'balance': 26000, 'unit': 'credits'}],
-                    allowance={'ordinary_usage_allowed': False})
+                    allowance={'ordinary_usage_allowed': False, 'limit_reached_type': 'primary'})
     account = row(quota, reading)
     assert account['status'] == 'stale'
     assert account['state'] not in ('credit_only', 'exhausted')
@@ -532,3 +533,54 @@ def test_menu_bar_projection_names_allowance_and_keeps_reserve_runway(quota, tmp
     if not legacy:
         assert pace['summary'].lower() in result.stdout.lower()
         assert '26,000 credits' in result.stdout and '1 banked reset' in result.stdout
+
+
+@pytest.mark.parametrize('used', [60, 100])
+@pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
+def test_fresh_post_reset_refusal_remains_exhausted(quota, used, reset_in):
+    reading = value(quota, 'codex', 'default', [window(used, WEEK, reset_in, 'primary')],
+                    allowance={'ordinary_usage_allowed': False})
+    account = row(quota, reading)
+    assert account['state'] == 'exhausted'
+    assert account['status'] == 'ok'
+    assert 'stale' not in account['summary']
+
+
+@pytest.mark.parametrize('reached,all_reset,spend_cap,unreported,exhausted', [
+    ('primary', False, False, [], False),
+    ('primary', False, False, ['unrelated_window'], False),
+    ('secondary', False, False, [], True),
+    ('unreported_window', True, False, ['unreported_window'], True),
+    (None, False, False, [], True),
+    (None, True, False, [], False),
+    (None, True, False, ['missing'], True),
+    ('primary', True, True, [], True),
+    ('workspace_member_credits_depleted', True, False, [], True),
+])
+def test_reset_only_drops_the_refusal_for_its_own_window(quota, reached, all_reset, spend_cap, unreported, exhausted):
+    reading = value(quota, 'codex', 'default', [
+        window(60, WEEK, timedelta(hours=-1), 'primary'),
+        window(20, 300, timedelta(hours=-1) if all_reset else timedelta(hours=2), 'secondary')],
+        observed=NOW - timedelta(hours=2), unreported=unreported,
+        allowance={'ordinary_usage_allowed': False, 'spend_control_reached': spend_cap,
+                   **({'limit_reached_type': reached} if reached else {})})
+    account = row(quota, reading)
+    assert (account['state'] == 'exhausted') is exhausted
+
+
+def test_credit_runway_uses_the_anchor_while_credits_are_being_drawn(quota):
+    reading = value(quota, 'codex', 'default', [window(64.2, WEEK, timedelta(hours=135.7), 'primary')],
+                    allowance={'ordinary_usage_allowed': False}, usage_credits=[{'balance': 26000, 'unit': 'credits'}],
+                    credit_anchor={'balance': 27000, 'observed_at': iso(NOW - timedelta(hours=1))})
+    account = row(quota, reading)
+    assert account['state'] == 'credit_only'
+    assert 'then about 26h on credits' in account['windows'][0]['pace']['summary']
+
+
+def test_allowance_lasting_to_reset_does_not_append_credit_runway(quota):
+    reading = value(quota, 'codex', 'default', [window(90, WEEK, timedelta(hours=1), 'primary')],
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}])
+    account = row(quota, reading)
+    assert account['windows'][0]['pace']['will_last_to_reset'] is True
+    assert 'allowance lasts until reset' in account['summary']
+    assert 'then' not in account['summary'] and 'credit runway' not in account['summary']

@@ -106,7 +106,7 @@ def test_reserve_on_pace_exhausted_and_not_started_states(quota):
     assert started_on_use == {**started_on_use, 'state': 'not_started', 'expected_used_percent': None,
                               'headroom_percent': 100, 'expiring_headroom_percent': 0}
     passed = quota.pace(window(100, 300, timedelta(hours=-1)), NOW)
-    assert passed['state'] == 'unknown' and passed['headroom_percent'] == 0
+    assert passed['state'] == 'exhausted' and passed['headroom_percent'] == 0
 
 
 def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
@@ -1124,10 +1124,7 @@ def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota
     configure(tmp_path, {'quota': {'unknown_reset_cooldown_seconds': configured} if configured else {}})
     snapshot(quota, 'codex', [window(60, WEEK, reset_in, 'primary')], usage_credits=None,
              allowance={'ordinary_usage_allowed': False})
-    if reset_in is not None:
-        assert quota.route_states(NOW)['codex']['state'] == 'unknown'
-        assert quota.apply_to_cooldowns({}, NOW) == {}
-        return
+    assert quota.route_states(NOW)['codex']['state'] == 'exhausted'
     until = iso(NOW + timedelta(seconds=configured or 3600))
     assert quota.route_states(NOW)['codex']['cooling_until'] == until
     assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
@@ -1249,7 +1246,7 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
     assert quota.apply_to_cooldowns(cooldown, NOW) == cooldown  # account a is retained after switching to b
 
 
-@pytest.mark.parametrize('reset_in', [None, timedelta(hours=8)])
+@pytest.mark.parametrize('reset_in', [None, -timedelta(hours=1), timedelta(hours=8)])
 def test_exhaustion_takes_precedence_over_missing_or_inconsistent_timing(quota, reset_in):
     state = quota.pace(window(100, 300, reset_in), NOW)
     assert state['state'] == 'exhausted' and state['headroom_percent'] == 0
@@ -2044,7 +2041,7 @@ def test_choose_claude_account_refuses_all_exhausted(quota, five, seven):
         quota.choose_claude_account(values, NOW)
 
 
-@pytest.mark.parametrize('used,expected', [(10, 'known'), (70, 'known'), (100, 'unknown')])
+@pytest.mark.parametrize('used,expected', [(10, 'known'), (70, 'unknown'), (100, 'unknown')])
 @pytest.mark.parametrize('unknown', [None, {'status': 'error'}, {'status': 'ok', 'windows': []}])
 def test_choose_claude_account_places_unknown_below_usable_allowance(quota, used, expected, unknown):
     values = {'unknown': unknown, 'known': {'status': 'ok', 'windows': [
@@ -2081,7 +2078,7 @@ def test_choose_claude_account_partial_reading_still_excludes_known_exhaustion(q
 
 
 @pytest.mark.parametrize('missing', ['reset_at', 'window_minutes'])
-@pytest.mark.parametrize('used,expected', [(50, 'known-max'), (70, 'known-max')])
+@pytest.mark.parametrize('used,expected', [(50, 'known-max'), (70, 'unknown-pro')])
 def test_choose_claude_account_incomplete_weekly_pace_ranks_as_unknown(quota, missing, used, expected):
     incomplete = window(10, WEEK, timedelta(days=3.5))
     incomplete.pop(missing)
@@ -2094,18 +2091,22 @@ def test_choose_claude_account_incomplete_weekly_pace_ranks_as_unknown(quota, mi
     assert quota.choose_claude_account(values, NOW) == expected
 
 
-def test_exhausted_reading_becomes_unknown_at_its_reset(quota):
-    result = quota.pace(window(100, WEEK, timedelta(0)), NOW)
-    assert result['state'] == 'unknown'
-    assert 'awaiting a fresh reading' in result['summary']
+@pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
+def test_fresh_exhausted_reading_at_reset_remains_exhausted(quota, reset_in):
+    snapshot(quota, 'codex', [window(100, WEEK, reset_in, 'primary')])
+    result = quota.route_states(NOW)['codex']
+    assert result['state'] == 'exhausted'
+    assert 'stale' not in result['summary']
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == iso(NOW + timedelta(hours=1))
 
 
-def test_ahead_of_pace_with_allowance_ranks_above_unknown_cache(quota):
-    values = {'unknown': None, 'burst': {'status': 'ok', 'credits': {'reset_credits': 1}, 'windows': [
+@pytest.mark.parametrize('resets,expected', [(0, 'unknown'), (1, 'unknown'), (6, 'burst')])
+def test_ahead_of_pace_with_allowance_ranks_above_unknown_cache(quota, resets, expected):
+    values = {'unknown': None, 'burst': {'status': 'ok', 'credits': {'reset_credits': resets}, 'windows': [
         window(10, 300, timedelta(hours=2), 'five_hour'),
         window(33, WEEK, timedelta(hours=159)),
     ]}}
-    assert quota.choose_claude_account(values, NOW) == 'burst'
+    assert quota.choose_claude_account(values, NOW) == expected
 
 
 def test_ahead_of_pace_clears_an_older_refusal_cooldown(quota):
@@ -2117,3 +2118,28 @@ def test_route_summary_includes_manually_banked_resets(quota):
     snapshot(quota, 'codex', [window(33, WEEK, timedelta(hours=159), 'primary')])
     quota.change_credits('codex', 'default', 1)
     assert '1 banked reset' in quota.route_states(NOW)['codex']['summary']
+
+
+@pytest.mark.parametrize('credit,expected', [(None, 'unknown'), ({'balance': 26000}, 'unknown'),
+                                            ({'unlimited': True}, 'shortage')])
+def test_weekly_shortage_ranks_below_unknown_unless_credit_runway_is_known(quota, credit, expected):
+    values = {'unknown': None, 'shortage': {'status': 'ok', 'usage_credits': [credit] if credit else None,
+              'windows': [window(10, 300, timedelta(hours=2), 'five_hour'),
+                          window(95, WEEK, timedelta(days=3))]}}
+    assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('used,reset_in,clears', [(94, timedelta(days=3), True),
+                                                (95, timedelta(days=3), False),
+                                                (97, timedelta(days=3), False),
+                                                (97, timedelta(hours=1), True)])
+def test_usage_refusal_needs_headroom_or_allowance_through_reset(quota, used, reset_in, clears):
+    snapshot(quota, 'codex', [window(used, WEEK, reset_in, 'primary')])
+    refused = cooldown('usage_limited', NOW - timedelta(minutes=10))
+    assert quota.apply_to_cooldowns(refused, NOW) == ({} if clears else refused)
+
+
+def test_unstarted_weekly_allowance_still_ranks_above_unknown(quota):
+    values = {'unknown': None, 'unstarted': {'status': 'ok', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'), window(0, WEEK)]}}
+    assert quota.choose_claude_account(values, NOW) == 'unstarted'
