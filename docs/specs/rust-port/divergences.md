@@ -1708,3 +1708,17 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   is no default runtime byte limit or accepted cut-over refusal policy.
 - Run-registry stays partial. Its final public reader must settle the bound
   and generic JavaScript JSON contract before claiming full source parity.
+
+### RP-FR3-005: owner extra wire spelling and nested order (open)
+
+- Class: `library`, unresolved. Rulebook v4; source/oracle baseline
+  `a05bcb461f8a599a61637dc97153e65bc315ee81`, main `b527d675`.
+- Node rewrites owner extras `"x":1.0` as `"x":1`, `"x":1e21` as
+  `"x":1e+21`, and retains `"future":{"b":1,"a":2}`. Rust writes
+  `1.0`, `1e21` and nested `{"a":2,"b":1}` respectively.
+- The raw-wire differential asserts the exact source and Rust strings and
+  their inequality. It is mismatch evidence, not parity. A number-only
+  serialiser cannot recover nested insertion order after `Value` decoding.
+- Disposition: await p3-rrc's records-owned ordered lossless codec, not on
+  main at this repair. No new codec is built here. Both run-registry unit 01
+  and its withdrawn interface stay absent from the completion claims.

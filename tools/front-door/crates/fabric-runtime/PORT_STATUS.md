@@ -111,3 +111,12 @@ fixture deliberately proves the documented mismatch; it is not parity evidence.
 Native adversarial repair re-review is clean for this stated partial scope.
 The reviewer did not reproduce the test run because its shared Cargo cache
 was read-only; the required writer run used the isolated cache above.
+
+## PR 1334 cross-family repair follow-up
+
+Item 2 is blocked by p3-rrc's lossless ordered JSON codec, absent from main
+`b527d675`. Owner extras still serialise through `Value`: `1.0`, `1e21` and
+nested `{"b":1,"a":2}` differ from Node wire strings `1`, `1e+21` and the
+original nested order. The exact differential records all three mismatches.
+The finite-number helper alone cannot restore order lost during decoding.
+RP-FR3-005 tracks this gap; run-registry unit and interface remain partial.
