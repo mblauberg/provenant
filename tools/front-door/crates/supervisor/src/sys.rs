@@ -208,3 +208,10 @@ pub(crate) fn fixture_ignore_term() -> io::Result<()> {
     }
     Ok(())
 }
+
+// Existing lane subjects remain until S2 replaces custody. These narrow
+// allowances cover inherited diagnostics and pre-R7 unsafe grouping only.
+#[allow(clippy::print_stderr, clippy::collapsible_if, clippy::unwrap_used,
+        clippy::undocumented_unsafe_blocks, clippy::multiple_unsafe_ops_per_block)]
+#[doc(hidden)]
+pub mod legacy_lane;

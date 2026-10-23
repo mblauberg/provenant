@@ -441,3 +441,5 @@ pub(crate) mod tests {
         }
     }
 }
+
+pub(crate) fn wait(duration: std::time::Duration) { std::thread::sleep(duration); }

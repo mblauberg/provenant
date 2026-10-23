@@ -180,9 +180,10 @@ mod tests {
             .write_all(b"staged")
             .unwrap();
         assert!(dir.publish_file("staging", "../outside", false).is_err());
-        assert!(dir
-            .publish_file("staging", outside.to_str().unwrap(), false)
-            .is_err());
+        assert!(
+            dir.publish_file("staging", outside.to_str().unwrap(), false)
+                .is_err()
+        );
         assert!(dir.publish_file("../outside", "inside", false).is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
     }

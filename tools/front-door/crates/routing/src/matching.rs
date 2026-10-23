@@ -1,7 +1,7 @@
 //! Model identity resolution. Catalogue and fresh listing observations are explicit inputs.
 use crate::{casefold::fold, pending::python_strip};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -90,7 +90,9 @@ fn live_entry(base: &Value, model: &str) -> Result<Value, MatchError> {
     Ok(Value::Object(result))
 }
 fn newer(model: &str) -> String {
-    format!("{model} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json")
+    format!(
+        "{model} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json"
+    )
 }
 fn newest<'a>(
     entries: impl IntoIterator<Item = &'a Value>,

@@ -61,7 +61,7 @@ fn suite() -> Result<()> {
     let outcome = executor.execute(options)?;
     assert!(outcome.timed_out);
     assert_eq!(outcome.termination, Termination::Signal(9));
-    println!("process fixtures passed");
+
     Ok(())
 }
 fn main() -> Result<()> {

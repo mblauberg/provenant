@@ -101,7 +101,7 @@ pub fn publish_marker(path: &Path, bytes: &[u8]) -> Result<Publication> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     #[test]
     fn append_preserves_existing_mode_and_bounded_read_follows_links() {
         let root = tempfile::tempdir().unwrap();

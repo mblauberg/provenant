@@ -5,6 +5,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     # Only labels declared in .github/labels.yml; without this Dependabot
     # recreates its per-ecosystem default labels that the label sync prunes.
@@ -18,6 +20,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - dependencies
@@ -27,6 +31,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     labels:
       - dependencies
@@ -40,13 +46,14 @@ updates:
       workspace-production-dependencies:
         dependency-type: production
 
-  # The Rust front door crate (ADR 0027). Std-only today, so this tracks the
-  # lockfile and any dependency a later decision admits.
+  # Rust workspace dependencies approved by ADR 0028.
   - package-ecosystem: cargo
     directory: /tools/front-door
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - dependencies

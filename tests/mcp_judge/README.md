@@ -30,7 +30,7 @@ working directory. The default command is the Rust binary built by test support.
 
 ## Coverage
 
-`transcripts/protocol.jsonl` records initialization and `tools/list`, including
+`transcripts/protocol.jsonl` records initialisation and `tools/list`, including
 every tool name and input schema. `core.scenario.jsonl` drives tool calls and
 their expected replies. It covers every listed tool with a callback response and
 an error path. `fabric_dispatch` is limited to safe validation errors as
@@ -40,7 +40,7 @@ create/update/list a task; acquire/verify/release a work claim and landing lease
 append/read activity; inspect identity and sessions; and read seeded run status,
 run listings and output.
 
-Transcripts retain the wire requests and responses. Normalization replaces the
+Transcripts retain the wire requests and responses. Normalisation replaces the
 per-test temporary root, ISO timestamps, UUIDs, Git object hashes, process ids,
 run tokens, epoch-millisecond expiries and JSON-RPC ids. Object key ordering is
 ignored by JSON comparison; `tools/list` entries are sorted by name because

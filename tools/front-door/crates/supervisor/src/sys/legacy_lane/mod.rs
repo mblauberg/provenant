@@ -491,3 +491,7 @@ pub fn run(args: &[OsString]) -> u8 {
     output.finish(Duration::from_millis(50));
     status
 }
+
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod fixtures;

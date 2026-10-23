@@ -196,7 +196,7 @@ is checked once per process.
   `runtime/fabric/bin/fabric-mcp` wrapper with the `opencode` seat, bypassing the home-installed
   Python launcher and product pointer. Writer confinement already permits reads of this wrapper
   and its Node runtime; no home read grant is added. Before starting the model process, the supervisor
-  checks MCP initialization under the same environment and confinement profile. A missing wrapper,
+  checks MCP initialisation under the same environment and confinement profile. A missing wrapper,
   runtime failure, denied launch or invalid handshake rejects the lane with `fabric_mcp_unavailable`.
   The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
   `..._AUTOUPDATE` and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.

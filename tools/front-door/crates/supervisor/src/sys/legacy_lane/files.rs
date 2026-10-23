@@ -29,7 +29,7 @@ pub fn nullable(s: Option<&str>) -> String {
 }
 pub fn timestamp() -> Result<String, provenant_core::TimeError> {
     use provenant_core::Clock;
-    provenant_supervisor::clock::SystemClock::new()
+    crate::clock::SystemClock::new()
         .wall_now()
         .map(|time| time.to_string())
 }
@@ -66,12 +66,12 @@ pub fn canonical_start(epoch: u64) -> Option<String> {
 static TEMP: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug)]
 pub struct Attempt {
-    dir: provenant_supervisor::sys::lane_files::LaneDirectory,
+    dir: crate::sys::lane_files::LaneDirectory,
 }
 impl Attempt {
     pub fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
-            dir: provenant_supervisor::sys::lane_files::LaneDirectory::open(path)?,
+            dir: crate::sys::lane_files::LaneDirectory::open(path)?,
         })
     }
     pub fn create(&self, path: &Path) -> io::Result<File> {
@@ -177,7 +177,7 @@ impl Capture {
                 if room > 0 {
                     f.write_all(&data[..room.min(data.len())])
                 } else {
-                    provenant_supervisor::sys::lane_files::touch(f)?;
+                    crate::sys::lane_files::touch(f)?;
                     Ok(())
                 }
             });
@@ -345,7 +345,7 @@ mod tests {
         };
         let text = r.encode();
         assert!(text.len() <= 16384);
-        let v = crate::json::parse(&text).unwrap();
-        assert!(matches!(v.get("reaped_truncated"),Some(crate::json::Value::Int(n)) if *n>0));
+        let v = crate::legacy_json::parse(&text).unwrap();
+        assert!(matches!(v.get("reaped_truncated"),Some(crate::legacy_json::Value::Int(n)) if *n>0));
     }
 }

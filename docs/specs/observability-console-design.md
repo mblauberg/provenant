@@ -1088,7 +1088,7 @@ WWDC sessions:
 [Meet Liquid Glass (WWDC25 219)](https://developer.apple.com/videos/play/wwdc2025/219/),
 [Get to know the new design system (WWDC25 356)](https://developer.apple.com/videos/play/wwdc2025/356/),
 [Build a SwiftUI app with the new design (WWDC25 323)](https://developer.apple.com/videos/play/wwdc2025/323/),
-[Optimize SwiftUI performance with Instruments (WWDC25 306)](https://developer.apple.com/videos/play/wwdc2025/306/),
+[Optimise SwiftUI performance with Instruments (WWDC25 306)](https://developer.apple.com/videos/play/wwdc2025/306/),
 [What's new in SwiftUI (WWDC26 269)](https://developer.apple.com/videos/play/wwdc2026/269/).
 
 Local evidence: the macOS 27.0 SDK interfaces (SwiftUI, SwiftUICore, Charts,

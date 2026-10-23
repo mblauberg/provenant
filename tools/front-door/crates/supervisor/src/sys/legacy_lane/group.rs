@@ -4,7 +4,7 @@ use super::{
     platform::{self, Identity, Row},
     state::StopReason,
 };
-use crate::json::{self, Value};
+use crate::legacy_json::{self as json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::{self, Read};

@@ -372,7 +372,7 @@ impl Directory {
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
             }
-            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            os::wait(remaining.min(Duration::from_millis(5)));
         }
     }
     /// Exclusive create, mode 0600 subject to umask, O_NOFOLLOW | O_CLOEXEC.

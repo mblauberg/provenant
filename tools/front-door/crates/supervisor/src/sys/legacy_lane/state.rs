@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Policy-free transitions. No process, clock, filesystem or signal operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopReason {
