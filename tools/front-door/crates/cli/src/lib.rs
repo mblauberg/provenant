@@ -29,3 +29,5 @@ pub mod stale_checkout;
 mod oracle;
 
 pub mod pr_checks;
+
+pub mod retry_install;
