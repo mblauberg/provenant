@@ -239,3 +239,6 @@ mod tests {
         assert_eq!(status.code(), Some(37));
     }
 }
+
+mod child;
+pub(crate) use child::{anonymous_spool, OwnedChild};
