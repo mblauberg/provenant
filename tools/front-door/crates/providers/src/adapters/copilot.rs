@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn copilot(plan: &Plan) -> AdapterProfile {
+pub fn copilot(plan: &Plan) -> Result<AdapterProfile, BuildError> {
     let mut argv = vec![
         "-p".into(),
         plan.prompt.clone(),
@@ -25,18 +25,7 @@ pub fn copilot(plan: &Plan) -> AdapterProfile {
     if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
-    profile(
-        "copilot",
-        argv,
-        Metadata {
-            transport: PromptTransport::Argv,
-            stdin: StdinMode::Null,
-            output: "json",
-            effort_flag: Some("--effort"),
-            session_keys: &["session_id"],
-            model_source: None,
-        },
-    )
+    profile("copilot", argv)
 }
 
 #[cfg(test)]
@@ -47,6 +36,7 @@ mod tests {
     #[test]
     fn copilot_read_only_uses_plan_mode() {
         assert!(copilot(&plan(Mode::ReadOnly))
+            .unwrap()
             .argv
             .windows(2)
             .any(|v| v == ["--mode", "plan"]));
