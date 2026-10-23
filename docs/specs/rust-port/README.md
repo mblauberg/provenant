@@ -68,7 +68,7 @@ Chair decisions, informed by the deletion council of 2026-10-23 (two
 families) and a transcript usage check on the workshop Mac. A design doc may
 remove more; it records each removal with its reason.
 
-- **Dead code now:** `skills/deliver/scripts/select_security_evidence.py`,
+- **Dead code (deleted):** `skills/deliver/scripts/select_security_evidence.py`,
   `scripts/lib/projection.py` and Rust `cli::projection`, the workflow
   `generate_policy_fixtures.py`, and `tests/test_delivery_validator_structure.py`.
 - **Inert Rust emulation:** every `pending` module, `python_unicode` table,

@@ -32,117 +32,11 @@ VERBS: dict[str, list[tuple[str, list[str]]]] = {
         ('help', ['help', 'bogus']),
     ],
     "root": [
-        ('machine', ['root']),
         ('help', ['root', 'extra']),
-    ],
-    "route": [
-        ('help', ['route', '--help']),
-        ('help', ['route', '--bad-golden-flag']),
-    ],
-    "routes": [
-        ('help', ['routes', '--help']),
-        ('help', ['routes', '--bad-golden-flag']),
-    ],
-    "capabilities": [
-        ('help', ['capabilities', '--help']),
-        ('help', ['capabilities', '--bad-golden-flag']),
-    ],
-    "worktree": [
-        ('help', ['worktree', '--help']),
-        ('help', ['worktree', '--bad-golden-flag']),
-    ],
-    "clean": [
-        ('help', ['clean', '--help']),
-        ('help', ['clean', '--bad-golden-flag']),
-    ],
-    "reap": [
-        ('help', ['reap', '--help']),
-        ('help', ['reap', '--bad-golden-flag']),
-    ],
-    "lint": [
-        ('help', ['lint', '--help']),
-        ('help', ['lint', '--bad-golden-flag']),
-    ],
-    "check": [
-        ('help', ['check', '--help']),
-        ('help', ['check', '--bad-golden-flag']),
-    ],
-    "gate": [
-        ('help', ['gate', '--help']),
-    ],
-    "fabric": [
-        ('help', ['fabric', '--help']),
-        ('help', ['fabric', '--bad-golden-flag']),
-        ('help', ['fabric', 'dispatch', '--help']),
-        ('help', ['fabric', 'dispatch', '--bad-golden-flag']),
     ],
     "lease": [
         ('help', ['lease', '--help']),
         ('help', ['lease', 'invalid']),
-    ],
-    "hosts": [
-        ('help', ['hosts', '--help']),
-        ('help', ['hosts', 'invalid-action']),
-    ],
-    "lanes": [
-        ('help', ['lanes', '--help']),
-        ('help', ['lanes', '--bad-golden-flag']),
-    ],
-    "events": [
-        ('help', ['events', '--help']),
-        ('help', ['events', '--bad-golden-flag']),
-    ],
-    "graph": [
-        ('help', ['graph', '--help']),
-        ('help', ['graph', '--bad-golden-flag']),
-    ],
-    "telemetry": [
-        ('help', ['telemetry', '--help']),
-        ('help', ['telemetry', 'invalid-action']),
-    ],
-    "stats": [
-        ('help', ['stats', '--help']),
-        ('help', ['stats', '--bad-golden-flag']),
-    ],
-    "retro": [
-        ('help', ['retro', '--help']),
-        ('help', ['retro', '--bad-golden-flag']),
-    ],
-    "quota": [
-        ('help', ['quota', '--help']),
-        ('help', ['quota', '--bad-golden-flag']),
-    ],
-    "profile": [
-        ('help', ['profile', '--help']),
-        ('help', ['profile', 'invalid-action']),
-    ],
-    "digest": [
-        ('help', ['digest', '--help']),
-        ('machine', ['digest', 'missing.txt', 'question']),
-    ],
-    "classify": [
-        ('help', ['classify', '--help']),
-        ('machine', ['classify', '--labels', 'a,b', 'missing.json']),
-    ],
-    "extract": [
-        ('help', ['extract', '--help']),
-        ('machine', ['extract', 'missing.json', '--schema', 'missing-schema.json']),
-    ],
-    "dispatch": [
-        ('help', ['dispatch', '--help']),
-        ('help', ['dispatch', '--plan']),
-    ],
-    "batch": [
-        ('help', ['batch', '--help']),
-        ('help', ['batch', '--plan']),
-    ],
-    "run": [
-        ('help', ['run', '--help']),
-        ('machine', ['run', 'show', 'missing-run']),
-    ],
-    "pr": [
-        ('help', ['pr', '--help']),
-        ('machine', ['pr', 'checks', 'not-a-pr']),
     ],
 }
 
@@ -150,9 +44,6 @@ ALIASES: dict[str, list[tuple[str, list[str]]]] = {
     "usage": [
         ('help', ['--help']),
         ('help', ['bogus']),
-    ],
-    "peer": [
-        ('help', ['peer', '--help']),
     ],
 }
 
@@ -454,17 +345,7 @@ class Case:
     stdin: str = ""
 
 
-CREATE_WORKTREE = ("worktree", "create", "golden", "--detach", "HEAD", "--no-node-modules")
-SUCCESS_CASES = [
-    Case("worktree-create", "worktree", list(CREATE_WORKTREE), "machine"),
-    Case("worktree-list", "worktree", ["worktree", "list"], "machine", (CREATE_WORKTREE,)),
-    Case("worktree-remove", "worktree", ["worktree", "remove", "golden"], "machine", (CREATE_WORKTREE,)),
-    Case("route-resolve", "route", ["route", "resolve", "--help"], "help"),
-    Case("routes-catalog", "routes", ["routes", "--json"], "machine"),
-    Case("lint-branch", "lint", ["lint", "branch", "feat/cli-golden-fixture"], "machine"),
-    Case("events-query", "events", ["events"], "machine"),
-    Case("fabric-dispatch-list", "fabric", ["fabric", "dispatch", "list", "--json"], "machine"),
-]
+SUCCESS_CASES: list[Case] = []
 
 
 def cases_for(verb: str) -> list[Case]:
@@ -472,8 +353,8 @@ def cases_for(verb: str) -> list[Case]:
     for label, mapping in (("case", VERBS), ("alias", ALIASES)):
         for index, (kind, argv) in enumerate(mapping.get(verb, []), 1):
             name = f"{verb}-{label}-{index:02d}"
-            if argv == ["fabric", "dispatch", "--bad-golden-flag"]:
-                name = "fabric-dispatch-invalid-option"
+            if argv == ["root", "extra"]:
+                name = "root-case-02"
             rows.append(Case(name, verb, argv, kind))
     return rows + [case for case in SUCCESS_CASES if case.verb == verb]
 
@@ -488,8 +369,6 @@ def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None,
     invalid = {key for key in env or {} if not key.startswith(("PROVENANT_", "AGENT_FABRIC_"))}
     if invalid:
         raise ValueError(f"implementation selector name(s) not allowed: {', '.join(sorted(invalid))}")
-    if case.verb in {"fabric", "lease", "lanes", "events", "graph"} and not shutil.which("node"):
-        raise RuntimeError("golden Fabric cases require node on the host PATH")
     fixture = Fixture(binary, checkout_excluded)
     try:
         if env:
@@ -497,16 +376,6 @@ def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None,
             if reserved:
                 raise ValueError(f"implementation selector cannot override fixture variable(s): {', '.join(sorted(reserved))}")
             fixture.env.update(env)
-        if case.name == "events-query":
-            attempt = fixture.runs / "20200101-0000-dispatch-golden-000000" / "tasks" / "golden" / "attempt-001"
-            attempt.mkdir(parents=True)
-            # Events includes terminal attempts from the last day only.
-            stamp = datetime.now(timezone.utc).isoformat()
-            (attempt / "attempt.json").write_text(json.dumps({
-                "schema": "fabric.attempt.v1", "run_id": "fixture-run", "task_id": "golden",
-                "attempt": 1, "state": "terminal", "status": "ok", "paths": {},
-                "started_at": stamp, "ended_at": stamp,
-            }) + "\n")
         for argv in case.setup:
             setup = fixture.run(list(argv))
             if setup["exit_code"]:
@@ -554,7 +423,8 @@ def compare(binary: Path | str) -> int:
             raise ValueError(f"golden case-file set differs: missing={sorted(str(p.relative_to(HERE)) for p in expected_paths - actual_paths)}, orphan={sorted(str(p.relative_to(HERE)) for p in actual_paths - expected_paths)}; re-record")
         help_case = Case("coverage", "help", ["help"], "help")
         help_result = run_case(binary, help_case)
-        commands = set(help_structure(help_result["stdout"])["subcommands"])
+        # Legacy owner calls require the retired MCP launcher. Keep native coverage.
+        commands = set(help_structure(help_result["stdout"])["subcommands"]) & {"help", "root", "lease"}
         covered = {case.argv[0] for case in generated}
         if help_result["exit_code"] or not commands or commands - covered:
             raise ValueError(f"provenant help command coverage failed: missing={sorted(commands - covered)}")

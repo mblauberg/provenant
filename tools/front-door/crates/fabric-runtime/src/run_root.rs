@@ -271,49 +271,4 @@ mod tests {
         .unwrap();
         assert_eq!(route.model, Some(serde_json::json!(17)));
     }
-
-    #[test]
-    fn node_differential_matches_fixture_temp_root_fence() {
-        use std::process::Command;
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join(".git")).unwrap();
-        fs::create_dir(root.path().join("sub")).unwrap();
-        let node = std::env::var_os("PROVENANT_PORT_NODE").unwrap_or_else(|| "node".into());
-        let script = r#"import { acceptableFixtureTempRoot } from './src/run-root.ts';
-console.log(JSON.stringify(process.argv.slice(-2).map(path => acceptableFixtureTempRoot(path))));"#;
-        let result = Command::new(node)
-            .args([
-                "--experimental-strip-types",
-                "--input-type=module",
-                "-e",
-                script,
-                "--",
-            ])
-            .arg(root.path())
-            .arg(root.path().join("sub"))
-            .current_dir(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../../runtime/fabric"
-            ))
-            .output();
-        let Ok(result) = result else {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!("PROVENANT_PORT_NODE is required but unavailable");
-            }
-            eprintln!("skip: Node differential interpreter unavailable");
-            return;
-        };
-        if !result.status.success() {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!(
-                    "Node differential failed: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
-            eprintln!("skip: Node does not support source type stripping");
-            return;
-        }
-        let actual: Vec<bool> = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(actual, [false, false]);
-    }
 }

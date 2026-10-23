@@ -77,5 +77,5 @@ lightweight advisory dispatch.
   file-class ownership by product, instance or seeded template.
 - [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md): the daemonless Fabric
   runtime this core dispatches through.
-- [`runtime/fabric/README.md`](../../../runtime/fabric/README.md): the current
+- [Fabric Rust design](../rust-port/design/fabric.md): the current
   Fabric command and configuration surface.

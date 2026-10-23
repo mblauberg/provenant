@@ -1,7 +1,7 @@
 # Fabric MCP registration
 
-Status: current
-Applies to: `scripts/configure-fabric-mcp.py` and `runtime/fabric/bin/fabric-mcp`
+Status: legacy registration; Rust MCP owner pending
+Applies to: `scripts/configure-fabric-mcp.py`
 
 `install-harness --platform all` registers Fabric MCP for Claude Code and Codex,
 plus OpenCode, Agy, Cursor and Kiro when their home directories are present.
@@ -16,8 +16,8 @@ add a client, check the registrations or repair one.
 
 The registered command is the managed stable shim at
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant`. With no arguments and
-`AGENT_FABRIC_SEAT` set, that shim resolves the product root and execs
-`runtime/fabric/bin/fabric-mcp`. Registering the shim rather than the checkout
+`AGENT_FABRIC_SEAT` set, that shim resolves the product root. The TS MCP entry point is retired;
+the Rust MCP owner will replace it. Registering the shim rather than the checkout
 path means moving the checkout does not invalidate six client registries: re-run
 `scripts/install-harness` from the new checkout and the pointer at
 `<instance-root>/.agent-fabric/product-root.json` is updated atomically.

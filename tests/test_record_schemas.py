@@ -30,14 +30,7 @@ NON_RECORD_SCHEMAS = {
     "fabric.exec-plan.v1": "transient --plan-only CLI response consumed over stdout by the owner",
     "fabric.status.v1": "CLI status projection in run-status/owner-output and batch_run",
     "fabric.status.v2": "multi-host CLI status projection in fabric_lanes",
-    "fabric.batch.v1": "legacy CLI batch projection recognised by owner-output",
-    "fabric.runs.v1": "CLI run discovery projection in run-reader",
     "fabric.runs.v2": "multi-host CLI lane listing in fabric_lanes",
-    "fabric.event.v1": "CLI event projection assembled from ledger rows in run-reader",
-    "fabric.events.v1": "CLI event page and cursor in run-reader",
-    "fabric.graph.v1": "CLI single-graph projection in graph/surface",
-    "fabric.graphs.v1": "CLI graph listing in graph/surface",
-    "fabric.inbox_digest.v1": "inbox summary response from store.inboxDigest",
     "fabric.catalogue.v1": "routing catalogue query response from model_route",
     "fabric.routes.v1": "route-pool listing response from model_route_pools",
     "fabric.cooldowns.active.v1": "active cooldown CLI report from model_route",
@@ -165,36 +158,6 @@ def validate_run_records(run):
     return seen
 
 
-@pytest.mark.parametrize("flow,status,outcome", [
-    ("success", "ok", "ok"), ("failed", "failed", "failed"),
-    ("timed-out", "timed_out", "timeout"), ("quota-limited", "failed", "usage_limited"),
-    ("question", "blocked", "question"),
-])
-def test_dispatch_records(flow_root, flow, status, outcome):
-    run = write_dispatch(flow_root, flow)
-    seen = validate_run_records(run)
-    assert {"canonical-attempt", "dispatch-attempt", "adapter-receipt", "run-receipt",
-            "attempt-digest-sidecar", "manifest-row"} <= seen
-    value = json.loads((run / "dispatch/tasks/task-1/attempt-001/attempt.json").read_text())
-    assert value["status"] == status
-    assert value["outcome"] == outcome
-    reject("dispatch-attempt", {**value, "unexpected_field": True})
-    reject("dispatch-attempt", {**value, "started_at": "yesterday"})
-    reject("dispatch-attempt", {**value, "prompt": {"path": "", "digest": "bad"}})
-    canonical = json.loads((run / "tasks/task-1/attempt-001/attempt.json").read_text())
-    reject("canonical-attempt", {**canonical, "unexpected_field": True})
-    reject("canonical-attempt", {**canonical, "status": "invented"})
-    reject("canonical-attempt", {**canonical, "paths": {}})
-    nullable_account = {**canonical, "account": None}
-    validate("canonical-attempt", nullable_account)
-    if flow == "question":
-        envelope = json.loads((run / "dispatch/tasks/task-1/attempt-001/result.md").read_text())
-        validate("worker-terminal-envelope", envelope)
-        reject("worker-terminal-envelope", {**envelope, "question": {"code": "needs_input", "prompt": ""}})
-    if flow in {"failed", "quota-limited"}:
-        assert "wip-checkpoint" in seen
-
-
 def test_active_attempt_records(flow_root):
     dispatch = load_script(ROOT / "skills/orchestrate/scripts/dispatch_run.py", "schema_active_dispatch")
     run = make_run(flow_root, "schema-active")
@@ -212,24 +175,6 @@ def test_active_attempt_records(flow_root):
     assert "queued_seconds" not in value["timing"]
     validate("canonical-attempt", value)
     reject("canonical-attempt", {**value, "timing": {"phases": [], "queued_seconds": 0}})
-
-
-def test_batch_records(flow_root):
-    provider(flow_root, "cat >/dev/null\nprintf 'OK\\n'\n")
-    run = make_run(flow_root, "schema-batch")
-    prompt = flow_root / "prompt.md"
-    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
-    manifest = flow_root / "tasks.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "tasks": [
-        {"id": "task-1", "adapter": "codex", "alias": "senior", "prompt_file": str(prompt)}
-    ]}), encoding="utf-8")
-    result = run_command([sys.executable, str(ROOT / "skills/orchestrate/scripts/batch_run.py"),
-                          "--run-dir", str(run), "--manifest", str(manifest)], flow_root)
-    assert result.returncode == 0, result.stderr[-4000:]
-    assert "batch-summary" in validate_run_records(run)
-    summary = json.loads((run / "dispatch/batches/batch-001/summary.json").read_text())
-    reject("batch-summary", {**summary, "counts": {"ok": "one"}})
-    reject("batch-summary", {**summary, "tasks": [{}]})
 
 
 def test_adapter_error_receipt(flow_root):
@@ -289,7 +234,7 @@ def test_schema_inventory():
     # entry after checking whether they are persisted record writers.
     pattern = re.compile(r"['\"]([a-z][a-z0-9_.-]*\.v\d+)['\"]")
     observed = set()
-    for directory in ("scripts", "skills", "runtime/fabric/src"):
+    for directory in ("scripts", "skills"):
         for path in (ROOT / directory).rglob("*"):
             relative_parts = path.relative_to(ROOT).parts
             if (path.is_file() and not any(part.startswith(".") or part == "node_modules" for part in relative_parts)

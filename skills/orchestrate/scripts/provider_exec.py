@@ -1641,54 +1641,6 @@ def execute(plan, output_path, **options):
         os.close(tmp_fd)
 
 
-MCP_PREFLIGHT_SECONDS = 10
-
-
-def _preflight_opencode_mcp(plan, environment, tmp_fd):
-    """Check the exact writer MCP command under the lane's final environment and boundary."""
-    if plan["adapter"] != "opencode" or plan["mode"] != "worktree_write":
-        return
-    server = json.loads(environment["OPENCODE_CONFIG_CONTENT"])["mcp"]["servers"]["fabric"]
-    mcp_environment = {**environment, **server.get("environment", {})}
-    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2024-11-05", "capabilities": {},
-        "clientInfo": {"name": "provenant-preflight", "version": "1"},
-    }}) + "\n"
-    said = ""
-    try:
-        command = provider_confinement.confinement_command(plan, server["command"], environment.get("PATH"))
-        # Files bound what the supervisor reads even if startup produces noisy diagnostics.
-        with provider_confinement._unlinked_file(tmp_fd) as output, provider_confinement._unlinked_file(tmp_fd) as errors:
-            process = subprocess.Popen(command, cwd=plan["cwd"], env=mcp_environment,
-                                       stdin=subprocess.PIPE, stdout=output, stderr=errors,
-                                       start_new_session=True)
-            descendants = _Descendants(process, environment["PROVENANT_ATTEMPT_MARKER"])
-            descendants.sample()
-            try:
-                process.communicate(request.encode(), timeout=MCP_PREFLIGHT_SECONDS)
-            finally:
-                descendants.stop(normal=process.poll() is not None)
-                process.wait()
-            errors.seek(0)
-            # The wrapper names its own fault, such as a missing loader or an unsupported Node.
-            said = " ".join(errors.read(65536).decode(errors="replace").split())[-300:]
-            output.seek(0)
-            for line in output.read(65536).splitlines():
-                try:
-                    response = json.loads(line)
-                except ValueError:
-                    continue
-                result = response.get("result") if isinstance(response, dict) else None
-                if (isinstance(response, dict) and response.get("id") == 1 and isinstance(result, dict)
-                        and result.get("protocolVersion") and isinstance(result.get("capabilities"), dict)
-                        and isinstance(result.get("serverInfo"), dict) and process.returncode == 0):
-                    return
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed; check the product wrapper, Node runtime and confinement grants") from exc
-    raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed: no valid initialize response; check the product wrapper, Node runtime and confinement grants"
-                          + (f"; wrapper stderr: {said}" if said else ""))
-
-
 def attempt_environment(plan, env):
     """Prepare the provider environment from the owner environment."""
     control_environment = dict(os.environ if env is None else env)
@@ -1915,7 +1867,6 @@ def _run_attempt(
         else:
             if model_check == "invalid":
                 raise CapabilityError("model_unavailable", model_check_detail)
-            _preflight_opencode_mcp(plan, environment, tmp_fd)
             command = provider_confinement.confinement_command(plan, command, environment.get("PATH"))
             if lane_impl == "rust":
                 if plan["stdin_policy"] == "prompt":

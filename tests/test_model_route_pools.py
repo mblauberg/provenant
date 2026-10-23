@@ -441,11 +441,6 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     assert any("codex/gpt-6-luna" in line and "cooling until" in line for line in lines)
     assert any("codex/gpt-6-astra" in line and line.rstrip().endswith("available") for line in lines)
     assert "[free, trains-on-prompts]" in all_run.stdout
-    provenant = subprocess.run([str(front_door_binary()), "routes", "--json"],
-                               text=True, capture_output=True, check=False,
-                               env={**env, "PATH": os.environ["PATH"]})
-    assert provenant.returncode == 0, provenant.stderr
-    assert set(json.loads(provenant.stdout)["routes"]) >= {"principal", "senior", "junior", "utility", "design", "writing"}
 
 
 def test_route_line_names_why_the_pool_picked_the_model():
@@ -607,10 +602,6 @@ def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
     assert plain.returncode == 0, plain.stderr
     document = json.loads(plain.stdout)
     assert {"routes", "health"} <= set(document)
-    helped = subprocess.run([str(front_door_binary()), "help", "routes"],
-                            text=True, capture_output=True, check=False, env=env)
-    assert helped.returncode == 0, helped.stderr
-    assert "senior" in helped.stdout and "route health --json" in helped.stdout
     assert "--json" in model_route(env, "routes", "--help").stdout
 
 

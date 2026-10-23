@@ -38,16 +38,11 @@ and `PROVENANT_GOLDEN_ALLOW_SKIP=1` permits skipping unless
 and would trip its guard. CI's serial Rust front door job sets it with
 `PROVENANT_GOLDEN_REQUIRED=1`.
 
-Every public command listed by `provenant help` must have a case, and the
-recorded file set must exactly match the generated set. Real success paths
-cover worktree create/list/remove, route listing, branch lint, event reading
-and Fabric dispatch listing. Worktree list/remove
-cases have fixture-local setup commands, and events reads a seeded terminal
-attempt receipt in `run.py`. Route resolution uses `resolve --help` as a help
-case, avoiding byte comparisons against the changing live catalogue. Gate's only
-execution mode runs the heavy composite suite, so it has help coverage only.
-Fabric dispatch has no public plan/dry-run mode: `fabric-dispatch-invalid-option`
-covers an invalid flag and `fabric-dispatch-list` is a real read-only query.
+The remaining end-to-end cases cover native Rust help, usage, lease help
+and argument errors. Legacy owner calls require the retired TS MCP launcher;
+those caller cases and their differential smoke are deleted under PORTING R10.
+The recorded file set must exactly match the generated set. Direct Python
+owner tests remain with their modules.
 Provider-launching verbs stay at help or validation boundaries.
 
 Normalisation replaces fixture/checkout paths (including macOS `/var` aliases),

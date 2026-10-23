@@ -1098,45 +1098,6 @@ def test_inactive_removed_and_disabled_accounts_do_not_touch_routing(quota, monk
 
 # CLI ----------------------------------------------------------------------------------------
 
-def test_quota_cli_reports_config_accounts_from_cache_without_fetching(tmp_path):
-    home, state = tmp_path / 'home', tmp_path / 'state'
-    (home / '.codex').mkdir(parents=True)
-    (state / 'quota').mkdir(parents=True)
-    observed = datetime.now(UTC)
-    module = load('quota_cli_fixture', ROOT / 'scripts/provider_quota.py')
-    cache_name = module.cache_path('codex', 'default', 'studio', home / '.codex').name
-    (state / 'quota' / cache_name).write_text(json.dumps({
-        'schema': 'provenant.quota.v1', 'provider': 'codex', 'account': 'default', 'plan': 'pro', 'host': 'studio',
-        'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
-        'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
-        'windows': [{'name': 'secondary', 'raw_kind': 'secondary', 'used_percent': 55, 'window_minutes': WEEK,
-                     'reset_at': iso(observed + timedelta(days=3)), 'window_start': None}]}))
-    hosts = home / '.agents/.agent-fabric/hosts.json'
-    hosts.parent.mkdir(parents=True)
-    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
-    config = home / '.agents/config/telemetry.json'
-    config.parent.mkdir(parents=True)
-    config.write_text(json.dumps({'accounts': {'agy': {'work': {'identity_dir': '~/.gemini'}},
-                                               'claude': {'max-b': {'identity_dir': '~/.claude-b', 'plan': 'Max'}}}}))
-    # Fetching is disabled and no provider CLI is reachable, so nothing can touch a credential.
-    tools = [directory for directory in os.environ['PATH'].split(os.pathsep)
-             if not any(shutil.which(name, path=directory) for name in ('claude', 'codex'))]
-    env = {**os.environ, 'HOME': str(home), 'AGENT_FABRIC_STATE_ROOT': str(state),
-           'AGENT_FABRIC_INSTANCE_ROOT': str(home / '.agents'), 'CODEX_HOME': str(home / '.codex'),
-           'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'PATH': os.pathsep.join(tools), 'PROVENANT_QUOTA': '0'}
-    result = subprocess.run([str(front_door_binary()), 'quota', '--json'], env=env, capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout)
-    assert report['schema'] == 'provenant.quota.report.v1' and report['enabled'] is False
-    rows = {(row['provider'], row['account']): row for row in report['accounts']}
-    assert set(rows) == {('agy', 'work'), ('claude', 'max-b'), ('codex', 'default')}
-    codex = rows[('codex', 'default')]
-    assert (codex['plan'], codex['host'], codex['state']) == ('pro', 'studio', 'on_pace')
-    assert rows[('claude', 'max-b')]['status'] == 'disabled' and rows[('claude', 'max-b')]['plan'] == 'Max'
-    assert rows[('agy', 'work')]['status'] == 'disabled'
-    table = subprocess.run([str(front_door_binary()), 'quota'], env=env, capture_output=True, text=True, check=False)
-    assert table.returncode == 0 and 'codex' in table.stdout and 'max-b' in table.stdout
-
 
 def test_cache_is_keyed_by_provider_account_and_host(quota, monkeypatch):
     first = snapshot(quota, windows=[window(10, WEEK, timedelta(days=3))])

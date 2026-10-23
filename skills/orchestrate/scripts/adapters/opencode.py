@@ -1,10 +1,8 @@
 """OpenCode v2 (`opencode run`). v1 (`--dir`, `--variant`, `opencode export`) is not supported."""
 import json
-from pathlib import Path
 import re
 
 CLI = "opencode"
-FABRIC_MCP = Path(__file__).resolve().parents[4] / "runtime/fabric/bin/fabric-mcp"
 MIN_MAJOR = 2
 PROMPT_TRANSPORT = "argv"
 STDIN = "null"
@@ -91,14 +89,7 @@ def environment(plan):
     }
     # The sentinel matches no real command and exists only so Zen declares bash.
     opencode_config = {"permission": permission}
-    if plan["mode"] == "worktree_write":
-        # The product wrapper bypasses the home-installed Python resolver and its pointer.
-        # Writer profiles already permit reading this code and its Node runtime.
-        opencode_config["mcp"] = {"servers": {
-            "fabric": {"type": "local", "command": [str(FABRIC_MCP.resolve())], "disabled": False,
-                       "environment": {"AGENT_FABRIC_SEAT": "opencode"}},
-        }}
-    elif plan["applied"].get("confinement") == "sandbox-exec":
+    if plan["applied"].get("confinement") == "sandbox-exec":
         # V2 replaces the whole server definition; a disabled entry still needs type and command.
         opencode_config["mcp"] = {"servers": {
             "fabric": {"type": "local", "command": ["provenant"], "disabled": True},

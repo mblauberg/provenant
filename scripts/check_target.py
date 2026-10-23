@@ -10,7 +10,6 @@ import sys
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 
 REPAIR = "repair: re-run install-harness from the product checkout, or set AGENT_FABRIC_PRODUCT_ROOT"
-FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 
 
 def resolve_product_root() -> Path:
@@ -39,9 +38,6 @@ def resolve_product_root() -> Path:
         candidate = candidate.resolve()
     else:
         candidate = (Path.home() / ".agents").resolve()
-    wrapper = candidate / FABRIC_MCP
-    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
-        raise ValueError(f"Fabric MCP launcher is missing or not executable at {wrapper}; {REPAIR}")
     return candidate
 
 
@@ -143,7 +139,7 @@ def checked_target(root: Path) -> Path:
 def check_target() -> tuple[Path, Path]:
     local_root = Path(__file__).resolve().parent.parent
     local_target = local_root / "scripts/check-harness"
-    local_available = (local_root / FABRIC_MCP).is_file() and local_target.is_file()
+    local_available = local_target.is_file()
     product_root = local_root if local_available else resolve_product_root()
     caller_root = registered_caller_checkout(product_root)
     selected = caller_root or (local_root if local_available else product_root)

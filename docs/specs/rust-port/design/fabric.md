@@ -147,7 +147,7 @@ Help and root resolution do not open SQLite or start threads.
 
 All records crossing a crate or persistence edge are typed serde models.
 Facts built only at an edge derive `Serialize` only, never `Deserialize`. Shared identifiers
-and process/authority types belong in `core` or `records`; private SQL rows stay in store. New owned formats carry `version: 1`; refuse unsupported major
+and process/authority types belong in `core` or `records`; private SQL rows stay in store. Fabric-only `Message`, `TaskState`, `MessageKind`, `TaskFence` and message/task refs live in `fabric-store`; `Page` and `Cursor` remain store types until a second owner needs them. New owned formats carry `version: 1`; refuse unsupported major
 versions. SQL migrations are for future Rust versions only. Use integer epoch
 milliseconds (`TimestampMs(i64)`) and checked durations, never JS float seconds.
 Paths remain `PathBuf`/`OsString` internally; JSON paths must be UTF-8 or fail with
@@ -531,7 +531,7 @@ struct RegistrationDescriptor { executable: PathBuf, args: Vec<String>,
     env: BTreeMap<String, String> }
 ```
 
-`Page`, `Observed`, `OutputChunk`, `OperationKey` and `ResumeRequest` also live in
+`Observed`, `OutputChunk`, `OperationKey` and `ResumeRequest` also live in
 records, so run never imports Fabric. `WaitBudget { deadline: MonotonicDeadline }`
 and cooperative `CancelToken` live in core; supervisor consumes them. Runtime's
 peer client takes `PeerRequest { version, target_host, project: ProjectKey, operation, action }`;
@@ -561,7 +561,7 @@ instruction links, and updates `~/.agents/AGENTS.md` and linked files for the la
 exact command/link target under that checkout, read links with `readlink` only,
 and print each harness-config change before applying it. Rollback reinstalls
 `pre-rust-rewrite`; import never modifies the old store. `fabric-store::Store::open(StateRoot)` and transaction
-methods take explicit `TimestampMs`; clocks are injected at the service edge.
+methods take a `Request` with an injected clock; the store derives decision times and lease expiries from that clock.
 `CancelToken`, `WaitBudget`, `CommandSpec` and filesystem handles are safe
 supervisor/core types. The CLI and MCP own no filesystem policy.
 If a signature requires an extra allowed dependency edge, settle the shared
@@ -931,7 +931,7 @@ requested contracts, not claims that the current crates implement them.
 | Owner | Exact requested API | Types and promise |
 |---|---|---|
 | `core` | `ProjectId::from_common_dir(HostId, &Path) -> Result<ProjectId, IdentityError>`; `ProjectId::from_directory(HostId, &Path) -> Result<ProjectId, IdentityError>`; `TimestampMs::checked_add(Duration) -> Result<TimestampMs, TimeError>` | Host-local ProjectId, recorded on each run; runtime owns cross-host ProjectKey. Opaque IDs including `RequestId`, `HostId`, `RunId`, `AttemptRef`, `OperationId`, `Digest`, `GitOid`; `WaitBudget`, cooperative `CancelToken`; no I/O or unsafe |
-| `records` | `encode_canonical<T: Serialize>(&T) -> Result<Vec<u8>, CodecError>`; `decode_bounded<T: DeserializeOwned>(&[u8], JsonLimits) -> Result<T, CodecError>` | `Serialize`-only edge facts; versioned stored records; duplicate-key/depth/number refusal; `Authority`, `Submission`, `TaskRequest` (`id: RequestId`), `SubmissionReceipt`, `ResumeRequest`, `RunQuery`, `WaitCondition`, `RunSnapshot`, `RunEvent`, `RouteReceipt`, `ArtifactRef`, `ArtifactManifest`, `Page`, `Observed`, `OutputChunk`, `OperationKey`, `ExecutionContext`, `AttemptTempPaths`, `RegistrationDescriptor` |
+| `records` | `encode_canonical<T: Serialize>(&T) -> Result<Vec<u8>, CodecError>`; `decode_bounded<T: DeserializeOwned>(&[u8], JsonLimits) -> Result<T, CodecError>` | `Serialize`-only edge facts; versioned stored records; duplicate-key/depth/number refusal; `Authority`, `Submission`, `TaskRequest` (`id: RequestId`), `SubmissionReceipt`, `ResumeRequest`, `RunQuery`, `WaitCondition`, `RunSnapshot`, `RunEvent`, `RouteReceipt`, `ArtifactRef`, `ArtifactManifest`, `Observed`, `OutputChunk`, `OperationKey`, `ExecutionContext`, `AttemptTempPaths`, `RegistrationDescriptor` |
 | `config` | `load(&ConfigLocation, &EnvSnapshot) -> Result<ResolvedConfig, ConfigError>`; `project_policy(&ResolvedConfig, &Path) -> Result<ProjectPolicy, ConfigError>` | `~/.local/share/provenant/v1`, host-global; `--state-dir` over `PROVENANT_STATE_DIR`; one config.toml, no layering/per-knob env; only product env inputs are PROVENANT_STATE_DIR and PROVENANT_AGENT_LABEL; immutable Fabric config/peers/policy |
 | `config` | `reconcile_mcp(&RegistrationDescriptor, &[Client], ApplyMode) -> Result<RegistrationReport, ConfigError>` | `install [--dry-run]`, `check install`, `uninstall`, `--legacy-checkout`; MCP descriptor stays Fabric-owned (PORTING R2); replace/remove legacy hook/skill/workflow/instruction links, rewrite MCP and global instructions/linked files for label rename automatically; preserve unrelated config, print edits, re-install recovers |
 | `supervisor` | `entropy_128() -> Result<[u8;16], OsError>`; `lock(&Path, LockMode) -> Result<OwnedLock, OsError>` | OS-owned handle, release only on close/death; no TTL substitute |

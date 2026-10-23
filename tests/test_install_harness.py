@@ -1592,53 +1592,6 @@ def test_all_primary_cutover_preflights_second_primary_before_mutating_first(
     assert (tmp_path / "new product/HARNESS.md").is_file()
 
 
-def test_all_primary_install_configures_both_surfaces_and_publishes_once(
-    tmp_path,
-    product_template,
-):
-    product = copy_product(product_template, tmp_path / "product with spaces")
-
-    result = run_product(product, "all", tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.count("product root pointer updated=") == 1
-    assert (tmp_path / "claude/skills/scope/SKILL.md").is_file()
-    assert (tmp_path / "codex/skills/scope/SKILL.md").is_file()
-    assert (tmp_path / "claude/CLAUDE.md").read_text().find(str(product / "HARNESS.md")) >= 0
-    assert (tmp_path / "codex/AGENTS.md").read_text().find(str(product / "HARNESS.md")) >= 0
-
-    claude_mcp = json.loads((tmp_path / "claude/.claude.json").read_text())
-    assert not (tmp_path / "home/.claude.json").exists()
-    assert not (tmp_path / "claude/settings.json").exists()
-    assert not (tmp_path / "claude/settings.json").is_symlink()
-    codex_config = tomllib.loads((tmp_path / "codex/config.toml").read_text())
-    assert claude_mcp["mcpServers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
-    assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
-    assert claude_mcp["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "claude"
-    assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "codex"
-    assert claude_mcp["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(tmp_path / "instance")
-    assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(tmp_path / "instance")
-    clean_home = tmp_path / "clean-home"
-    clean_home.mkdir()
-    registered_environment = os.environ.copy()
-    registered_environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
-    registered_environment.update({
-        "HOME": str(clean_home),
-        **claude_mcp["mcpServers"]["fabric"]["env"],
-    })
-    registered = run_cli(
-        [claude_mcp["mcpServers"]["fabric"]["command"], "root"],
-        cwd=clean_home,
-        env=registered_environment,
-    )
-    assert registered.returncode == 0, registered.stderr
-    assert registered.stdout == f"{product.resolve()}\n"
-    assert not (tmp_path / "home/.cursor/mcp.json").exists()
-    assert not (tmp_path / "home/.gemini/config/mcp_config.json").exists()
-    assert not (tmp_path / "home/.kiro/settings/mcp.json").exists()
-    assert not (tmp_path / "home/.config/opencode/opencode.jsonc").exists()
-
-
 def test_all_primary_install_uses_selected_python_when_path_has_no_python3(
     tmp_path,
     product_template,

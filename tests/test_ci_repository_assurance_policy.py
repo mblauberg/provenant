@@ -55,7 +55,6 @@ SETUP_ACTION = ROOT / ".github" / "actions" / "setup-node-workspace" / "action.y
 SETUP_ACTION_USES = "$/.github/actions/setup-node-workspace"
 ROOT_PACKAGE = ROOT / "package.json"
 ROOT_LOCK = ROOT / "package-lock.json"
-FABRIC_PACKAGE = ROOT / "runtime" / "fabric" / "package.json"
 IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # Local composite actions are pinned by the commit under review itself; only
 # repository-local paths are exempt from the 40-hex SHA pin.
@@ -66,7 +65,6 @@ JOB_PERMISSIONS = {
     "python-tests": {"contents": "read"},
     "lane-conformance": {"contents": "read"},
     "docs": {"contents": "read"},
-    "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
     "rust-macos-release": {"contents": "read"},
@@ -75,7 +73,6 @@ JOB_PERMISSIONS = {
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
-FABRIC_GUIDE = ROOT / "runtime" / "fabric" / "README.md"
 
 
 def _parse_workflow_text(text: str) -> dict[str, object]:
@@ -283,7 +280,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
     assert set(outputs) == {
-        "harness", "docs", "fabric", "split-root", "workflows", "rust", "lane", "tree", "passed-tree"
+        "harness", "docs", "split-root", "workflows", "rust", "lane", "tree", "passed-tree"
     }
     # `docs`, `tree` and `passed-tree` are computed from the PR file list or
     # tested checkout, not path filters. They do not cover tracked paths.
@@ -392,7 +389,7 @@ def test_continue_on_error_on_a_step_fails_the_guard() -> None:
 
 def test_continue_on_error_on_a_job_fails_the_guard() -> None:
     document = _workflow()
-    _job(document, "fabric")["continue-on-error"] = True
+    _job(document, "harness-checks")["continue-on-error"] = True
     with pytest.raises(AssertionError):
         _assert_no_continue_on_error(document)
 
@@ -472,12 +469,11 @@ def test_duplicate_on_key_boolean_alias_fails_the_exact_key_guard() -> None:
         _assert_exact_on_key(mutated)
 
 
-def test_ci_runs_complete_harness_and_fabric_gates() -> None:
+def test_ci_runs_complete_harness_gates() -> None:
     document = _workflow()
     harness_steps = _steps(_job(document, "harness-checks"))
     python_test_job = _job(document, "python-tests")
     python_test_steps = _steps(python_test_job)
-    fabric_steps = _steps(_job(document, "fabric"))
 
     # The toolchain contract (Node 24, pinned npm before a locked install)
     # moved into the shared composite action; assert it once there, then
@@ -497,7 +493,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     )
     assert pin_index < install_index
 
-    for job_name in ("harness-checks", "python-tests", "fabric", "split-root"):
+    for job_name in ("harness-checks", "python-tests", "split-root"):
         steps = _steps(_job(document, job_name))
         uses = [str(step.get("uses", "")) for step in steps]
         checkout_index = next(index for index, action in enumerate(uses) if action.startswith("actions/checkout@"))
@@ -542,17 +538,6 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     )
     assert str(marker_upload.get("uses", "")).startswith("actions/upload-artifact@")
 
-    fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
-    for required in (
-        "npm run check",
-        "npm run test:package-install --workspace @local/fabric",
-        "node runtime/fabric/mcp-smoke.mjs",
-        "npm audit --workspace=@local/fabric --omit=dev --audit-level=high",
-    ):
-        assert required in fabric_commands
-    assert "runtime/agent-fabric" not in fabric_commands
-    run_steps = [step for step in fabric_steps if "run" in step]
-    assert all("working-directory" not in step for step in run_steps)
 
 
 def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
@@ -604,17 +589,8 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     assert {"pytest", "pyyaml"} <= locked
 
 
-def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> None:
+def test_node_workspace_uses_locked_root_dependencies() -> None:
     document = _workflow()
-    fabric_steps = _steps(_job(document, "fabric"))
-    fabric_paths = set(_flatten_patterns(_change_filters(document)["fabric"]))
-    assert {
-        "config/**",
-        "pyproject.toml",
-        "scripts/**",
-        "skills/**",
-        "uv.lock",
-    } <= fabric_paths
     node_setup = next(
         step for step in _setup_action_steps() if str(step.get("uses", "")).startswith("actions/setup-node@")
     )
@@ -622,15 +598,13 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
     assert cache_paths == ["package-lock.json"]
 
     root_package = json.loads(ROOT_PACKAGE.read_text(encoding="utf-8"))
-    assert root_package.get("workspaces") == ["runtime/fabric"]
+    assert root_package.get("workspaces") == []
     root_scripts = root_package.get("scripts")
     assert isinstance(root_scripts, dict)
     assert root_scripts.get("check") == (
         "python3 scripts/node-workspace-provision.py && "
-        "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test"
+        "node scripts/node-workspace-preflight.mjs"
     )
-    assert root_scripts.get("typecheck") == "npm run typecheck --workspaces --if-present"
-    assert root_scripts.get("test") == "npm run test --workspaces --if-present"
     assert ROOT_LOCK.is_file()
     assert not list((ROOT / "runtime").glob("*/package-lock.json"))
     root_dev_dependencies = root_package.get("devDependencies")
@@ -638,34 +612,6 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
     assert isinstance(root_dev_dependencies.get("tsx"), str)
     assert root_package.get("dependencies") is None
 
-    package = json.loads(FABRIC_PACKAGE.read_text(encoding="utf-8"))
-    assert package.get("name") == "@local/fabric"
-    assert package.get("engines") == {"node": ">=24.15.0 <25"}
-    scripts = package.get("scripts")
-    assert isinstance(scripts, dict)
-    assert {"test", "test:package-install", "typecheck"} <= scripts.keys()
-    dependencies = package.get("dependencies")
-    assert isinstance(dependencies, dict)
-    assert isinstance(dependencies.get("tsx"), str)
-
-    setup_uv = next(
-        step for step in fabric_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
-    )
-    assert setup_uv.get("with") == {
-        "python-version": "3.14",
-        "enable-cache": True,
-        "cache-dependency-glob": "uv.lock",
-    }
-    smoke_step = next(
-        step for step in fabric_steps
-        if str(step.get("run", "")).strip() == "node runtime/fabric/mcp-smoke.mjs"
-    )
-    assert smoke_step.get("env") == {
-        "HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python",
-    }
-
-    fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
-    assert fabric_commands.index("uv sync --locked --only-group test") < fabric_commands.index("npm run check")
 
 
 def test_repository_policy_covers_sensitive_fabric_surfaces() -> None:
@@ -737,7 +683,7 @@ def test_gate_reports_each_step_and_tails_failed_step_log(tmp_path: Path) -> Non
             "#!/bin/sh\n"
             "i=1\n"
             "while [ $i -le 25 ]; do echo \"$0 line-$i\"; i=$((i + 1)); done\n"
-            + ("exit 7\n" if name == "node" else "exit 0\n"),
+            + ("exit 7\n" if name == "npm" else "exit 0\n"),
             encoding="utf-8",
         )
         executable.chmod(0o755)
@@ -765,7 +711,7 @@ def test_gate_reports_each_step_and_tails_failed_step_log(tmp_path: Path) -> Non
     summaries = [line for line in lines if re.match(r"(?:ok|FAIL) [a-z0-9-]+ \d+s$", line)]
     failures = [line for line in summaries if line.startswith("FAIL ")]
     assert len(failures) == 1
-    assert "fabric-mcp-smoke" in failures[0]
+    assert "workspace-checks" in failures[0]
     assert "line-25" in result.stdout
     failed_log_line = next(line for line in lines if line.startswith("log: "))
     failed_log = Path(failed_log_line.removeprefix("log: "))

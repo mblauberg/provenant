@@ -28,20 +28,6 @@ INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 CLI = front_door_binary()
 
 
-def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, status="succeeded")
-    module = load_script(SCRIPT, "legacy_run_controls")
-
-    assert module.validate_retained_dispatch(run_dir) == []
-    result = invoke(
-        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path,
-    )
-    assert result.returncode == 2
-    assert "successful attempts cannot be retried" in json.loads(result.stdout)["message"]
-
-
 @pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("host_disk_full", None), ("provider_lost", 12345), ("process_spawn_error", None)])
 def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
     run_dir = make_run(tmp_path, "controls")
@@ -61,6 +47,14 @@ def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
             "attempt_path": str(attempt.relative_to(run_dir))}],
     }))
     assert module._load_summary(run_dir, "batch-001")["status"] == "failed"
+
+
+def test_retained_legacy_success_is_valid(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "controls")
+    write_attempt(run_dir, status="succeeded")
+    module = load_script(SCRIPT, "legacy_run_controls")
+
+    assert module.validate_retained_dispatch(run_dir) == []
 
 
 def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: Path):
@@ -215,89 +209,6 @@ def invoke(*args: str, cwd: Path, env: dict[str, str] | None = None) -> subproce
     return subprocess.run([str(CLI), *args], cwd=cwd, env=merged, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def test_inspect_reports_exact_attempt_artifacts_without_reconciling_manifest(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir)
-    before = (run_dir / "MANIFEST.md").read_bytes()
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    payload = json.loads(result.stdout)
-    assert payload["tasks"][0]["task_id"] == "task-1"
-    assert payload["tasks"][0]["attempts"][0]["attempt_id"] == "attempt-001"
-    assert payload["tasks"][0]["attempts"][0]["artifacts"]["result"].endswith("result.md")
-    assert (run_dir / "MANIFEST.md").read_bytes() == before
-
-
-def test_artifact_commands_require_exact_attempt_and_emit_raw_content(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir)
-
-    result = invoke("run", "result", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", cwd=tmp_path)
-
-    assert result.returncode == 0
-    assert result.stdout == "result\n"
-
-
-def test_cancel_writes_one_empty_attempt_marker_without_terminal_evidence(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
-    attempt_dir.mkdir(parents=True)
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 1
-    assert json.loads(result.stdout)["status"] == "completion_evidence_missing"
-    marker = attempt_dir / "cancel.request"
-    assert marker.read_bytes() == b""
-    assert marker.stat().st_nlink == 1
-
-
-def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("natural\n", encoding="utf-8")
-    adapter = tmp_path / "adapter"
-    write_success_adapter(adapter)
-    dispatch = load_script(ROOT / "skills/orchestrate/scripts/dispatch_run.py", "dispatch_for_cancel_natural")
-    monkeypatch.setattr(dispatch, "CF_DISPATCH", adapter)
-    monkeypatch.chdir(tmp_path)
-    args = dispatch.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "natural", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-    ])
-    assert dispatch.dispatch(args) == 0
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "natural",
-        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 0
-    assert json.loads(result.stdout)["status"] == "already_terminal"
-    assert not (run_dir / "dispatch/tasks/natural/attempt-001/cancel.request").exists()
-
-
-def test_cancel_removes_stale_marker_after_validated_terminal_attempt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    attempt = write_attempt(run_dir, status="failed", result=None)
-    marker = attempt.parent / "cancel.request"
-    marker.touch()
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 0
-    assert json.loads(result.stdout)["status"] == "already_terminal"
-    assert not marker.exists()
-
-
 def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
@@ -413,125 +324,6 @@ def test_cancel_waits_through_late_summary_bundle_completion(
         publisher.join()
 
 
-def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, status="cancelled", observed_exit=False)
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 2
-    assert json.loads(result.stdout)["status"] == "invalid_target"
-    assert not (run_dir / "dispatch/tasks/task-1/attempt-001/cancel.request").exists()
-
-
-def test_retry_requires_observed_provider_exit(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, status="failed", result=None, observed_exit=False)
-
-    result = invoke(
-        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path,
-    )
-
-    assert result.returncode == 2
-    assert "observed provider exit" in json.loads(result.stdout)["message"]
-    assert not (run_dir / "dispatch/tasks/task-1/attempt-002").exists()
-
-
-def test_blocked_retry_requires_exact_retained_question_envelope(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    parent_question = {"code": "needs_input", "prompt": "Which source?"}
-    retained_question = {"code": "needs_input", "prompt": "A different source?"}
-    envelope = json.dumps({
-        "schema_version": 1, "record_type": "provenant-worker-terminal",
-        "classification": "question", "question": retained_question,
-    }) + "\n"
-    write_attempt(run_dir, status="blocked", result=envelope, question=parent_question)
-    response = tmp_path / "response.md"
-    response.write_text("Use the archive.\n", encoding="utf-8")
-
-    result = invoke(
-        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--same-route", "--response-file", str(response),
-        cwd=tmp_path,
-    )
-
-    assert result.returncode == 2
-    assert "question disagrees with terminal result" in json.loads(result.stdout)["message"]
-    assert not (run_dir / "dispatch/tasks/task-1/attempt-002").exists()
-
-
-def test_cancel_rejects_closed_run_without_writing_marker(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
-    attempt_dir.mkdir(parents=True)
-    receipt_path = run_dir / "RUN_RECEIPT.json"
-    receipt = json.loads(receipt_path.read_text())
-    receipt.update({"status": "completed", "closed_at": "2026-08-29T00:00:00Z"})
-    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
-        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 2
-    assert json.loads(result.stdout)["status"] == "invalid_target"
-    assert not (attempt_dir / "cancel.request").exists()
-
-
-def test_cancel_rejects_internally_incomplete_batch_summary(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    batch_dir = run_dir / "dispatch/batches/batch-001"
-    batch_dir.mkdir(parents=True)
-    (batch_dir / "summary.json").write_text(json.dumps({
-        "schema_version": 1,
-        "record_type": "dispatch-batch",
-        "batch_id": "batch-001",
-        "status": "cancelled",
-        "task_count": 0,
-        "counts": {},
-        "tasks": [],
-    }) + "\n", encoding="utf-8")
-
-    result = invoke(
-        "run", "cancel", "--run-dir", str(run_dir), "--batch-id", "batch-001",
-        "--wait-seconds", "0", cwd=tmp_path,
-    )
-
-    assert result.returncode == 2
-    assert json.loads(result.stdout)["status"] == "invalid_target"
-    assert not (batch_dir / "cancel.request").exists()
-
-
-def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir)
-    (run_dir / "dispatch/tasks/task-1/attempt-001/result.md").write_text("tampered\n", encoding="utf-8")
-
-    result = invoke("run", "result", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "digest does not match" in json.loads(result.stdout)["message"]
-
-
-def test_artifact_command_rejects_attempt_copied_from_another_run(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    attempt = write_attempt(run_dir)
-    record = json.loads(attempt.read_text(encoding="utf-8"))
-    record["run_id"] = "different-run"
-    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-    (attempt.parent / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
-
-    result = invoke("run", "result", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "invalid identity" in json.loads(result.stdout)["message"]
-
-
 def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="failed", result=None)
@@ -557,90 +349,6 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
     assert delegated[delegated.index("--risk-tier") + 1] == "substantial"
     assert delegated[delegated.index("--reviewer-id") + 1] == "reviewer-1"
     assert delegated[delegated.index("--effort") + 1] == "high"
-
-
-def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_prompt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_bytes(b"retry these exact bytes\n\n")
-    policy = tmp_path / ".agents/fabric-policy.json"
-    policy.parent.mkdir(exist_ok=True)
-    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
-    bin_dir = fake_bin(tmp_path)
-    provider_count = tmp_path / "provider.count"
-    received = tmp_path / "received.bin"
-    fake_codex(
-        bin_dir,
-        f"""
-        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
-        if [ "$1" = "--help" ]; then exit 0; fi
-        if [ ! -f {provider_count} ]; then
-          printf '1\n' > {provider_count}
-          cat >/dev/null
-          echo 'first attempt fails' >&2
-          exit 7
-        fi
-        cat > {received}
-        printf 'RETRY OK\n'
-        """,
-        models={"gpt-6.1-sol": ("high",)},
-    )
-    env = {**os.environ, "PATH": f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}"}
-    first = subprocess.run(
-        [
-            str(ROOT / "skills/orchestrate/scripts/dispatch_run.py"),
-            "--run-dir", str(run_dir), "--task-id", "retry-chain",
-            "--adapter", "codex", "--prompt-file", str(prompt),
-            "--alias", "senior", "--role", "worker",
-            "--risk-tier", "substantial",
-        ],
-        cwd=tmp_path, env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    assert first.returncode == 1, first.stderr + first.stdout
-
-    retry = invoke(
-        "run", "retry", "--run-dir", str(run_dir), "--task-id", "retry-chain",
-        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path, env=env,
-    )
-
-    assert retry.returncode == 0, retry.stderr + retry.stdout
-    attempt = json.loads(
-        (run_dir / "dispatch/tasks/retry-chain/attempt-002/attempt.json").read_text(encoding="utf-8")
-    )
-    assert attempt["status"] == "ok"
-    assert attempt["retry_of"] == "attempt-001"
-    assert attempt["requested_route"]["alias"] == "senior"
-    assert attempt["requested_route"]["risk_tier"] == "substantial"
-    assert attempt["route"]["risk_tier"] == "substantial"
-    assert attempt["route"]["model_override_tier"] == ""
-    assert received.read_bytes().endswith(prompt.read_bytes())
-    assert received.read_bytes().startswith(b"You are codex/")
-
-
-def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, status="failed", result=None)
-
-    result = invoke("run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
-                    "--attempt-id", "attempt-001", "--reroute", "--adapter", "gemini", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "route selector" in json.loads(result.stdout)["message"]
-
-
-def test_blocked_inspection_exposes_question_and_continuation_reference(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, status="blocked", result=None,
-                  question={"code": "needs_input", "prompt": "Which source?"})
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), "--task-id", "task-1",
-                    "--attempt-id", "attempt-001", cwd=tmp_path)
-
-    assert result.returncode == 0
-    attempt = json.loads(result.stdout)["tasks"][0]["attempts"][0]
-    assert attempt["question"]["prompt"] == "Which source?"
-    assert attempt["continuation_ref"] == "dispatch/tasks/task-1/attempt-001/attempt.json"
 
 
 def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -675,27 +383,6 @@ def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path
     assert prompt.startswith("prompt\n")
     assert "prompt" in prompt and "Which source should I use?" in prompt
     assert "Use the primary archive." in prompt
-
-
-def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("Need a source choice\n", encoding="utf-8")
-    adapter = tmp_path / "question-adapter"
-    dispatch = tmp_path / "dispatch-wrapper"
-    write_question_adapter(adapter)
-    write_dispatch_wrapper(dispatch, adapter)
-    result = subprocess.run([
-        str(dispatch), "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker",
-    ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert result.returncode == 1, result.stderr + result.stdout
-
-    inspected = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-    assert inspected.returncode == 0, inspected.stderr + inspected.stdout
-    attempt = json.loads(inspected.stdout)["tasks"][0]["attempts"][0]
-    assert attempt["question"] == {"code": "needs_input", "prompt": "Which source should I use?"}
-    assert attempt["continuation_ref"] == "dispatch/tasks/question/attempt-001/attempt.json"
 
 
 def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -837,84 +524,6 @@ def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path,
     assert b"\\ud800" in captured.read_bytes()
 
 
-def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absent(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    summary = run_dir / "dispatch/batches/batch-001/summary.json"
-    summary.parent.mkdir(parents=True)
-    summary.write_text(json.dumps({
-        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
-        "status": "cancelled", "tasks": [{"task_id": "not-started", "status": "cancelled"}],
-    }) + "\n", encoding="utf-8")
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 0
-    batch_task = json.loads(result.stdout)["batches"][0]["tasks"][0]
-    assert batch_task == {"task_id": "not-started", "status": "incomplete", "claimed_status": "cancelled",
-                          "receipt_status": "receipt_unavailable"}
-
-
-def test_inspect_does_not_publish_terminal_batch_claim_without_valid_attempt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    summary = run_dir / "dispatch/batches/batch-001/summary.json"
-    summary.parent.mkdir(parents=True)
-    summary.write_text(json.dumps({
-        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
-        "status": "failed", "tasks": [{"task_id": "missing", "status": "failed",
-                                           "attempt_path": "dispatch/tasks/missing/attempt-001/attempt.json"}],
-    }) + "\n", encoding="utf-8")
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 0
-    task = json.loads(result.stdout)["batches"][0]["tasks"][0]
-    assert task["status"] == "incomplete" and task["claimed_status"] == "failed"
-
-
-def test_inspect_rejects_non_string_batch_attempt_path(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    summary = run_dir / "dispatch/batches/batch-001/summary.json"
-    summary.parent.mkdir(parents=True)
-    summary.write_text(json.dumps({
-        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
-        "status": "failed", "tasks": [{"task_id": "missing", "status": "failed", "attempt_path": 7}],
-    }) + "\n", encoding="utf-8")
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "attempt path is not a string" in json.loads(result.stdout)["message"]
-
-
-def test_inspect_rejects_invalid_batch_task_id(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    summary = run_dir / "dispatch/batches/batch-001/summary.json"
-    summary.parent.mkdir(parents=True)
-    summary.write_text(json.dumps({
-        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
-        "status": "failed", "tasks": [{"task_id": "../outside", "status": "failed"}],
-    }) + "\n", encoding="utf-8")
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "task universe" in json.loads(result.stdout)["message"]
-
-
-def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    (run_dir / "dispatch/tasks/task-1/attempt-001").mkdir(parents=True)
-
-    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
-
-    assert result.returncode == 0
-    attempt = json.loads(result.stdout)["tasks"][0]["attempts"][0]
-    assert attempt == {
-        "attempt_id": "attempt-001", "status": "incomplete", "receipt_status": "unavailable",
-        "artifacts": {"attempt": "dispatch/tasks/task-1/attempt-001/attempt.json"},
-    }
-
-
 def test_evidence_reader_rejects_intermediate_directory_symlink(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "controls")
     outside = tmp_path / "outside"
@@ -1043,30 +652,6 @@ def test_reduce_forwards_delivery_run_id_only_when_selected_attempts_agree(
         assert delegated[delegated.index("--delivery-run-id") + 1] == expected_delivery
 
 
-def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    first = write_attempt(run_dir, task="same", attempt=1)
-    second = write_attempt(run_dir, task="same", attempt=2)
-    for batch_id, attempt in (("batch-001", first), ("batch-002", second)):
-        summary = run_dir / "dispatch/batches" / batch_id / "summary.json"
-        summary.parent.mkdir(parents=True, exist_ok=True)
-        summary.write_text(json.dumps({
-            "schema_version": 1, "record_type": "dispatch-batch", "batch_id": batch_id,
-            "tasks": [{"task_id": "same", "status": "ok",
-                       "attempt_path": str(attempt.relative_to(run_dir)),
-                       "result_path": str(attempt.parent / "result.md").replace(str(run_dir) + "/", "")}],
-        }) + "\n", encoding="utf-8")
-    prompt = tmp_path / "reduce.md"
-    prompt.write_text("reduce", encoding="utf-8")
-
-    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
-                    "--prompt-file", str(prompt), "--batch-id", "batch-001",
-                    "--input", "same/attempt-002", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "selected batch" in json.loads(result.stdout)["message"]
-
-
 def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = tmp_path / "adapter"
     dispatch = tmp_path / "dispatch-wrapper"
@@ -1122,77 +707,9 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     assert not list(reduce_run.glob(".provenant-reducer-*.md"))
 
 
-@pytest.mark.parametrize("name", [".env", ".ssh/known_hosts"])
-def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, name: str) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, task="one")
-    prompt = tmp_path / name
-    prompt.parent.mkdir(parents=True, exist_ok=True)
-    prompt.write_text("secret prompt", encoding="utf-8")
-
-    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
-                    "--prompt-file", str(prompt), "--batch-id", "batch-001",
-                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "credential or authentication" in json.loads(result.stdout)["message"]
-
-
-def test_reduce_rejects_original_prompt_symlink_before_resolving(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "controls")
-    write_attempt(run_dir, task="one")
-    target = tmp_path / "ordinary-prompt.md"
-    target.write_text("prompt", encoding="utf-8")
-    supplied = tmp_path / "prompt-link.md"
-    supplied.symlink_to(target)
-
-    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
-                    "--prompt-file", str(supplied), "--batch-id", "batch-001",
-                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
-
-    assert result.returncode == 2
-    assert "must not be a symlink" in json.loads(result.stdout)["message"]
-
-
 def make_listed_run(tmp_path: Path) -> Path:
     name = "20261022-1200-dispatch-task-1-abc123"
     return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "runs" / name)], text=True).strip())
-
-
-def test_show_resolves_task_id_and_bounds_the_result_tail(tmp_path: Path) -> None:
-    run_dir = make_listed_run(tmp_path)
-    write_attempt(run_dir, result="".join(f"line {number}\n" for number in range(100)))
-    shown = invoke("run", "show", "task-1", "--tail", "3", cwd=tmp_path)
-    assert shown.returncode == 0, shown.stderr
-    assert shown.stdout.splitlines()[-3:] == ["line 97", "line 98", "line 99"]
-    assert "task task-1 attempt-001 status ok" in shown.stdout
-    as_json = invoke("run", "show", f"mcp-{run_dir.name[-6:]}", "--tail", "2", "--json", cwd=tmp_path)
-    data = json.loads(as_json.stdout)
-    assert data["run_id"] == run_dir.name and data["tasks"][0]["result_tail"] == ["line 98", "line 99"]
-    assert data["tasks"][0]["result_clipped"] is True
-
-
-def test_show_rejects_unknown_reference(tmp_path: Path) -> None:
-    make_listed_run(tmp_path)
-    assert invoke("run", "show", "missing", cwd=tmp_path).returncode == 2
-
-
-def test_show_does_not_follow_symlinks_out_of_the_run(tmp_path: Path) -> None:
-    run_dir = make_listed_run(tmp_path)
-    attempt_dir = write_attempt(run_dir).parent
-    secret = tmp_path / "outside.txt"
-    secret.write_text("TOPSECRET\n", encoding="utf-8")
-    (attempt_dir / "result.md").unlink()
-    (attempt_dir / "result.md").symlink_to(secret)
-    shown = invoke("run", "show", "task-1", cwd=tmp_path)
-    assert "TOPSECRET" not in shown.stdout and "result unavailable" in shown.stdout
-    outside = tmp_path / "outside-attempt"
-    outside.mkdir()
-    (outside / "result.md").write_text("TOPSECRET\n", encoding="utf-8")
-    (run_dir / "dispatch/tasks/task-2").mkdir()
-    (run_dir / "dispatch/tasks/task-2/attempt-001").symlink_to(outside)
-    shown = invoke("run", "show", "task-1", "--task-id", "task-2", cwd=tmp_path)
-    assert "TOPSECRET" not in shown.stdout and "TOPSECRET" not in shown.stderr
 
 
 def _packet_metadata():
