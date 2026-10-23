@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "lint",
+    "branch",
+    "main"
+  ],
+  "class": "machine",
+  "exit_code": 0,
+  "files": [],
+  "stderr": "",
+  "stdin": "",
+  "stdout": "provenant lint: main is a default branch; skipping\n"
+}

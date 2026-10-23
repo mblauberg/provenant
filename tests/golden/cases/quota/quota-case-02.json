@@ -3,6 +3,7 @@
     "quota",
     "--bad-golden-flag"
   ],
+  "class": "help",
   "exit_code": 2,
   "files": [],
   "stderr": "usage: provenant quota [-h] [--json] [--refresh] [--verbose]\nprovenant quota: error: unrecognized arguments: --bad-golden-flag\n",

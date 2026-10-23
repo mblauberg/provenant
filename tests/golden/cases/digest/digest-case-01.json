@@ -3,6 +3,7 @@
     "digest",
     "--help"
   ],
+  "class": "help",
   "exit_code": 0,
   "files": [],
   "stderr": "",

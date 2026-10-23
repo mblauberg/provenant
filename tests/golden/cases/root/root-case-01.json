@@ -2,6 +2,7 @@
   "argv": [
     "root"
   ],
+  "class": "machine",
   "exit_code": 0,
   "files": [],
   "stderr": "",

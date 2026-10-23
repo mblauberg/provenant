@@ -3,6 +3,7 @@
     "check",
     "--help"
   ],
+  "class": "help",
   "exit_code": 2,
   "files": [],
   "stderr": "usage: check-harness [--doctor] [--checks-only]\n",

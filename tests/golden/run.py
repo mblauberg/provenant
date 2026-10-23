@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import difflib
 import hashlib
 import json
@@ -21,6 +22,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 CASES = HERE / "cases"
+MANIFEST = HERE / "manifest.json"
 
 # Each entry has a representative boundary invocation. The detail case gives
 # the public usage text; the second case exercises owner validation (or a
@@ -38,7 +40,7 @@ VERBS: dict[str, list[list[str]]] = {
     "check": [["check", "--help"], ["check", "--bad-golden-flag"]],
     "gate": [["gate", "--help"]],
     "fabric": [["fabric", "--help"], ["fabric", "--bad-golden-flag"],
-                ["fabric", "dispatch", "--help"], ["fabric", "dispatch", "--plan"]],
+                ["fabric", "dispatch", "--help"], ["fabric", "dispatch", "--bad-golden-flag"]],
     "lease": [["lease", "--help"], ["lease", "invalid"]],
     "hosts": [["hosts", "--help"], ["hosts", "invalid-action"]],
     "lanes": [["lanes", "--help"], ["lanes", "--bad-golden-flag"]],
@@ -61,13 +63,10 @@ VERBS: dict[str, list[list[str]]] = {
 ALIASES: dict[str, list[list[str]]] = {
     "usage": [["--help"], ["bogus"]],
     "peer": [["peer", "--help"]],
-    "events": [["events", "--help"]],
-    "hosts": [["hosts", "--help"]],
-    "routes": [["help", "routes"]],
 }
 
 
-def binary_path() -> Path | str | None:
+def binary_path() -> Path | None:
     explicit = os.environ.get("PROVENANT_GOLDEN_BIN")
     if explicit:
         return Path(explicit).expanduser().resolve()
@@ -75,10 +74,7 @@ def binary_path() -> Path | str | None:
     if not target.is_absolute():
         target = REPO / target
     release = target / "release" / "provenant"
-    if release.is_file():
-        return release
-    on_path = shutil.which("provenant")
-    return Path(on_path).resolve() if on_path else None
+    return release.resolve() if release.is_file() else None
 
 
 def normalize(value: str, replacements: list[tuple[str, str]]) -> str:
@@ -87,21 +83,100 @@ def normalize(value: str, replacements: list[tuple[str, str]]) -> str:
     value = re.sub(r"\b20\d\d-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?\b", "<TIMESTAMP>", value)
     value = re.sub(r"\b\d{13}\b", "<EPOCH_MS>", value)
     value = re.sub(r"\b(?:duration|elapsed|took|waited)[=: ]+\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds)?\b", "<DURATION>", value, flags=re.I)
-    value = re.sub(r"\bpid\b[\"']?\s*[:= ]\s*[\"']?\d+\b", "pid=<PID>", value, flags=re.I)
-    value = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", "<UUID>", value, flags=re.I)
-    value = re.sub(r"\b(?:run|task|attempt)[-_]?[0-9]{6,}[-_a-zA-Z0-9]*\b", "<RUN_ID>", value)
-    value = re.sub(r"\b(?:[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{12,})\b", "<TOKEN>", value)
+    value = re.sub(r'(\"(?:pid|owner_pid|parent_pid)\"\s*:\s*|(?<![\w-])pid=)\d+\b', r'\1<PID>', value)
+    value = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", "<UUID:8-4-4-4-12>", value, flags=re.I)
+
+    def shaped(match: re.Match[str]) -> str:
+        token = match.group()
+        shape = ''.join('0' if c.isdigit() else 'a' if c.islower() else 'A' if c.isupper() else c for c in token)
+        return f"<{shape}>"
+
+    value = re.sub(r"\b(?:run|task|attempt)[-_]\d{6,}[-_a-zA-Z0-9]*\b", shaped, value)
+    value = re.sub(r"\b(?:[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{12,})\b", shaped, value)
     hostname = socket.gethostname()
     if hostname:
-        value = value.replace(hostname, "<HOST>")
-    value = re.sub(r"\b[\w.-]+\.local\b", "<HOST>", value)
+        value = re.sub(r"(?<![\w./-])" + re.escape(hostname) + r"(?![\w./-])", "<HOST>", value)
+    value = re.sub(r"(?<![\w./-])[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.local(?![\w./-])", "<HOST>", value)
     return value
+
+
+def path_spellings(path: Path, label: str) -> list[tuple[str, str]]:
+    resolved = str(path.resolve())
+    spellings = {str(path), resolved}
+    if resolved.startswith("/private/var/"):
+        spellings.add(resolved.removeprefix("/private"))
+    elif resolved.startswith("/var/"):
+        spellings.add("/private" + resolved)
+    return [(spelling, label) for spelling in spellings]
+
+
+def checkout_status() -> bytes:
+    return subprocess.check_output([
+        shutil.which("git") or "git", "--no-optional-locks", "-C", str(REPO),
+        "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).agent-run",
+    ])
+
+
+def runtime_manifest() -> dict[str, str]:
+    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}", "sqlite": sqlite3.sqlite_version}
+
+
+def check_manifest() -> None:
+    expected = json.loads(MANIFEST.read_text())
+    if expected != runtime_manifest():
+        raise ValueError(
+            f"golden runtime mismatch: recorded {expected}, current {runtime_manifest()}; "
+            f"re-record with Python {expected['python']} (CI uses 3.12) and review the manifest and case diffs"
+        )
+
+
+def help_structure(text: str) -> dict[str, list[str]]:
+    """Extract declared command choices and option names, ignoring help prose."""
+    flags = set(re.findall(r"(?<![\w-])--?[A-Za-z][\w-]*", text))
+    commands: set[str] = set()
+    for choices in re.findall(r"\{([a-z][a-z0-9_,|-]+)\}", text):
+        commands.update(re.split(r"[,|]", choices))
+    in_commands = False
+    for line in text.splitlines():
+        if line.strip() == "Commands":
+            in_commands = True
+            continue
+        if in_commands:
+            match = re.match(r"^  ([a-z][a-z0-9_|-]*)(?:\s|$)", line)
+            if match:
+                commands.update(match[1].split("|"))
+            elif line and not line.startswith(" "):
+                in_commands = False
+        # Shell-style usage and argparse subparser listings.
+        match = re.search(r"usage: (?:provenant|fabric)\s+([a-z][\w|-]*)(?:\s+([a-z][\w|-]*))?", line)
+        if match:
+            for group in match.groups():
+                if group:
+                    commands.update(group.split("|"))
+        match = re.match(r"^    ([a-z][\w|-]*)\s{2,}", line)
+        if match:
+            commands.update(match[1].split("|"))
+        match = re.match(r"^ {2,4}([a-z][\w|-]*)(?:\s{2,}|\s+(?:\[|--|<|\.\.\.))", line)
+        if match:
+            commands.update(match[1].split("|"))
+    return {"subcommands": sorted(commands), "flags": sorted(flags)}
+
+
+def comparison_fields(result: dict[str, Any]) -> dict[str, Any]:
+    if result["class"] == "help":
+        return {"exit_code": result["exit_code"],
+                "help": help_structure(result["stdout"] + "\n" + result["stderr"])}
+    fields = {key: result[key] for key in ("exit_code", "stdout", "stderr")}
+    files = {row["path"]: {key: val for key, val in row.items() if key != "path"} for row in result["files"]}
+    fields["files.paths"] = sorted(files)
+    fields.update({f"files.{path}": content for path, content in files.items()})
+    return fields
 
 
 class Fixture:
     def __init__(self, binary: Path | str):
         self.tmp = tempfile.TemporaryDirectory(prefix="provenant-golden-")
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.binary = str(binary)
         self.home = self.root / "home"
         self.bin = self.root / "fake-bin"
@@ -109,16 +184,19 @@ class Fixture:
         self.runs = self.project / ".agent-run" / "runs"
         self.roots = [self.home, self.root / "xdg-cache", self.root / "xdg-config",
                       self.root / "xdg-data", self.root / "fabric-state", self.root / "fabric-instance",
-                      self.root / "codex", self.root / "claude", self.project]
+                      self.root / "codex", self.root / "claude", self.root / "gh", self.project]
         for directory in self.roots + [self.bin, self.runs / "fixture-run"]:
             directory.mkdir(parents=True, exist_ok=True)
         (self.runs / "fixture-run" / "RUN.json").write_text('{"run_id":"fixture-run","status":"complete"}\n')
-        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
-        subprocess.run(["git", "-C", str(self.project), "config", "user.name", "Golden Fixture"], check=True)
-        subprocess.run(["git", "-C", str(self.project), "config", "user.email", "golden@example.invalid"], check=True)
         self.make_fake_clis()
-        inherited_path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-        self.env = {"PATH": str(self.bin) + os.pathsep + inherited_path}
+        self.git = shutil.which("git")
+        if not self.git:
+            raise RuntimeError("golden fixtures require git")
+        # Every PATH entry is pinned here; no host PATH directories leak in.
+        for name, target in {"git": self.git, "python": sys.executable, "python3": sys.executable,
+                             "bash": "/bin/bash", "dirname": "/usr/bin/dirname"}.items():
+            (self.bin / name).symlink_to(target)
+        self.env = {"PATH": str(self.bin)}
         if os.name == "nt" and "SystemRoot" in os.environ:
             self.env["SystemRoot"] = os.environ["SystemRoot"]
         self.env.update({
@@ -128,13 +206,32 @@ class Fixture:
             "AGENT_FABRIC_INSTANCE_ROOT": str(self.root / "fabric-instance"),
             "CODEX_HOME": str(self.root / "codex"), "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
             "AGENT_FABRIC_PRODUCT_ROOT": str(REPO), "AGENT_FABRIC_PROJECT_ROOT": str(self.project),
-            "AGENTS_HOME": str(self.home / ".agents"), "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
+            "AGENTS_HOME": str(self.home / ".agents"),
             "TZ": "UTC", "LC_ALL": "C", "COLUMNS": "80", "NO_COLOR": "1", "TERM": "dumb",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig"),
-            "PYTHONHASHSEED": "0",
+            "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+            "HARNESS_PYTHON": sys.executable, "GIT_TERMINAL_PROMPT": "0",
+            "GH_CONFIG_DIR": str(self.root / "gh"), "GH_TOKEN": "",
+            "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z",
             "TMPDIR": str(self.root), "TMP": str(self.root), "TEMP": str(self.root),
         })
-        self.replacements = [(str(self.root), "<FIXTURE>"), (str(REPO), "<CHECKOUT>")]
+        # Fabric's real query paths need its installed Node runtime, pinned once.
+        node = shutil.which("node")
+        if node:
+            self.env["FABRIC_NODE"] = str(Path(node).resolve())
+        self.replacements = (path_spellings(self.root, "<FIXTURE>") + path_spellings(REPO, "<CHECKOUT>")
+                             + [(sys.executable, "<PYTHON>")])
+        self.git_run("init", "-q", "-b", "main")
+        self.git_run("config", "user.name", "Golden Fixture")
+        self.git_run("config", "user.email", "golden@example.invalid")
+        self.git_run("config", "core.autocrlf", "false")
+        (self.project / ".gitignore").write_text(".agent-run/\n.worktrees/\n")
+        self.git_run("add", ".gitignore")
+        self.git_run("-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+
+    def git_run(self, *args: str) -> None:
+        subprocess.run([self.git, "-C", str(self.project), *args], env=self.env,
+                       check=True, capture_output=True)
 
     def make_fake_clis(self) -> None:
         for name in ("claude", "codex", "gemini", "opencode", "cursor"):
@@ -142,17 +239,33 @@ class Fixture:
             path.write_text("#!/bin/sh\nprintf '%s\\n' 'golden fake provider'\n")
             path.chmod(0o755)
 
+        gh = self.bin / "gh"
+        gh.write_text("#!/bin/sh\nprintf '%s\\n' 'golden: gh unavailable (offline fixture)' >&2\nexit 1\n")
+        gh.chmod(0o755)
+
     def snapshot(self) -> dict[str, str]:
         found: dict[str, str] = {}
         for base in self.roots:
             for path in base.rglob("*"):
+                # Git's binary index/stat caches are implementation metadata, not
+                # portable output files. Worktree .git pointer files remain visible.
+                if ".git" in path.relative_to(self.root).parts[:-1]:
+                    continue
                 if path.is_file() and not path.is_symlink():
-                    rel = "<FIXTURE>" + str(path.relative_to(self.root))
+                    rel = "<FIXTURE>/" + str(path.relative_to(self.root))
                     data = path.read_bytes()
                     if path.suffix in {".sqlite", ".sqlite3", ".db"}:
                         try:
                             with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
-                                dump = "\n".join(db.iterdump()) + "\n"
+                                schema = db.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name, tbl_name, sql").fetchall()
+                                tables = {}
+                                for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+                                    quoted = '"' + name.replace('"', '""') + '"'
+                                    columns = len(db.execute(f"SELECT * FROM {quoted} LIMIT 0").description)
+                                    order = ", ".join(str(i) for i in range(1, columns + 1))
+                                    tables[name] = db.execute(f"SELECT * FROM {quoted} ORDER BY {order}").fetchall()
+                                dump = json.dumps({"schema": schema, "rows": tables}, indent=2, sort_keys=True,
+                                                  default=lambda blob: {"blob_hex": blob.hex()}) + "\n"
                             found[rel] = normalize(dump, self.replacements)
                             continue
                         except sqlite3.Error:
@@ -165,10 +278,15 @@ class Fixture:
         return found
 
     def run(self, argv: list[str], stdin: str = "") -> dict[str, Any]:
+        checkout_before = checkout_status()
         before = self.snapshot()
-        completed = subprocess.run([self.binary, *argv], cwd=self.project, env=self.env,
-                                   input=stdin.encode(), stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, timeout=30)
+        try:
+            completed = subprocess.run([self.binary, *argv], cwd=self.project, env=self.env,
+                                       input=stdin.encode(), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=30)
+        finally:
+            if checkout_status() != checkout_before:
+                raise AssertionError("golden child changed AGENT_FABRIC_PRODUCT_ROOT checkout")
         after = self.snapshot()
         changed = []
         for path in sorted(before.keys() | after.keys()):
@@ -177,8 +295,8 @@ class Fixture:
         return {
             "argv": argv, "stdin": stdin,
             "exit_code": completed.returncode,
-            "stdout": normalize(completed.stdout.decode("utf-8", "replace"), self.replacements),
-            "stderr": normalize(completed.stderr.decode("utf-8", "replace"), self.replacements),
+            "stdout": normalize(completed.stdout.decode("utf-8", "surrogateescape"), self.replacements),
+            "stderr": normalize(completed.stderr.decode("utf-8", "surrogateescape"), self.replacements),
             "files": changed,
         }
 
@@ -186,51 +304,134 @@ class Fixture:
         self.tmp.cleanup()
 
 
-def cases_for(verb: str) -> list[tuple[str, list[str]]]:
-    rows = [(f"{verb}-case-{index:02d}", argv) for index, argv in enumerate(VERBS.get(verb, []), 1)]
-    rows.extend((f"{verb}-alias-{index:02d}", argv) for index, argv in enumerate(ALIASES.get(verb, []), 1))
-    return rows
+@dataclass(frozen=True)
+class Case:
+    name: str
+    verb: str
+    argv: list[str]
+    kind: str
+    setup: tuple[tuple[str, ...], ...] = ()
+    stdin: str = ""
+
+
+CREATE_WORKTREE = ("worktree", "create", "golden", "--detach", "HEAD", "--no-node-modules")
+SUCCESS_CASES = [
+    Case("worktree-create", "worktree", list(CREATE_WORKTREE), "machine"),
+    Case("worktree-list", "worktree", ["worktree", "list"], "machine", (CREATE_WORKTREE,)),
+    Case("worktree-remove", "worktree", ["worktree", "remove", "golden"], "machine", (CREATE_WORKTREE,)),
+    Case("route-resolve", "route", ["route", "resolve", "--adapter", "codex", "--alias", "senior", "--role", "worker"], "machine"),
+    Case("routes-catalog", "routes", ["routes", "--json"], "machine"),
+    Case("lint-branch", "lint", ["lint", "branch", "main"], "machine"),
+    Case("events-query", "events", ["events"], "machine"),
+    Case("fabric-dispatch-list", "fabric", ["fabric", "dispatch", "list", "--json"], "machine"),
+]
+
+
+def cases_for(verb: str) -> list[Case]:
+    rows = []
+    for label, mapping in (("case", VERBS), ("alias", ALIASES)):
+        for index, argv in enumerate(mapping.get(verb, []), 1):
+            # Usage/argparse cases intentionally compare structure, not prose.
+            kind = "help" if ("--help" in argv or "--bad-golden-flag" in argv
+                              or argv[0] in {"help", "bogus"}
+                              or argv == ["--help"]
+                              or (len(argv) > 1 and argv[1] in {"invalid", "invalid-action", "--plan"})
+                              or argv in (["root", "extra"], ["gate", "--help"])) else "machine"
+            name = f"{verb}-{label}-{index:02d}"
+            if argv == ["fabric", "dispatch", "--bad-golden-flag"]:
+                name = "fabric-dispatch-invalid-option"
+            rows.append(Case(name, verb, argv, kind))
+    return rows + [case for case in SUCCESS_CASES if case.verb == verb]
+
+
+def all_cases() -> list[Case]:
+    return [case for verb in sorted(set(VERBS) | set(ALIASES)) for case in cases_for(verb)]
+
+
+def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None) -> dict[str, Any]:
+    fixture = Fixture(binary)
+    try:
+        if env:
+            fixture.env.update(env)
+        if case.name == "events-query":
+            attempt = fixture.runs / "fixture-run" / "tasks" / "golden" / "attempt-001"
+            attempt.mkdir(parents=True)
+            (attempt / "attempt.json").write_text(json.dumps({
+                "schema": "fabric.attempt.v1", "run_id": "fixture-run", "task_id": "golden",
+                "attempt": 1, "state": "terminal", "status": "ok", "paths": {},
+                "started_at": "2020-01-01T00:00:00Z", "ended_at": "2020-01-01T00:00:01Z",
+            }) + "\n")
+        for argv in case.setup:
+            setup = fixture.run(list(argv))
+            if setup["exit_code"]:
+                raise RuntimeError(f"{case.name} setup failed: {setup}")
+        result = fixture.run(case.argv, case.stdin)
+        result["class"] = case.kind
+        return result
+    finally:
+        fixture.close()
 
 
 def record(binary: Path | str, selected: str | None) -> None:
-    verbs = [selected] if selected else sorted(set(VERBS) | set(ALIASES))
-    for verb in verbs:
-        for name, argv in cases_for(verb):
-            fixture = Fixture(binary)
-            try:
-                result = fixture.run(argv)
-                destination = CASES / verb / f"{name}.json"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-            finally:
-                fixture.close()
+    # A partial record cannot bless existing cases with a different runtime.
+    if selected and MANIFEST.exists():
+        check_manifest()
+    generated = all_cases()
+    for case in generated:
+        if selected and case.verb != selected:
+            continue
+        result = run_case(binary, case)
+        if case in SUCCESS_CASES and result["exit_code"] != 0:
+            raise ValueError(f"{case.name}: expected a real success path, got {result}")
+        destination = CASES / case.verb / f"{case.name}.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    expected = {CASES / case.verb / f"{case.name}.json" for case in generated}
+    for path in CASES.glob("*/*.json"):
+        if path not in expected:
+            path.unlink()
+    MANIFEST.write_text(json.dumps(runtime_manifest(), indent=2, sort_keys=True) + "\n")
 
 
 def compare(binary: Path | str) -> int:
-    files = sorted(CASES.glob("*/*.json"))
-    if not files:
-        print("no golden cases found; run python tests/golden/run.py --record", file=sys.stderr)
-        return 1
-    failed = 0
-    for path in files:
-        fixture = Fixture(binary)
-        try:
+    try:
+        check_manifest()
+        generated = all_cases()
+        expected_paths = {CASES / case.verb / f"{case.name}.json" for case in generated}
+        actual_paths = set(CASES.glob("*/*.json"))
+        if expected_paths != actual_paths:
+            raise ValueError(f"golden case-file set differs: missing={sorted(str(p.relative_to(HERE)) for p in expected_paths - actual_paths)}, orphan={sorted(str(p.relative_to(HERE)) for p in actual_paths - expected_paths)}; re-record")
+        help_case = Case("coverage", "help", ["help"], "help")
+        help_result = run_case(binary, help_case)
+        commands = set(help_structure(help_result["stdout"])["subcommands"])
+        covered = {case.argv[0] for case in generated}
+        if help_result["exit_code"] or not commands or commands - covered:
+            raise ValueError(f"provenant help command coverage failed: missing={sorted(commands - covered)}")
+        failed = 0
+        for case in generated:
+            path = CASES / case.verb / f"{case.name}.json"
             expected = json.loads(path.read_text())
-            actual = fixture.run(expected["argv"], expected["stdin"])
-            got = json.dumps(actual, indent=2, sort_keys=True) + "\n"
-            want = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+            actual = run_case(binary, case)
+            # Input metadata is part of the recorded contract too.
+            want = {key: expected[key] for key in ("argv", "stdin", "class")}
+            got = {key: actual[key] for key in ("argv", "stdin", "class")}
+            want.update(comparison_fields(expected))
+            got.update(comparison_fields(actual))
             if got != want:
                 failed += 1
                 print(f"\n{path.relative_to(HERE)}: mismatch")
-                print("".join(difflib.unified_diff(want.splitlines(True), got.splitlines(True),
-                                                  fromfile="expected", tofile="actual")), end="")
-        finally:
-            fixture.close()
-    if failed:
-        print(f"{failed} golden case(s) differed", file=sys.stderr)
+                print("".join(difflib.unified_diff(
+                    (json.dumps(want, indent=2, sort_keys=True) + "\n").splitlines(True),
+                    (json.dumps(got, indent=2, sort_keys=True) + "\n").splitlines(True),
+                    fromfile="expected", tofile="actual")), end="")
+        if failed:
+            print(f"{failed} golden case(s) differed", file=sys.stderr)
+            return 1
+        print(f"{len(generated)} golden cases passed")
+        return 0
+    except (ValueError, OSError, AssertionError) as exc:
+        print(str(exc), file=sys.stderr)
         return 1
-    print(f"{len(files)} golden cases passed")
-    return 0
 
 
 def main() -> int:
@@ -243,13 +444,13 @@ def main() -> int:
     if args.verb and not args.record:
         parser.error("--verb is available only with --record")
     binary = binary_path()
-    if binary is None or (isinstance(binary, Path) and not binary.is_file()):
+    if binary is None or not binary.is_file():
         reason = "no CLI binary found (set PROVENANT_GOLDEN_BIN or build tools/front-door)"
-        if os.environ.get("PROVENANT_GOLDEN_REQUIRED") == "1":
-            print(reason, file=sys.stderr)
-            return 1
-        print(f"SKIP: {reason}")
-        return 0
+        if os.environ.get("PROVENANT_GOLDEN_ALLOW_SKIP") == "1" and os.environ.get("PROVENANT_GOLDEN_REQUIRED") != "1":
+            print(f"SKIP: {reason}")
+            return 0
+        print(reason, file=sys.stderr)
+        return 1
     if args.record:
         record(binary, args.verb)
         print(f"recorded golden cases for {args.verb or 'all verbs'}")

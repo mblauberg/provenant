@@ -4,6 +4,7 @@
     "show",
     "missing-run"
   ],
+  "class": "machine",
   "exit_code": 2,
   "files": [],
   "stderr": "",
