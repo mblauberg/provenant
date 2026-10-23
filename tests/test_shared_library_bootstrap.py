@@ -5,8 +5,7 @@ script's own directory and the shared library one level up is not reachable
 without an explicit bootstrap. That bootstrap is a process-global side effect:
 once any module performs it, every module loaded afterwards in that process can
 import `_shared` whether or not it did the work. The result is a silent
-load-order dependency, which is the failure `test_delivery_validator_structure`
-already documents for the delivery validator.
+load-order dependency that can break a directly invoked entry point.
 
 These tests remove the ambiguity. Each consumer is loaded on its own into a copy
 of the catalogue in which every *other* module's path repair has been
