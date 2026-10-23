@@ -77,7 +77,7 @@ pub enum PushError<E> {
     Cleanup {
         callback: E,
         #[source]
-        cleanup: Error,
+        cleanup: Box<Error>,
     },
 }
 #[derive(Debug, Serialize)]
@@ -265,7 +265,7 @@ impl Store {
                     Ok(()) => PushError::Callback(error),
                     Err(cleanup) => PushError::Cleanup {
                         callback: error,
-                        cleanup,
+                        cleanup: Box::new(cleanup),
                     },
                 });
             }
