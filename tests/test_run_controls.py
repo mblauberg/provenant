@@ -343,7 +343,9 @@ def test_attempt_terminal_tolerates_receipt_renamed_before_its_digest_sidecar(tm
         module._attempt_terminal(run_dir, "task-1", "attempt-001")
 
 
-def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_waits_through_late_summary_bundle_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     sidecar = attempt.with_name("attempt.sha256")
@@ -374,18 +376,35 @@ def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, mon
     module = load_script(SCRIPT, "run_controls_late_summary")
     monkeypatch.chdir(tmp_path)
 
+    publisher_ready = threading.Event()
+    publish_now = threading.Event()
+    published = threading.Event()
+
     def publish_sidecar() -> None:
-        time.sleep(0.1)
+        publisher_ready.set()
+        assert publish_now.wait(timeout=5)
         sidecar.write_bytes(sidecar_bytes)
+        published.set()
+
+    original_sleep = time.sleep
+
+    def release_publisher_during_wait(seconds: float) -> None:
+        publish_now.set()
+        assert published.wait(timeout=5)
+        original_sleep(0)
+
+    monkeypatch.setattr(module.time, "sleep", release_publisher_during_wait)
 
     publisher = threading.Thread(target=publish_sidecar)
     publisher.start()
     try:
+        assert publisher_ready.wait(timeout=5)
         args = module.parser().parse_args([
             "cancel", "--run-dir", str(run_dir), "--batch-id", "batch-001",
             "--wait-seconds", "1",
         ])
         assert module.run(args) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "already_terminal"
     finally:
         publisher.join()
 
