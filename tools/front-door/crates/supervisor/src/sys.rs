@@ -139,6 +139,9 @@ pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
                 },
             }
         };
+        if status == libc::EINTR {
+            continue;
+        }
         if status == libc::ERANGE {
             let Some(size) = buffer.len().checked_mul(2) else {
                 return Err(failure(io::Error::from_raw_os_error(libc::ERANGE)));
@@ -158,11 +161,15 @@ pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
         // Nothing is shared with other threads or transferred to libc.
         unsafe {
             let entry = entry.assume_init();
-            if entry.pw_name.is_null() || entry.pw_dir.is_null() {
+            if entry.pw_dir.is_null() {
                 return Ok(None);
             }
             return Ok(Some(AccountInfo {
-                name: OsString::from_vec(CStr::from_ptr(entry.pw_name).to_bytes().to_vec()),
+                name: if entry.pw_name.is_null() {
+                    OsString::new()
+                } else {
+                    OsString::from_vec(CStr::from_ptr(entry.pw_name).to_bytes().to_vec())
+                },
                 home: OsString::from_vec(CStr::from_ptr(entry.pw_dir).to_bytes().to_vec()),
             }));
         }
@@ -241,9 +248,12 @@ mod tests {
 }
 
 mod child;
+pub(crate) mod pid;
+pub(crate) mod raw_exec;
 pub use child::ChildWaitError;
 pub(crate) use child::{anonymous_spool, OwnedChild};
 
+pub mod lane_files;
 pub mod process;
 
 pub(crate) mod fs;

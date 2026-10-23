@@ -325,6 +325,36 @@ pub(crate) fn clear_nonblocking(file: &File) -> io::Result<()> {
         .map(|_| ())
 }
 
+pub(crate) fn open_append(path: &Path, mode: u32) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NONBLOCK prevents a FIFO open from waiting before regular-file refusal.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(mode)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+}
+pub(crate) fn open_following(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+}
+pub(crate) fn flock(file: &File, mode: crate::fs::LockMode, nonblocking: bool) -> io::Result<()> {
+    let op = match mode {
+        crate::fs::LockMode::Shared => libc::LOCK_SH,
+        crate::fs::LockMode::Exclusive => libc::LOCK_EX,
+    } | if nonblocking { libc::LOCK_NB } else { 0 };
+    // SAFETY: file owns a live descriptor throughout this call. flock changes
+    // only this open file description's advisory lock, retains no pointers,
+    // transfers no ownership, and returns errno on refusal. Caller owns mode
+    // and any blocking policy; retry handles interrupted calls.
+    retry(|| unsafe { libc::flock(file.as_raw_fd(), op) }).map(|_| ())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

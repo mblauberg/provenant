@@ -1,11 +1,8 @@
 //! File publication has no process-group handle and cannot request a stop.
 use std::collections::VecDeque;
-use std::ffi::CString;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub fn quote(s: &str) -> String {
@@ -37,135 +34,30 @@ pub fn timestamp() -> String {
     timestamp_epoch(time.as_secs() as i64, time.subsec_millis())
 }
 pub fn timestamp_epoch(sec: i64, millis: u32) -> String {
-    unsafe {
-        let t = sec as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&t, &mut tm);
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            millis
-        )
-    }
+    provenant_supervisor::sys::lane_files::timestamp_epoch(sec, millis)
 }
 pub fn canonical_start(epoch: u64) -> String {
-    // Match process_info._lstart and run-registry's C-locale ps identity.
-    unsafe {
-        let t = epoch as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        format!(
-            "{} {} {:2} {:02}:{:02}:{:02} {}",
-            days[tm.tm_wday as usize],
-            months[tm.tm_mon as usize],
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            tm.tm_year + 1900
-        )
-    }
-}
-fn cstr(s: &std::ffi::OsStr) -> io::Result<CString> {
-    use std::os::unix::ffi::OsStrExt;
-    CString::new(s.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
-}
-fn cvt(fd: i32) -> io::Result<File> {
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
+    provenant_supervisor::sys::lane_files::canonical_start(epoch)
 }
 static TEMP: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug)]
 pub struct Attempt {
-    dir: File,
-    _lock: File,
+    dir: provenant_supervisor::sys::lane_files::LaneDirectory,
 }
 impl Attempt {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let dir = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        let name = CString::new("supervisor.lock").unwrap();
-        let lock = cvt(unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600,
-            )
-        })?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { dir, _lock: lock })
-    }
-    fn parent(&self, path: &Path) -> io::Result<(File, CString)> {
-        let mut parts = path.components().peekable();
-        let mut dir = self.dir.try_clone()?;
-        while let Some(part) = parts.next() {
-            let Component::Normal(name) = part else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "uncontained file",
-                ));
-            };
-            let name = cstr(name)?;
-            if parts.peek().is_none() {
-                return Ok((dir, name));
-            }
-            dir = cvt(unsafe {
-                libc::openat(
-                    dir.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            })?;
-        }
-        Err(io::Error::new(io::ErrorKind::InvalidInput, "empty file"))
-    }
-    pub fn create(&self, path: &Path) -> io::Result<File> {
-        let (dir, name) = self.parent(path)?;
-        cvt(unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
+        Ok(Self {
+            dir: provenant_supervisor::sys::lane_files::LaneDirectory::open(path)?,
         })
     }
+    pub fn create(&self, path: &Path) -> io::Result<File> {
+        self.dir.create(path)
+    }
     pub fn remove(&self, path: &str) {
-        if let Ok(name) = CString::new(path) {
-            unsafe {
-                libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), 0);
-            }
-        }
+        self.dir.remove(path);
     }
     pub fn exists(&self, path: &str) -> bool {
-        let name = CString::new(path).unwrap();
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        unsafe {
-            libc::fstatat(
-                self.dir.as_raw_fd(),
-                name.as_ptr(),
-                st.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            ) == 0
-        }
+        self.dir.exists(path)
     }
     pub fn atomic(&self, name: &str, data: &[u8], no_replace: bool) -> io::Result<()> {
         fault(if no_replace { "exit" } else { "progress" })?;
@@ -178,37 +70,15 @@ impl Attempt {
             let mut f = self.create(Path::new(&temp))?;
             f.write_all(data)?;
             f.sync_all()?;
-            let from = CString::new(temp.as_str()).unwrap();
-            let to = CString::new(name).unwrap();
-            let rc = unsafe {
-                if no_replace {
-                    libc::linkat(
-                        self.dir.as_raw_fd(),
-                        from.as_ptr(),
-                        self.dir.as_raw_fd(),
-                        to.as_ptr(),
-                        0,
-                    )
-                } else {
-                    libc::renameat(
-                        self.dir.as_raw_fd(),
-                        from.as_ptr(),
-                        self.dir.as_raw_fd(),
-                        to.as_ptr(),
-                    )
-                }
-            };
-            if rc != 0 {
-                return Err(io::Error::last_os_error());
-            }
+            self.dir.publish_file(&temp, name, no_replace)?;
             if no_replace {
                 // link is the publication boundary. A later durability error
                 // must not retry link and misreport this visible record as lost.
-                if let Err(error) = fault("exit-sync").and_then(|_| self.dir.sync_all()) {
+                if let Err(error) = fault("exit-sync").and_then(|_| self.dir.sync()) {
                     eprintln!("provenant lane: exit record linked; directory sync: {error}");
                 }
             } else {
-                self.dir.sync_all()?;
+                self.dir.sync()?;
             }
             Ok(())
         })();
@@ -283,11 +153,7 @@ impl Capture {
                 if room > 0 {
                     f.write_all(&data[..room.min(data.len())])
                 } else {
-                    unsafe {
-                        if libc::futimens(f.as_raw_fd(), std::ptr::null()) != 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                    }
+                    provenant_supervisor::sys::lane_files::touch(f)?;
                     Ok(())
                 }
             });

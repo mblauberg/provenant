@@ -1,7 +1,5 @@
 //! File-backed bounded utility execution. Not the S2 provider lifecycle owner.
-use crate::capture::{
-    read_bounded_output, read_bounded_text, BoundedProcessResult, CaptureError, CapturedOutput,
-};
+use crate::capture::{read_bounded_output, BoundedProcessResult, CaptureError};
 use crate::identity::Signal;
 use crate::sys::{anonymous_spool, OwnedChild};
 use std::ffi::OsString;
@@ -130,44 +128,10 @@ pub fn run_bounded(
     command: &[OsString],
     options: Options<'_>,
 ) -> Result<BoundedProcessResult, BoundedError> {
-    run(command, options, CaptureMode::Replace, false)
+    run(command, options)
 }
 
-pub(crate) fn run_bounded_text(
-    command: &[OsString],
-    options: Options<'_>,
-) -> Result<BoundedProcessResult, BoundedError> {
-    run(command, options, CaptureMode::Text, false)
-}
-
-/// Node's execFileSync aborts when its stdout buffer crosses maxBuffer.
-pub(crate) fn run_bounded_limited(
-    command: &[OsString],
-    options: Options<'_>,
-) -> Result<BoundedProcessResult, BoundedError> {
-    run(command, options, CaptureMode::Replace, true)
-}
-
-#[derive(Clone, Copy)]
-enum CaptureMode {
-    Replace,
-    Text,
-}
-impl CaptureMode {
-    fn read(self, spool: &mut std::fs::File, limit: i64) -> Result<CapturedOutput, CaptureError> {
-        match self {
-            Self::Replace => read_bounded_output(spool, limit),
-            Self::Text => read_bounded_text(spool, limit),
-        }
-    }
-}
-
-fn run(
-    command: &[OsString],
-    options: Options<'_>,
-    mode: CaptureMode,
-    stop_on_output_limit: bool,
-) -> Result<BoundedProcessResult, BoundedError> {
+fn run(command: &[OsString], options: Options<'_>) -> Result<BoundedProcessResult, BoundedError> {
     let Some(program) = command.first() else {
         return Err(BoundedError::EmptyCommand);
     };
@@ -189,33 +153,24 @@ fn run(
         .stdout(Stdio::from(
             stdout.try_clone().map_err(io_error("clone stdout spool"))?,
         ))
-        .stderr(if stop_on_output_limit {
-            // execFileSync's ps bridge ignores stderr, even on failure.
-            Stdio::null()
-        } else {
-            Stdio::from(
-                stderr
-                    .as_ref()
-                    .unwrap_or(&stdout)
-                    .try_clone()
-                    .map_err(io_error("clone stderr spool"))?,
-            )
-        });
+        .stderr(Stdio::from(
+            stderr
+                .as_ref()
+                .unwrap_or(&stdout)
+                .try_clone()
+                .map_err(io_error("clone stderr spool"))?,
+        ));
     if options.null_stdin {
         launch.stdin(Stdio::null());
     }
     let mut child =
         OwnedChild::spawn(&mut launch, options.pass_fds, options.env).map_err(io_error("spawn"))?;
-    let (stopped, timed_out) = wait_and_stop(
-        &mut child,
-        options.timeout_seconds,
-        stop_on_output_limit.then_some((&stdout, options.output_limit_bytes.max(0) as u64)),
-    )?;
+    let (stopped, timed_out) = wait_and_stop(&mut child, options.timeout_seconds)?;
     let status = stopped.status;
-    let output = mode.read(&mut stdout, options.output_limit_bytes)?;
+    let output = read_bounded_output(&mut stdout, options.output_limit_bytes)?;
     let error_output = stderr
         .as_mut()
-        .map(|spool| mode.read(spool, options.output_limit_bytes))
+        .map(|spool| read_bounded_output(spool, options.output_limit_bytes))
         .transpose()?;
     Ok(BoundedProcessResult {
         returncode: status
@@ -263,14 +218,10 @@ pub struct GroupStop {
 /// SIGTERM, a bounded group grace, optional SIGKILL, and two bounded waits.
 /// This is bounded_process.stop_process_group's utility-only API.
 pub fn stop_process_group(child: &mut UtilityChild) -> Result<GroupStop, BoundedError> {
-    wait_and_stop(&mut child.0, 0.0, None).map(|(stopped, _)| stopped)
+    wait_and_stop(&mut child.0, 0.0).map(|(stopped, _)| stopped)
 }
 
-fn wait_and_stop(
-    child: &mut OwnedChild,
-    timeout: f64,
-    stdout_limit: Option<(&std::fs::File, u64)>,
-) -> Result<(GroupStop, bool), BoundedError> {
+fn wait_and_stop(child: &mut OwnedChild, timeout: f64) -> Result<(GroupStop, bool), BoundedError> {
     // Python starts its wait timeout after Popen has returned.
     let waiting = Instant::now();
     let mut state = State::Waiting;
@@ -281,17 +232,7 @@ fn wait_and_stop(
         let exited = child.exited().map_err(io_error("observe child"))?;
         let group_exists = child.group_exists();
         let now = waiting.elapsed().as_secs_f64();
-        let output_exceeded = match stdout_limit {
-            Some((file, limit)) if state == State::Waiting => {
-                file.metadata()
-                    .map_err(io_error("observe stdout size"))?
-                    .len()
-                    > limit
-            }
-            _ => false,
-        };
-        let effect =
-            state.step_with_output_limit(now, timeout, exited, group_exists, output_exceeded);
+        let effect = state.step(now, timeout, exited, group_exists);
         match effect {
             Effect::Wait => std::thread::sleep(Duration::from_millis(10)),
             Effect::Terminate { timed_out: expired } => {
