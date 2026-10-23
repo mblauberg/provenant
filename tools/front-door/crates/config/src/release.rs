@@ -45,32 +45,14 @@ impl Release {
         };
         let manifest: ReleaseManifest =
             provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG)?;
-        if manifest.schema_version != 1 {
-            return Err(InstallError::Manifest("unsupported schema version"));
-        }
         if manifest.target != target {
             return Err(InstallError::Platform);
         }
-        if manifest.toolchain.is_empty()
-            || manifest.toolchain.len() > 256
-            || manifest.target.len() > 256
-        {
-            return Err(InstallError::Manifest("invalid build identity"));
-        }
-        if manifest.files.is_empty() || manifest.files.len() > ENTRY_LIMIT {
-            return Err(InstallError::Manifest("inventory bounds"));
-        }
+        check_bounds(&manifest)?;
         let mut files = BTreeMap::new();
-        let mut total = 0u64;
         for item in &manifest.files {
             let relative = item.path.to_relative_path()?.as_path().to_path_buf();
             validate_name(&relative, item.mode)?;
-            total = total
-                .checked_add(item.bytes)
-                .ok_or(InstallError::Manifest("release byte bound"))?;
-            if total > RELEASE_LIMIT || item.bytes > FILE_LIMIT {
-                return Err(InstallError::Manifest("release byte bound"));
-            }
             let path = source.join(&relative);
             let current = snapshot(&path, fs)?;
             let Some(crate::managed::Snapshot {
@@ -261,6 +243,8 @@ pub fn package_release(
         return Ok(release);
     }
 
+    // A published manifest is immutable, so refuse it before publication.
+    check_bounds(&candidate.manifest)?;
     verify_binary_identity(&candidate, smoke, cancel)?;
     normalise_staged_modes(source, &candidate.files, fs)?;
     crate::managed::durable(directory(source, false, fs)?.atomic_write(
@@ -271,6 +255,31 @@ pub fn package_release(
         PublishMode::NoReplace,
     )?)?;
     Release::read(source, &expected.target, fs)
+}
+
+fn check_bounds(manifest: &ReleaseManifest) -> Result<(), InstallError> {
+    if manifest.schema_version != 1 {
+        return Err(InstallError::Manifest("unsupported schema version"));
+    }
+    if manifest.toolchain.is_empty()
+        || manifest.toolchain.len() > 256
+        || manifest.target.len() > 256
+    {
+        return Err(InstallError::Manifest("invalid build identity"));
+    }
+    if manifest.files.is_empty() || manifest.files.len() > ENTRY_LIMIT {
+        return Err(InstallError::Manifest("inventory bounds"));
+    }
+    let mut total = 0u64;
+    for item in &manifest.files {
+        total = total
+            .checked_add(item.bytes)
+            .ok_or(InstallError::Manifest("release byte bound"))?;
+        if total > RELEASE_LIMIT || item.bytes > FILE_LIMIT {
+            return Err(InstallError::Manifest("release byte bound"));
+        }
+    }
+    Ok(())
 }
 
 fn normalise_staged_modes(

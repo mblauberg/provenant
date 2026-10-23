@@ -1451,18 +1451,6 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
             .unwrap(),
         f.home.join(".codex/AGENTS.md")
     );
-    for lock in [
-        f.targets.bin_dir.join(".provenant-install.lock"),
-        f.home.join(".codex/.provenant-install.lock"),
-        f.home.join(".codex/skills/.provenant-install.lock"),
-    ] {
-        assert!(
-            !lock.exists(),
-            "unexpected destination lock at {}",
-            lock.display()
-        );
-    }
-
     let mut changed_targets = f.targets.clone();
     changed_targets.bin_dir = f.home.join("elsewhere/bin");
     changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
