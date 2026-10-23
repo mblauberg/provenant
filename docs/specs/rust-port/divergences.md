@@ -1647,3 +1647,55 @@ The review-panel and authority-mapping unit claims hold. All three cycle
 interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
+
+### RP-WF3-001: workflow boundary repairs (fixed Rust bugs)
+
+- Class: `bug`; rulebook v4, source/oracle
+  `b527d675d15c50ee51701bb15db6439c95277918`.
+- Native review caught a public route deserialisation bypass, lost scalar
+  observer dictionary keys, receipt JSON ordering/ASCII bytes, narrowed ISO
+  timestamps, counter range transitions, registry diagnostic precedence,
+  overlapping STATE.md operands, attached shell comments, unsorted successful
+  authority budgets, Unicode report wires and inherited Git environment drift.
+  These are repaired against unchanged Python source, including exact JSON
+  strings and frozen artifact bytes rather than sorted-value comparisons.
+- Additional fixtures cover malformed single-pipe queue rows, distinct UTF-8
+  decode failures, Python 3.14 negative-number argument prefixes, finite float
+  exponents, and integer transitions across i64::MAX into u64. No intentional
+  source behaviour change is accepted by these repairs.
+
+### RP-WF3-002: Python JSON and pattern owners (open partial scope)
+
+- Class: `library`; not accepted. Same source revision and rulebook as above.
+- The shared checked decoder and ordered records cannot retain Python-valid
+  NaN/Infinity or escaped lone UTF-16 surrogates, and serde decoder prose is
+  not Python JSONDecodeError prose. Portable workflow, raw authority mapping,
+  packet input, cycle interfaces, session/tracker input and custom reference
+  templates remain partial at these boundaries. Integer overflow is the
+  rulebook R4 typed NumberOutOfRange improvement, never a float conversion.
+- Source-varying style rules remain tables. Real academic wrapper lookarounds
+  have typed matchers and differentials; arbitrary caller-supplied Python
+  lookarounds/backreferences still need a shared matcher API. Style unit 01
+  stays partial. Unit 02 ports the CLI with explicit scanner variants.
+- Python JSON encoding, ordered records and scalar dictionary identity remain
+  marked pending records APIs. Existing core py and records checked_json
+  helpers are reused; the duplicate equality and unused config reader are
+  removed. These libraries do not switch the live runtime owner.
+
+### RP-WF3-003: workflow effect adapters and CLI subsets (open partial scope)
+
+- Class: `library`; not accepted. Same source revision and rulebook as above.
+- Supervisor's safe filesystem API is on main, but the permitted confinement
+  dependency does not expose it. Custody, locked receipt mutations, capture
+  reads/replay, writer safe walks/locks and reference publication remain
+  partial. Process-group execution also needs an allowed confinement adapter.
+  No direct workflow-to-supervisor edge or local unsafe substitute is added.
+- Bootstrap main has a typed host but no default UTC/entropy/copy-metadata and
+  safe publication binding. Delivery invariants lack the permitted policy
+  loader and live artifact reader. Receipt mutation still uses sorted Value
+  for pre-existing objects even though ordered show and new JSONL rows are
+  repaired. These are disclosed partials, not successful cut-over gates.
+- Portable workflow, context audit and steward retain unported argv edges;
+  receipt unit 02's review argument descriptor is not the complete source
+  build_parser. Named-user home expansion remains unimplemented for compact
+  reinjection. PORT_STATUS.md lists each affected unit and missing boundary.
