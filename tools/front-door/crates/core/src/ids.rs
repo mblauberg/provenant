@@ -60,6 +60,7 @@ ids!(
     ActorId,
     RunId,
     TaskId,
+    MessageId,
     AttemptId,
     DeliveryId,
     SessionId,
@@ -295,5 +296,13 @@ mod tests {
         }
         assert!(serde_json::from_str::<RunId>("12").is_err());
         assert_eq!(RunId::from_bytes([255; 16]).to_string(), "f".repeat(32));
+    }
+
+    #[test]
+    fn message_ids_round_trip() {
+        let id = MessageId::from_bytes([42; 16]);
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<MessageId>(&json).unwrap(), id);
+        assert!(serde_json::from_str::<MessageId>("\"invalid\"").is_err());
     }
 }

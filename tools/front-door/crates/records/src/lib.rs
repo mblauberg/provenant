@@ -1,6 +1,7 @@
 //! Bounded record codecs, canonical digest bytes, and shared serialized facts.
 #![forbid(unsafe_code)]
 
+mod artifact_ref;
 mod attempt_fact;
 mod canonical;
 mod json;
@@ -8,6 +9,7 @@ mod jsonc;
 mod path_wire;
 mod yaml;
 
+pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
     AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, RouteFact, UsageCounts,
 };

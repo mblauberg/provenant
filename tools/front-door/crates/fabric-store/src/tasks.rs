@@ -1,227 +1,332 @@
+use crate::events::{append, event};
 use crate::*;
+use provenant_core::TaskId;
+use provenant_records::RecordHeader;
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Open,
+    Active,
+    Done,
+    Cancelled,
+}
+impl TaskState {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Active => "active",
+            Self::Done => "done",
+            Self::Cancelled => "cancelled",
+        }
+    }
+    /// Historical state mapping is data for the one-shot importer, not a live
+    /// compatibility API. Only Open and blocked rows are eligible for import.
+    pub fn from_old(state: &str) -> Result<Self> {
+        const STATES: [(&str, TaskState); 6] = [
+            ("open", TaskState::Open),
+            ("blocked", TaskState::Open),
+            ("claimed", TaskState::Active),
+            ("active", TaskState::Active),
+            ("done", TaskState::Done),
+            ("cancelled", TaskState::Cancelled),
+        ];
+        STATES
+            .iter()
+            .find_map(|(name, state_value)| (*name == state).then_some(*state_value))
+            .ok_or(Error::Invalid("old task state"))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Task {
-    pub task_id: String,
+    pub header: RecordHeader,
+    pub project: ProjectId,
+    pub id: TaskId,
     pub objective: String,
-    pub owner: Option<String>,
-    pub state: String,
-    pub depends_on: Vec<String>,
+    pub note: Option<String>,
+    pub state: TaskState,
+    pub owner: Option<ActorId>,
+    pub generation: u64,
+    pub expires_at: Option<WallTime>,
+    pub created_at: WallTime,
+    pub updated_at: WallTime,
+    pub legacy: Option<LegacyRef>,
 }
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Activity {
-    pub seq: i64,
-    pub at: String,
-    pub agent_id: String,
-    pub kind: String,
-    pub detail: String,
+#[derive(Clone)]
+pub struct TaskClaim {
+    pub project: ProjectId,
+    pub task: TaskId,
+    pub actor: ActorId,
+    pub token: [u8; 16],
+    pub at: WallTime,
+    pub expires_at: WallTime,
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Team {
-    pub team_id: String,
-    pub members: Vec<String>,
+/// Store-specific task fence. Tokens are supplied by the entropy-owning edge,
+/// returned only to the claimant and never included in task lists or events.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskFence {
+    pub task: TaskId,
+    pub actor: ActorId,
+    pub generation: u64,
+    pub token: [u8; 16],
 }
-
+impl std::fmt::Debug for TaskFence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskFence")
+            .field("task", &self.task)
+            .field("actor", &self.actor)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+pub(crate) fn insert_task(tx: &Transaction<'_>, task: &Task) -> Result<bool> {
+    text(&task.objective, "objective")?;
+    if let Some(note) = &task.note {
+        text(note, "note")?;
+    }
+    if task.state != TaskState::Open
+        || task.owner.is_some()
+        || task.generation != 0
+        || task.expires_at.is_some()
+    {
+        return Err(Error::Invalid("initial task state"));
+    }
+    let bytes = encode(task)?;
+    if let Some(previous) = tx
+        .query_row(
+            "SELECT substr(record,1,262145) FROM tasks WHERE project=? AND id=?",
+            params![task.project.to_string(), task.id.to_string()],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+    {
+        if previous != bytes {
+            return Err(Error::Conflict);
+        }
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO tasks VALUES(?,?,'open',0,NULL,NULL,NULL,?)",
+        params![task.project.to_string(), task.id.to_string(), bytes],
+    )?;
+    append(
+        tx,
+        &event(
+            task.project,
+            None,
+            EventKind::TaskCreated,
+            Some(task.id.to_string()),
+            "created".into(),
+            task.created_at,
+        ),
+        None,
+    )?;
+    Ok(true)
+}
+fn load(db: &rusqlite::Connection, project: ProjectId, id: TaskId) -> Result<Task> {
+    let bytes: Vec<u8> = db
+        .query_row(
+            "SELECT substr(record,1,262145) FROM tasks WHERE project=? AND id=?",
+            params![project.to_string(), id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let task: Task = decode(&bytes)?;
+    if task.project != project || task.id != id {
+        return Err(Error::Invalid("stored task identity"));
+    }
+    Ok(task)
+}
+fn fenced(
+    tx: &Transaction<'_>,
+    project: ProjectId,
+    fence: &TaskFence,
+    at: WallTime,
+) -> Result<Task> {
+    let task = load(tx, project, fence.task)?;
+    let token: Option<Vec<u8>> = tx.query_row(
+        "SELECT token FROM tasks WHERE project=? AND id=?",
+        params![project.to_string(), fence.task.to_string()],
+        |r| r.get(0),
+    )?;
+    if task.state != TaskState::Active
+        || task.owner != Some(fence.actor)
+        || task.generation != fence.generation
+        || task.expires_at.is_none_or(|expiry| expiry <= at)
+        || token.as_deref() != Some(fence.token.as_slice())
+    {
+        return Err(Error::StaleFence);
+    }
+    Ok(task)
+}
+fn save(tx: &Transaction<'_>, task: &Task, token: Option<&[u8]>) -> Result<()> {
+    let generation =
+        i64::try_from(task.generation).map_err(|_| Error::Invalid("task generation"))?;
+    tx.execute("UPDATE tasks SET state=?,generation=?,owner=?,token=?,expires=?,record=? WHERE project=? AND id=?",params![task.state.sql(),generation,task.owner.map(|id|id.to_string()),token,task.expires_at.map(|t|t.as_micros()),encode(task)?,task.project.to_string(),task.id.to_string()])?;
+    Ok(())
+}
 impl Store {
-    pub fn create_team(&self, who: &Identity, team_id: &str, members: &[String]) -> Result<Team> {
-        if team_id == "all" || members.iter().any(|m| m == "all") {
-            return Err(invalid("recipient id \"all\" is reserved for broadcast"));
-        }
-        let now = self.now();
-        let mut effective = Vec::new();
-        for member in members {
-            if !effective.contains(member) {
-                effective.push(member.clone());
-            }
-        }
-        self.transaction(true, || {
-            let existing = self
-                .db
-                .query_row(
-                    "SELECT 1 FROM teams WHERE project = ? AND team_id = ?",
-                    params![who.project, team_id],
-                    |_| Ok(()),
-                )
-                .optional()?;
-            if existing.is_none()
-                && self
-                    .db
-                    .query_row(
-                        "SELECT 1 FROM agents WHERE project = ? AND agent_id = ?",
-                        params![who.project, team_id],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_some()
-            {
-                return Err(invalid(format!(
-                    "team id {team_id} collides with an agent label in {}",
-                    who.project
-                )));
-            }
-            self.db.execute(
-                "INSERT OR IGNORE INTO teams(project, team_id, created_at) VALUES (?, ?, ?)",
-                params![who.project, team_id, now],
-            )?;
-            self.db.execute(
-                "DELETE FROM team_members WHERE project = ? AND team_id = ?",
-                params![who.project, team_id],
-            )?;
-            for member in &effective {
-                self.db.execute(
-                    "INSERT INTO team_members(project, team_id, agent_id) VALUES (?, ?, ?)",
-                    params![who.project, team_id, member],
-                )?;
-            }
-            self.log(who, "team", &format!("{team_id}: {}", effective.join(", ")))
-        })?;
-        Ok(Team {
-            team_id: team_id.into(),
-            members: effective,
+    pub fn create_task(&self, task: &Task, request: &Request<'_>) -> Result<()> {
+        self.write(request, |tx| insert_task(tx, task).map(|_| ()))
+    }
+    pub fn task(&self, project: ProjectId, id: TaskId, request: &Request<'_>) -> Result<Task> {
+        request.retry(|| load(&self.db, project, id))
+    }
+    pub fn tasks(
+        &self,
+        project: ProjectId,
+        state: Option<TaskState>,
+        after: Option<TaskId>,
+        limit: u64,
+        request: &Request<'_>,
+    ) -> Result<Vec<Task>> {
+        let limit = page(0, limit)?;
+        request.retry(|| {
+            let mut statement=self.db.prepare("SELECT substr(record,1,262145) FROM tasks WHERE project=? AND (? IS NULL OR state=?) AND (? IS NULL OR id>?) ORDER BY id LIMIT ?")?;
+            let state=state.map(TaskState::sql);let after=after.map(|id|id.to_string());let mut rows=statement.query(params![project.to_string(),state,state,after,after,limit])?;
+            let mut output=Vec::new();let mut total=0;
+            while let Some(row)=rows.next()? {let bytes:Vec<u8>=row.get(0)?;total+=bytes.len();if total>1_048_576 {break;} output.push(decode(&bytes)?);}
+            Ok(output)
         })
     }
-    /// The runtime supplies the task id, using an eight-character UUID prefix by default.
-    pub fn create_task(
-        &self,
-        who: &Identity,
-        objective: &str,
-        task_id: &str,
-        owner: Option<&str>,
-        depends_on: &[String],
-    ) -> Result<Task> {
-        if task_id.is_empty() {
-            return Err(invalid("task id must not be empty"));
+    pub fn claim_task(&self, claim: &TaskClaim, request: &Request<'_>) -> Result<TaskFence> {
+        let duration = claim
+            .expires_at
+            .as_micros()
+            .checked_sub(claim.at.as_micros())
+            .ok_or(Error::Invalid("task lease"))?;
+        if !(1_000_000..=3_600_000_000).contains(&duration) {
+            return Err(Error::Invalid("task lease"));
         }
-        let now = self.now();
-        self.transaction(false, || {
-            self.db.execute("INSERT INTO tasks(project, task_id, objective, owner_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'open', ?, ?)", params![who.project, task_id, objective, owner, now, now])?;
-            for parent in depends_on { self.db.execute("INSERT OR IGNORE INTO task_dependencies(project, task_id, depends_on) VALUES (?, ?, ?)", params![who.project, task_id, parent])?; }
-            self.log(who, "task", &format!("{task_id} open: {}", pending::js_slice(objective, 120)))
-        })?;
-        Ok(Task {
-            task_id: task_id.into(),
-            objective: objective.into(),
-            owner: owner.map(Into::into),
-            state: "open".into(),
-            depends_on: depends_on.to_vec(),
+        self.write(request, |tx| {
+            let mut task = load(tx, claim.project, claim.task)?;
+            if !matches!(task.state, TaskState::Open | TaskState::Active)
+                || (task.state == TaskState::Active
+                    && task.expires_at.is_none_or(|expiry| expiry > claim.at))
+            {
+                return Err(Error::Conflict);
+            }
+            task.generation = task
+                .generation
+                .checked_add(1)
+                .ok_or(Error::Invalid("task generation"))?;
+            task.state = TaskState::Active;
+            task.owner = Some(claim.actor);
+            task.expires_at = Some(claim.expires_at);
+            task.updated_at = claim.at;
+            save(tx, &task, Some(&claim.token))?;
+            append(
+                tx,
+                &event(
+                    task.project,
+                    task.owner,
+                    EventKind::TaskClaimed,
+                    Some(task.id.to_string()),
+                    task.generation.to_string(),
+                    claim.at,
+                ),
+                None,
+            )?;
+            Ok(TaskFence {
+                task: task.id,
+                actor: claim.actor,
+                generation: task.generation,
+                token: claim.token,
+            })
         })
     }
     pub fn update_task(
         &self,
-        who: &Identity,
-        task_id: &str,
-        state: &str,
+        project: ProjectId,
+        fence: &TaskFence,
+        objective: &str,
         note: Option<&str>,
-    ) -> Result<Task> {
-        if state == "claimed" {
-            return Err(invalid("state claimed is reserved for atomic task claim"));
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        text(objective, "objective")?;
+        if let Some(note) = note {
+            text(note, "note")?;
         }
-        self.transaction(false, || {
-            if self.db.execute(
-                "UPDATE tasks SET state = ?, updated_at = ? WHERE project = ? AND task_id = ?",
-                params![state, self.now(), who.project, task_id],
-            )? == 0
-            {
-                return Err(invalid(format!("no task {task_id} in {}", who.project)));
-            }
-            self.log(
-                who,
-                "task",
-                &format!(
-                    "{task_id} {state}{}",
-                    note.map(|n| format!(": {n}")).unwrap_or_default()
+        self.write(request, |tx| {
+            let mut task = fenced(tx, project, fence, at)?;
+            task.objective = objective.into();
+            task.note = note.map(Into::into);
+            task.updated_at = at;
+            save(tx, &task, Some(&fence.token))?;
+            append(
+                tx,
+                &event(
+                    project,
+                    task.owner,
+                    EventKind::TaskUpdated,
+                    Some(task.id.to_string()),
+                    "updated".into(),
+                    at,
                 ),
+                None,
             )?;
-            self.task(&who.project, task_id)
+            Ok(())
         })
     }
-    pub fn claim_task(&self, who: &Identity, task_id: &str) -> Result<Task> {
-        self.transaction(true, || {
-            let changed = self.db.execute("UPDATE tasks SET owner_id = ?, updated_at = ? WHERE project = ? AND task_id = ? AND state = 'open' AND owner_id IS NULL", params![who.agent_id, self.now(), who.project, task_id])?;
-            if changed != 1 {
-                let current = self.task(&who.project, task_id)?;
-                if current.state == "open" && current.owner.as_deref() == Some(&who.agent_id) { return Ok(current); }
-                if current.state == "open" { if let Some(owner) = current.owner { return Err(invalid(format!("task {task_id} is already assigned to {owner}"))); } }
-                return Err(invalid(format!("task {task_id} is not open and unowned in {}", who.project)));
-            }
-            self.log(who, "task", &format!("{task_id} claimed by {}", who.agent_id))?;
-            self.task(&who.project, task_id)
+    pub fn release_task(
+        &self,
+        project: ProjectId,
+        fence: &TaskFence,
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        self.close_task(project, fence, TaskState::Open, at, request)
+    }
+    pub fn finish_task(
+        &self,
+        project: ProjectId,
+        fence: &TaskFence,
+        state: TaskState,
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        if !matches!(state, TaskState::Done | TaskState::Cancelled) {
+            return Err(Error::Invalid("finish state"));
+        }
+        self.close_task(project, fence, state, at, request)
+    }
+    fn close_task(
+        &self,
+        project: ProjectId,
+        fence: &TaskFence,
+        state: TaskState,
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        self.write(request, |tx| {
+            let mut task = fenced(tx, project, fence, at)?;
+            task.state = state;
+            task.owner = None;
+            task.expires_at = None;
+            task.updated_at = at;
+            save(tx, &task, None)?;
+            let kind = if state == TaskState::Open {
+                EventKind::TaskReleased
+            } else {
+                EventKind::TaskFinished
+            };
+            append(
+                tx,
+                &event(
+                    project,
+                    Some(fence.actor),
+                    kind,
+                    Some(task.id.to_string()),
+                    state.sql().into(),
+                    at,
+                ),
+                None,
+            )?;
+            Ok(())
         })
-    }
-    pub fn tasks(&self, project: &str, state: Option<&str>) -> Result<Vec<Task>> {
-        let mut rows = self.db.prepare("SELECT task_id, objective, owner_id, state FROM tasks WHERE project = ? AND (? IS NULL OR state = ?) ORDER BY created_at")?.query_map(params![project, state, state], |r| Ok(Task { task_id: r.get(0)?, objective: r.get(1)?, owner: r.get(2)?, state: r.get(3)?, depends_on: Vec::new() }))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        for row in &mut rows {
-            row.depends_on = self
-                .db
-                .prepare(
-                    "SELECT depends_on FROM task_dependencies WHERE project = ? AND task_id = ?",
-                )?
-                .query_map(params![project, row.task_id], |r| r.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-        }
-        Ok(rows)
-    }
-    fn task(&self, project: &str, task_id: &str) -> Result<Task> {
-        self.tasks(project, None)?
-            .into_iter()
-            .find(|t| t.task_id == task_id)
-            .ok_or_else(|| invalid(format!("task {task_id} vanished during update")))
-    }
-    pub fn note(&self, who: &Identity, detail: &str) -> Result<()> {
-        self.log(who, "note", detail)
-    }
-    pub fn activity(&self, project: &str, limit: i64) -> Result<Vec<Activity>> {
-        self.read_activity(project, None, limit)
-    }
-    pub fn activity_after(
-        &self,
-        project: &str,
-        after_seq: i64,
-        limit: i64,
-    ) -> Result<Vec<Activity>> {
-        if !(0..=MAX_SAFE_INTEGER).contains(&after_seq) {
-            return Err(invalid("activity cursor must be a non-negative integer"));
-        }
-        self.read_activity(project, Some(after_seq), limit)
-    }
-    fn read_activity(
-        &self,
-        project: &str,
-        after: Option<i64>,
-        limit: i64,
-    ) -> Result<Vec<Activity>> {
-        if !(1..=MAX_SAFE_INTEGER).contains(&limit) {
-            return Err(invalid("activity limit must be positive"));
-        }
-        let query = if after.is_some() {
-            "SELECT seq, at, agent_id, kind, detail FROM activity WHERE project = ? AND seq > ? ORDER BY seq LIMIT ?"
-        } else {
-            "SELECT seq, at, agent_id, kind, detail FROM activity WHERE project = ? AND ? IS NULL ORDER BY seq DESC LIMIT ?"
-        };
-        let rows = self
-            .db
-            .prepare(query)?
-            .query_map(params![project, after, limit], |r| {
-                Ok((
-                    Activity {
-                        seq: r.get(0)?,
-                        at: String::new(),
-                        agent_id: r.get(2)?,
-                        kind: r.get(3)?,
-                        detail: r.get(4)?,
-                    },
-                    r.get::<_, i64>(1)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(mut a, at)| {
-                a.at = iso(at)?;
-                Ok(a)
-            })
-            .collect()
     }
 }
