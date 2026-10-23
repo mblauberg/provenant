@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -65,9 +66,9 @@ DISPATCH_SCHEMA = {
 
 
 def test_output_install_replaces_symlink_without_overwriting_target(tmp_path):
-    root = Path(tmp_path)
+    root = tmp_path
     bin_dir = fake_bin(root)
-    fake_codex(bin_dir, "        cat >/dev/null\n        printf 'safe output\n'\n        ", models={'gpt-6-luna': ['high']})
+    fake_codex(bin_dir, "cat >/dev/null\nprintf 'safe output\n'", models={'gpt-6-luna': ['high']}, mcp=False)
     prompt = root / "prompt.md"
     prompt.write_text("test\n", encoding="utf-8")
     outside = root / "outside"
@@ -90,9 +91,9 @@ def test_output_install_replaces_symlink_without_overwriting_target(tmp_path):
 
 
 def test_directory_symlink_output_is_rejected_without_escaping(tmp_path):
-    root = Path(tmp_path)
+    root = tmp_path
     bin_dir = fake_bin(root)
-    fake_codex(bin_dir, "        cat >/dev/null\n        printf 'safe output\n'\n        ", models={'gpt-6.1-sol': ['high']})
+    fake_codex(bin_dir, "cat >/dev/null\nprintf 'safe output\n'", models={'gpt-6.1-sol': ['high']}, mcp=False)
     prompt = root / "prompt.md"
     prompt.write_text("test\n", encoding="utf-8")
     outside = root / "outside"
@@ -114,9 +115,9 @@ def test_directory_symlink_output_is_rejected_without_escaping(tmp_path):
 
 
 def test_symlinked_output_parent_is_rejected_without_escaping(tmp_path):
-    root = Path(tmp_path)
+    root = tmp_path
     bin_dir = fake_bin(root)
-    fake_codex(bin_dir, "        cat >/dev/null\n        printf 'MUST STAY INSIDE\n'\n        ", models={'gpt-6-luna': ['high']})
+    fake_codex(bin_dir, "cat >/dev/null\nprintf 'MUST STAY INSIDE\n'", models={'gpt-6-luna': ['high']}, mcp=False)
     prompt = root / "prompt.md"
     prompt.write_text("test\n", encoding="utf-8")
     outside = root / "outside"
@@ -139,11 +140,14 @@ def test_symlinked_output_parent_is_rejected_without_escaping(tmp_path):
 
 
 def test_output_parent_swap_cannot_certify_an_identical_outside_file(tmp_path):
-    root = Path(tmp_path)
+    root = tmp_path
     bin_dir = fake_bin(root)
     payload = root / "payload"
     payload.write_bytes(b"A" * (16 * 1024 * 1024))
-    fake_codex(bin_dir, '        cat >/dev/null\n        cat "$CF_DISPATCH_TEST_PAYLOAD"\n        ', models={'gpt-6.1-sol': ['high']})
+    fake_codex(bin_dir, textwrap.dedent("""\
+        cat >/dev/null
+        cat "$CF_DISPATCH_TEST_PAYLOAD"
+        """), models={'gpt-6.1-sol': ['high']}, mcp=False)
     prompt = root / "prompt.md"
     prompt.write_text("test\n", encoding="utf-8")
     safe_parent = root / "safe"
@@ -282,7 +286,7 @@ def test_ok_routing_record_requires_complete_execution_identity(tmp_path):
         "identity_source": "runtime-configuration",
         "alias": "senior",
     }
-    root = Path(tmp_path)
+    root = tmp_path
     for missing_field in (
         "resolved_model", "model_family", "endpoint_provider", "identity_source",
     ):
@@ -367,7 +371,7 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_5_1_override():
 def test_task_class_route_accepts_lifecycle_risk_without_model_override(tmp_path, risk_tier):
     tmp = Path(tmp_path)
     bin_dir = fake_bin(tmp)
-    fake_codex(bin_dir, "cat >/dev/null\nprintf 'TASK RISK OK\\n'", models={"gpt-6-luna": ["low"]})
+    fake_codex(bin_dir, "cat >/dev/null\nprintf 'TASK RISK OK\\n'", models={"gpt-6-luna": ["low"]}, mcp=False)
     out = tmp / "out.txt"
     result, record = run_cf_dispatch(tmp, '--intent', 'ordinary', '--tool', 'codex', '--orchestrator-family', 'anthropic', '--task-class', 'mechanical', '--role', 'worker', '--risk-tier', risk_tier, '--prompt', 'Review', '--out', str(out), path=[bin_dir, PRODUCT_ROOT / 'scripts'])
 
@@ -413,10 +417,34 @@ def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback(tmp
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
     env["PATH"] = os.pathsep.join(
-        [str(misleading_path), str(PRODUCT_ROOT / "scripts"), "/usr/bin", "/bin"]
+        [
+            str(misleading_path),
+            str(PRODUCT_ROOT / "scripts"),
+            *(
+                entry
+                for entry in env["PATH"].split(os.pathsep)
+                if entry and not (Path(entry) / "claude").exists()
+            ),
+        ]
     )
     out = tmp / "out.txt"
-    result = run_cli([sys.executable, SCRIPT, "--tool", "claude", "--orchestrator-family", "codex", "--role", "other-primary", "--out", str(out), "--prompt", "Reply exactly OK"], cwd=tmp, env=env)
+    result = run_cli(
+        [
+            str(SCRIPT),
+            "--tool",
+            "claude",
+            "--orchestrator-family",
+            "codex",
+            "--role",
+            "other-primary",
+            "--out",
+            str(out),
+            "--prompt",
+            "Reply exactly OK",
+        ],
+        cwd=tmp,
+        env=env,
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "tool_missing"
@@ -512,10 +540,30 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt(tmp_path):
         """,
     )
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["CF_DISPATCH_AGY_ADD_DIR"] = str(allowed_one)
     out = tmp / "out.txt"
-    result = run_cli([str(SCRIPT), '--tool', 'agy', '--model', 'gemini-3.7-flash', '--effort', 'medium', '--add-dir', str(allowed_two), '--orchestrator-family', 'codex', '--out', str(out), '--prompt', 'Reply exactly AGY OK'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'agy',
+            '--model',
+            'gemini-3.7-flash',
+            '--effort',
+            'medium',
+            '--add-dir',
+            str(allowed_two),
+            '--orchestrator-family',
+            'codex',
+            '--out',
+            str(out),
+            '--prompt',
+            'Reply exactly AGY OK',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode == 0, result.stderr
     assert DISPATCH_SCHEMA <= set(record)
@@ -589,9 +637,29 @@ def test_agy_explicit_effort_never_claims_an_unavailable_probe(tmp_path):
     )
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
 
-    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', 'agy', '--orchestrator-family', 'openai', '--model', 'gemini-3.7-flash', '--effort', 'medium', '--prompt', 'Review', '--out', str(out)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--intent',
+            'ordinary',
+            '--tool',
+            'agy',
+            '--orchestrator-family',
+            'openai',
+            '--model',
+            'gemini-3.7-flash',
+            '--effort',
+            'medium',
+            '--prompt',
+            'Review',
+            '--out',
+            str(out),
+        ],
+        cwd=tmp,
+        env=env,
+        path=[bin_dir],
+    )
 
     record = json.loads(result.stdout)
     assert result.returncode == 0, result.stderr + result.stdout
@@ -624,9 +692,31 @@ def test_claude_task_class_runs_the_subscription_capability_canary(tmp_path):
     )
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
 
-    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', 'claude', '--orchestrator-family', 'openai', '--task-class', 'critical-review', '--role', 'critical-review', '--risk-tier', 'crucial', '--prompt', 'Review', '--out', str(out)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--intent',
+            'ordinary',
+            '--tool',
+            'claude',
+            '--orchestrator-family',
+            'openai',
+            '--task-class',
+            'critical-review',
+            '--role',
+            'critical-review',
+            '--risk-tier',
+            'crucial',
+            '--prompt',
+            'Review',
+            '--out',
+            str(out),
+        ],
+        cwd=tmp,
+        env=env,
+        path=[bin_dir],
+    )
 
     record = json.loads(result.stdout)
     assert result.returncode == 0, result.stderr + result.stdout
@@ -858,7 +948,6 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
         exec {shlex.quote(sys.executable)} {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} resolve "$@" --adapter-compatibility {shlex.quote(str(overlay))}
     """)
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
     for tool, model, executable in (("kiro", "deepseek-v3.2", "kiro-cli"),):
         invoked = tmp / f"{tool}.invoked"
         write_executable(
@@ -866,7 +955,28 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
             f"#!/usr/bin/env bash\ntouch {invoked}\nexit 99\n",
         )
         out = tmp / f"{tool}.txt"
-        result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', tool, '--model', model, '--alias', 'junior', '--role', 'worker', '--prompt', 'Review', '--out', str(out)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+        result = run_cli(
+            [
+                str(SCRIPT),
+                '--intent',
+                'ordinary',
+                '--tool',
+                tool,
+                '--model',
+                model,
+                '--alias',
+                'junior',
+                '--role',
+                'worker',
+                '--prompt',
+                'Review',
+                '--out',
+                str(out),
+            ],
+            cwd=tmp,
+            env=env,
+            path=[bin_dir],
+        )
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
@@ -898,7 +1008,28 @@ def test_disabled_capability_adapters_are_rejected_before_their_probe_runs(tmp_p
             f"#!/usr/bin/env bash\ntouch {invoked}\nexit 99\n",
         )
         out = tmp / f"{tool}.txt"
-        result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', tool, '--model', model, '--alias', 'senior', '--role', 'worker', '--prompt', 'Review', '--out', str(out)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+        result = run_cli(
+            [
+                str(SCRIPT),
+                '--intent',
+                'ordinary',
+                '--tool',
+                tool,
+                '--model',
+                model,
+                '--alias',
+                'senior',
+                '--role',
+                'worker',
+                '--prompt',
+                'Review',
+                '--out',
+                str(out),
+            ],
+            cwd=tmp,
+            env=env,
+            path=[bin_dir],
+        )
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
@@ -911,14 +1042,35 @@ def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte(tmp_pat
     tmp = Path(tmp_path)
     bin_dir = fake_bin(tmp)
     received = tmp / "received.bin"
-    fake_codex(bin_dir, f"        cat > {received}\n        printf 'OK\n'\n        ", models={'gpt-6-luna': ['high']})
+    fake_codex(bin_dir, f"cat > {received}\nprintf 'OK\n'", models={'gpt-6-luna': ['high']}, mcp=False)
     prompt = tmp / "prompt.bin"
     prompt.write_bytes(b"Review exactly\n\n")
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
 
-    result = run_cli([str(SCRIPT), '--no-preface', '--intent', 'ordinary', '--tool', 'codex', '--orchestrator-family', 'anthropic', '--alias', 'senior', '--role', 'worker', '--prompt-file', str(prompt), '--out', str(out)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--no-preface',
+            '--intent',
+            'ordinary',
+            '--tool',
+            'codex',
+            '--orchestrator-family',
+            'anthropic',
+            '--alias',
+            'senior',
+            '--role',
+            'worker',
+            '--prompt-file',
+            str(prompt),
+            '--out',
+            str(out),
+        ],
+        cwd=tmp,
+        env=env,
+        path=[bin_dir],
+    )
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert received.read_bytes() == prompt.read_bytes()
@@ -965,9 +1117,23 @@ def test_nul_prompt_file_is_rejected_before_provider_execution(tmp_path):
     prompt = tmp / "prompt.bin"
     prompt.write_bytes(b"A\0B\n")
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
 
-    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', 'codex', '--orchestrator-family', 'anthropic', '--prompt-file', str(prompt)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--intent',
+            'ordinary',
+            '--tool',
+            'codex',
+            '--orchestrator-family',
+            'anthropic',
+            '--prompt-file',
+            str(prompt),
+        ],
+        cwd=tmp,
+        env=env,
+        path=[bin_dir],
+    )
 
     assert result.returncode == 2
     assert json.loads(result.stdout)["status"] == "prompt_unavailable"
@@ -1057,9 +1223,25 @@ def test_agy_failure_with_null_error_uses_generic_reason_and_never_publishes_res
     )
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
 
-    result = run_cli([str(SCRIPT), '--tool', 'agy', '--model', 'gemini-3.8-flash-high', '--orchestrator-family', 'codex', '--out', str(out), '--prompt', 'Reply'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'agy',
+            '--model',
+            'gemini-3.8-flash-high',
+            '--orchestrator-family',
+            'codex',
+            '--out',
+            str(out),
+            '--prompt',
+            'Reply',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
 
     record = json.loads(result.stdout)
     assert result.returncode != 0
@@ -1088,8 +1270,24 @@ def test_agy_permission_denial_overrides_false_success_envelope(tmp_path):
     )
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'agy', '--model', 'gemini-3.8-flash-high', '--orchestrator-family', 'codex', '--out', str(out), '--prompt', 'Reply'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'agy',
+            '--model',
+            'gemini-3.8-flash-high',
+            '--orchestrator-family',
+            'codex',
+            '--out',
+            str(out),
+            '--prompt',
+            'Reply',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "permission_blocked"
@@ -1217,8 +1415,22 @@ def test_cursor_model_provider_prevents_disguised_same_family_review(tmp_path):
     bin_dir = fake_bin(tmp)
     write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'cursor', '--model', 'gpt-5.6-sol', '--orchestrator-family', 'openai', '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'cursor',
+            '--model',
+            'gpt-5.6-sol',
+            '--orchestrator-family',
+            'openai',
+            '--prompt',
+            'Review',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["provider_family"] == "openai"
@@ -1236,8 +1448,24 @@ def test_cursor_distinct_model_records_adapter_and_provider_family(tmp_path):
     )
     out = tmp / "out.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'cursor', '--model', 'cursor-grok-4.5-high', '--orchestrator-family', 'openai', '--out', str(out), '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'cursor',
+            '--model',
+            'cursor-grok-4.5-high',
+            '--orchestrator-family',
+            'openai',
+            '--out',
+            str(out),
+            '--prompt',
+            'Review',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode == 0
     assert record["adapter"] == "cursor"
@@ -1265,8 +1493,24 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics(tmp_path):
     )
     out = tmp / "review.txt"
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'cursor', '--model', 'cursor-grok-4.5-high', '--orchestrator-family', 'openai', '--out', str(out), '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'cursor',
+            '--model',
+            'cursor-grok-4.5-high',
+            '--orchestrator-family',
+            'openai',
+            '--out',
+            str(out),
+            '--prompt',
+            'Review',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "failed"
@@ -1277,10 +1521,26 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics(tmp_path):
 def test_unwritable_output_path_cannot_certify_success(tmp_path):
     tmp = Path(tmp_path)
     bin_dir = fake_bin(tmp)
-    fake_codex(bin_dir, '        echo OK\n        ', models={'gpt-6.1-sol': ['high', 'max', 'ultra']})
+    fake_codex(bin_dir, 'echo OK', models={'gpt-6.1-sol': ['high', 'max', 'ultra']}, mcp=False)
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'codex', '--effort', 'high', '--orchestrator-family', 'anthropic', '--out', str(tmp / 'missing' / 'out.txt'), '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'codex',
+            '--effort',
+            'high',
+            '--orchestrator-family',
+            'anthropic',
+            '--out',
+            str(tmp / 'missing' / 'out.txt'),
+            '--prompt',
+            'Review',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "output_write_error"
@@ -1289,20 +1549,24 @@ def test_unwritable_output_path_cannot_certify_success(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "case_args,models,expected_alias,expected_model,requested_effort,effort,extra_absent",
+    "case_args,models,expected_alias,expected_model,requested_effort,effort,extra_absent,check_catalog_fields,forbid_unquoted_xhigh",
     [
-        pytest.param(["--role", "critical-review"], {"gpt-6-astra": ["high"]}, "principal", "gpt-6-astra", "xhigh", "high", [], id="critical-review-effort-substitution"),
-        pytest.param([], {"gpt-6-luna": ["medium", "high"], "gpt-6.1-sol": ["medium", "high", "max"]}, "senior", "gpt-6.1-sol", "medium", "medium", ["gpt-6-luna", "gpt-6-astra"], id="bare-dispatch-defaults-to-senior"),
-        pytest.param(["--role", "critical-review"], {"gpt-6-luna": ["medium"], "gpt-6-astra": ["xhigh"]}, "principal", "gpt-6-astra", "xhigh", "xhigh", [], id="critical-review-defaults-to-principal"),
+        pytest.param(["--role", "critical-review"], {"gpt-6-astra": ["high"]}, "principal", "gpt-6-astra", "xhigh", "high", [], True, True, id="critical-review-effort-substitution"),
+        pytest.param([], {"gpt-6-luna": ["medium", "high"], "gpt-6.1-sol": ["medium", "high", "max"]}, "senior", "gpt-6.1-sol", "medium", "medium", ["gpt-6-luna", "gpt-6-astra"], False, False, id="bare-dispatch-defaults-to-senior"),
+        pytest.param(["--role", "critical-review"], {"gpt-6-luna": ["medium"], "gpt-6-astra": ["xhigh"]}, "principal", "gpt-6-astra", "xhigh", "xhigh", [], True, False, id="critical-review-defaults-to-principal"),
     ],
 )
-def test_codex_role_effort_selection(tmp_path, case_args, models, expected_alias, expected_model, requested_effort, effort, extra_absent):
+def test_codex_role_effort_selection(
+    tmp_path, case_args, models, expected_alias, expected_model,
+    requested_effort, effort, extra_absent, check_catalog_fields,
+    forbid_unquoted_xhigh,
+):
     tmp = Path(tmp_path)
     bin_dir = fake_bin(tmp)
     args_file = tmp / "codex.args"
     fake_codex(bin_dir, f'''printf '%s\\n' "$@" > {args_file}
         cat >/dev/null
-        echo OK''', models=models)
+        echo OK''', models=models, mcp=False)
     result, record = run_cf_dispatch(tmp, "--tool", "codex", "--orchestrator-family", "anthropic", *case_args, "--out", str(tmp / "out.txt"), "--prompt", "Review", path=[bin_dir])
     assert result.returncode == 0, result.stderr
     assert record["route_alias"] == expected_alias
@@ -1316,12 +1580,12 @@ def test_codex_role_effort_selection(tmp_path, case_args, models, expected_alias
     assert f'model_reasoning_effort="{effort}"' in args
     for absent in extra_absent:
         assert absent not in args
-    if expected_model == "gpt-6-astra":
+    if check_catalog_fields:
         assert record["effort_capability_source"] == "runtime-model-catalog"
         assert record["catalog_model"] == ""
         assert record["model_selection"] == ""
-        if requested_effort == "xhigh" and effort == "high":
-            assert "model_reasoning_effort=xhigh" not in args
+    if forbid_unquoted_xhigh:
+        assert "model_reasoning_effort=xhigh" not in args
 
 
 @pytest.mark.parametrize(
@@ -1390,10 +1654,24 @@ def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure(tmp_pa
     tmp = Path(tmp_path)
     bin_dir = fake_bin(tmp)
     invoked = tmp / "codex.invoked"
-    fake_codex(bin_dir, f'        touch {invoked}\n        exit 9\n        ', models={'gpt-5.6-sol': ['high']})
+    fake_codex(bin_dir, f'touch {invoked}\nexit 9', models={'gpt-5.6-sol': ['high']}, mcp=False)
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    result = run_cli([str(SCRIPT), '--tool', 'codex', '--model', 'gpt-5.6-sol', '--orchestrator-family', 'anthropic', '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'codex',
+            '--model',
+            'gpt-5.6-sol',
+            '--orchestrator-family',
+            'anthropic',
+            '--prompt',
+            'Review',
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "failed"
@@ -1498,7 +1776,7 @@ def test_chain_tool_missing_uses_the_entry_model_when_recording_alias(tmp_path):
         if path and not (Path(path) / "cursor-agent").exists()
     )
     env["PATH"] = f"{bin_dir}:{available_path}"
-    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--chain', 'cursor:cursor-grok-4.5-high:', '--orchestrator-family', 'openai', '--prompt', 'Reply OK'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--chain', 'cursor:cursor-grok-4.5-high:', '--orchestrator-family', 'openai', '--prompt', 'Reply OK'], cwd=tmp_path, env=env)
 
     assert result.returncode != 0
     entry_record = next(
@@ -1613,7 +1891,23 @@ def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
         shutil.copy2(product / "config" / name, instance / "config" / name)
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance)
     out = tmp / "out.txt"
-    result = run_cli([str(product / 'skills' / 'orchestrate' / 'scripts' / 'cf_dispatch.py'), '--tool', 'claude', '--orchestrator-family', 'codex', '--role', 'reviewer', '--out', str(out), '--prompt', 'Reply exactly OK'], cwd=str(tmp), env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(product / 'skills' / 'orchestrate' / 'scripts' / 'cf_dispatch.py'),
+            '--tool',
+            'claude',
+            '--orchestrator-family',
+            'codex',
+            '--role',
+            'reviewer',
+            '--out',
+            str(out),
+            '--prompt',
+            'Reply exactly OK',
+        ],
+        cwd=str(tmp),
+        env=env,
+    )
     record = json.loads(result.stdout)
     assert result.returncode == 0, result.stderr
     assert record["status"] == "ok"
@@ -1975,7 +2269,7 @@ def test_named_endpoint_reaches_the_claude_writer_route_environment():
 
 
 CODEX_ARGV_STUB = """\
-printf '%s\\n' "$@" >> {args_file}
+printf '%s\\n' "$@" > {args_file}
 cat >/dev/null
 echo "OK"
 """
@@ -2114,14 +2408,27 @@ def test_unimplemented_adapter_is_refused_before_any_provider_work(tmp_path):
         f"#!/usr/bin/env bash\ntouch {invoked}\nexit 0\n",
     )
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
     out = tmp / "out.txt"
     for args in (
         ["--tool", "pi"],
         ["--tool", "not-an-adapter"],
         ["--chain", "claude:opus:low pi:pi-model:low"],
     ):
-        result = run_cli([str(SCRIPT), *args, '--orchestrator-family', 'anthropic', '--out', str(out), '--prompt', 'Review'], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+        result = run_cli(
+            [
+                str(SCRIPT),
+                *args,
+                '--orchestrator-family',
+                'anthropic',
+                '--out',
+                str(out),
+                '--prompt',
+                'Review',
+            ],
+            cwd=tmp_path,
+            env=env,
+            path=[bin_dir],
+        )
         assert result.returncode == 2, (args, result.stdout, result.stderr)
         assert "unimplemented adapter" in result.stderr
         assert result.stdout == ""
@@ -2427,9 +2734,25 @@ def test_oversized_argv_prompt_is_typed_for_cursor(tmp_path):
     big_prompt = tmp / "big-prompt.txt"
     big_prompt.write_text("x" * 200_000, encoding="utf-8")
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
     out = tmp / "out.txt"
-    result = run_cli([str(SCRIPT), '--tool', 'cursor', '--model', 'cursor-grok-4.5-high', '--orchestrator-family', 'openai', '--out', str(out), '--prompt-file', str(big_prompt)], cwd=tmp_path, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+    result = run_cli(
+        [
+            str(SCRIPT),
+            '--tool',
+            'cursor',
+            '--model',
+            'cursor-grok-4.5-high',
+            '--orchestrator-family',
+            'openai',
+            '--out',
+            str(out),
+            '--prompt-file',
+            str(big_prompt),
+        ],
+        cwd=tmp_path,
+        env=env,
+        path=[bin_dir],
+    )
     record = json.loads(result.stdout)
     assert result.returncode != 0
     assert record["status"] == "rejected", record
@@ -2511,11 +2834,29 @@ def test_agy_denied_actions_never_publish_partial_success(tmp_path):
     printf '%s' "$AGY_TEST_ENVELOPE"
     """)
     env = fabric_free_env()
-    env["PATH"] = f"{bin_dir}:{env['PATH']}"
     for index, (extra, expected) in enumerate(cases):
         env["AGY_TEST_ENVELOPE"] = json.dumps({"status": "SUCCESS", "response": "PARTIAL RESULT", **extra})
         out = tmp / f"result-{index}.txt"
-        result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', 'agy', '--model', 'gemini-3.8-flash', '--effort', 'low', '--out', str(out), '--prompt', 'Read the fixture'], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
+        result = run_cli(
+            [
+                str(SCRIPT),
+                '--intent',
+                'ordinary',
+                '--tool',
+                'agy',
+                '--model',
+                'gemini-3.8-flash',
+                '--effort',
+                'low',
+                '--out',
+                str(out),
+                '--prompt',
+                'Read the fixture',
+            ],
+            cwd=tmp,
+            env=env,
+            path=[bin_dir],
+        )
         record = json.loads(result.stdout)
         assert record["status"] == expected, (extra, record)
         assert (result.returncode == 0) == (expected == "ok")
@@ -2529,49 +2870,68 @@ def test_agy_denied_actions_never_publish_partial_success(tmp_path):
 
 
 def test_agy_sandbox_setting_is_explicit_and_assurance_stays_bounded(tmp_path):
-            tmp = Path(tmp_path)
-            bin_dir = fake_bin(tmp)
-            args_file = tmp / "args.json"
-            prompt = "Read the fixture: café\n\n"
-            prompt_file = tmp / "prompt.txt"
-            prompt_file.write_text(prompt, encoding="utf-8")
-            write_executable(bin_dir / "agy", f"""#!/usr/bin/env python3
-    import json,sys
-    from pathlib import Path
-    if sys.argv[1:] == ['models']:
-        print('gemini-3.8-flash-low')
-    else:
-        Path({str(args_file)!r}).write_text(json.dumps(sys.argv[1:]))
-        print(json.dumps({{'status':'SUCCESS','response':'READ OK'}}))
-    """)
-            for index, (intent, setting, expected) in enumerate([
-                ("ordinary", None, False), ("ordinary", "0", False),
-                ("ordinary", "1", True), ("assurance", None, True),
-                ("assurance", "0", True), ("ordinary", "false", None),
-                ("ordinary", "", None),
-            ]):
-                env = fabric_free_env()
-                env.pop("CF_DISPATCH_AGY_SANDBOX", None)
-                env["PATH"] = f"{bin_dir}:{env['PATH']}"
-                if setting is not None:
-                    env["CF_DISPATCH_AGY_SANDBOX"] = setting
-                if args_file.exists():
-                    args_file.unlink()
-                result = run_cli([str(SCRIPT), '--intent', intent, '--tool', 'agy', '--alias', 'junior', '--orchestrator-family', 'openai', '--out', str(tmp / f'out-{index}'), '--prompt-file', str(prompt_file)], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / 'scripts'])
-                record = json.loads(result.stdout)
-                if expected is None:
-                    assert result.returncode != 0
-                    assert record["status"] == "invalid_configuration"
-                    assert not args_file.exists()
-                    continue
-                assert result.returncode == 0, result.stdout + result.stderr
-                argv = json.loads(args_file.read_text())
-                assert ("--sandbox" in argv) is expected
-                assert "--dangerously-skip-permissions" not in argv
-                effective_prompt = argv[argv.index("--print") + 1]
-                assert effective_prompt.startswith(f"Workspace root: {tmp.resolve()}\n")
-                assert "Do not modify files or run commands that mutate state." in effective_prompt
-                assert effective_prompt.endswith(prompt)
-                assert record["provider_sandbox"] is expected
-                assert record["read_only_guarantee"] == "prompt_only"
-                assert record["certification_eligible"] is False
+    tmp = tmp_path / "agy workspace x"
+    tmp.mkdir()
+    bin_dir = fake_bin(tmp)
+    args_file = tmp / "args.json"
+    prompt = "Read the fixture: café\n\n"
+    prompt_file = tmp / "prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    write_executable(bin_dir / "agy", f"""#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+if sys.argv[1:] == ['models']:
+    print('gemini-3.8-flash-low')
+else:
+    Path({str(args_file)!r}).write_text(json.dumps(sys.argv[1:]))
+    print(json.dumps({{'status':'SUCCESS','response':'READ OK'}}))
+""")
+    for index, (intent, setting, expected) in enumerate([
+        ("ordinary", None, False), ("ordinary", "0", False),
+        ("ordinary", "1", True), ("assurance", None, True),
+        ("assurance", "0", True), ("ordinary", "false", None),
+        ("ordinary", "", None),
+    ]):
+        env = fabric_free_env()
+        env.pop("CF_DISPATCH_AGY_SANDBOX", None)
+        if setting is not None:
+            env["CF_DISPATCH_AGY_SANDBOX"] = setting
+        if args_file.exists():
+            args_file.unlink()
+        result = run_cli(
+            [
+                str(SCRIPT),
+                "--intent",
+                intent,
+                "--tool",
+                "agy",
+                "--alias",
+                "junior",
+                "--orchestrator-family",
+                "openai",
+                "--out",
+                str(tmp / f"out-{index}"),
+                "--prompt-file",
+                str(prompt_file),
+            ],
+            cwd=tmp,
+            env=env,
+            path=[bin_dir],
+        )
+        record = json.loads(result.stdout)
+        if expected is None:
+            assert result.returncode != 0
+            assert record["status"] == "invalid_configuration"
+            assert not args_file.exists()
+            continue
+        assert result.returncode == 0, result.stdout + result.stderr
+        argv = json.loads(args_file.read_text())
+        assert ("--sandbox" in argv) is expected
+        assert "--dangerously-skip-permissions" not in argv
+        effective_prompt = argv[argv.index("--print") + 1]
+        assert effective_prompt.startswith(f"Workspace root: {tmp.resolve()}\n")
+        assert "Do not modify files or run commands that mutate state." in effective_prompt
+        assert effective_prompt.endswith(prompt)
+        assert record["provider_sandbox"] is expected
+        assert record["read_only_guarantee"] == "prompt_only"
+        assert record["certification_eligible"] is False
