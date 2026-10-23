@@ -9,9 +9,11 @@ engines, generated reference runs, duplicated queues and the entire bespoke UI
 runtime. Skills conduct the work using `git`, `gh`, Fabric and browser tools.
 
 This is a design for both implementation chairs, not an implementation or
-cut-over approval. The agreed v7 direction of 23 October 2026 supersedes the transition,
-compatibility and parity sections of [ADR 0028](../../../adr/0028-rust-port-dependencies.md),
-[PORTING v5](../PORTING.md) and the [port plan](../README.md).
+cut-over approval. The binding [cross-area decisions](https://github.com/mblauberg/provenant/blob/d61c4335a5c3e9ef3c5761b21fc710354226723e/docs/specs/rust-port/design/README.md#cross-area-decisions)
+and [PORTING v7](https://github.com/mblauberg/provenant/blob/d61c4335a5c3e9ef3c5761b21fc710354226723e/docs/specs/rust-port/PORTING.md)
+govern this design; the table wins any conflict, including older R1 import
+wording. V7 supersedes the transition, compatibility and parity sections of
+[ADR 0028](../../../adr/0028-rust-port-dependencies.md) and the [port plan](../README.md).
 Their dependency allowlist, typed errors, serde records, crate layering,
 process custody and sole unsafe boundary in `supervisor::sys` still apply.
 ADR 0028's small stderr diagnostic module governs the conflicting R8 reference
@@ -30,8 +32,9 @@ on each Mac is the frozen live install. Never pull, check out another revision
 or reinstall it until cut-over. All work uses worktrees from `origin/main`.
 Deletions may merge to main freely while that checkout stays frozen. Do not
 re-point symlinks or edit `~/.claude/settings.json` during the rewrite.
-The agreed v7 wording is pending publication in those owner documents on this
-PR's merged baseline; this chair decision governs the lanes below.
+PORTING R11 on the binding ref publishes this frozen-install rule; the local
+port-plan baseline predates it. Final cut-over follows the table's installer
+contract, including authorised global instruction updates.
 
 Evidence baseline: checkout `26521609fc114e85946aa5d43ef67828b8e2490f`;
 `docs/rust-port-slices` at `4201ef9f9185ae4fed23ff5d0e03d15e13561c40`.
@@ -48,18 +51,18 @@ blank lines, generated bundles and vendor copies where tracked.
 | User at CLI | Inspect a receipt, understand a refusal, save/resume a checkpoint | `session/references/chair-state.md:64,98` and `context-hygiene.md:59` document direct helpers. Provide short verbs and actionable diagnostics. |
 | Machine callers | Obtain structured results | CLI `--json` suffices; `runtime/fabric/src/server.ts` exposes no workflow demand. Add no workflow MCP tools or crate edge. |
 | Harness hooks | Restore the correct session after compaction | `session/scripts/state_check.py:84` emits PreCompact and SessionStart hook configuration. Keep the host's JSON stdin/stdout contract; replace transcript searching with an explicit checkpoint key. |
-| Long-running skill | Resume a goal and distinguish idle waiting from completion | `autopilot/SKILL.md:32`, templates/README:68 and `validate_idle_pause.py` use a second Markdown queue. Cut the idle validator; skill guidance reads Fabric lanes/tasks directly. |
+| Long-running skill | Resume a goal and distinguish idle waiting from completion | `autopilot/SKILL.md:32`, templates/README:68 and `validate_idle_pause.py` use a second Markdown queue. Cut the idle validator; skill guidance reads top-level `lanes` and Fabric tasks. |
 | Writing skills | Locate mechanical prose defects, including legal/academic rules | `legal-writing/SKILL.md:73`, `natural-writing/references/academic-prose.md:310`. Retain one matcher with three rule sets. |
 | Repository setup and tracker | Follow the declared tracker and avoid duplicate issue work | `setup-repo/SKILL.md:76` offers the shell-detecting hook; `tracker/references/steward.md:29` offers replay bookkeeping. Replace with skill instructions and existing tasks plus `gh` reads. |
 | Installed workflow host | Discover `meta` and execute `run` JavaScript exports | `scripts/install-workflows:46` globs sources; `scripts/install-harness:366,556` installs them. Claude Code owns this external Workflow host contract. Retire our accelerators, which hard-code deleted scripts; no Provenant Node or Rust host replaces it. |
-| Other crates and hosts | Link a delivery to attempts and report its outcome | `runtime/fabric/src/execution-input.ts` carries `delivery_run_id`; `scripts/telemetry_delivery.py:37` ingests receipts. Share typed identities and summaries, not executable workflow internals. |
+| Other crates and hosts | Link a delivery to attempts and report its outcome | `runtime/fabric/src/execution-input.ts` carries `delivery_run_id`; `scripts/telemetry_delivery.py:37` ingests receipts. Replace this with typed `DeliveryId` links in run records; the receipt plus run records are the record. |
 
 Paths beginning with a skill name in this document are relative to `skills/`.
 Evidence of a call in a skill is evidence of a supported path, not a measured
 invocation count. State sampling is read-only, bounded and excludes prompt,
 message and credential contents.
 
-The default telemetry ledger at
+At the evidence baseline, the legacy telemetry ledger at
 `~/.local/state/agent-harness/fabric/telemetry.sqlite3` exists: about 565 MB,
 566,185 usage rows, 566,877 usage-file rows, 111,191 observations, 46,923 events,
 13 deliveries and zero changes at the baseline inspection. A repair-pass
@@ -100,9 +103,9 @@ as a compatibility wrapper.
 | Tracker Bash command parser and denying hook | Cut* | Shell recognition is incomplete; repository tracker instructions and command wrappers own routing. |
 | Herdr CLI markdown/help contract checker | Cut* | Workflow no longer invokes Herdr; the external integration owner tests any retained transport itself. |
 | JS implement-run, cross-verify and codebase-polish engines | Cut* | Existing skills plus Fabric already conduct these sequences; no replacement generic workflow interpreter. |
-| Shared root, exclude, profile, bounded process and custody helpers | Merge | Core/config/confinement/supervisor own these services; no workflow copies. |
-| Writing, academic and legal linters | Merge* | One small matcher behind top-level `provenant lint`; rules are JSON beside the owning SKILL.md, outside policy/config/records. |
-| Delivery telemetry, cost per accepted outcome and retrospective inputs | Simplify | Emit one summary per receipt revision; telemetry owns joins, deduplication and honest missingness. |
+| Shared root, exclude, config-loading, bounded process and custody helpers | Merge | Core/config/confinement/supervisor own these services; no workflow copies. |
+| Writing, academic and legal linters | Merge* | One small matcher; top-level `provenant lint` is pending CLI freeze. Rules are JSON beside the owning SKILL.md, outside policy/config/records. |
+| Delivery telemetry, cost per accepted outcome and retrospective inputs | Simplify | No ledger or summary ingestion. `telemetry stats` reduces terminal run records with prices; receipts retain decisions and run records carry `DeliveryId`. Preserve missingness. |
 | UI detector, live server and browser overlays | Cut/replace* | Component decisions below remove all UI runtime ownership from workflow. |
 
 ## UI component decisions
@@ -175,8 +178,14 @@ Records owns the receipt and review wire types, provenance and risk/review
 policy records. Workflow owns their semantic checks. Markdown is the session
 payload, with no typed JSON checkpoint schema. Writing rules belong beside
 `skills/natural-writing/SKILL.md` and `skills/legal-writing/SKILL.md` as
-`lint-rules.json`; general and academic profiles share natural-writing's data.
-No writing rules enter `WorkflowPolicy`, config or records.
+`lint-rules.json`; general and academic rule sets share natural-writing's data.
+No writing rules enter config or records. Risk/review settings and bounds come
+from typed values loaded from the single user-owned `config.toml` under the
+state root, with compiled defaults. There is no profile layering, project
+overlay, per-knob environment input or profile mutation command; `config show`
+and `config check` remain, with an optional `profile =` selector. Product env
+inputs are only `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL`; provider and
+harness variables pass through as their tools define them.
 
 | Type | Minimal contents |
 |---|---|
@@ -244,8 +253,13 @@ on run, routing or providers.
 
 ## Persistence, concurrency and errors
 
-Use a fresh root, proposed `${XDG_STATE_HOME:-~/.local/state}/provenant-rust`;
-the config chair freezes the spelling. Under `workflow/projects/<project-id>/`:
+Use the host-global `~/.local/share/provenant/v1` root. `--state-dir ABS`
+overrides `PROVENANT_STATE_DIR`, then this default. No old-root fallback; refuse
+a new root inside an old root. Runs and their store stay at the top level,
+Fabric under `fabric/`, and installation under `install/` and `releases/`.
+Workflow proposes `workflow/projects/<project-id>/` beneath that one root,
+using host-local `ProjectId` for receipts and checkpoints, not separate roots
+per project. The Open decisions row requests this subtree in the binding table:
 
 ```text
 deliveries/<delivery-id>/receipt.json
@@ -293,8 +307,11 @@ no threads or subprocesses and never cancels another owner's attempt/lease.
 
 ## CLI, writing and hook surface
 
-Proposed commands and exits are **pending the other chair's command-tree
-freeze**, including the top-level lint spelling:
+The [CLI design in PR #1359](https://github.com/mblauberg/provenant/pull/1359)
+owns the command envelope and verb tree. Its `workflow` subtree is reserved;
+the following leaves are proposed. **Top-level `provenant lint` remains pending**:
+CLI's proposal omits it and proposes internalising lint policy. Resolve that
+placement before lane D lands; it is not frozen by this document.
 
 ```text
 provenant workflow review --request <file|-> [--json]
@@ -302,16 +319,28 @@ provenant workflow receipt show <id> [--json]
 provenant workflow receipt save <id> --expected-revision <n> --request <file|->
 provenant workflow session save <session-id> --file <markdown|->
 provenant workflow session show <session-id> [--json]
-provenant workflow hook pre-compact|session-start
-provenant lint <paths...> --profile general|academic|legal [--json]
+provenant hook claude pre-compact|compact
+provenant lint <paths...> --rules general|academic|legal [--json]  # pending
 ```
 
 `review` is the pure coverage check. A new receipt uses expected revision zero;
 `save` replaces its minimal fields with trusted actor context supplied by the
 host, never by JSON claiming authority. `show` reports stored claims, without
-claiming current verification. JSON uses `{ version, result, diagnostics }`;
-text reports short status and remedies. Proposed exits: 0 valid/saved, 1 policy
-unsatisfied, 2 bad request/config, 3 conflict/contention, 4 I/O, 130 cancelled.
+claiming current verification. CLI renders one UTF-8 JSON object plus LF:
+`{ "schema_version": 1, "command": "workflow.review", "status": "ok", "data": {}, "error": null }`.
+Status is `ok`, `failed`, `refused`, `cancelled`, `timeout` or `error`; errors
+carry a stable code, redacted message, cause and optional repair. Useful partial
+coverage and input-required state go in `data`, never an exit 4. The whole
+result is capped at **1 MiB**; paginated lists carry `next_cursor`, and tails
+are at most 500 lines/64 KiB. Never silently discard rows. Text reports short
+status and remedies.
+
+The binding exits are 0 successful operation/query, 1 failed/refused/findings,
+2 invalid input/version, 3 cannot proceed (setup, I/O, conflict/contention or
+unavailable required evidence), 124 wait deadline and 130 cancelled. A wait
+whose condition is met, including `InputRequired`, exits 0. Waits require an
+explicit budget; CLI permits up to 14,400 seconds. The binary edge renders
+these outcomes; libraries never choose exits or return an envelope.
 No workflow MCP tools or `fabric-mcp -> workflow` edge: CLI `--json` only.
 
 The matcher loads bounded JSON rules from the selected skill, compiles Rust
@@ -327,14 +356,25 @@ UTF-8 and use the explicit host/project key, without a shape validator or JSON
 wrapper. `save` writes atomically under that session's lock. Save updates must
 preserve originating authority references; prose cannot expand a grant.
 
-Hooks read bounded host JSON stdin. SessionStart obtains the actual session ID
-from the host event and injects the validated key and this save command with the actual ID substituted:
+Run owns the top-level `dispatch`, `lanes [--wait]`, `output`, `cancel`,
+`resume` and `reconcile` verbs. `reconcile` recovers queued/orphaned work after
+scheduler death. Fabric keeps messaging, tasks, agent labels, peer hosts and
+MCP; named sessions retire in favour of run `resume`. The table overrides
+CLI's older `fabric.lanes` examples; CLI freezes exact run flags. Workflow
+adds no execution verbs and never calls old orchestrate scripts.
+
+Hooks use CLI's `hook claude pre-compact` and `hook claude compact` leaves,
+with host-native stdout/exit contracts rather than the CLI envelope. They read
+at most 1 MiB host JSON stdin and emit at most 8 KiB context. Advisory callbacks
+exit 0 even for missing/invalid state, with a bounded diagnostic. SessionStart
+obtains the actual session ID from the host event and injects the validated key
+and this save command with the actual ID substituted:
 `provenant workflow session save <session-id> --file <checkpoint.md>`.
 It then injects only that key's bounded checkpoint, or an explicit missing/stale
 status. PreCompact reports whether that checkpoint needs saving; it does not
-search transcripts. Missing/invalid host ID is an explicit hook error, never a
-fallback to the latest file. Keep native fixtures for host field names and
-omission/error behaviour. Cut the idle-pause validator and `work_frontier` ask;
+search transcripts. Missing/invalid host ID produces an explicit diagnostic
+and no checkpoint, never a fallback to the latest file. Keep native fixtures
+for host field names and omission/error behaviour. Cut the idle-pause validator and `work_frontier` ask;
 autopilot guidance reads lanes/tasks directly and run owns pause/admission.
 Config retires the tracker hook in the final install while preserving unrelated
 and user-owned config.
@@ -347,29 +387,19 @@ RUN.json, session Markdown, mission queues, tracker replay files or UI journals.
 Active work resumes by an agent reading old documents and explicitly creating
 a new authorised receipt/checkpoint, not by a hidden migration command.
 
-Only Fabric messages/tasks and the telemetry ledger are eligible for a
-one-shot import under v7. Workflow needs neither to function. The populated
-telemetry ledger has cross-linked usage/cursor/observation/delivery history;
-mapping that history to redesigned schemas is not trivial. Recommend **no
-telemetry import**: retain the database for historical analysis, start the new
-ledger clean and do not infer links from coincident old/new IDs. A byte copy
-does not constitute a useful import into a different schema.
+The table narrows PORTING R1: **Fabric alone owns the read-only, one-shot
+cut-over import**, covering open and blocked tasks plus unacknowledged requests
+from the last 14 days. Point agents with active old tasks to that import, not
+manual recreation. The earlier sample of 25 open/five blocked tasks describes
+the old store, not a separate workflow migration or a frozen import count.
+Fabric owns project/identity mapping; imported text grants no new authority.
 
-Legacy `fabric.sqlite3` has 12,456 messages, 475 tasks, 2,608 agents and seven
-task dependencies. Replies have a declared FK; project, sender and ownership
-links are mostly soft keys. The separate `fabric-v1.sqlite3` has 228 tables,
-two messages and five tasks with run/authority relationships. Importing rows
-into a new identity/authority model needs decisions about authors, project
-mapping, replies and dependencies. Recommend **no Fabric import** as
-non-trivial, with zero implementation lane-days allocated. An archive-only
-row copy could be small, but does not restore live task/message semantics.
-The store chair may overturn this only with a bounded, trivial projection
-that retains these meanings without importing execution state or authority.
-The repair-pass aggregate query finds 25 open and five blocked Fabric tasks;
-agents recreate these by hand after reading the old records, with current
-authority and new IDs. A clean telemetry ledger loses weekly quota history in
-new reports; preserve the old ledger for historical reads. Fabric and telemetry
-import decisions belong to the other chair, not workflow.
+There is **no telemetry ledger** in the new product. `telemetry stats` reduces
+terminal run records with the bundled price table. The receipt plus run records
+are the record; workflow publishes no delivery summaries and requests no
+telemetry write/report API. The old ledger stays on disk for the old install,
+neither imported nor deleted, and its history is absent from new reports.
+The OTel collector retires at cut-over. No workflow import is added.
 
 | Material inspected | Keep | Strip or move |
 |---|---|---|
@@ -383,7 +413,7 @@ import decisions belong to the other chair, not workflow.
 | Layer | Native cases and tools |
 |---|---|
 | Review/receipt | Duplicate actors, author/decision-maker exclusion, tier/lens/family fallback, unknown/ChairAttested/observed provenance, terminal adversarial counting, stale subject and required user approval. Minimal receipt bounds/version/revision. |
-| CLI/hook | New text/JSON snapshots with injected IDs/clock and isolated roots; malformed input, exits and side-effect-free help. SessionStart supplies key/save template for present, absent, stale and malformed session cases. No MCP fixtures. |
+| CLI/hook | Envelope/status/1 MiB bound and 0/1/2/3/124/130 snapshots with injected IDs/clock and isolated roots; partial/input-required data, malformed input and side-effect-free help. SessionStart key/save template for present, absent, stale and malformed sessions; native advisory exits. No MCP fixtures. |
 | Concurrency | Two fixture processes use handshakes to save the same revision: one winner, one conflict; independent delivery/session locks. No sleep-based assertions. |
 | Faults | `cfg(test)` filesystem/clock fault traits inject read/write/rename/fsync/lock failure, ENOSPC and clock regression. Kill a fixture at publication boundaries; reread old/new complete bytes and distinguish failed durability from rollback. No `fail` crate. |
 | Custody/subject | Symlink swap, traversal/non-regular files, SHA-1/SHA-256, changed document digest and wrong PR head. Git/process custody tests stay with supervisor/confinement; no workflow merge-tree validator. |
@@ -580,21 +610,21 @@ test coverage or future patch size.
 ### Other chair's deletions
 
 These rows are excluded from workflow's deletion/net budget. Run owns the
-entire run-directory contract, with a **Cut** recommendation: Fabric run files
-plus `provenant clean` replace scaffolding, manifests and finalisation. Lane C
+entire run-directory contract, with a **Cut** recommendation: its files under
+`runs/<RunId>/` plus `provenant clean` replace scaffolding, manifests and finalisation. Lane C
 may implement against fakes but must not delete `review_plan.py` until run has
 removed `run_dir_finalize.py` and rewritten its callers.
 
 | Owner | File or contract | Baseline lines | Replacement/ordering |
 |---|---|---:|---|
-| run | `skills/orchestrate/scripts/git_evidence_packet.py` | 88 | Rewrite `dispatch_run.py:58` and `run_controls.py:37` inside run; workflow owns neither. |
-| run | `skills/orchestrate/scripts/run_dir_init.sh` | 138 | Cut the `.agent-run` scaffolder; use Fabric run files. |
+| run | `skills/orchestrate/scripts/git_evidence_packet.py` | 88 | Rewrite old dispatch/control callers to top-level `dispatch`, `lanes`, `output`, `cancel`, `resume` and `reconcile`; workflow owns neither. |
+| run | `skills/orchestrate/scripts/run_dir_init.sh` | 138 | Cut the `.agent-run` scaffolder; use run-owned files. |
 | run | `skills/orchestrate/scripts/run_dir_finalize.py` | 654 | Cut finaliser before lane C deletes its review-plan import. |
 | run | `schemas/run-receipt.schema.json` | 751 | Cut old run receipt schema with finaliser/scaffolder. |
 | run | `schemas/manifest-row.schema.json` | 55 | Cut manifest-row contract with its last run caller. |
 | run | Generated `RUN_RECEIPT.json` and `MANIFEST.md` contract | Not tracked | Cut new writes; retain existing run files untouched. Rewrite implement run-contract and orchestrate memory-scratchpad instructions. |
-| telemetry | `scripts/telemetry_changes.py` | 406 | Native telemetry owner; lane I integrates summaries. |
-| telemetry | `scripts/telemetry_delivery.py` | 276 | Same; counted here only, never in workflow's budget. |
+| telemetry | `scripts/telemetry_changes.py` | 406 | Retire legacy change markers; `telemetry stats` reads terminal run records with prices. |
+| telemetry | `scripts/telemetry_delivery.py` | 276 | Retire receipt ingestion; the receipt plus run records are the record. Excluded from workflow's budget. |
 
 ### Shared helpers and installer
 
@@ -707,16 +737,16 @@ the same lane that retires their target, without compatibility wrappers.
 | `code-review/references/finding-contract.md:41` | Delete `delivery_receipt.py finding`; record severity, file:line, impact and fix in the PR or review artefact. | G |
 | `implement/SKILL.md:65,74-75` | Replace `repair --failing` and validator call with PR repair notes and `workflow review`; preserve bounded repair and required checks. | G |
 | `implement/references/run-contract.md:9-31,47,67` | Delete software profile/RUN.json validator, acceptance and `bind_merged_delivery` commands. “The PR is the evidence: exact-head CI, required review, then repository merge.” Session Markdown records progress. | G |
-| `implement/references/run-contract.md:55`; `orchestrate/references/memory-scratchpad.md:16-74` | Delete init/finalise, MANIFEST/RUN_RECEIPT and custom run-directory instructions; use Fabric run files and `provenant clean`. | Other chair run; C deletion follows |
-| `orchestrate/scripts/dispatch_run.py:58,495`; `orchestrate/scripts/run_controls.py:37,354,367` | Delete git-evidence-packet imports/use inside the native run replacement. | Other chair run |
+| `implement/references/run-contract.md:55`; `orchestrate/references/memory-scratchpad.md:16-74` | Delete init/finalise, MANIFEST/RUN_RECEIPT and custom run-directory instructions; use top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile` and `provenant clean`. | Other chair run; C deletion follows |
+| `orchestrate/scripts/dispatch_run.py:58,495`; `orchestrate/scripts/run_controls.py:37,354,367` | Delete git-evidence-packet imports/use; replace script callers with top-level `dispatch`, `lanes`, `output`, `cancel`, `resume` and `reconcile` through run. | Other chair run |
 | `orchestrate/SKILL.md:70`; `orchestrate/references/autonomous-implementation.md:13-21,33-38,47-67` | Remove per-issue RUN.template/RUN.json mandates and receipt-path reporting. Track issue/PR and exact-head CI; minimal receipt uses DeliveryId where needed, session Markdown resumes work. Preserve readiness, authority, bounded repair and merge gates. | G orchestration/delivery prose; E resume; other chair run admission |
-| `orchestrate/references/direct-cli-fallback.md:8` | Remove `run_dir_init.sh` and primary-checkout scratch writes; run owner supplies an isolated run-files location and retained result reference. Preserve degraded-route declaration and authority checks. | Other chair run |
+| `orchestrate/references/direct-cli-fallback.md:8` | Remove `run_dir_init.sh` and primary-checkout scratch writes; use top-level `dispatch` then `lanes`/`output`, with `cancel`, `resume` and `reconcile` for control/recovery. Run owns file custody. Preserve degraded-route declaration and authority checks. | Other chair run |
 | `evaluate/references/receipt.md:3-7,20-22` | Replace enclosing delivery-run schema/path anchors with subject plus optional DeliveryId/PR reference; evaluate retains protocol, evidence and acceptance of its own evaluation result. No workflow Evaluation rule. | Evaluate skill owner, coordinated by G |
-| `docs/runbooks/telemetry.md:175-195`; `tests/test_telemetry.py:320` | Replace RUN.json/delivery_acceptance/merge_commit joins, `--delivery-run-id` and RUN.template fixture with native revisioned DeliverySummary/DeliveryId inputs and minimal test constructors. Preserve honest linked/unlinked cost and missingness. | Other chair telemetry; I integration |
+| `docs/runbooks/telemetry.md:175-195`; `tests/test_telemetry.py:320` | Replace RUN.json/delivery_acceptance/merge_commit joins, `--delivery-run-id` and RUN.template fixture with terminal run records carrying `DeliveryId` and minimal test constructors. `telemetry stats` applies prices; preserve missingness and receipt decision references without ledger ingestion. | Other chair telemetry; I integration |
 | `docs/specs/harness/lifecycle.md:98,168-178,434` | Replace canonical delivery-run v1/RUN.json and all-gates kernel claims with minimal receipt and PR evidence; evaluate/release own domain evidence. Retain explicit user gates and frozen-install rule. | G lifecycle text; other chair run for retired run-directory contract |
 | `tests/test_record_schemas.py:335-339,372` | Remove delivery-profiles registry/schema cases while preserving unrelated config/schema coverage; native minimal-record tests replace only retired workflow assertions. | B |
 | `orchestrate/references/verification.md:134-158` | Delete panel preset/axis/membership/reducer registry instructions; request named independent lenses and synthesise their findings directly. | C |
-| `orchestrate/references/orchestration-contract.md:7-22,29,75` | Remove accelerator bindings and run-directory ledger claim; native skill orchestration uses Fabric run files and the session checkpoint. | H accelerator text; other chair run ledger |
+| `orchestrate/references/orchestration-contract.md:7-22,29,75` | Remove accelerator bindings and run-directory ledger claim; native skill orchestration uses run-owned files and the session checkpoint. | H accelerator text; other chair run files |
 | `orchestrate/references/dynamic-workflows.md:1` | Retire our three-accelerator adapter instructions; preserve host-independent review/authority guidance in orchestration-contract. No claim that Provenant owns Claude's Workflow host. | H |
 | `grill-me/SKILL.md:37`; `orchestrate/SKILL.md:76`; `retrospect/SKILL.md:78`; `release/SKILL.md:84`; `scope/SKILL.md:88`; `work-map/SKILL.md:73` | Delete portable-wrapper schema links; point to the skill's existing project document or PR. No replacement context-stamping command. | B |
 | `deliver/SKILL.md:91`; `implement/SKILL.md:101`; `session/SKILL.md:83` | Delete wrapper schema links; use minimal receipt for delivery/implementation and Markdown checkpoint for session. | B deletes wrappers; G/E rewrite text |
@@ -725,13 +755,13 @@ the same lane that retires their target, without compatibility wrappers.
 | `session/references/chair-state.md:64-110` | Replace state checker/install-hook/transcript instructions with `workflow session save <session-id> --file <checkpoint.md>` and SessionStart key injection. Managed hook changes occur at final install. | E |
 | `session/references/context-hygiene.md:59,66` | Delete context audit/cleanup-script calls; save bounded checkpoint and refer retention to `provenant clean`, without old-root deletion authority. | E; J cleanup integration |
 | `autopilot/SKILL.md:32`; `autopilot/references/state-contract.md:11-35,55-67` | Delete bootstrap/knob parser and Markdown queue/lease mechanics. Retain user mission/STOP constraints; use lanes/tasks for live work and session Markdown for resumption. | E |
-| `autopilot/references/codex-operator.md:44,94`; `autopilot/references/recovery-and-cadence.md:17-18,137-143,163` | Delete idle validator and duplicate queue/reconcile/lease protocol; read Fabric lanes/tasks and run admission directly. Save blockers/resume trigger, never infer completion from idle. | E |
+| `autopilot/references/codex-operator.md:44,94`; `autopilot/references/recovery-and-cadence.md:17-18,137-143,163` | Delete idle validator and duplicate queue/reconcile/lease protocol; read top-level `lanes`, Fabric tasks and run admission; use `resume` and `reconcile` for continuation/recovery. Save blockers/resume trigger, never infer completion from idle. | E |
 | `autopilot/templates/GOAL.template.md:9-15`; `autopilot/templates/STATE.template.md:19,57`; `autopilot/templates/README.template.md:26-35,66-69,106-108`; `autopilot/templates/HANDOFF.template.md:23-24`; `autopilot/templates/QUEUE.template.md:1-24` | Remove bootstrap, fixed state shape and queue/lease requirements. Keep optional mission/authority/handoff prose; remove live queue/lease tracking from the templates. | E |
 | `tracker/SKILL.md:61-64`; `tracker/references/steward.md:29` | Delete replay queue/outcome writer; reconcile current issues/tasks with `gh` reads before retrying an authorised write. | H |
 | `setup-repo/SKILL.md:77-78` | Delete tracker denying-hook/settings-template instructions and both templates; retain repository tracker routing guidance. | H |
 | `tests/test_herdr_cli_contract.py:13`; `tests/test_herdr_orchestrate_contract.py:1` | Delete retired Herdr CLI contract checker/tests; any retained external transport belongs to that integration owner. No workflow Herdr gate. | H |
-| `legal-writing/SKILL.md:73`; `legal-writing/references/validation-checklists.md:206,214,218`; `legal-writing/references/forbidden-patterns.md:9-14`; `legal-writing/references/australian-english-house-style.md:53-54` | Use `provenant lint <paths> --profile legal`, with quoted-example/exclusion rules in skill data. Preserve filing-blocker failure severity and warnings as review prompts. | D |
-| `natural-writing/references/academic-prose.md:310`; `natural-writing/scripts/check_academic_style.py:18`; `legal-writing/scripts/lint_legal_style.py:24` | Use `provenant lint <paths> --profile academic`; delete Python engine imports. General/academic/legal rules move to skill-owned JSON. | D |
+| `legal-writing/SKILL.md:73`; `legal-writing/references/validation-checklists.md:206,214,218`; `legal-writing/references/forbidden-patterns.md:9-14`; `legal-writing/references/australian-english-house-style.md:53-54` | Pending CLI freeze, propose `provenant lint <paths> --rules legal`, with quoted-example/exclusion rules in skill data. Preserve filing-blocker failure severity and warnings as review prompts. | D |
+| `natural-writing/references/academic-prose.md:310`; `natural-writing/scripts/check_academic_style.py:18`; `legal-writing/scripts/lint_legal_style.py:24` | Pending CLI freeze, propose `provenant lint <paths> --rules academic`; delete Python engine imports. General/academic/legal rules move to skill-owned JSON. | D |
 | `ui-ux-design/SKILL.md:3,22-23`; `ui-ux-design/references/review.md:25`; `ui-ux-design/references/visual-qa.md:25`; `ui-ux-design/references/live.md:10-22,38` | Remove live-iteration/detector promises and every live command. “Read-only UI review by default; pair source changes with implement and use external browser evidence with app-owned preview.” | H |
 | `ui-ux-design/evals/boundary_cases.yaml:95-103`; `ui-ux-design/evals/regression_cases.yaml:79-85`; `ui-ux-design/evals/reference_disposition.yaml:26`; `ui-ux-design/evals/provenance_components.yaml:24` | Replace live/detector expectations and runtime dispositions with external-browser review cases. Preserve read-only authority and retained skill provenance. | H |
 | `docs/runbooks/github-workflow.md:202,309-321,349` | Replace receipt-directory/binder/validator requirements with PR evidence and exact-head CI. Replace primary-checkout sync at merge with the frozen-install rule until cut-over. | G; J final install wording |
@@ -768,31 +798,39 @@ caller deletions integrate only in the dependency order below.
 | E. Session/hooks | 1 | A; safe-FS/host-session interfaces | Markdown checkpoint and key/save-command injection, built against fake handles/host events first. Delete session/autopilot helpers and idle validator. Own session/autopilot text; no run/runtime frontier dependency. |
 | F. Store | 1 | B, confinement/supervisor | Lock/revision/atomic replacement and fault tests; delete producer write/process modules. |
 | G. Receipt/review binding | 1 | B/C/F; run fact interface | Minimal decision and review-attempt binding against fake run facts first. Delete validator cone and old `skills/implement` merge-binder/checkpoint scripts; E owns replacement checkpoints. Own deliver/implement evidence/repair/merge text. |
-| I. CLI/telemetry integration | 1.5 | C/D/E/G, real run/FS/host APIs, command freeze | Replace fakes with real owner reads; CLI/hook snapshots and summary ingestion. Telemetry deletes its own reducers. No MCP adapter. |
+| I. CLI/telemetry integration | 1.5 | C/D/E/G, real run/FS/host APIs, command freeze | Replace fakes with real owner reads; CLI/hook snapshots, run `DeliveryId` links and terminal-record stats with prices. No telemetry ledger or summary ingestion. No MCP adapter. |
 | J. Closure and final install | 1.5 | H/I, all product owners | Own final retired-name CI grep gate, mixed docs/tests and package closure; clean-state native gates and final link rewrite/install on both Macs. |
 | **Total** | **11.5** | Shared owner effort excluded | Integration waits never justify compatibility layers or pulling the frozen primary. |
 
-At J, the final installer inventories and rewrites every link into the frozen
-checkout on **each Mac**. The local repair-pass inventory is:
+At J, use the table's `install [--dry-run]`, `check` and `remove` commands,
+with `--legacy-checkout ABS`. Re-applying `install` is recovery; rollback
+reinstalls `pre-rust-rewrite`. The compiled cut-over link/command inventory
+belongs in [state.md's installer section](https://github.com/mblauberg/provenant/blob/docs/rewrite-state/docs/specs/rust-port/design/state.md#proposed-commands-and-installer-behaviour),
+whose older command proposal must conform to the table. State matches exact
+commands/link targets beneath the supplied checkout, reads links with
+`readlink` only and prints every harness-config change before applying it.
+Keep only workflow's entries here:
 
-| Live surface | Final install action |
+| Workflow surface | Final install action |
 |---|---|
-| `~/.claude/skills/<name>` and `~/.codex/skills/<name>` | Rewrite all checkout-targeting skill links, including `_shared`; enumerate the actual names on each Mac. Locally 30 in each directory, names below. |
-| `~/.claude/workflows/codebase-polish.js`, `cross-verify.js`, `implement-run.js` | Retire all three links; no workflow replacement host. Check any additional host workflow directory at cut-over. |
-| `~/.claude/settings.json`, SessionStart command | Replace `python3 "<primary>/skills/session/scripts/compact_reinject.py"` with the new session-start hook. |
-| Same file, PreCompact command | Replace `python3 "<primary>/skills/session/scripts/state_check.py" --hook` with the new pre-compact hook. |
-| `~/.local/bin/fabric` | Checkout-targeting link also found locally; config/install owner rewrites or retires it with the binary front door and MCP/root registrations. |
+| `~/.claude/workflows/codebase-polish.js`, `cross-verify.js`, `implement-run.js` | Remove the three managed checkout-targeting links; no replacement workflow host. |
+| `~/.claude/settings.json`, SessionStart command | Replace `python3 "<primary>/skills/session/scripts/compact_reinject.py"` with `provenant hook claude compact`. |
+| Same file, PreCompact command | Replace `python3 "<primary>/skills/session/scripts/state_check.py" --hook` with `provenant hook claude pre-compact`. |
+| Tracker denying-hook/settings companion | Remove its exact managed registration; preserve unrelated/user-owned settings. |
 
-Local skill-link names in both directories: `_shared`, `autopilot`, `code-review`,
-`d2-diagrams`, `deliver`, `diagnose`, `engineering-docs`, `engineering-writing`,
-`evaluate`, `grill-me`, `implement`, `legal-writing`, `natural-writing`,
-`orchestrate`, `playwright`, `prototype`, `react-performance`, `refactor`,
-`release`, `retrospect`, `scope`, `session`, `setup-repo`, `skill-craft`,
-`tanstack-query`, `tdd`, `tracker`, `typescript-clean-code`, `ui-ux-design`,
-`work-map`. Re-enumerate rather than assume both Macs match. Until J, keep all
-these links and commands pointing at the frozen checkout. Rehearse install and
-rollback with isolated roots, then require exact-head CI and separate cut-over
-authority before the final live install.
+State owns the complete skill/MCP/binary/instruction-link inventory on each
+Mac. At cut-over it may automatically update `~/.agents/AGENTS.md` and files
+linked to it when switching to `PROVENANT_AGENT_LABEL`, as authorised in the
+table on 24 October 2026. Until then the primary install stays frozen. Rehearse
+install/rollback with isolated roots, then require exact-head CI and final
+cut-over authority; this conform pass does not perform a live install.
+
+## Open decisions
+
+| Binding topic | Proposed table/owner change | Current design constraint |
+|---|---|---|
+| Layout | Add workflow's subtree: `workflow/projects/<ProjectId>/deliveries/<DeliveryId>/receipt.{json,lock}` and `sessions/<SessionId>/checkpoint.{md,lock}`. | A subtree of the single host-global root, not a per-project root; no alternate root pending acceptance. |
+| Command tree | Resolve top-level `provenant lint` and its `--rules` selector in CLI's freeze; current CLI proposal internalises lint and omits the verb. | Marked pending throughout; writing matcher remains skill-owned and legal blockers survive. |
 
 ## Cross-crate asks for the other chair
 
@@ -804,14 +842,14 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 |---|---|
 | core | `ProjectId`, `DeliveryId`, `SessionId`, `AttemptId`, `ActorId`, `RepoId`, `GitOid` (SHA-1/SHA-256), `Digest`, `UtcMicros`, `Deadline`, `CancelToken`, `RelPath::parse`; production `CommitClock` via `jiff`. No `WorkScope` ask after cutting idle validation. |
 | records | Bounded decode, canonical encode (sorted keys/final LF), digest; minimal receipt, subject, risk/review policy and request records; `RouteProvenance`/`ReviewEligibility` with Observed/ChairAttested/Unknown. Facts serialise but do not deserialise. No checkpoint or writing-rule schema. |
-| config | `workflow_policy(&ResolvedConfig)` for constitutional risk/review and bounds; `state_root()` with frozen spelling. Own final managed hook/link/installer reconciliation and tracker hook removal; replace only the enumerated managed hooks, preserving unrelated/user-owned settings. Writing data stays with skills. |
+| config/state | Typed risk/review settings and bounds from one root-owned `config.toml` plus compiled defaults, with optional `profile =`; no layers/project overlays/per-knob env or mutation verbs. Root `~/.local/share/provenant/v1`, `--state-dir` over `PROVENANT_STATE_DIR`; accept workflow subtree row. Own `install [--dry-run]`, `check`, `remove`, `--legacy-checkout` inventory and authorised instruction updates; preserve unrelated/user-owned entries. Writing data stays with skills. |
 | supervisor | Safe FS: stable lock inode, no-follow open, atomic replace/no-replace, file/directory sync; expose bounded `FileHandle::lock(LockOptions)` polling non-blocking `flock` through confinement, with cancellation. `run_utility` for fixed git/gh reads. Test-only fixture launch/kill support. |
 | confinement | Own `Grant`, `Workspace`, `RepoHandle`; `open_workflow_store`, `open_artifact`, `narrow`, safe `git_facts` with replacement objects off/alternates ignored. `StoreRoot::lock(..., Deadline, CancelToken)` returns a held record for bounded `read`/atomic `publish`; ordinary path/phase/cause I/O diagnostics, no workflow uncertain-commit protocol. |
-| run | `RunStore::completed_attempt(AttemptId) -> AttemptFact`: terminal state/exit, subject, output ref/digest, route and reviewer. Dispatch carries `DeliveryId`. Own git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
+| run | `RunStore::completed_attempt(AttemptId) -> AttemptFact`: terminal state/exit, subject, output ref/digest, route and reviewer. Terminal records carry `DeliveryId` for stats. Own top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile`, git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
 | providers | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; keep adapter, endpoint and model family separate. ChairAttested never fills cross-family coverage. Workflow consumes edge-built facts, without a providers dependency. |
 | routing | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`: tiers, all author families, expiry and quota/config/capability/family-slot blockers. No probes under the receipt lock. Quota feeds routing, with no workflow call. |
-| telemetry | `upsert_delivery(DeliverySummary)` keyed by `(delivery_id, revision)` plus `delivery_report`; minimal subject/risk/decision/route links with missingness. Own both reducers and no-import/weekly-history decision. Failure cannot undo a decision. |
-| cli | `WorkflowArgs`, `execute_workflow(args, &HostContext)` and top-level lint; freeze verbs/exits 0/1/2/3/4/130. Gather subject, attempt, actor and routing facts at the binary edge; no MergeFact. |
-| fabric-store | Own no-import decision for messages/tasks and manual recreation of the 25 open/five blocked tasks, with new identities and current authority. |
-| fabric-mcp / fabric-runtime | No workflow asks, tools or dependency edges. CLI JSON and direct lanes/tasks guidance suffice. |
+| telemetry | No workflow write/report API or ledger. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |
+| cli/binary | Parse proposed workflow leaves and `hook claude pre-compact\|compact`; resolve pending top-level lint. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/124/130; partial/input-required in data. Run verbs stay top level under run. |
+| fabric-store / fabric-runtime | Own the only read-only one-shot cut-over import: open/blocked tasks plus unacknowledged requests from the last 14 days. Map project/identity without importing authority; workflow points agents to it. Product identity env is `PROVENANT_AGENT_LABEL`, replacing `AGENT_FABRIC_LABEL`. |
+| fabric-mcp | No workflow asks, tools or dependency edge. CLI JSON, top-level run `lanes` and Fabric tasks suffice. |
 | Native host | Supply session ID in hook events; SessionStart injects actual key/save command. Retain observed launch identity when available, otherwise explicit ChairAttested native provenance under the limits above. |
