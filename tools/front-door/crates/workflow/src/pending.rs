@@ -401,3 +401,8 @@ fn python_integer_value(value:&serde_json::Value)->Option<i128> {
         _=>None,
     }
 }
+
+mod python_word;
+
+// port: belongs in provenant-core
+pub(crate) fn python_word(c:char)->bool {python_word::is_word(c)}
