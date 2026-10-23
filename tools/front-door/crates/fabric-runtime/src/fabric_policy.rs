@@ -79,7 +79,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         let Some(value) = entry.as_str().filter(|value| !value.is_empty()) else {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                python_repr(entry)
+                crate::pending::python_repr(entry)
             ));
             continue;
         };
@@ -87,14 +87,14 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         if path.is_absolute() {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                python_repr(entry)
+                crate::pending::python_repr(entry)
             ));
             continue;
         }
         let candidate = match crate::pending::resolve_path(&root.join(path)) {
             Ok(candidate) => candidate,
             Err(_) => {
-                warnings.push(format!("{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}", python_repr(entry)));
+                warnings.push(format!("{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}", crate::pending::python_repr(entry)));
                 continue;
             }
         };
@@ -103,49 +103,11 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         } else {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                python_repr(entry)
+                crate::pending::python_repr(entry)
             ));
         }
     }
     (excluded, warnings)
-}
-
-fn python_repr(value: &Value) -> String {
-    match value {
-        Value::String(value) => format!(
-            "'{}'",
-            value
-                .replace('\\', "\\\\")
-                .replace('\'', "\\'")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t")
-        ),
-        Value::Null => "None".into(),
-        Value::Bool(true) => "True".into(),
-        Value::Bool(false) => "False".into(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(python_repr)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Object(values) => format!(
-            "{{{}}}",
-            values
-                .iter()
-                .map(|(key, value)| format!(
-                    "{}: {}",
-                    python_repr(&Value::String(key.clone())),
-                    python_repr(value)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        other => other.to_string(),
-    }
 }
 
 const DEFAULT_BRANCH: &str = "main";
@@ -296,7 +258,7 @@ mod tests {
         fs::create_dir(root.path().join("allowed")).unwrap();
         write_policy(
             root.path(),
-            r#"{"instruction_changes":"deny","secret_scan_exclude":["allowed","../outside",null],"tools":{"extra":1,"lint":{"areas":["api"],"x":2}}}"#,
+            r#"{"instruction_changes":"deny","secret_scan_exclude":["allowed","../outside",null],"tools":{"default_branch":NaN,"extra":1,"lint":{"areas":["api"],"x":2}}}"#,
         );
         let python = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
         let source = concat!(

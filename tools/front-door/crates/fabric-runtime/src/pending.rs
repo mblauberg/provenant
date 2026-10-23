@@ -72,9 +72,10 @@ pub(crate) fn resolve_path(path: &Path) -> io::Result<PathBuf> {
 // port: belongs in provenant-records
 pub(crate) fn checked_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     use serde::de::IgnoredAny;
-    serde_json::from_str::<IgnoredAny>(text)?;
-    let mut normalized = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
+    let source = replace_nonfinite_json_constants(text);
+    serde_json::from_str::<IgnoredAny>(&source)?;
+    let mut normalized = String::with_capacity(source.len());
+    let mut chars = source.char_indices().peekable();
     while let Some((start, ch)) = chars.next() {
         normalized.push(ch);
         if ch == '"' {
@@ -97,7 +98,7 @@ pub(crate) fn checked_json(text: &str) -> Result<serde_json::Value, serde_json::
                 end = index + next.len_utf8();
                 chars.next();
             }
-            let token = &text[start..end];
+            let token = &source[start..end];
             if !token.contains(['.', 'e', 'E'])
                 && token.parse::<i64>().is_err()
                 && token.parse::<u64>().is_err()
@@ -111,4 +112,90 @@ pub(crate) fn checked_json(text: &str) -> Result<serde_json::Value, serde_json::
         }
     }
     serde_json::from_str(&normalized)
+}
+
+fn replace_nonfinite_json_constants(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            let ch = text[index..].chars().next().expect("valid UTF-8 boundary");
+            output.push(ch);
+            index += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            output.push('"');
+            index += 1;
+            continue;
+        }
+        let token = [b"-Infinity".as_slice(), b"Infinity", b"NaN"]
+            .into_iter()
+            .find(|token| {
+                bytes[index..].starts_with(token)
+                    && bytes.get(index + token.len()).is_none_or(|next| {
+                        matches!(next, b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}')
+                    })
+            });
+        if let Some(token) = token {
+            output.push_str("null");
+            index += token.len();
+        } else {
+            let ch = text[index..].chars().next().expect("valid UTF-8 boundary");
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    output
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_repr(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => format!(
+            "'{}'",
+            value
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
+        serde_json::Value::Null => "None".into(),
+        serde_json::Value::Bool(true) => "True".into(),
+        serde_json::Value::Bool(false) => "False".into(),
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        serde_json::Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}: {}",
+                    python_repr(&serde_json::Value::String(key.clone())),
+                    python_repr(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_string(),
+    }
 }
