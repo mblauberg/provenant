@@ -179,7 +179,7 @@ extension QuotaReport.Account {
             ?? windows.max { $0.usedPercent! < $1.usedPercent! }
     }
 
-    /// As in provider_quota.py `display`: an exhausted window; else a shorter window at the alert use or more,
+    /// As in quota_display.py `display`: an exhausted window; else a shorter window at the alert use or more,
     /// even when the longest is higher, since the short one runs out first; else the longest.
     static func shown(_ windows: [Window], alert: Double) -> Window? {
         if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
