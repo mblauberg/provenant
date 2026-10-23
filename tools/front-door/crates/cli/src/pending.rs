@@ -17,3 +17,36 @@ pub(crate) fn decimal_digit(c: char) -> Option<u8> {
         .iter()
         .find_map(|&zero| code.checked_sub(zero).filter(|&d| d < 10).map(|d| d as u8))
 }
+
+// port: belongs in provenant-core
+pub(crate) fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut result = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c == quote => {
+                result.push('\\');
+                result.push(c);
+            }
+            c if c.is_control() => {
+                let code = u32::from(c);
+                if code < 256 {
+                    result.push_str(&format!("\\x{code:02x}"));
+                } else {
+                    result.push_str(&format!("\\u{code:04x}"));
+                }
+            }
+            c => result.push(c),
+        }
+    }
+    result.push(quote);
+    result
+}
