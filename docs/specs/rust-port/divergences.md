@@ -1399,3 +1399,68 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+## RP-core-3-01 — shared helper ownership and non-strict symlink loops
+
+- Rulebook v4; class `bug`, fixed in `port/core-3`. Author route:
+  `codex/gpt-6.1-sol@high`. Source/oracle and judge base:
+  `7021182d535f6c730c29713e77d5bca76893fd06`; local oracles CPython 3.14.8
+  (Unicode 16.0.0) and Node 24.21.0. All fixtures are isolated; no cut-over.
+- Core now owns the distinct Python Unicode, numeric, string, equality, line,
+  path and hexadecimal helpers, plus ECMAScript helpers under `core::js`.
+  Consumer copies are deliberately unchanged for their owning lanes to adopt.
+  The core README lists paths and semantics. Unicode data has one generated
+  table and one pinned generator under core.
+- Private copies disagree on Python digit/decimal classification, Unicode word
+  characters, radix numbers above u64, and valid symlink-chain lengths.
+  Differential fixtures compare against Python/Node rather than these copies.
+- `Path.resolve(strict=False)` on CPython >=3.13 retains an unresolved symlink
+  loop; core previously returned an error. A right-reason failing regression
+  and exact strict/non-strict Python differential now cover self-loops,
+  two-link loops, missing tails, parent components and existing targets.
+- Evidence: full-scalar Unicode property and decimal-value comparisons;
+  exact IEEE float-bit number comparisons; UTF-16 slices at the UTF-8 SQLite
+  boundary; TimeClip/calendar boundaries; Python numeric/shlex and path tests.
+  The oracle runner prints `skip:` for absence/version/exit-77 and fails required
+  mode. This is inert-library evidence; J1/J2/J3 remain cut-over gates.
+
+### RP-1001 core-3 follow-up — permissive hostname slug inputs
+
+- Unit: `scripts/host_identity.py#unit-01`; class `bug`, partial repair.
+- `host_identity::slug_value` now implements Python truthiness before `str()`
+  for serde JSON-shaped inputs. The thirteen-case Python differential includes
+  booleans, empty containers, zero, floats and Unicode lowercase expansion.
+- Remaining blocker on main: records has no extended Python JSON value/byte
+  decoder retaining non-finite values, lone surrogates and object insertion
+  order. `configured`/`peer_ids` cannot fully port through serde Value alone;
+  R2 prohibits a core -> records dependency. Raw surrogate-pass decoding also
+  needs that string representation. Excluded from `Units:`.
+
+### RP-1002 core-3 follow-up — records decoder composition
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; class `library`, open/partial.
+- `jsonc::parse_jsonc_with` applies the existing comment/comma policy then
+  retains a supplied decoder's value and typed error. Consumers can supply
+  `provenant_records::checked_json::from_str` without reversing the R2 edge.
+- Remaining blocker on main: the records decoder lacks extended Python JSON
+  values, insertion order and Python JSONDecodeError diagnostics. The existing
+  finite serde convenience reader also still needs checked integer ingress;
+  an ignored right-reason regression pins overflow refusal and integer `-0`.
+  No second checked JSON codec has been introduced. Excluded from `Units:`.
+
+### RP-1003 core-3 follow-up — supervisor publication seam and platform tests
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; class `bug`, partial
+  repair. `PointerWriter` is the composition seam for supervisor's now-landed
+  safe filesystem API. Production core no longer compiles its atomic-write
+  copy; the std backend is test-only. R2 still forbids core -> supervisor.
+- macOS APFS invalid UTF-8 filename creation is asserted to fail with EPERM,
+  with the same Python errno asserted. Linux must create the filename and
+  compare pointer publication bytes. No filesystem-error skip remains.
+  The 260-fixture native-path byte differential always runs independently.
+- Replaced the old combined ignored JSON/path fixture with the isolated ignored
+  extended-JSON fixture and the active platform-specific native-path tests.
+- Remaining blocker on main: records has no surrogateescaped path decoder or
+  extended JSON representation. Pointer loading for those values remains
+  partial. `pending::path_json` and `PathEncodingError` remain records-owned;
+  atomic writes are not a production pending item. Excluded from `Units:`.
