@@ -185,6 +185,18 @@ pub fn dispatch() -> io::Result<bool> {
             stream.write_all(b"R")?;
             wait_for_eof(&mut stream)?;
         }
+        "terminal-stdin" => {
+            io::stdout().write_all(b"terminal\n")?;
+            let mut input = Vec::new();
+            io::stdin().take(2 * 1024 * 1024).read_to_end(&mut input)?;
+            io::stdout().write_all(b"EOF\n")?;
+        }
+        "crash-guardian-provider" => {
+            let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            stream.write_all(b"R")?;
+            io::stdout().write_all(b"crash-guardian\n")?;
+            wait_for_eof(&mut stream)?;
+        }
         "exit" => {}
         "marker" => std::fs::write(fixture_path(&args, 3)?, b"spawned")?,
         "wait-policy-ignore"
@@ -229,4 +241,59 @@ fn wait_for_eof(stream: &mut std::os::unix::net::UnixStream) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Recorded boot key with live native process facts, injected explicitly.
+pub struct RecordedBootObserver;
+impl crate::census::ProcessObserver for RecordedBootObserver {
+    fn boot_identity(&self) -> Result<String, crate::census::CensusError> {
+        Ok("fixture-recorded-boot-v1".into())
+    }
+    fn observe(&self, pid: i64) -> crate::census::ProcessObservation {
+        match crate::sys::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1") {
+            Ok(observer) => observer.observe(pid),
+            Err(_) => crate::census::ProcessObservation::Unknown(
+                crate::census::ObservationIssue::Malformed,
+            ),
+        }
+    }
+    fn census(&self, limit: usize) -> Result<crate::census::Census, crate::census::CensusError> {
+        crate::sys::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
+            .census(limit)
+    }
+}
+
+/// Fixture-only injection at the boot observation seam.
+pub fn acquire_writer(
+    directory: crate::fs::Directory,
+    scope: crate::custody::Scope,
+    budget: provenant_core::WaitBudget,
+    cancel: &provenant_core::CancelToken,
+    clock: &dyn provenant_core::Clock,
+) -> crate::custody::Result<crate::custody::WriterLease> {
+    let binding = crate::custody::WriterBinding::from_verified(
+        &directory,
+        &directory,
+        "refs/heads/fixture",
+        provenant_core::GitOid::Sha1([0; 20]),
+    )?;
+    crate::custody::acquire_writer_with_observer(
+        directory,
+        scope,
+        binding,
+        budget,
+        cancel,
+        clock,
+        &RecordedBootObserver,
+    )
+}
+
+pub fn recovery_observation(recovery: &crate::custody::Recovery) -> crate::custody::RecoveryState {
+    recovery.observe_with(&RecordedBootObserver)
+}
+pub fn advance_attempt(
+    writer: &mut crate::custody::WriterLease,
+    next: crate::custody::Scope,
+) -> crate::custody::Result<()> {
+    writer.advance_with(next, &RecordedBootObserver)
 }

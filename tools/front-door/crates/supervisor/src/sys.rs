@@ -165,15 +165,13 @@ mod child;
 pub(crate) mod pid;
 pub(crate) mod raw_exec;
 
-pub mod lane_files;
-
 pub(crate) mod fs;
 
 /// Named platform errno values; consumers must not import libc.
 pub mod errno {
     pub use libc::{
-        EACCES, EEXIST, EINTR, EINVAL, EISDIR, ELOOP, ENOENT, ENOEXEC, ENOSYS, ENOTDIR, ENOTSUP,
-        EOPNOTSUPP, EPERM, EXDEV,
+        EACCES, EEXIST, EINTR, EINVAL, EISDIR, ELOOP, ENOENT, ENOEXEC, ENOSPC, ENOSYS, ENOTDIR,
+        ENOTSUP, EOPNOTSUPP, EPERM, EXDEV,
     };
 }
 
@@ -379,4 +377,12 @@ pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
     clippy::multiple_unsafe_ops_per_block
 )]
 #[doc(hidden)]
-pub mod legacy_lane;
+pub(crate) mod census;
+pub(crate) mod handoff;
+pub(crate) mod provider;
+
+/// One bounded scheduler pause. Callers recheck their cancellation/deadline
+/// between pauses; no process or descriptor is polled or signalled here.
+pub(crate) fn wait_pause(duration: std::time::Duration) {
+    std::thread::sleep(duration.min(std::time::Duration::from_millis(50)));
+}

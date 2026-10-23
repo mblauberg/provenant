@@ -52,7 +52,6 @@ ignored = [
   "provenant-fabric-store",
   "provenant-providers",
   "provenant-quota",
-  "provenant-records",
   "provenant-routing",
   "provenant-run",
   "provenant-telemetry",
@@ -87,10 +86,10 @@ license.workspace = true
 fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
+serde_json = { workspace = true }
 provenant-supervisor = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
 

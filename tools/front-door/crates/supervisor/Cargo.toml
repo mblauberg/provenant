@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 provenant-core = { workspace = true }
+provenant-records = { workspace = true }
 jiff = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
@@ -45,3 +46,9 @@ float_cmp = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 disallowed_methods = "deny"
+
+[[test]]
+name = "custody"
+path = "tests/custody.rs"
+harness = false
+required-features = ["fixture"]

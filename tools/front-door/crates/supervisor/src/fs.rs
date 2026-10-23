@@ -93,6 +93,15 @@ pub enum Publication {
 pub struct LockGuard {
     _file: File,
 }
+impl LockGuard {
+    // Only the private guardian handoff can duplicate custody descriptions.
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self._file
+    }
+    pub(crate) fn from_handoff(file: File) -> Self {
+        Self { _file: file }
+    }
+}
 
 impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
@@ -267,6 +276,12 @@ pub struct Directory {
     path: PathBuf,
 }
 impl Directory {
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self.file
+    }
+    pub(crate) fn from_handoff(file: File) -> Result<Self> {
+        Self::from_file(file, PathBuf::new())
+    }
     /// The initial path is trusted; symlinks in ancestors (e.g. macOS /var) are
     /// permitted. The final component must be a directory, never a symlink.
     pub fn open_anchor(path: &Path) -> Result<Self> {
@@ -703,6 +718,9 @@ pub struct FileHandle {
     path: PathBuf,
 }
 impl FileHandle {
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self.file
+    }
     fn regular(file: File, path: &Path) -> Result<Self> {
         if !file
             .metadata()

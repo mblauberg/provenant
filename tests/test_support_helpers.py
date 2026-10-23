@@ -2,9 +2,6 @@
 
 import os
 import sys
-from pathlib import Path
-
-import pytest
 
 from tests.support.fake_cli import fake_bin, write_executable
 from tests.support.proc import run_cli
@@ -56,43 +53,7 @@ def test_run_cf_dispatch_parses_json_and_hides_fabric_variables(tmp_path, monkey
     assert record == {"home": None, "label": None}
 
 
-@pytest.mark.parametrize("impl", ["python", "rust", "", "unsupported"])
-def test_lane_collection_validates_implementations(impl):
-    env = {key: value for key, value in os.environ.items() if key != "PROVENANT_TEST_SHARD"}
-    root = Path(__file__).resolve().parents[1]
-    result = run_cli(
-        [sys.executable, "-m", "pytest", "tests/lane_conformance", "--collect-only", "-q"],
-        cwd=root, env={**env, "PROVENANT_LANE_IMPL": impl}, timeout=10,
-    )
-    if impl in {"python", "rust"}:
-        assert result.returncode == 0, result.stderr
-        assert f"test_nested_owner_spared[{impl}]" in result.stdout
-    else:
-        assert result.returncode == 4, result.stderr
-        assert "unsupported PROVENANT_LANE_IMPL" in result.stderr
-
-
 def test_process_group_pids_includes_current_process():
     from tests.support.proc import process_group_pids
 
     assert os.getpid() in process_group_pids(os.getpgrp())
-
-
-def test_lane_provider_without_fifo_writer_exits_at_eof(tmp_path):
-    control = tmp_path / "control"
-    control.mkdir()
-    os.mkfifo(control / "commands")
-    os.mkfifo(control / "provider-exit")
-    exit_fd = os.open(control / "provider-exit", os.O_RDONLY | os.O_NONBLOCK)
-    script = Path(__file__).with_name("lane_conformance") / "fake_provider.py"
-    try:
-        result = run_cli(
-            [sys.executable, script], cwd=tmp_path, input="",
-            env={**os.environ, "LANE_FIXTURE_DIR": str(control),
-                 "LANE_FIXTURE_ADAPTER": "opencode"}, timeout=5,
-        )
-    finally:
-        os.close(exit_fd)
-    assert result.returncode == 1
-    assert "fixture FIFO closed without an exit command" in result.stderr
-    assert (control / "provider.json").is_file()

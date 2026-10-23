@@ -1,10 +1,15 @@
 //! Bounded direct-child utility execution. Provider custody belongs to S2.
+use crate::capture::{FrameDelivery, StreamCapture};
+#[cfg(test)]
+pub(crate) use crate::capture::{Frames, Pump};
 use crate::identity::Signal;
 use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper};
 use provenant_core::CancelToken;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
@@ -92,13 +97,13 @@ impl Default for StreamPolicy<'_> {
     }
 }
 impl StreamPolicy<'_> {
-    fn limit(&self) -> usize {
+    pub(crate) fn limit(&self) -> usize {
         match self {
             Self::Capture { limit } | Self::Tee { limit, .. } => *limit,
             Self::Discard => 0,
         }
     }
-    fn piped(&self) -> bool {
+    pub(crate) fn piped(&self) -> bool {
         !matches!(self, Self::Discard)
     }
 }
@@ -159,6 +164,8 @@ pub enum ExecError {
     DurationOutOfRange,
     #[error("capture or queue limit exceeds its bound")]
     InvalidLimit,
+    #[error("capture stream has already been finished")]
+    CaptureFinished,
     #[error("utility cleanup admission is full")]
     Busy,
     #[error("utility cancelled before spawn")]
@@ -200,107 +207,6 @@ impl Executor for SystemExecutor {
         run(&self.reaper, options)
     }
 }
-#[derive(Default)]
-struct Frames {
-    bytes: Vec<u8>,
-    oversized: bool,
-}
-impl Frames {
-    fn decode(&mut self, chunk: &[u8], sink: Option<&dyn FrameSink>, out: &mut CapturedStream) {
-        let Some(sink) = sink else {
-            return;
-        };
-        for &byte in chunk {
-            if byte == b'\n' {
-                if !self.oversized && sink.try_frame(&self.bytes).is_err() {
-                    out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
-                }
-                self.bytes.clear();
-                self.oversized = false;
-            } else if !self.oversized {
-                if self.bytes.len() == FRAME_LIMIT {
-                    self.bytes.clear();
-                    self.oversized = true;
-                    out.oversized_frames = out.oversized_frames.saturating_add(1);
-                } else {
-                    self.bytes.push(byte);
-                }
-            }
-        }
-    }
-    fn finish(&mut self, sink: Option<&dyn FrameSink>, out: &mut CapturedStream) {
-        if !self.bytes.is_empty()
-            && !self.oversized
-            && sink.is_some_and(|sink| sink.try_frame(&self.bytes).is_err())
-        {
-            out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
-        }
-        self.bytes.clear();
-    }
-}
-struct Pump<'a> {
-    policy: StreamPolicy<'a>,
-    decoder: Option<&'a dyn FrameSink>,
-    filter: Option<&'a mut dyn CaptureFilter>,
-    frames: Frames,
-}
-impl Pump<'_> {
-    fn read<R: Read>(&mut self, pipe: &mut Option<R>, capture: &mut CapturedStream) {
-        let Some(reader) = pipe else {
-            return;
-        };
-        let mut buffer = [0; 16 * 1024];
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                self.frames.finish(self.decoder, capture);
-                *pipe = None;
-            }
-            Ok(count) => {
-                let bytes = &buffer[..count];
-                capture.total_bytes = capture.total_bytes.saturating_add(count as u64);
-                self.frames.decode(bytes, self.decoder, capture);
-                let filtered;
-                let bytes = if capture.filter_failed {
-                    &[][..]
-                } else if let Some(filter) = self.filter.as_mut() {
-                    match filter.filter(bytes) {
-                        Ok(value) if value.len() <= FRAME_LIMIT => {
-                            filtered = value;
-                            &filtered
-                        }
-                        _ => {
-                            capture.filter_failed = true;
-                            &[][..]
-                        }
-                    }
-                } else {
-                    bytes
-                };
-                let room = self.policy.limit().saturating_sub(capture.bytes.len());
-                capture
-                    .bytes
-                    .extend_from_slice(&bytes[..bytes.len().min(room)]);
-                capture.truncated |= bytes.len() > room;
-                if let StreamPolicy::Tee { sink, .. } = self.policy
-                    && let Err(loss) = sink.try_send(bytes)
-                {
-                    capture.sink_lost_bytes =
-                        capture.sink_lost_bytes.saturating_add(bytes.len() as u64);
-                    capture.sink_failed |= loss == QueueLoss::Closed;
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
-            Err(_) => {
-                capture.read_failed = true;
-                *pipe = None;
-            }
-        }
-    }
-}
 fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
     if options.argv.is_empty() {
         return Err(ExecError::EmptyArgv);
@@ -334,18 +240,16 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut stdin = child.stdin.take();
-    let mut out_pump = Pump {
-        policy: options.stdout,
-        decoder: options.stdout_decoder,
-        filter: options.stdout_filter,
-        frames: Frames::default(),
-    };
-    let mut err_pump = Pump {
-        policy: options.stderr,
-        decoder: options.stderr_decoder,
-        filter: options.stderr_filter,
-        frames: Frames::default(),
-    };
+    let mut out_pump = StreamCapture::new(
+        options.stdout,
+        options.stdout_decoder.map(FrameDelivery::Raw),
+        options.stdout_filter,
+    )?;
+    let mut err_pump = StreamCapture::new(
+        options.stderr,
+        options.stderr_decoder.map(FrameDelivery::Raw),
+        options.stderr_filter,
+    )?;
     let input = options.stdin.unwrap_or_default();
     let mut written = 0;
     let mut output = ExecOutcome {
@@ -370,8 +274,8 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
                 drain_deadline = Instant::now().checked_add(options.reap_timeout);
             }
         }
-        out_pump.read(&mut stdout, &mut output.stdout);
-        err_pump.read(&mut stderr, &mut output.stderr);
+        out_pump.read(&mut stdout);
+        err_pump.read(&mut stderr);
         if written == input.len() || status.is_some() {
             stdin = None;
         }
@@ -395,13 +299,15 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             if finished || now >= final_deadline {
                 output.termination = termination;
                 output.drain_truncated = !finished;
+                output.stdout = out_pump.into_outcome();
+                output.stderr = err_pump.into_outcome();
                 output.elapsed_micros =
                     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
                 return Ok(output);
             }
         }
-        let overflow =
-            options.stop_on_output_limit && (output.stdout.truncated || output.stderr.truncated);
+        let overflow = options.stop_on_output_limit
+            && (out_pump.outcome().truncated || err_pump.outcome().truncated);
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
         if status.is_none() && term_at.is_none() && (now >= deadline || overflow || cancelled) {
             stdin = None;

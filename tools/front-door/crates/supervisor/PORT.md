@@ -1,61 +1,67 @@
-# S1: Safe OS owner
+# S1–S2: native OS and provider custody
 
-Rulebook: PORTING.md version 7. Design: `docs/specs/rust-port/design/supervisor.md`.
-Author route: `codex/gpt-6.1-sol@high` via Fabric.
+Rulebook: `PORTING.md` version 7. Design: `docs/specs/rust-port/design/supervisor.md`.
+Author route: `codex/gpt-6.1-sol@high` via Fabric. S2 is stacked on #1370.
 
-The prior runtime-parity API and its tests are deleted. Python and TypeScript
-leaves remain with their old subjects until the design's last-importer gates
-(R4+R5 and the named CLI/Fabric owners). S1 adds no bridge or public verb.
+S2 removes the old Rust lane, its compatibility JSON parser, the public raw
+`lane run` launch specification and the Python lane conformance subjects.
+Python leaves with live Run/CLI/Fabric importers remain until R4+R5 and the
+design's last-importer gates. There is no adapter for the removed command.
 
-## Syscall wrapper inventory
+## Native boundaries
 
-| Owner under `sys` | Native operations and boundary |
+| Owner under `sys` | Operations and proof |
 | --- | --- |
-| `child` | Preallocated argv/environment and pointer arrays, strict exec, signal-mask/disposition reset, descriptor CLOEXEC sweep. Post-fork callbacks use async-signal-safe calls. |
-| `raw_exec` | Owned direct-child spawn, nonblocking pipe flags, direct-child signals and bounded poll. No numeric-PID signal API is exported. |
-| `reaper` | Reserved fixed-capacity slots, fair `try_wait` polling, transfer on error/drop. No destructor signal or child wait. |
-| `pid` | Linux CWD link and Darwin `proc_pidinfo`, typed absence/permission/unsupported and malformed-record failures. CWD grants no custody. |
-| `fs` | Held-path open/stat/mkdir/unlink/symlink, atomic rename modes, entropy, errno, directory iteration and nonblocking flock. File ownership transfers once. |
-| `lane_files` | Existing lane's held-path creation and no-replace link publication, pending S2's owner replacement. |
-| `legacy_lane` | Existing binary lane's signal, spawn, reactor and process-observation mechanisms, relocated for R7. S2 owns the lifecycle redesign. |
-| Module root | Real-ID executable check, reentrant account lookup and process replacement for surviving binary owners. |
+| `child`, `raw_exec` | Preallocated argv/environment, strict exec, signal reset, CLOEXEC sweep, owned utility child and bounded pipe polling. |
+| `reaper` | Fixed admission reserved before spawn, non-signalling transfer, bounded fair `try_wait` turns. |
+| `pid`, `census` | Linux procfs and Darwin libproc identity/CPU/CWD, native boot identity, complete/partial/unknown census. Observation never grants arbitrary PID signalling. |
+| `provider` | Guardian-local signal reactor and Linux subreaping, WNOWAIT leader reservation, controlled group delivery, exact adopted-child checks and explicit cleanup before reap. |
+| `handoff` | Bounded private same-binary channel; only the guardian inherits writer/attempt locks. Provider environment values and prompt remain ephemeral. |
+| `fs` | Held-directory open/stat/mutation, atomic publication, no-follow locks, descriptor ownership, directory sync and bounded flock. |
 
-S2 retains observation-before-spawn, WNOWAIT/reserved identity, provider
-StopReason and guardian handoff responsibilities. Census and liveness are not
-reintroduced as S1 public diagnostic APIs.
+`machine` is pure; `capture` decodes before bounded retention and never treats
+capture failure or silence as a reason to stop. `custody` owns generation-scoped
+records, reservation fencing, recovery and release. `internal supervise` is
+private descriptor handoff, not a raw launch API. Run composes provider decoding
+and its children journal through `GuardianHooks` in its same-binary entry point.
 
-## Design clarifications
+## Clarifications for the next owners
 
-Core's `WaitBudget` stores a monotonic deadline, so lock acquisition also needs
-the corresponding `Clock`. It samples remaining budget once and derives a local
-`Instant` deadline. The clock owner is passed explicitly; there is no global
-clock coordinate or unbounded `None` path.
+The state reservation directory and verified worktree are different anchors.
+`WriterBinding` can only be constructed from confinement-supplied held worktree
+and Git handles, a branch and pinned base. Confinement owns their association to
+the selected state slot. A private storage DTO reads those facts during recovery.
+A durable ownership journal precedes reservation publication; missing reservation
+with unresolved journal evidence refuses a new writer. Retries update the
+reservation under the same writer lease; the original ownership journal remains
+until settlement, avoiding a two-record generation transaction.
 
-Direct-child custody requires default `SIGCHLD` without `SA_NOCLDWAIT` and no
-independent host reaper. Every spawn queries and refuses an incompatible host
-policy before creating a child. The process edge must keep that policy fixed
-while children are owned; blocked `SIGCHLD` alone remains supported. This
-preserves the unreaped PID reservation used for direct-child signalling.
+Run's trusted permissions service implements `ReconcileAuthority`. This is an
+in-process composition seam, not authentication against arbitrary Rust code.
+Supervisor checks the scoped decision and durably records actor, evidence and
+disposition before accepting a release. Uncertainty alone does not release a
+writer, and reconcile never grants numeric-PID signalling.
 
-Utility policy is supplied as a supervisor API for confinement's S3 facade.
-No workflow-to-supervisor dependency is introduced.
+`SettlementCommit` requires the original attempt inode, its custody lock and
+Run-private `release.json`, `terminal-commit.json` and `quarantine/manifest.json`
+attestations. All are version 1 and scoped; the release contains both raw-file
+digests. Run must write these only after its canonical terminal transaction and
+quarantine commit. This explicit release-attestation contract fills a design gap;
+S2 neither reads SQLite nor manufactures canonical Run truth. Run must protect
+these files from providers. Scratch admission likewise requires a private generated
+directory outside the provider sandbox and Run/writer/attempt exclusion against
+all legitimate mutators. Mode 0700 alone does not exclude same-UID peers; unknown
+or externally writable trees must not be admitted. Only classified unchanged
+leaves are removed; captures, history and unknown data remain.
 
-Stable lock leaves use the reserved `.lock` suffix. Generic directory mutation
-APIs refuse that suffix as source or destination, even through another anchor.
-This protects stable inodes without a process-global registry. The trusted
-owner still protects directory permissions from unmanaged filesystem actors.
+The guardian requires a native boot identity and fails closed if the host denies
+it. Dev fixtures inject a recorded boot key explicitly while retaining real
+native process observations; production has no environment override. Darwin's
+public proc APIs do not prove a particular open file description holds `flock`;
+nested custody therefore remains unknown and blocks unsafe group delivery there.
+A future native proof needs an explicit reviewed mechanism, not a guessed flag.
 
-`Clock::wall_now` returns a typed error: an infallible wall clock cannot report
-an OS value outside Jiff/core's wire range without panicking or inventing time.
-The legacy lane retains its existing start-display matching, implemented with
-safe Jiff, until S2 removes that old-subject field. It grants no S1 authority.
-
-PR #1350's private `sys::legacy_lane` keeps the previous provider subject for
-its remaining Python importer. Its existing group destructor, observer wait,
-signal-handler state and lifecycle policy are S2 work; moving them does not
-claim the guardian redesign has landed. The new utility owner has none of
-those destructor waits or signal-by-observed-PID interfaces.
-
-Merging #1350 also required Rust 1.99 formatting and small mechanical clippy
-changes in the stacked core/records dependency (chunk iteration and let chains).
-These do not change its types or wire contracts.
+The binary pointer reader now uses `serde_json` directly, allowing the last shared
+Python/V8 compatibility parser to be deleted. No legacy wire emulation remains
+in supervisor. S1's `WaitBudget`/`Clock`, streams, executor, filesystem and reaper
+APIs are reused. No dependency on Run, providers or confinement is introduced.
