@@ -5,7 +5,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -209,19 +208,26 @@ pub fn validate_mode(mode: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn cargo_path(path: &std::ffi::OsStr, home: &Path) -> Option<PathBuf> {
+/// The syscall owner must implement this with access(X_OK), including ACLs and
+/// the current process credentials. Mode bits alone are not an X_OK check.
+// port: belongs in provenant-supervisor
+pub trait ExecutableAccess {
+    fn executable(&self, path: &Path) -> bool;
+}
+
+pub fn cargo_path(
+    path: &std::ffi::OsStr,
+    home: &Path,
+    access: &impl ExecutableAccess,
+) -> Option<PathBuf> {
     for directory in std::env::split_paths(path) {
         let candidate = directory.join("cargo");
-        if candidate.is_file()
-            && fs::metadata(&candidate)
-                .ok()
-                .is_some_and(|m| m.permissions().mode() & 0o111 != 0)
-        {
+        if candidate.is_file() && access.executable(&candidate) {
             return Some(candidate);
         }
     }
     let fallback = home.join(".cargo/bin/cargo");
-    fallback.is_file().then_some(fallback)
+    (fallback.is_file() && access.executable(&fallback)).then_some(fallback)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,5 +497,337 @@ mod tests {
             source_digest(dir.path()).unwrap(),
             String::from_utf8(output).unwrap().trim()
         );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selected {
+    pub kind: &'static str,
+    pub source: PathBuf,
+    pub note: &'static str,
+}
+#[derive(Debug, Clone)]
+pub struct SmokeOutput {
+    pub returncode: i32,
+    pub stdout: Vec<u8>,
+}
+
+/// Platform execution is injected at the same boundary as subprocess.run in
+/// the source. Implementations null stdin, honor the smoke timeout, route cargo
+/// progress to stderr and apply a bounded build deadline. No utility process is
+/// spawned by this inert policy crate.
+pub trait FrontDoorHost {
+    fn environment(&self) -> BTreeMap<String, std::ffi::OsString>;
+    fn cargo(&self) -> Option<PathBuf>;
+    fn darwin(&self) -> bool;
+    fn build(&mut self, plan: &BuildPlan) -> Result<i32>;
+    fn smoke(
+        &mut self,
+        binary: &Path,
+        environment: &BTreeMap<String, std::ffi::OsString>,
+        timeout_seconds: u64,
+    ) -> Result<SmokeOutput>;
+}
+
+pub fn smoke(binary: &Path, host: &mut impl FrontDoorHost) -> Result<()> {
+    let environment = host.environment();
+    let output = host.smoke(
+        binary,
+        &smoke_environment(
+            environment.get("PATH").map(|s| s.as_os_str()),
+            environment.get("HOME").map(|s| s.as_os_str()),
+        ),
+        SMOKE_TIMEOUT_SECONDS,
+    )?;
+    validate_smoke(binary, output.returncode, &output.stdout)
+}
+pub fn build(
+    krate: &Path,
+    target: &Path,
+    digest: &str,
+    host: &mut impl FrontDoorHost,
+) -> Result<PathBuf> {
+    let cargo = host.cargo().ok_or(crate::Error::CargoUnavailable)?;
+    let plan = build_plan(
+        krate,
+        target,
+        digest,
+        &cargo,
+        host.environment(),
+        host.darwin(),
+    )?;
+    let returncode = host.build(&plan)?;
+    if returncode != 0 || !plan.binary.is_file() {
+        return Err(invalid(format!("cargo build failed (exit {returncode})")));
+    }
+    Ok(plan.binary)
+}
+pub fn select(
+    product_root: &Path,
+    mode: &str,
+    build_directory: &Path,
+    prebuilt: Option<&Path>,
+    host: &mut impl FrontDoorHost,
+) -> Result<Selected> {
+    validate_mode(mode)?;
+    let krate = product_root.join(CRATE_RELATIVE);
+    if !krate.join("Cargo.toml").is_file() {
+        return Err(invalid(format!(
+            "no {CRATE_RELATIVE} crate in {}",
+            product_root.display()
+        )));
+    }
+    let digest = source_digest(&krate)?;
+    if let Some(binary) = prebuilt {
+        validate_prebuilt(binary, &digest)?;
+        smoke(binary, host)?;
+        return Ok(Selected {
+            kind: "rust",
+            source: binary.into(),
+            note: "prebuilt",
+        });
+    }
+    let binary = build(&krate, build_directory, &digest, host)?;
+    smoke(&binary, host)?;
+    Ok(Selected {
+        kind: "rust",
+        source: binary,
+        note: "built",
+    })
+}
+
+#[derive(Debug, clap::Parser)]
+#[command(name = "front_door_build.py")]
+pub struct Arguments {
+    #[command(subcommand)]
+    pub command: Command,
+}
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    Digest {
+        krate: PathBuf,
+    },
+    Embedded {
+        binary: PathBuf,
+    },
+    Smoke {
+        binary: PathBuf,
+    },
+    Build {
+        krate: PathBuf,
+        target_dir: PathBuf,
+    },
+    Select {
+        #[arg(long)]
+        product_root: PathBuf,
+        #[arg(long)]
+        mode: String,
+        #[arg(long)]
+        build_dir: PathBuf,
+        #[arg(long)]
+        prebuilt: Option<PathBuf>,
+    },
+}
+pub fn run(command: &Command, host: &mut impl FrontDoorHost) -> crate::codex::CommandResult {
+    let result = (|| -> Result<Option<String>> {
+        Ok(match command {
+            Command::Digest { krate } => Some(source_digest(krate)?),
+            Command::Embedded { binary } => {
+                let bytes = fs::read(binary).map_err(|e| io(binary, e))?;
+                embedded_digest(&bytes).map(str::to_owned)
+            }
+            Command::Smoke { binary } => {
+                smoke(binary, host)?;
+                Some(String::new())
+            }
+            Command::Build { krate, target_dir } => {
+                let digest = source_digest(krate)?;
+                Some(pending::path_text(&build(
+                    krate, target_dir, &digest, host,
+                )?)?)
+            }
+            Command::Select {
+                product_root,
+                mode,
+                build_dir,
+                prebuilt,
+            } => {
+                let selected = select(product_root, mode, build_dir, prebuilt.as_deref(), host)?;
+                Some(format!("{}\t{}", selected.kind, selected.source.display()))
+            }
+        })
+    })();
+    match result {
+        Ok(Some(output)) => crate::codex::CommandResult {
+            exit_code: 0,
+            stdout: if output.is_empty() {
+                output
+            } else {
+                format!("{output}\n")
+            },
+            stderr: String::new(),
+        },
+        Ok(None) => crate::codex::CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Err(error) => crate::codex::CommandResult {
+            exit_code: 3,
+            stdout: String::new(),
+            stderr: format!(
+                "front door: {error}\n{}",
+                if matches!(error, crate::Error::CargoUnavailable) {
+                    format!("{RUSTUP_FIX}\n")
+                } else {
+                    String::new()
+                }
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+    struct Access {
+        allowed: Vec<PathBuf>,
+    }
+    impl ExecutableAccess for Access {
+        fn executable(&self, path: &Path) -> bool {
+            self.allowed.iter().any(|p| p == path)
+        }
+    }
+    #[test]
+    fn cargo_search_applies_execute_access_to_path_and_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("path");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("cargo"), "").unwrap();
+        let fallback = dir.path().join(".cargo/bin/cargo");
+        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fs::write(&fallback, "").unwrap();
+        assert_eq!(
+            cargo_path(path.as_os_str(), dir.path(), &Access { allowed: vec![] }),
+            None
+        );
+        assert_eq!(
+            cargo_path(
+                path.as_os_str(),
+                dir.path(),
+                &Access {
+                    allowed: vec![fallback.clone()]
+                }
+            ),
+            Some(fallback)
+        );
+        assert_eq!(
+            cargo_path(
+                path.as_os_str(),
+                dir.path(),
+                &Access {
+                    allowed: vec![path.join("cargo")]
+                }
+            ),
+            Some(path.join("cargo"))
+        );
+    }
+    struct Host {
+        cargo: Option<PathBuf>,
+        status: i32,
+        help: Vec<u8>,
+        builds: usize,
+        smokes: usize,
+    }
+    impl FrontDoorHost for Host {
+        fn environment(&self) -> BTreeMap<String, std::ffi::OsString> {
+            BTreeMap::from([
+                ("PATH".into(), "/bin".into()),
+                ("HOME".into(), "/home".into()),
+                ("SECRET".into(), "redacted".into()),
+            ])
+        }
+        fn cargo(&self) -> Option<PathBuf> {
+            self.cargo.clone()
+        }
+        fn darwin(&self) -> bool {
+            true
+        }
+        fn build(&mut self, plan: &BuildPlan) -> Result<i32> {
+            self.builds += 1;
+            assert_eq!(plan.environment["MACOSX_DEPLOYMENT_TARGET"], "15.0");
+            fs::create_dir_all(plan.binary.parent().unwrap()).unwrap();
+            fs::write(&plan.binary, b"built").unwrap();
+            Ok(self.status)
+        }
+        fn smoke(
+            &mut self,
+            _: &Path,
+            environment: &BTreeMap<String, std::ffi::OsString>,
+            timeout: u64,
+        ) -> Result<SmokeOutput> {
+            self.smokes += 1;
+            assert_eq!(environment.len(), 2);
+            assert_eq!(timeout, 30);
+            Ok(SmokeOutput {
+                returncode: self.status,
+                stdout: self.help.clone(),
+            })
+        }
+    }
+    #[test]
+    fn selection_build_prebuilt_and_failure_paths_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let krate = dir.path().join(CRATE_RELATIVE);
+        fs::create_dir_all(krate.join("src")).unwrap();
+        fs::write(krate.join("Cargo.toml"), "manifest").unwrap();
+        let target = dir.path().join("target");
+        let mut host = Host {
+            cargo: None,
+            status: 0,
+            help: b"usage: provenant".to_vec(),
+            builds: 0,
+            smokes: 0,
+        };
+        assert!(matches!(
+            select(dir.path(), "rust", &target, None, &mut host),
+            Err(crate::Error::CargoUnavailable)
+        ));
+        host.cargo = Some("/cargo".into());
+        let result = select(dir.path(), "rust", &target, None, &mut host).unwrap();
+        assert_eq!(result.note, "built");
+        assert_eq!((host.builds, host.smokes), (1, 1));
+        let binary = dir.path().join("prebuilt");
+        fs::write(
+            &binary,
+            format!(
+                "provenant-front-door source-sha256={}\n",
+                source_digest(&krate).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            select(dir.path(), "rust", &target, Some(&binary), &mut host)
+                .unwrap()
+                .note,
+            "prebuilt"
+        );
+        assert_eq!((host.builds, host.smokes), (1, 2));
+        host.status = 7;
+        assert!(select(dir.path(), "rust", &target, None, &mut host)
+            .unwrap_err()
+            .to_string()
+            .contains("cargo build failed (exit 7)"));
+        assert_eq!(host.smokes, 2);
+        let command = Command::Select {
+            product_root: dir.path().into(),
+            mode: "rust".into(),
+            build_dir: target,
+            prebuilt: None,
+        };
+        host.cargo = None;
+        let result = run(&command, &mut host);
+        assert_eq!(result.exit_code, 3);
+        assert!(result.stderr.ends_with(&format!("{RUSTUP_FIX}\n")));
     }
 }

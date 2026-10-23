@@ -21,9 +21,11 @@ pub mod workflows;
 pub enum Error {
     #[error(transparent)]
     Path(#[from] provenant_core::paths::PathError),
+    #[error("cargo is not on PATH (looked in ~/.cargo/bin too)")]
+    CargoUnavailable,
     #[error("{message}")]
     Invalid { message: String },
-    #[error("{path}: {source}")]
+    #[error("{}", python_io(path, source))]
     Io {
         path: std::path::PathBuf,
         #[source]
@@ -36,7 +38,7 @@ pub enum Error {
     },
     #[error("record codec integration is pending: {feature}")]
     PendingRecord { feature: &'static str },
-    #[error("{context}: {path}: {source}")]
+    #[error("{context}: {}", python_io(path, source))]
     Read {
         context: &'static str,
         path: std::path::PathBuf,
@@ -95,4 +97,18 @@ mod oracle;
 
 fn resolve(path: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(provenant_core::paths::resolve(path)?)
+}
+
+fn python_io(path: &std::path::Path, source: &std::io::Error) -> String {
+    if let Some(code) = source.raw_os_error() {
+        let native = source.to_string();
+        let suffix = format!(" (os error {code})");
+        let message = native.strip_suffix(&suffix).unwrap_or(&native);
+        format!(
+            "[Errno {code}] {message}: {}",
+            provenant_core::py::python_repr(&path.to_string_lossy())
+        )
+    } else {
+        source.to_string()
+    }
 }
