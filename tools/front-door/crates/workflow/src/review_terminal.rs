@@ -117,7 +117,9 @@ fn verdict(value: &Value) -> Result<(String, &'static str), PolicyError> {
             return invalid();
         }
     }
-    if serde_json::from_value::<WorkerReviewResult>(value.clone()).is_err() {
+    if !object["crossFamily"].is_object()
+        || serde_json::from_value::<WorkerReviewResult>(value.clone()).is_err()
+    {
         return invalid();
     }
     let Some(verdict) = object["verdict"].as_str() else {
@@ -278,6 +280,40 @@ pub fn normalise_dispatch_review(
     })
 }
 
+/// Decode a review case at its JSON boundary, refusing oversized integer
+/// tokens before serde_json can represent them as floating-point numbers.
+pub fn normalise_dispatch_review_json(input: &[u8]) -> Result<NormalisedReview, PolicyError> {
+    let value = crate::pending::parse_python_json(input).map_err(|error| match error {
+        crate::pending::PythonJsonError::NumberOutOfRange => PolicyError::NumberOutOfRange,
+        crate::pending::PythonJsonError::Invalid(error) => {
+            PolicyError::InvalidJson(error.to_string())
+        }
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| PolicyError::InvalidJson("expected an object".into()))?;
+    let dispatch = object
+        .get("dispatch")
+        .and_then(Value::as_object)
+        .ok_or_else(|| PolicyError::InvalidJson("expected dispatch object".into()))?;
+    let transcript = object
+        .get("transcript")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| PolicyError::InvalidJson("expected transcript boolean".into()))?;
+    let output = object
+        .get("output")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| PolicyError::InvalidJson("expected output boolean".into()))?;
+    normalise_dispatch_review(
+        dispatch,
+        object.get("terminal").unwrap_or(&Value::Null),
+        object.get("verdict").unwrap_or(&Value::Null),
+        object.get("chair").unwrap_or(&Value::Null),
+        transcript,
+        output,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,8 +329,23 @@ mod tests {
         ) {
             Ok(result) => serde_json::to_value(result).unwrap(),
             Err(PolicyError::Unhashable { kind, .. }) => crate::test_support::unhashable(kind),
+            Err(error) => panic!("unexpected typed input error: {error}"),
         }
     }
+
+    #[test]
+    fn oversized_exit_integer_is_a_typed_improvement_refusal() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/review_terminal.json")).unwrap();
+        let encoded = fixtures[0]["input"]
+            .to_string()
+            .replace("\"exit\":0", "\"exit\":18446744073709551616");
+        assert!(matches!(
+            normalise_dispatch_review_json(encoded.as_bytes()),
+            Err(PolicyError::NumberOutOfRange)
+        ));
+    }
+
     #[test]
     fn translated_terminal_policy_and_python_agree() {
         let fixtures: Value =
@@ -388,6 +439,22 @@ mod tests {
         }
         let mut c = base.clone();
         c["terminal"]["crossFamily"]["ran"] = json!(1);
+        cases.push(c);
+        let mut c = base.clone();
+        c["terminal"]["crossFamily"] = json!([
+            true,
+            "codex",
+            "ok",
+            "openai",
+            "openai",
+            true,
+            true,
+            "enforced",
+            "reviews/luna.out",
+            "reviews/luna.route.json",
+            ""
+        ]);
+        assert_eq!(run(&c)["reason"], "invalid-terminal-result");
         cases.push(c);
         let mut c = base.clone();
         c["terminal"]["extra"] = json!(1);

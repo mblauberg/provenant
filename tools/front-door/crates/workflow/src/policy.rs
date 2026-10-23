@@ -7,6 +7,10 @@ pub enum PolicyError {
         field: &'static str,
         kind: &'static str,
     },
+    #[error("Python integer is outside the i64/u64 range")]
+    NumberOutOfRange,
+    #[error("invalid review JSON: {0}")]
+    InvalidJson(String),
 }
 
 pub(crate) fn hashable(value: &serde_json::Value, field: &'static str) -> Result<(), PolicyError> {
@@ -18,9 +22,9 @@ pub(crate) fn hashable(value: &serde_json::Value, field: &'static str) -> Result
     Err(PolicyError::Unhashable { field, kind })
 }
 
-pub(crate) fn whitespace(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
-}
 pub(crate) fn strip(value: &str) -> &str {
-    value.trim_matches(whitespace)
+    crate::pending::python_strip(value)
+}
+pub(crate) fn whitespace(c: char) -> bool {
+    crate::pending::python_whitespace(c)
 }

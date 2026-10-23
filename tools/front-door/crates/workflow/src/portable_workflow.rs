@@ -24,6 +24,8 @@ pub enum PortableError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("{path}: Python integer is outside the i64/u64 range")]
+    NumberOutOfRange { path: std::path::PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +145,22 @@ pub fn read_object(path: &Path) -> Result<Map<String, Value>, PortableError> {
     crate::pending::read_python_object(path)
 }
 
+#[cfg(test)]
+mod out_of_range_tests {
+    use super::*;
+
+    #[test]
+    fn out_of_range_python_integer_is_a_typed_improvement_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("context.json");
+        fs::write(&path, br#"{"value":18446744073709551616}"#).unwrap();
+        assert!(matches!(
+            read_object(&path),
+            Err(PortableError::NumberOutOfRange { path: error_path }) if error_path == path
+        ));
+    }
+}
+
 /// Execute the existing fallback's effects; CLI argument parsing stays at the edge.
 pub fn execute(
     skill_root: &Path,
@@ -165,7 +183,12 @@ pub fn execute(
     // Python accepts True and 1.0 as equal to 1.
     if contract.len() != keys.len()
         || !keys.iter().all(|key| contract.contains_key(*key))
-        || !version.is_some_and(|v| v == &Value::Bool(true) || v.as_f64() == Some(1.0))
+        || !version.is_some_and(|v| {
+            v == &Value::Bool(true)
+                || v.as_i64() == Some(1)
+                || v.as_u64() == Some(1)
+                || (v.is_f64() && v.as_f64() == Some(1.0))
+        })
     {
         return Err(invalid("portable workflow contract is invalid"));
     }

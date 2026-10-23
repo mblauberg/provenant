@@ -148,9 +148,9 @@ mod tests {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
-                ) =>
+                ) || error.raw_os_error() == Some(92) =>
             {
-                eprintln!("skipping non-UTF-8 filesystem fixture: {error}");
+                eprintln!("skip: non-UTF-8 filesystem fixture: {error}");
                 return;
             }
             Err(error) => panic!("cannot create non-UTF-8 fixture: {error}"),
@@ -169,10 +169,11 @@ mod tests {
         fs::hard_link(temp.path().join("nested/file"), temp.path().join("hard")).unwrap();
         let mut cases = Vec::new();
         let mut actual = Vec::new();
+        let canonical_root = fs::canonicalize(temp.path()).unwrap();
         for root in [
-            temp.path().to_path_buf(),
-            temp.path().join("absent"),
-            temp.path().join("single"),
+            canonical_root.clone(),
+            canonical_root.join("absent"),
+            canonical_root.join("single"),
         ] {
             for path in [
                 "",

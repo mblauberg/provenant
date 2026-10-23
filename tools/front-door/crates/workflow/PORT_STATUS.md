@@ -1,7 +1,7 @@
 # Workflow port batch
 
 Oracle and source revision: e897b10d58b27a46544969594eed08a5ed64c72c.
-Rules: PORTING.md v2 with the user-directed v3 / PR #1294 override:
+Rules: PORTING.md v4:
 J1/J2/J3 gate cut-over, not these inert libraries. No commands switch owner.
 The source and test oracle are unchanged at this revision. No stable install
 or provider configuration is modified or used by these library checks.
@@ -21,10 +21,11 @@ The private `pending` module holds `OwnedFileError`, which belongs in
 
 Identity validation and SHA-256 digest are ported. Contract/context validation
 and fallback writes are implemented for finite, Unicode-scalar JSON with
-representable integers. The source reader also accepts non-finite numbers,
-lone surrogate escapes and arbitrary integers. Those cases remain blocked on
-the config/records parser API, not approved divergences (RP-1001). The private
-`pending::read_python_object` helper belongs in `provenant-config`.
+representable integers. Non-finite numbers and lone surrogate escapes remain
+blocked on the config/records parser API (RP-1003). Integers outside i64/u64
+are refused with typed `NumberOutOfRange` as an improvement divergence
+(RP-1005). The private `pending::read_python_object` helper belongs in
+`provenant-config`.
 CLI parsing remains for cut-over.
 The private `pending::python_json` encoder belongs in `provenant-records`;
 it preserves sorted keys, ASCII escaping, spaces and the final newline at
@@ -41,8 +42,11 @@ with both their expected values and the live Python implementation.
 
 Closed worker-result shape checks, verdict precedence, endpoint/provider/model
 lineage, unavailable statuses and certification rules are implemented for
-representable JSON inputs. Arbitrary Python exit integers and lone surrogate
-strings remain parser integration gaps (RP-1001), so this unit is partial.
+representable JSON inputs. The checked JSON boundary refuses integers outside
+i64/u64 with typed `NumberOutOfRange` as an improvement divergence (RP-1005);
+lone surrogate strings remain a parser integration gap (RP-1003), so this unit
+is partial. Raw JSON inputs use `normalise_dispatch_review_json` to preserve
+integer range classification before deserialization.
 Typed worker
 and normalised result records use serde. Policy fixtures translate all 17 pure
 assertions in `tests/test_review_terminal.py`; the registry/YAML drift test
@@ -76,9 +80,9 @@ Only CPython's built-in unhashable-TypeError prose is normalised, to the
 exception type and exact list/dict kind, because Python 3.14 changed that
 wording. Explicit policy diagnostics and artifact bytes remain exact.
 The current interpreter is Python 3.14.3; Rust uses pinned 1.94.1.
-The non-UTF-8 filesystem fixture skips if the filesystem/sandbox refuses its
-name. This headless sandbox refused it; Unicode, hard links, relative symlinks
-and root resolution still ran. Linux/macOS CI must exercise that fixture.
+The non-UTF-8 filesystem fixture prints `skip:` when the filesystem refuses
+its name, including APFS EILSEQ. Unicode, hard links, relative symlinks and
+root resolution still run. Linux/macOS CI must exercise the filesystem case.
 
 J1 CLI/help/environment, J2 schema/canonical-byte mutants, J3 MCP transcripts,
 platform conformance and the cross-crate adapter catalogue drift check remain
@@ -87,8 +91,9 @@ inert and the front door still uses its existing owners.
 
 Final local checks: `cargo fmt --all`,
 `cargo clippy -p provenant-workflow --all-targets -j 2 -- -D warnings`, and
-`cargo test -p provenant-workflow -j 2` passed. The test run had 16 passing
-Rust tests, no failures and no ignored tests, plus zero doctests. Native
+`PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-workflow -j 2` passed.
+The test run had 18 passing Rust tests, no failures and no ignored tests, plus
+zero doctests. Native
 adversarial source review and its repair-delta review found no remaining
 actionable defects within the documented implemented scope. PR CI remains the
 merge gate; this lane does not merge or enable auto-merge.

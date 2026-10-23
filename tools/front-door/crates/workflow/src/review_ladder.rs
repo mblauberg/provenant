@@ -223,6 +223,7 @@ mod tests {
                     Err(PolicyError::Unhashable { kind, .. }) => {
                         crate::test_support::unhashable(kind)
                     }
+                    Err(error) => panic!("unexpected typed input error: {error}"),
                 }
             })
             .collect();
