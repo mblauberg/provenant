@@ -1866,3 +1866,17 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
 - Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
   forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
   spawning. An infinite timeout keeps Python's behaviour: no deadline.
+
+
+## RP-RRC3-005: custody help-width boundary (open, library)
+
+- Class: `library`; same rulebook, baseline and author route as RP-RRC3-001.
+  The typed custody renderer observes COLUMNS with an 80-column fallback and
+  caps it at 4096 before formatting. Python argparse instead queries terminal
+  geometry when the environment does not supply a positive width and does not
+  impose this cap. This headless adapter therefore does not claim interactive
+  terminal or oversized-width parity. Output custody remains partial.
+- Differential cases cover ordinary widths 40/60/80/100, short/mid/long program
+  names, wrapping, positional/optional grouping and help/error output. A future
+  command owner needs an explicit terminal-width observation and a boundary
+  decision for the cap before cut-over. No accepted command behavior change.
