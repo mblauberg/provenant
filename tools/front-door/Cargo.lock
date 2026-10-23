@@ -159,6 +159,12 @@ version = "0.1.0"
 [[package]]
 name = "provenant-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-fabric-mcp"
