@@ -44,7 +44,7 @@ interface from being claimed. These IDs are absent from this batch's Units line.
 
 | Unit | Implemented | Remaining owner/API or boundary |
 |---|---|---|
-| `runtime/fabric/src/hosts.ts#unit-01` | eligibility, placement rewrites including arrays/BMP strings/scalars, cancellation response and bounded stderr tail | supervisor has no public pipe/stdin/live-child custody transport; UUID allocation and active/cancel/reap integration remain; UTF-16 lone-surrogate strings need a records value owner |
+| `runtime/fabric/src/hosts.ts#unit-01` | eligibility, object placement rewrites, cancellation response and bounded stderr tail | supervisor has no public pipe/stdin/live-child custody transport; UUID allocation and active/cancel/reap integration remain; non-object rewrites are explicitly unsupported; object enumeration/retained values need the lossless ordered records owner |
 | `runtime/fabric/src/json-subprocess.ts#unit-01` | capture bounds, failure precedence, pre-abort, explicit deadlines and first-failure/cancel effects | same missing pipe/stdin/live-child custody API; arbitrary non-JSON AbortSignal reasons need an edge representation |
 | `runtime/fabric/src/lane-watch.ts#unit-01` | file filter and explicit-clock debounce/wake decisions | supervisor has no recursive filesystem event watcher, registration/recovery/cleanup or bounded watch wait API |
 | `scripts/fabric_git.py#interface` | transport request/result records, metadata validation, verification receipt extension fields and transport trait | agreed run-owner writer-lease, repository proof and complete dynamic verification receipt contract; current run lease API is policy, not the federation owner |
@@ -138,3 +138,10 @@ codec returns typed `NumberOutOfRange`, following R4, rather than an f64 repr
 preserve this integer for the source warning and rejects the whole list. This
 remaining diagnostic/selection gap is RP-FR3-007, not accepted parity; the
 fabric-policy claim stays withdrawn pending the shared lossless owner.
+
+Item 5: reverted the unclaimed array/string/scalar Object.assign expansion.
+All truthy non-object rewrites again return `UnsupportedRewrite` before input
+mutation. The expansion-only test was replaced with retained-input refusal
+coverage for arrays, strings and scalars. Numeric-key ordering in object
+rewrites remains a partial records boundary, not a JS-order claim. Hosts is
+still absent from the ledger and Units line.
