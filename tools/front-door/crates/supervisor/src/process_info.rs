@@ -284,18 +284,18 @@ pub fn ps_process_output(
     lstart: Option<&str>,
     start_epoch: Option<f64>,
 ) -> Result<Option<ProcessInfo>, ProcessParseError> {
-    let text = stdout.trim_matches(crate::pending::python_space);
+    let text = stdout.trim_matches(provenant_core::py::python_whitespace);
     if text.is_empty() {
         return Ok(None);
     }
     let mut rest = text;
     let mut values = Vec::new();
     for _ in 0..7 {
-        let Some(end) = rest.find(crate::pending::python_space) else {
+        let Some(end) = rest.find(provenant_core::py::python_whitespace) else {
             return Ok(None);
         };
         values.push(&rest[..end]);
-        rest = rest[end..].trim_start_matches(crate::pending::python_space);
+        rest = rest[end..].trim_start_matches(provenant_core::py::python_whitespace);
     }
     if rest.is_empty() {
         return Ok(None);
@@ -304,7 +304,7 @@ pub fn ps_process_output(
         return Ok(None);
     };
     let first = rest
-        .split(crate::pending::python_space)
+        .split(provenant_core::py::python_whitespace)
         .find(|value| !value.is_empty())
         .ok_or(ProcessParseError::Field("command"))?;
     // pathlib preserves a final '..'; std::path::Path::file_name excludes it.
@@ -924,7 +924,7 @@ fn ps_command(
 pub fn ps_start_time(pid: i32, canonical: bool) -> Option<String> {
     let pid = pid.to_string();
     let result = ps_command(&["-o", "lstart=", "-p", &pid], 2.0, canonical).ok()?;
-    (result.returncode == 0).then(|| crate::pending::python_strip(&result.output).to_string())
+    (result.returncode == 0).then(|| provenant_core::py::python_strip(&result.output).to_string())
 }
 
 pub fn ps_process(pid: i32) -> Result<Option<ProcessInfo>, ProcessError> {
@@ -1014,7 +1014,7 @@ pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
             result
                 .stderr
                 .as_deref()
-                .map(crate::pending::python_strip)
+                .map(provenant_core::py::python_strip)
                 .filter(|text| !text.is_empty())
                 .unwrap_or("ps census failed")
                 .into(),
@@ -1022,7 +1022,7 @@ pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     }
     let pids: Vec<i32> = result
         .output
-        .split(crate::pending::python_space)
+        .split(provenant_core::py::python_whitespace)
         .filter(|value| {
             !value.is_empty()
                 && value

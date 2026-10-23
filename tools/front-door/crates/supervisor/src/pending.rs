@@ -220,11 +220,6 @@ const NONPRINTABLE: &[(u32, u32)] = &[
 ];
 
 // port: belongs in provenant-core
-pub(crate) fn python_space(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
-}
-
-// port: belongs in provenant-core
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Integer {
     negative: bool,
@@ -365,11 +360,6 @@ pub(crate) fn divmod_decimal(digits: &str, divisor: u32) -> (String, u32) {
 }
 
 // port: belongs in provenant-core
-pub(crate) fn python_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
-}
-
-// port: belongs in provenant-core
 /// Python float(str): Unicode decimal digits/whitespace and digit underscores.
 pub(crate) fn python_float(text: &str) -> Option<f64> {
     let text = text.trim_matches(char::is_whitespace);
@@ -411,41 +401,6 @@ pub(crate) fn python_float(text: &str) -> Option<f64> {
         }),
         _ => normalized.parse().ok(),
     }
-}
-
-// port: belongs in provenant-core
-pub(crate) fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if !printable(c) => {
-                let code = c as u32;
-                if code < 256 {
-                    out.push_str(&format!("\\x{code:02x}"));
-                } else if code <= 0xffff {
-                    out.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
 }
 
 // port: belongs in provenant-core

@@ -324,19 +324,36 @@ fn wait_and_stop(
     Ok((GroupStop { status, escalated }, timed_out))
 }
 
+/// BudgetArgumentParser's edge effect, without terminating the embedding process.
+/// The CLI exits with the returned status after this fallible stderr write.
+pub fn write_argument_error(
+    command_name: Option<&str>,
+    program: &str,
+    message: &str,
+    stderr: &mut impl std::io::Write,
+) -> Result<u8, BoundedError> {
+    let command = command_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(program);
+    stderr
+        .write_all(argument_error(command, message).as_bytes())
+        .map_err(io_error("write argument error"))?;
+    Ok(2)
+}
+
 /// Edge rendering for BudgetArgumentParser's one-line errors (exit status 2).
 pub fn argument_error(command: &str, message: &str) -> String {
     let clean = message.replace('\n', " ");
-    let clean = crate::pending::python_strip(&clean);
+    let clean = provenant_core::py::python_strip(&clean);
     let fix = if let Some(args) = clean.strip_prefix("the following arguments are required:") {
-        format!("pass {}", crate::pending::python_strip(args))
+        format!("pass {}", provenant_core::py::python_strip(args))
     } else if clean.contains("one of the arguments") && clean.contains("is required") {
         let args = clean
             .split_once("arguments")
             .map_or("", |(_, rest)| rest)
             .split_once("is required")
             .map_or("", |(args, _)| args)
-            .trim_matches(crate::pending::python_space);
+            .trim_matches(provenant_core::py::python_whitespace);
         format!("pass {args}")
     } else {
         format!("provenant help {command}")
@@ -582,5 +599,191 @@ mod spawn_tests {
         let output = run_bounded(&["tool".into()], options).unwrap();
         assert_eq!(output.output, "value");
         assert_eq!(output.returncode, 0);
+    }
+}
+
+#[cfg(test)]
+mod parser_edge_tests {
+    #[test]
+    fn parser_error_effect_matches_python_stderr_and_exit_status() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(
+            &root,
+            r#"
+import json, io
+from contextlib import redirect_stderr
+from skills._shared.bounded_process import BudgetArgumentParser
+out=[]
+for command in [None, '', 'custom-cmd']:
+    for message in ['unrecognized arguments: --bad\n', 'the following arguments are required: --arg', 'one of the arguments --a --b is required', '\x1c bad\nmessage \x1f']:
+        stream=io.StringIO()
+        try:
+            with redirect_stderr(stream):
+                BudgetArgumentParser(command, prog='fixture').error(message)
+        except SystemExit as error:
+            out.append([error.code,stream.getvalue()])
+print(json.dumps(out))
+"#,
+        ) else {
+            return;
+        };
+        let mut actual = Vec::new();
+        for command in [None, Some(""), Some("custom-cmd")] {
+            for message in [
+                "unrecognized arguments: --bad\n",
+                "the following arguments are required: --arg",
+                "one of the arguments --a --b is required",
+                "\u{1c} bad\nmessage \u{1f}",
+            ] {
+                let mut output = Vec::new();
+                let code =
+                    super::write_argument_error(command, "fixture", message, &mut output).unwrap();
+                actual.push(serde_json::json!([
+                    code,
+                    String::from_utf8(output).unwrap()
+                ]));
+            }
+        }
+        assert_eq!(serde_json::json!(actual), expected);
+        assert!(super::write_argument_error(None, "fixture", "bad", &mut std::io::sink()).is_ok());
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(super::write_argument_error(None, "fixture", "bad", &mut Broken).is_err());
+    }
+}
+
+#[cfg(test)]
+mod descendant_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    const FIXTURE: &str = "bounded::descendant_tests::descendant_fixture";
+
+    #[test]
+    fn descendant_fixture() {
+        let Some(role) = std::env::var_os("PROVENANT_UTILITY_ROLE") else {
+            return;
+        };
+        let socket = std::env::var_os("PROVENANT_UTILITY_SOCKET").unwrap();
+        let ready = std::env::var_os("PROVENANT_UTILITY_READY").unwrap();
+        if role == "grandchild" {
+            let mut stream = UnixStream::connect(socket).unwrap();
+            stream.write_all(&std::process::id().to_ne_bytes()).unwrap();
+            let mut buffer = [0];
+            // Root holds this connection open until group cleanup closes it.
+            let _ = stream.read(&mut buffer);
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let script = crate::process_info::shell_join_os([
+            executable.as_os_str(),
+            std::ffi::OsStr::new("--exact"),
+            std::ffi::OsStr::new(FIXTURE),
+            std::ffi::OsStr::new("--nocapture"),
+        ]);
+        // The clean-parent fixture deliberately exits while its child lives;
+        // only the utility owner may reap/clean the abandoned group.
+        #[allow(clippy::zombie_processes)]
+        let _child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("trap '' TERM; exec {}", script.to_str().unwrap()),
+            ])
+            .env("PROVENANT_UTILITY_ROLE", "grandchild")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !Path::new(&ready).exists() {
+            assert!(Instant::now() < deadline, "grandchild did not become ready");
+            std::thread::yield_now();
+        }
+        if role == "parent-timeout" {
+            // A wait fixture, never a timing assertion. The root's bounded runner
+            // terminates this process only after the readiness handshake.
+            std::thread::park_timeout(Duration::from_secs(60));
+        }
+    }
+
+    fn cleanup_fixture(timeout: bool) {
+        // macOS sockaddr_un has a small sun_path; the managed TMPDIR is long.
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = temp.path().join("ready.sock");
+        let ready = temp.path().join("ready");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let env = [
+            (
+                "PROVENANT_UTILITY_ROLE".into(),
+                if timeout {
+                    "parent-timeout"
+                } else {
+                    "parent-exit"
+                }
+                .into(),
+            ),
+            ("PROVENANT_UTILITY_SOCKET".into(), socket.into_os_string()),
+            (
+                "PROVENANT_UTILITY_READY".into(),
+                ready.clone().into_os_string(),
+            ),
+        ];
+        let executable = std::env::current_exe().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut options = Options::new(Path::new("/"), 5.0);
+            options.env = Some(&env);
+            run_bounded(
+                &[
+                    executable.into_os_string(),
+                    "--exact".into(),
+                    FIXTURE.into(),
+                    "--nocapture".into(),
+                ],
+                options,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "grandchild handshake timed out");
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        };
+        // Darwin accepts inherit the listener's nonblocking descriptor flag.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut pid = [0; 4];
+        stream.read_exact(&mut pid).unwrap();
+        assert_ne!(u32::from_ne_bytes(pid), 0);
+        std::fs::write(&ready, b"ready").unwrap();
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.timed_out, timeout);
+        if !timeout {
+            assert_eq!(result.returncode, 0);
+        }
+        // EOF proves the SIGTERM-ignoring descendant released its inherited
+        // descriptors; it cannot be a zombie-only PID-probe false positive.
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
+    #[test]
+    fn clean_parent_exit_still_cleans_its_same_group_descendant() {
+        cleanup_fixture(false);
+    }
+    #[test]
+    fn timeout_cleans_its_same_group_descendant() {
+        cleanup_fixture(true);
     }
 }
