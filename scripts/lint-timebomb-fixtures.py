@@ -19,7 +19,7 @@ ISO_DATE_LITERAL = re.compile(
     r"['\"](\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?)['\"]"
 )
 WINDOW = re.compile(r"\b(?:now|today|utcnow)\s*\(|\btimedelta\s*\(")
-# A bare `now` or `today` counts only where it is read; a parameter of that name alone is not a window.
+# A bare `now` or `today` counts only where it is read or patched; a parameter of that name alone is not a window.
 WINDOW_NAMES = {"now", "today"}
 
 
@@ -59,6 +59,9 @@ def _reads_window_name(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
     return any(
         (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in WINDOW_NAMES)
         or (isinstance(node, ast.Attribute) and node.attr in WINDOW_NAMES)
+        # A clock patched by name: monkeypatch.setattr(mod, "now", ...) or patch("pkg.mod.today").
+        or (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value.rpartition(".")[2] in WINDOW_NAMES)
         for node in ast.walk(function)
     )
 

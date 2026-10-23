@@ -112,6 +112,25 @@ def test_ignores_unused_now_parameter_on_pinned_clock_test(tmp_path):
     assert module.scan_file(path) == [(6, "2026-10-28T10:00:00Z")]
 
 
+def test_finds_dates_where_now_is_read_or_patched_by_name(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'def test_fixture(now):\n'
+        '    assert now < parse("2026-12-01")\n'
+        'def test_attribute(self):\n'
+        '    assert self.now < parse("2026-12-02")\n'
+        'def test_setattr(monkeypatch):\n'
+        '    monkeypatch.setattr(mod, "now", lambda: FIXED)\n'
+        '    assert check("2026-12-03")\n'
+        'def test_patch():\n'
+        '    with patch("pkg.mod.today"):\n'
+        '        assert check("2026-12-04")\n',
+        encoding="utf-8",
+    )
+    assert sorted(value for _, value in module.scan_file(path)) == ["2026-12-01", "2026-12-02", "2026-12-03", "2026-12-04"]
+
+
 def test_finds_parametrized_date_on_now_relative_test(tmp_path):
     module = load_module()
     path = tmp_path / "test_fixture.py"
