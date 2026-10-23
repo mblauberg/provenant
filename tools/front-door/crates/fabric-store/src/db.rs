@@ -14,6 +14,7 @@ use std::{
 pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("schema.sql"),
     include_str!("migrations/002-import-skips.sql"),
+    include_str!("migrations/003-claims-landing.sql"),
 ];
 fn schema_version(db: &Connection) -> Result<usize> {
     // One statement reads both values from one snapshot, so a concurrent first
@@ -104,6 +105,7 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
+    pub(crate) locks: Directory,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
@@ -122,6 +124,10 @@ impl Store {
             }
         }
         private(&directory, root.as_path())?;
+        // Traversal from / may cross a local mount before the configured
+        // state root. Pin supervisor's device policy to this validated handle,
+        // without reopening ancestors or relaxing descendant checks.
+        let directory = directory.into_anchor()?;
         match directory.mkdir(OsStr::new("fabric"), 0o700) {
             Ok(()) => directory.sync()?,
             Err(error) if error.is_exists() => {}
@@ -154,8 +160,20 @@ impl Store {
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
         request.retry(|| enable_wal(&db))?;
+        match fabric.mkdir(OsStr::new("locks"), 0o700) {
+            Ok(()) => fabric.sync()?,
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let locks = checked_directory(
+            &fabric,
+            OsStr::new("locks"),
+            Some(fabric.metadata()?.device),
+        )?;
+        private(&locks, &path.join("locks"))?;
         let store = Self {
             db,
+            locks,
             _owner: PhantomData,
         };
         loop {
