@@ -4139,7 +4139,7 @@ def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monke
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    args = router.parser().parse_args([
+    args = router._sibling("model_route_cli").parser(router).parse_args([
         "resolve", "--adapter", "codex", "--alias", "senior",
         "--model", "gpt-6-luna", "--role", "worker",
     ])
