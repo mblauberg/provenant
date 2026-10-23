@@ -1849,6 +1849,7 @@ def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
         "provider_identity.py",
         "host_identity.py",
         "quota_schedule.py",
+        "quota_display.py",
         "telemetry.py",
     ):
         shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
