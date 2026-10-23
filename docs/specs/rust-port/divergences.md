@@ -964,3 +964,82 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+
+## RP-config-4 — config command edge rendering gaps
+
+- Units: `scripts/configure-codex-skill-overrides.py#unit-01`,
+  `scripts/install-workflows#unit-01`; rulebook v4.
+- Class: `bug`. Disposition: open; affected units remain partial. These
+  mismatches are not approved contract changes.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust command boundaries are
+  commits `8638ee4ab59b8581b7a7ca80d06ed1c26cefb435` and
+  `4dc3cc45ea474754deb828f4d76a559ada9addc3`. Python 3.14.3. Fixture roots
+  are isolated temporary directories; no live config is read or written.
+- Reproducers and expected/actual:
+  - Codex config with `enabled = []`: Python exits 1 with an uncaught
+    `TypeError` traceback; the Rust command result exits 1 with a short
+    `TypeError` line.
+  - On Unix, a `--config` or workflow `--target` path containing a non-UTF-8
+    byte is preserved in Python's printed bytes; current Rust `Path::display`
+    replaces it with U+FFFD, and command result strings cannot preserve that
+    byte sequence.
+- Evidence: reviewer source comparison against
+  `scripts/configure-codex-skill-overrides.py:44,132-134`, and
+  `scripts/install-workflows:290-292`; Rust implementations are in `codex.rs`
+  and `workflows.rs`. `codex::tests::unhashable_enabled_values_keep_python_type_error_and_exit_status`
+  compares the source exception and verifies status, while
+  `workflows::tests::conflicting_preflight_command_matches_python` compares
+  command streams and status. The traceback bytes and non-UTF-8 path output
+  remain uncovered.
+- Follow-up: add exact command edge rendering and OS-path compatibility before
+  claiming these units complete. No command cut-over is included in this lane.
+
+## RP-config-5 — workflow JSON parse diagnostic wording
+
+- Unit: `scripts/install-workflows#unit-01`; rulebook v4.
+- Class: `library`. Disposition: open; the unit remains partial. This is not
+  an approved contract change.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust workflow reader commit
+  `4dc3cc45ea474754deb828f4d76a559ada9addc3`. Python 3.14.3. Fixture roots are
+  isolated temporary directories; no live receipt is read or written.
+- Reproducer: create an empty `.agent-harness-workflows-installation.json`
+  beside the target and load it through `_load_manifest` and `workflows::load`.
+- Expected / actual: both reject the receipt. Python reports
+  `Expecting value: line 1 column 1 (char 0)`; serde_json reports its EOF
+  parse diagnostic and byte offset. The command status remains 3.
+- Evidence: source handling is at `scripts/install-workflows:67-70`; Rust
+  parsing is at `workflows.rs:78` through `pending::read_json`. The malformed
+  receipt differential remains to be added; only successful receipt and
+  command cases plus conflict refusal are covered in this batch.
+- Follow-up: reconcile Python JSON diagnostic rendering at the command edge
+  and add malformed receipt failure differentials before claiming the unit
+  complete.
+
+## RP-config-6 — instance interface input ordering and home expansion
+
+- Unit: `scripts/instance_installation.py#interface`; rulebook v4.
+- Class: `bug`. Disposition: open; the interface remains partial. These are
+  not approved contract changes.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust interface commit
+  `742ce1d92ac8632e3a673e63cdc2999594d5bdec`. Python
+  3.14.3. The path traversal case uses an in-memory fixture; the `~username`
+  case depends on the host account database and does not touch instance files.
+- Reproducers and expected/actual:
+  - Validate the JSON text
+    `{"schema_version":1,"contract":"installation-desired-state","product":{"version":"${ROOT}","name":"~/product"},"mode":"split"}`.
+    Python retains product insertion order and reports `/product/version`
+    first; conversion into serde_json's default sorted object reports
+    `/product/name` first.
+  - Set `AGENT_FABRIC_INSTANCE_ROOT=~mikey/instance` on a host where `mikey`
+    exists. Python `Path.expanduser()` returns that account's absolute home
+    path; Rust expands only `~` and `~/`, then refuses the relative value.
+- Evidence: source review at `scripts/instance_installation.py:191-203,737-743`
+  and candidate implementation at `instance.rs:57-67,134,188-194`. Existing
+  desired-state differential cases cover representable values but not these
+  two cases; a retained exact differential remains to be added.
+- Follow-up: expose an ordered JSON input representation and platform home
+  directory lookup before claiming this interface complete. No caller
+  cut-over is included in this lane.
