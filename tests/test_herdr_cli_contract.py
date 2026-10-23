@@ -150,56 +150,54 @@ def test_cli_gate_distinguishes_agent_idle_from_pane_done_wait_statuses(tmp_path
     assert "done" in result.stdout
 
 
-def test_cli_gate_rejects_documented_command_drift(tmp_path: Path) -> None:
-    fake, _ = _fake_herdr(tmp_path, agent_help=AGENT_HELP.replace("herdr agent read <target>\n", ""))
-    result = _run(fake)
-
-    assert result.returncode == 1
-    assert "documented command is absent from help: herdr agent read" in result.stdout
-
-
-def test_cli_gate_rejects_missing_documented_integration_install(tmp_path: Path) -> None:
-    fake, _ = _fake_herdr(
-        tmp_path,
-        integration_help=INTEGRATION_HELP.replace("herdr integration install pi\n", ""),
-    )
-    result = _run(fake)
-
-    assert result.returncode == 1
-    assert (
-        "documented command is absent from help: herdr integration install pi"
-        in result.stdout
-    )
-
-
-def test_cli_gate_rejects_missing_documented_pane_run_shorthand(tmp_path: Path) -> None:
-    fake, _ = _fake_herdr(
-        tmp_path,
-        pane_help=PANE_HELP.replace("herdr pane run <pane_id> <command>\n", ""),
-    )
-    result = _run(fake)
-
-    assert result.returncode == 1
-    assert "documented command is absent from help: herdr pane run" in result.stdout
-
-
-def test_cli_gate_rejects_missing_documented_pane_observation_commands(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("help_kwarg", "help_text", "line", "command"),
+    (
+        pytest.param(
+            "agent_help",
+            AGENT_HELP,
+            "herdr agent read <target>",
+            "herdr agent read",
+            id="test_cli_gate_rejects_documented_command_drift",
+        ),
+        pytest.param(
+            "integration_help",
+            INTEGRATION_HELP,
+            "herdr integration install pi",
+            "herdr integration install pi",
+            id="test_cli_gate_rejects_missing_documented_integration_install",
+        ),
+        pytest.param(
+            "pane_help",
+            PANE_HELP,
+            "herdr pane run <pane_id> <command>",
+            "herdr pane run",
+            id="test_cli_gate_rejects_missing_documented_pane_run_shorthand",
+        ),
+        pytest.param(
+            "pane_help",
+            PANE_HELP,
+            "herdr pane layout [--pane ID|--current]",
+            "herdr pane layout",
+            id="test_cli_gate_rejects_missing_documented_pane_observation_commands-layout",
+        ),
+        pytest.param(
+            "pane_help",
+            PANE_HELP,
+            "herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]",
+            "herdr pane read",
+            id="test_cli_gate_rejects_missing_documented_pane_observation_commands-read",
+        ),
+    ),
+)
+def test_cli_gate_rejects_a_missing_documented_command(
+    tmp_path: Path, help_kwarg: str, help_text: str, line: str, command: str
 ) -> None:
-    for index, command in enumerate(("herdr pane layout", "herdr pane read")):
-        case = tmp_path / str(index)
-        case.mkdir()
-        fake, _ = _fake_herdr(
-            case,
-            pane_help=PANE_HELP.replace(
-                next(line for line in PANE_HELP.splitlines() if line.startswith(command)) + "\n",
-                "",
-            ),
-        )
-        result = _run(fake)
+    fake, _ = _fake_herdr(tmp_path, **{help_kwarg: help_text.replace(line + "\n", "")})
+    result = _run(fake)
 
-        assert result.returncode == 1
-        assert f"documented command is absent from help: {command}" in result.stdout
+    assert result.returncode == 1
+    assert f"documented command is absent from help: {command}" in result.stdout
 
 
 def test_cli_gate_rejects_a_documented_status_absent_from_help(tmp_path: Path) -> None:
