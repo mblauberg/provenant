@@ -199,13 +199,18 @@ impl Store {
             let changed = self.db.execute("UPDATE landing_leases SET pushing_until = ? WHERE project = ? AND generation = ? AND (pushing_until IS NULL OR pushing_until <= ?)", params![until, who.project, generation, now])?;
             if changed != 1 { return Err(invalid("landing push already in progress")); } Ok(())
         })?;
+        let mut hold = PushHold { store: self, project: &who.project, owner: &owner, generation, armed: true };
         let result = match push() {
             Ok(result) => result,
             Err(error) => {
-                self.db.execute("UPDATE landing_leases SET pushing_until = NULL WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL", params![who.project, owner, generation])?;
+                let cleared = hold.clear();
+                hold.armed = false;
+                cleared?;
                 return Err(error);
             }
         };
+        // A release failure intentionally retains the bounded hold, as in TypeScript.
+        hold.armed = false;
         let release = self.transaction(true, || {
             self.db.execute("UPDATE landing_leases SET released_at = ?, pushing_until = NULL WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL", params![self.now(), who.project, owner, generation])?;
             self.log(who, "landing_release", &format!("{owner} generation {generation}"))
@@ -243,5 +248,31 @@ impl Store {
             return Err(Error::StaleLanding);
         }
         Ok(())
+    }
+}
+
+/// Only armed across the caller callback. Explicit Result paths propagate write
+/// errors; unwinding cannot return an error, so it reports a failed cleanup.
+/// Abort/SIGKILL cannot run Drop; the persisted 150-second fence still expires.
+struct PushHold<'a> {
+    store: &'a Store,
+    project: &'a str,
+    owner: &'a str,
+    generation: i64,
+    armed: bool,
+}
+impl PushHold<'_> {
+    fn clear(&self) -> Result<()> {
+        self.store.db.execute("UPDATE landing_leases SET pushing_until = NULL WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL", params![self.project, self.owner, self.generation])?;
+        Ok(())
+    }
+}
+impl Drop for PushHold<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self.clear() {
+                eprintln!("landing push unwind cleanup failed: {error}");
+            }
+        }
     }
 }

@@ -436,3 +436,18 @@ fn landing_release_refusals_round_trip_without_losing_reason() {
         assert_eq!(serde_json::to_string(&release).unwrap(), wire);
     }
 }
+
+#[test]
+fn panicking_push_clears_its_hold_and_preserves_the_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let who = Identity { project: "p".into(), agent_id: "a".into(), provider: "codex".into() };
+    let sha = "a".repeat(40);
+    store.acquire_landing(&who, "s", &sha, 60, 1000).unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.with_landing_push(&who, "s", 1, &sha, || -> Result<()> { panic!("push panicked") })
+    }));
+    assert!(panic.is_err());
+    assert!(store.landing_lease("p", 1000).unwrap().unwrap().pushing_until_ms.is_none());
+    assert!(store.try_release_landing(&who, "s", 1, Some(1000)).unwrap().released());
+}
