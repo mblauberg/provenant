@@ -6,6 +6,7 @@
 mod casefold;
 mod render;
 
+pub mod selection;
 pub mod capability;
 pub mod catalog;
 pub mod cli;
