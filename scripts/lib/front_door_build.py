@@ -7,7 +7,8 @@ The front door is a binary built from `tools/front-door/`. A built binary
 embeds the managed-file marker and the line
 `provenant-front-door source-sha256=<hex>` as lines of their own, so the
 installer's marker rule and the install check both work on it unchanged. The
-hash covers `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/**`.
+hash covers the workspace manifest, lockfile and toolchain, plus the front
+door's and every `crates/*` member's manifest, `src/**` and `build.rs`.
 
 Commands (stdout carries only the answer; progress and reasons go to stderr):
 
@@ -48,15 +49,32 @@ class CargoUnavailable(FrontDoorError):
 
 
 def source_digest(crate: Path) -> str:
-    """Digest of the files a build depends on, in a path-sorted, framed order."""
+    """Hash the R2 workspace layout without requiring Cargo.
+
+    Start with HASHED_FILES in their listed order (when present), then all
+    remaining inputs sorted by workspace-relative POSIX path. Each input is
+    framed as UTF-8 `path\0byte-length\0` followed by its unmodified bytes.
+    """
     manifest = crate / "Cargo.toml"
     sources = crate / "src"
     if not manifest.is_file() or not sources.is_dir():
         raise FileNotFoundError(f"no Rust front door sources under {crate}")
     names = [name for name in HASHED_FILES if (crate / name).is_file()]
-    names += sorted(
-        path.relative_to(crate).as_posix() for path in sources.rglob("*") if path.is_file()
-    )
+    # PORTING.md R2 fixes workspace members at `.` and `crates/*`. Include
+    # every member, even before it becomes a dependency of the binary.
+    packages = [crate, *(path.parent for path in crate.glob("crates/*/Cargo.toml"))]
+    inputs = set()
+    for package in packages:
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in (package / "Cargo.toml", package / "build.rs")
+            if path.is_file()
+        )
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in (package / "src").rglob("*") if path.is_file()
+        )
+    names += sorted(inputs.difference(names))
     digest = hashlib.sha256()
     for name in names:
         content = (crate / name).read_bytes()
