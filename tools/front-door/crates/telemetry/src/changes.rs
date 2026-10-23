@@ -3035,6 +3035,35 @@ for index, row in enumerate(input.get('events', [])):
     }
 
     #[test]
+    fn render_changes_matches_python_join_error_for_persisted_nonstring_label() {
+        let input = json!({
+            "markers":[{
+                "change_id":"pr:4","kind":"pr","pr":4,"merge_commit":null,
+                "merged_at":"2026-10-06T00:00:00Z","title":"change",
+                "labels":[7],"added_at":"2026-10-06T00:00:00Z"
+            }]
+        });
+        let oracle = python_oracle(
+            "try: owner.render_changes(t,owner.changes(db),10)\nexcept Exception as exc: print(json.dumps(str(exc)))\nelse: raise AssertionError('expected error')",
+            &input,
+        );
+        let row = ChangeRecord {
+            change_id: "pr:4".into(),
+            kind: "pr".into(),
+            pr: Some(4),
+            merge_commit: None,
+            merged_at: "2026-10-06T00:00:00Z".into(),
+            title: Some("change".into()),
+            labels: vec![json!(7)],
+            added_at: "2026-10-06T00:00:00Z".into(),
+        };
+        let rust = render_changes(&[row], 10).unwrap_err().to_string();
+        if let Some(oracle) = oracle {
+            crate::differential::equal(&json!(rust), &oracle);
+        }
+    }
+
+    #[test]
     fn sqlite_store_commits_sync_pages_and_preserves_marker_ordering() {
         let connection = Connection::open_in_memory().unwrap();
         connection
