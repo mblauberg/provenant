@@ -5,7 +5,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum JsoncError {
-    #[error("unterminated block comment")]
+    #[error("unterminated block comment: line {line} column {column} (char {offset})")]
     UnterminatedComment {
         offset: usize,
         line: usize,
@@ -93,16 +93,15 @@ pub fn prepare_jsonc(text: &str) -> Result<(String, bool), JsoncError> {
         } else if current == '"' {
             quoted = true;
         } else if current == ',' {
-            let following = chars[index + 1..].iter().find(|&&c| !python_whitespace(c));
+            let following = chars[index + 1..]
+                .iter()
+                .find(|&&c| !crate::py::python_whitespace(c));
             if matches!(following, Some('}' | ']')) {
                 chars[index] = ' ';
             }
         }
     }
     Ok((chars.into_iter().collect(), comment))
-}
-fn python_whitespace(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
 /// JSONC syntax port. Python's extended number and lone-surrogate values still
@@ -241,5 +240,64 @@ print(json.dumps(results))
                 .collect::<Vec<_>>()),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    #[test]
+    fn unterminated_comments_match_python_character_diagnostics() {
+        let fixtures = serde_json::json!([
+            "/*",
+            "// first\n/*",
+            "[\"é😀\", /* unfinished",
+            "/* first */\r\n\t/* end",
+            "/*a*/\n/*é\r\n*/\n/*",
+            "[1,/*"
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixtures.json");
+        std::fs::write(&path, serde_json::to_vec(&fixtures).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/lib/jsonc.py",
+            r#"
+results=[]
+for text in json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    try: m.parse_jsonc(text); results.append(None)
+    except json.JSONDecodeError as e: results.append([str(e),e.pos,e.lineno,e.colno])
+print(json.dumps(results))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = fixtures
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|text| {
+                let error = prepare_jsonc(text.as_str().unwrap()).unwrap_err();
+                match &error {
+                    JsoncError::UnterminatedComment {
+                        offset,
+                        line,
+                        column,
+                    } => serde_json::json!([error.to_string(), offset, line, column]),
+                    _ => panic!("expected unterminated-comment diagnostic"),
+                }
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+    #[test]
+    fn python_whitespace_does_not_change_json_whitespace_grammar() {
+        for c in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\u{85}', '\u{a0}'] {
+            let (prepared, comments) = prepare_jsonc(&format!("[1,{c}]")).unwrap();
+            assert_eq!(prepared, format!("[1 {c}]"));
+            assert!(!comments);
+            // isspace affects comma lookahead; json.loads still rejects these.
+            assert!(parse_jsonc(&format!("[1,{c}]")).is_err());
+        }
     }
 }

@@ -13,7 +13,7 @@ pub struct Homes {
 }
 #[derive(Debug, Error)]
 pub enum PathError {
-    #[error("Could not determine home directory")]
+    #[error("Could not determine home directory.")]
     Home,
     #[error("lstat: embedded null character in path")]
     Null { path: PathBuf },
