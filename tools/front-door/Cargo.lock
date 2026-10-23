@@ -458,11 +458,25 @@ dependencies = [
 [[package]]
 name = "provenant-fabric-mcp"
 version = "0.1.0"
+dependencies = [
+ "provenant-core",
+ "provenant-fabric-runtime",
+ "provenant-records",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-fabric-runtime"
 version = "0.1.0"
 dependencies = [
+ "provenant-core",
+ "provenant-fabric-store",
+ "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "sha2",
