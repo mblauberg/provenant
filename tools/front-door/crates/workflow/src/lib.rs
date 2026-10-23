@@ -15,6 +15,7 @@ mod test_support;
 mod policy;
 pub use policy::PolicyError;
 pub mod authority_mapping;
+pub mod check_herdr_cli;
 pub mod compact_reinject;
 pub mod delivery_receipt_commands;
 pub mod delivery_receipt_process;
