@@ -145,7 +145,7 @@ is no PyYAML comparison. Python-AST tooling is deleted with the Python.
 All first-party `unsafe` lives in `supervisor::sys` behind narrow safe
 wrappers with documented invariants. Every other crate, the binary included,
 has `#![forbid(unsafe_code)]`. A workspace `clippy.toml` `disallowed-methods`
-entry bans `std::process::Command::new` outside supervisor. Do not export
+entry bans `std::process::Command::new` outside supervisor. Until a crate is rewritten its root carries a `// Rewrite pending` allow for that lint; the crate's first build PR removes it, and the cli build removes the last one. Do not export
 raw owning descriptors or process handles that bypass custody. Each unsafe
 block states validity, ownership, lifetime, concurrency and error conditions,
 and a second reviewer checks it. Secret environment values stay off disk and
