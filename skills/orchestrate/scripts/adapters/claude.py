@@ -15,6 +15,12 @@ def uses_api_key(route):
 
 
 def argv(p):
+    confined_shell = (
+        p["mode"] == "read_only"
+        and p["applied"].get("confinement") == "sandbox-exec"
+        and p["applied"].get("guarantee") == "enforced"
+    )
+    boundary = p["boundary_prompt"]
     command = [
         CLI,
         "-p",
@@ -41,8 +47,16 @@ def argv(p):
             "Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob",
         ]
     else:
-        command += ["--permission-mode", "default", "--tools", "Read,Grep,Glob"]
-    command += ["--system-prompt", p["boundary_prompt"]]
+        tools = "Read,Grep,Glob,Bash" if confined_shell else "Read,Grep,Glob"
+        command += ["--permission-mode", "default", "--tools", tools]
+        if confined_shell:
+            # Listing Bash exposes it; default mode still needs approval under -p.
+            command += ["--allowedTools", "Bash"]
+            boundary = boundary.replace(
+                "Use file-reading tools only.",
+                "Read-only shell commands, including diffs and targeted tests, are allowed.",
+            )
+    command += ["--system-prompt", boundary]
     for directory in p["applied"]["add_dirs"]:
         command += ["--add-dir", directory]
     if p["model"]:
