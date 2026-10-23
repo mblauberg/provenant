@@ -642,3 +642,21 @@ fn push_callback_preserves_a_callers_error_and_clears_the_hold() {
         .pushing_until_ms
         .is_none());
 }
+
+#[test]
+fn activity_preserves_the_source_default_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let who = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
+    for _ in 0..205 {
+        store.note(&who, "entry").unwrap();
+    }
+    assert_eq!(store.activity("p", None).unwrap().len(), 50);
+    assert_eq!(store.activity_after("p", 0, None).unwrap().len(), 200);
+    assert_eq!(store.activity("p", Some(1)).unwrap().len(), 1);
+    assert_eq!(store.activity_after("p", 0, Some(1)).unwrap().len(), 1);
+}

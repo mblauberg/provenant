@@ -202,19 +202,19 @@ impl Store {
     pub fn note(&self, who: &Identity, detail: &str) -> Result<()> {
         self.log(who, "note", detail)
     }
-    pub fn activity(&self, project: &str, limit: i64) -> Result<Vec<Activity>> {
-        self.read_activity(project, None, limit)
+    pub fn activity(&self, project: &str, limit: Option<i64>) -> Result<Vec<Activity>> {
+        self.read_activity(project, None, limit.unwrap_or(50))
     }
     pub fn activity_after(
         &self,
         project: &str,
         after_seq: i64,
-        limit: i64,
+        limit: Option<i64>,
     ) -> Result<Vec<Activity>> {
         if !(0..=MAX_SAFE_INTEGER).contains(&after_seq) {
             return Err(Error::ActivityCursor);
         }
-        self.read_activity(project, Some(after_seq), limit)
+        self.read_activity(project, Some(after_seq), limit.unwrap_or(200))
     }
     fn read_activity(
         &self,

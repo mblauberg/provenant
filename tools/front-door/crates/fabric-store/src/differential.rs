@@ -496,8 +496,10 @@ fn delivery_task_and_observation_database_differential() {
     capture(&mut out, store.tasks("p", Some("open")));
     capture(&mut out, store.claim_task(&a, "missing"));
     capture(&mut out, store.update_task(&a, "missing", "done", None));
-    capture(&mut out, store.activity_after("p", 2, 3));
-    capture(&mut out, store.activity("p", 2));
+    capture(&mut out, store.activity_after("p", 2, Some(3)));
+    capture(&mut out, store.activity("p", Some(2)));
+    capture(&mut out, store.activity("p", None));
+    capture(&mut out, store.activity_after("p", 0, None));
     let lane = |task: &str, attempt: i64| LaneAttempt {
         run_id: "r".into(),
         task_id: task.into(),
@@ -553,7 +555,14 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.acknowledge_terminal(&b, "r", "t", 3, Some("/legacy"), 1),
+        store.acknowledge_terminal_row(
+            &b,
+            &TerminalRow::from_json(
+                r#"{"run_id":"r","task_id":"t","attempt":3,"run_dir":"/legacy"}"#,
+            )
+            .unwrap(),
+            1,
+        ),
     );
     capture(
         &mut out,
@@ -610,8 +619,8 @@ fn delivery_task_and_observation_database_differential() {
             &ids,
         ),
     );
-    capture(&mut out, store.activity_after("p", -1, 200));
-    capture(&mut out, store.activity("p", 0));
+    capture(&mut out, store.activity_after("p", -1, Some(200)));
+    capture(&mut out, store.activity("p", Some(0)));
     compare("messages", snapshot(&store, out));
 }
 #[test]
@@ -649,7 +658,12 @@ fn sqlite_contention_rolls_back_and_restores_timeout_differential() {
     capture(&mut out, claim);
     capture(
         &mut out,
-        store.acknowledge_terminal(&b, "r", "t", 1, Some("/r"), 1),
+        store.acknowledge_terminal_row(
+            &b,
+            &TerminalRow::from_json(r#"{"run_id":"r","task_id":"t","attempt":1,"run_dir":"/r"}"#)
+                .unwrap(),
+            1,
+        ),
     );
     raw.execute_batch("ROLLBACK").unwrap();
     capture(&mut out, store.inbox(&b, InboxOptions::default(), &ids));
@@ -737,7 +751,7 @@ fn javascript_date_range_and_signed_year_differential() {
         8_640_000_000_000_001,
     ] {
         store.db.execute("UPDATE activity SET at=?", [at]).unwrap();
-        capture(&mut out, store.activity("p", 50));
+        capture(&mut out, store.activity("p", Some(50)));
     }
     compare("dates", snapshot(&store, out));
 }
@@ -952,7 +966,14 @@ fn cross_thread_sqlite_contention_differential() {
         );
         capture(
             &mut out,
-            store.acknowledge_terminal(&b(), "r", "t", 1, Some("/r"), 1),
+            store.acknowledge_terminal_row(
+                &b(),
+                &TerminalRow::from_json(
+                    r#"{"run_id":"r","task_id":"t","attempt":1,"run_dir":"/r"}"#,
+                )
+                .unwrap(),
+                1,
+            ),
         );
         release_tx.send(()).unwrap();
         writer.join().unwrap();

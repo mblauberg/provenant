@@ -1732,3 +1732,25 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   object keys and its diagnostics are serde's. This is not accepted source parity.
 - Remove unit-01 from this lane's temporary completion claim. Main had no
   completion ID for it; unit-02 and unit-03 remain complete. No runtime cut-over.
+
+## RP-FS3-008: explicit runtime inputs (library)
+
+- PR #1332 repair 2, rulebook v4, unchanged source/oracle
+  `c80d6a7c90c240a6272fdcea1ec4fdc6ce88c74a`.
+- Source `PROVENANT_CHAIR`/`PROVENANT_PARENT` environment reads become
+  `RecipientContext`; `randomUUID` becomes `IdSource`; `Date.now` becomes
+  `Clock`. The runtime caller supplies these process-boundary inputs so the
+  library does not own environment, entropy or process setup. Source sampling
+  and generation timing remain covered by the Node differentials.
+- `AbortSignal` becomes an `aborted` closure and the asynchronous timer becomes
+  a bounded caller wait callback. The runtime owns cancellation delivery and
+  scheduling; the store owns synchronous polling without a live transaction.
+- Source optional `now` arguments are required integer milliseconds on the
+  corresponding Rust APIs. The caller samples its clock when omitting them at
+  the external edge; this is an API-shape change, not a new stored timestamp.
+- Restored source activity defaults: `activity(..., None)` uses 50 and
+  `activity_after(..., None)` uses 200; explicit limits remain validated.
+  The default-limit regression checks 205 rows and the Node differential checks
+  both omitted limits. The duplicate typed `acknowledge_terminal` was deleted;
+  all callers use `acknowledge_terminal_row`, whose differential covers nullish
+  attempt fallback and ECMAScript String/Number coercion.

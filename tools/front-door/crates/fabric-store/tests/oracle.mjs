@@ -259,6 +259,8 @@ if(scenario==='work-path-json') {
   capture(() => store.updateTask(a, 'missing', 'done'));
   capture(() => store.activityAfter('p', 2, 3));
   capture(() => store.activity('p', 2));
+  capture(() => store.activity('p'));
+  capture(() => store.activityAfter('p', 0));
   capture(() => store.markLanesSeen(b, [{runId:'r',taskId:'t',attempt:2}]));
   capture(() => store.markLanesSeen(b, [{runId:'r',taskId:'t',attempt:1}]));
   capture(() => store.unseenLanes(b, [{runId:'r',taskId:'t',attempt:1},{runId:'r',taskId:'t',attempt:3},{runId:'r',taskId:'zero',attempt:0},{runId:'',taskId:'t',attempt:1}]));

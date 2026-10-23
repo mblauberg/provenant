@@ -301,31 +301,6 @@ impl Store {
         self.db.execute("INSERT INTO run_observations(project, recipient_id, run_id, task_id, attempt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project, recipient_id, run_id, task_id) DO UPDATE SET attempt = MAX(attempt, excluded.attempt)", params![who.project, who.agent_id, run, task, attempt])?;
         Ok(())
     }
-    /// Typed terminal rows are normalised by fabric-runtime before reaching the store.
-    pub fn acknowledge_terminal(
-        &self,
-        who: &Identity,
-        run: &str,
-        task: &str,
-        attempt: i64,
-        run_dir: Option<&str>,
-        busy_timeout_ms: u64,
-    ) -> Result<()> {
-        if !(1..=5000).contains(&busy_timeout_ms) {
-            return Err(Error::NoticeTimeout);
-        }
-        let prefix = format!("{run}:{task}:");
-        self.db
-            .busy_timeout(Duration::from_millis(busy_timeout_ms))?;
-        let result = self.transaction(true, || {
-            self.record_observation(who, run, task, attempt as f64)?;
-            let length = prefix.encode_utf16().count();
-            self.db.execute("UPDATE deliveries SET read_at = ? WHERE project = ? AND recipient_id = ? AND read_at IS NULL AND message_id IN (SELECT message_id FROM messages WHERE project = ? AND kind = 'run_terminal' AND ((substr(output_path, 1, ?) = ? AND CAST(substr(output_path, ?) AS INTEGER) <= ?) OR output_path = ?))", params![self.now(), who.project, who.agent_id, who.project, length as i64, prefix, length as i64 + 1, attempt, run_dir])?;
-            Ok(())
-        });
-        self.restore_default_busy_timeout()?;
-        result
-    }
 }
 
 impl Store {
