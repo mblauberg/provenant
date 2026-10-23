@@ -731,7 +731,7 @@ class ConfigContracts(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': default_host(), 'local': True}])
 
     def test_instance_root_must_be_absolute(self):
-        result = subprocess.run([str(front_door_binary()), 'hosts', 'list', '--json'],
+        result = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'hosts', 'list', '--json'],
             capture_output=True, text=True, env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': '.'})
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)['error']['code'], 'invalid_config')
