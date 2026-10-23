@@ -41,7 +41,10 @@ product-authored and the natural home for one user's personal doctrine.
 product policy the harness gates against. `config/model-preferences.json` and
 `config/model-routing.json` encode which providers a particular user pays for.
 `workflows/` is installed into `~/.claude/workflows` by
-`scripts/install-workflows` and had no ownership story at all.
+`scripts/install-workflows` and had no ownership story at all. This workflow
+installation description is superseded by workflow lane H: the accelerators
+are retired, and the installer succeeds without changing targets when its
+source directory is absent or empty.
 
 Two mechanisms already exist and neither had to be invented here. The
 installation receipt written by `scripts/managed_installation_manifest.py`

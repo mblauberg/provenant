@@ -32,7 +32,6 @@ def call_fits_schema(tool: str, fields: list[str]) -> bool:
 def documentation_paths():
     for directory in ("skills", "docs"):
         yield from (ROOT / directory).rglob("*.md")
-    yield from (ROOT / "workflows").rglob("*.js")
 
 
 def documented_calls(text: str):
@@ -69,7 +68,7 @@ def test_documented_fabric_call_parameters_fit_server_schema():
                 violations.append((str(path.relative_to(ROOT)), tool, sorted(invalid)))
     assert not violations, violations
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output"} <= covered
-    assert {"skills", "workflows", "docs"} <= {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
+    assert {"skills", "docs"} <= {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
 
 
 def test_checker_rejects_unknown_field_and_removed_tool():

@@ -89,7 +89,7 @@ pub struct RecordedRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn records_use_source_wire_names_and_preserve_optional_presence() {

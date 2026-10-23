@@ -1,5 +1,5 @@
 //! Model attribution and summable API-equivalent costs. No rounding before finalisation.
-use crate::{number, Numeric, Result, Usage};
+use crate::{Numeric, Result, Usage, number};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -779,7 +779,10 @@ mod tests {
     fn review_regression_catalogue_and_price_reads_are_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("table.json");
-        let text = format!("{{\"models\":{{}},\"padding\":\"{}\",\"adapters\":{{\"a\":{{\"models\":[{{\"id\":\"m\"}}]}}}}}}", "x".repeat(8 * 1024 * 1024));
+        let text = format!(
+            "{{\"models\":{{}},\"padding\":\"{}\",\"adapters\":{{\"a\":{{\"models\":[{{\"id\":\"m\"}}]}}}}}}",
+            "x".repeat(8 * 1024 * 1024)
+        );
         std::fs::write(&path, text).unwrap();
         assert!(Prices::load(&path).is_err());
         assert!(catalogue(&path).is_empty());

@@ -31,7 +31,7 @@ pub enum PidError {
     CustodyPoisoned { pid: i32 },
 }
 /// Only consuming a Child grants signal authority. An unreaped direct child
-/// reserves its PID, and the mutex serializes observation and signalling.
+/// reserves its PID, and the mutex serialises observation and signalling.
 /// This is a utility API, not S2 provider custody. Drop never signals: callers
 /// retain their explicit wait/cleanup responsibility and must not abandon it.
 #[derive(Debug)]

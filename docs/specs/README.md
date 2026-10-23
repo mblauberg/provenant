@@ -32,7 +32,7 @@ described. Fabric is now small enough to be its own documentation: see
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
 - [Graph runner: contract-driven plan graphs (operating model R2)](harness/graph-runner.md)
 - [Rust lane supervisor and a single Rust front door](harness/rust-supervisor.md)
-- [Whole-project Rust port plan and rulebook](rust-port/README.md)
+- [Rust rewrite plan and rulebook](rust-port/README.md)
 - [Harness profiles: cost and quality knobs](harness/profiles.md)
 - [Switching and comparing profiles](../runbooks/harness-profiles.md)
 - [Held-out replay bench for harness changes](harness/replay-bench.md)

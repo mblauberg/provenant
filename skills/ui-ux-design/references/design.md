@@ -56,10 +56,10 @@ Do not nest interactive controls, duplicate state, or push feature-specific
 layout into a shared primitive. Prefer one extended owner over a near-copy.
 
 For exploratory work, keep variants in the authorised scratch artefact and
-tune one meaningful axis at a time within a direction. Do not activate live work or production
-source through a request for directions alone. Once a direction is approved,
-implement the smallest coherent slice, exercise real content and applicable
-states, then integrate rather than leaving parallel primitives.
+tune one meaningful axis at a time within a direction. A request for directions
+alone does not authorise changes to production source. Once a direction is
+approved, implement the smallest coherent slice, exercise real content and
+applicable states, then integrate rather than leaving parallel primitives.
 
 Polish is iterative craft judgement against real content, not a one-off gate.
 Repeat until a fresh look finds nothing in scope worth changing:

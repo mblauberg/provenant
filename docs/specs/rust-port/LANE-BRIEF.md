@@ -26,7 +26,8 @@ emulation is not.
 Establish real use before keeping a feature: find its callers in skills,
 hooks, scripts, docs and `tools/front-door/src`, and check
 `~/.claude/projects` and `~/.codex/sessions` transcripts for actual
-invocations (commands run, not files edited). Never open credential files,
+invocations (commands run, not files edited). Transcripts are read-only:
+search them, never write, move or delete them. Never open credential files,
 `~/.ssh`, `~/.aws`, `~/.kube` or `~/.secrets`.
 
 EXTRA
@@ -86,7 +87,8 @@ How to work:
    is not yet rewritten keeps calling the old path; if this step removes
    that path, delete the caller's tests and note the break in the PR.
 4. Do not touch the primary checkout, the stable install or the old state
-   roots. Never read credentials.
+   roots. Tests set `HOME` and the state root to temporary directories
+   (PORTING.md R9). Never read credentials.
 
 Write scope: the crate, the binary's wiring for this step's verbs, the files
 you delete with their tests, callers you update, and `Cargo.lock`. Not CI

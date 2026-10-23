@@ -1,200 +1,238 @@
-//! Product-root precedence. The install supplies its fallback root as a value.
-use crate::paths::{expand_user, Homes, PathError};
-use std::path::{Path, PathBuf};
+//! Root selection consumes one captured environment/home snapshot. Alias binding
+//! is supplied by supervisor's safe filesystem boundary, never performed here.
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use thiserror::Error;
 
-pub const ENVIRONMENT_VARIABLE: &str = "AGENT_FABRIC_PRODUCT_ROOT";
+pub const STATE_DIRECTORY_ENV: &str = "PROVENANT_STATE_DIR";
+pub const DEFAULT_STATE_SUFFIX: &str = ".local/share/provenant/v1";
 
-/// Configured roots are expanded without resolving symlinks. The fallback is
-/// the install's resolved product root (the Python owner's file location).
-pub fn product_root(
-    configured: Option<&Path>,
-    installed_root: &Path,
-    homes: &Homes,
-) -> Result<PathBuf, PathError> {
-    match configured.filter(|v| !v.as_os_str().is_empty()) {
-        Some(path) => expand_user(path, homes),
-        None => Ok(installed_root.into()),
+/// The sole filesystem seam for root binding. Implementations resolve existing
+/// ancestor aliases and append only normal missing components; they must fail
+/// on loops/inaccessible ancestors, create nothing, and never open legacy root
+/// contents. Supervisor owns the production binding and handle-based checks.
+pub trait PathResolver {
+    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf>;
+}
+
+#[derive(Debug, Clone)]
+pub struct RootInputs {
+    pub state_dir: Option<PathBuf>,
+    pub environment_state_dir: Option<PathBuf>,
+    pub home: PathBuf,
+    pub checkout: PathBuf,
+    pub workspaces: Vec<PathBuf>,
+    pub old_roots: Vec<PathBuf>,
+}
+impl RootInputs {
+    pub fn new(home: PathBuf, checkout: PathBuf) -> Self {
+        Self {
+            state_dir: None,
+            environment_state_dir: None,
+            home,
+            checkout,
+            workspaces: Vec::new(),
+            old_roots: Vec::new(),
+        }
+    }
+    /// Selection alone is not a filesystem safety proof. Use `resolve` before
+    /// passing a state path to an owner that performs I/O.
+    pub fn candidate(&self) -> Result<PathBuf, RootError> {
+        absolute_normal(&self.home)?;
+        let candidate = self
+            .state_dir
+            .as_ref()
+            .or(self.environment_state_dir.as_ref())
+            .cloned()
+            .unwrap_or_else(|| self.home.join(DEFAULT_STATE_SUFFIX));
+        absolute_normal(&candidate)?;
+        Ok(candidate)
+    }
+    pub fn resolve(&self, resolver: &impl PathResolver) -> Result<Roots, RootError> {
+        StateRoot::resolve(self, resolver).map(|state| Roots { state })
     }
 }
-pub fn skills_root(
-    configured: Option<&Path>,
-    installed_root: &Path,
-    homes: &Homes,
-) -> Result<PathBuf, PathError> {
-    Ok(product_root(configured, installed_root, homes)?.join("skills"))
+
+#[derive(Debug, Error)]
+pub enum RootError {
+    #[error("root input must be an absolute path with only normal components: {path}")]
+    InvalidPath { path: PathBuf },
+    #[error("state root is a protected location: {path}")]
+    Protected { path: PathBuf },
+    #[error("cannot bind root input: {path}")]
+    Resolution {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateRoot(PathBuf);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Roots {
+    pub state: StateRoot,
+}
+impl StateRoot {
+    pub fn resolve(inputs: &RootInputs, resolver: &impl PathResolver) -> Result<Self, RootError> {
+        let candidate = inputs.candidate()?;
+        let mut protected = vec![
+            inputs.checkout.clone(),
+            inputs.home.join(".agents"),
+            inputs.home.join(".local/state/agent-harness"),
+            inputs.home.join(".local/state/provenant"),
+        ];
+        protected.extend(inputs.workspaces.iter().map(|p| p.join(".agent-run")));
+        protected.extend(inputs.old_roots.iter().cloned());
+        for path in &protected {
+            absolute_normal(path)?;
+        }
+        refuse(&candidate, &inputs.home, &protected)?;
+        let resolve = |path: &Path| -> Result<PathBuf, RootError> {
+            let bound = resolver.resolve_existing_ancestor(path).map_err(|source| {
+                RootError::Resolution {
+                    path: path.into(),
+                    source,
+                }
+            })?;
+            absolute_normal(&bound)?;
+            Ok(bound)
+        };
+        let bound_home = resolve(&inputs.home)?;
+        let bound_protected = protected
+            .iter()
+            .map(|path| resolve(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bound = resolve(&candidate)?;
+        refuse(&bound, &bound_home, &bound_protected)?;
+        Ok(Self(bound))
+    }
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+    pub fn into_path_buf(self) -> PathBuf {
+        self.0
+    }
+}
+impl AsRef<Path> for StateRoot {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+fn absolute_normal(path: &Path) -> Result<(), RootError> {
+    if !path.is_absolute()
+        || crate::paths::has_dot_or_nul(path)
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(RootError::InvalidPath { path: path.into() });
+    }
+    Ok(())
+}
+fn refuse(candidate: &Path, home: &Path, protected: &[PathBuf]) -> Result<(), RootError> {
+    if candidate.parent().is_none()
+        || candidate == home
+        || candidate
+            .components()
+            .any(|c| c.as_os_str() == ".agent-run")
+        || protected.iter().any(|root| candidate.starts_with(root))
+    {
+        return Err(RootError::Protected {
+            path: candidate.into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn configured_root_precedes_install_and_empty_is_unset() {
-        let homes = Homes {
-            current: Some("/home/user".into()),
-            ..Homes::default()
-        };
-        assert_eq!(
-            product_root(
-                Some(Path::new("~/product")),
-                Path::new("/installed"),
-                &homes
-            )
-            .unwrap(),
-            Path::new("/home/user/product")
-        );
-        assert_eq!(
-            skills_root(
-                Some(Path::new("relative/product")),
-                Path::new("/installed"),
-                &homes
-            )
-            .unwrap(),
-            Path::new("relative/product/skills")
-        );
-        for configured in [None, Some(Path::new(""))] {
-            assert_eq!(
-                product_root(configured, Path::new("/installed"), &homes).unwrap(),
-                Path::new("/installed")
-            );
+    struct Resolver;
+    impl PathResolver for Resolver {
+        fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.into())
         }
     }
-    #[cfg(unix)]
+    fn inputs() -> RootInputs {
+        RootInputs::new("/fixture/home".into(), "/fixture/checkout".into())
+    }
     #[test]
-    fn configured_symlink_keeps_the_callers_spelling() {
-        let dir = tempfile::tempdir().unwrap();
-        let alias = dir.path().join("alias");
-        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+    fn explicit_selection_has_priority_and_never_falls_back_on_invalid_input() {
+        let mut input = inputs();
         assert_eq!(
-            product_root(Some(&alias), Path::new("/installed"), &Homes::default()).unwrap(),
-            alias
+            input.resolve(&Resolver).unwrap().state.as_path(),
+            Path::new("/fixture/home/.local/share/provenant/v1")
         );
-    }
-}
-
-#[cfg(test)]
-mod differential {
-    use super::*;
-    #[test]
-    fn python_root_precedence() {
-        let Some(expected) = crate::test_support::python(
-            "skills/_shared/roots.py",
-            r#"
-results=[]
-for value in ['', 'relative/tree', '~/tree', './a//b/', '//server//tree/']:
-    os.environ['HOME'] = '/home/fixture'
-    os.environ['AGENT_FABRIC_PRODUCT_ROOT'] = value
-    results.append([str(m.product_root()),str(m.skills_root())])
-print(json.dumps(results))
-"#,
-            &[],
-        ) else {
-            return;
-        };
-        let installed = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(4)
-            .unwrap();
-        let installed = std::fs::canonicalize(installed).unwrap();
-        let homes = Homes {
-            current: Some("/home/fixture".into()),
-            ..Homes::default()
-        };
-        let actual: Vec<_> = ["", "relative/tree", "~/tree", "./a//b/", "//server//tree/"]
-            .iter()
-            .map(|v| {
-                serde_json::json!([
-                    product_root(Some(Path::new(v)), &installed, &homes).unwrap(),
-                    skills_root(Some(Path::new(v)), &installed, &homes).unwrap()
-                ])
-            })
-            .collect();
-        assert_eq!(serde_json::json!(actual), expected);
-    }
-}
-
-#[cfg(test)]
-mod facade_tests {
-    use super::*;
-    #[test]
-    fn scripts_facade_preserves_root_and_skills_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let input = root.join("inputs.json");
-        let fixtures = [
-            None,
-            Some(""),
-            Some("relative/tree"),
-            Some("~/tree"),
-            Some("./a//b/"),
-            Some("//server//tree/"),
-            Some("~provenant-no-such-user-192837/tree"),
-        ];
-        std::fs::write(&input, serde_json::to_vec(&fixtures).unwrap()).unwrap();
-        let Some(expected) = crate::test_support::python(
-            "scripts/lib/roots.py",
-            r#"
-results=[]
-os.environ['HOME']='/home/fixture'
-for value in json.loads(pathlib.Path(sys.argv[3]).read_text()):
-    if value is None: os.environ.pop(m.ENVIRONMENT_VARIABLE,None)
-    else: os.environ[m.ENVIRONMENT_VARIABLE]=value
-    try: results.append([str(m.product_root()),str(m.skills_root())])
-    except RuntimeError as e: results.append({'error':str(e)})
-print(json.dumps([m.ENVIRONMENT_VARIABLE,results]))
-"#,
-            &[&input],
-        ) else {
-            return;
-        };
-        let installed = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(4)
-            .unwrap();
-        let installed = std::fs::canonicalize(installed).unwrap();
-        let homes = Homes {
-            current: Some("/home/fixture".into()),
-            ..Homes::default()
-        };
-        let actual: Vec<_> = fixtures
-            .into_iter()
-            .map(
-                |configured| match product_root(configured.map(Path::new), &installed, &homes) {
-                    Ok(product) => serde_json::json!([
-                        product,
-                        skills_root(configured.map(Path::new), &installed, &homes).unwrap()
-                    ]),
-                    Err(e) => serde_json::json!({"error":e.to_string()}),
-                },
-            )
-            .collect();
-        assert_eq!(serde_json::json!([ENVIRONMENT_VARIABLE, actual]), expected);
-    }
-    #[cfg(unix)]
-    #[test]
-    fn scripts_facade_keeps_native_environment_path_bytes() {
-        use std::os::unix::ffi::OsStrExt;
-        let dir = tempfile::tempdir().unwrap();
-        let configured = dir.path().join(std::ffi::OsStr::from_bytes(b"root-\xff"));
-        let Some(expected) = crate::test_support::python(
-            "scripts/lib/roots.py",
-            r#"
-os.environ[m.ENVIRONMENT_VARIABLE]=sys.argv[3]
-print(json.dumps([list(os.fsencode(m.product_root())),list(os.fsencode(m.skills_root()))]))
-"#,
-            &[&configured],
-        ) else {
-            return;
-        };
-        let product =
-            product_root(Some(&configured), Path::new("/ignored"), &Homes::default()).unwrap();
-        let skills =
-            skills_root(Some(&configured), Path::new("/ignored"), &Homes::default()).unwrap();
+        input.environment_state_dir = Some("/fixture/env".into());
         assert_eq!(
-            serde_json::json!([
-                product.as_os_str().as_bytes(),
-                skills.as_os_str().as_bytes()
-            ]),
-            expected
+            input.resolve(&Resolver).unwrap().state.as_path(),
+            Path::new("/fixture/env")
         );
+        input.state_dir = Some("/fixture/flag".into());
+        assert_eq!(
+            input.resolve(&Resolver).unwrap().state.as_path(),
+            Path::new("/fixture/flag")
+        );
+        for bad in ["", "relative", "/fixture/../escape", "/fixture/./tail"] {
+            input.state_dir = Some(bad.into());
+            assert!(matches!(
+                input.resolve(&Resolver),
+                Err(RootError::InvalidPath { .. })
+            ));
+        }
+    }
+    #[test]
+    fn roots_refuse_home_checkout_old_roots_and_any_agent_run_component() {
+        let mut input = inputs();
+        input.workspaces.push("/selected/workspace".into());
+        input.old_roots.push("/explicit/old".into());
+        for forbidden in [
+            "/",
+            "/fixture/home",
+            "/fixture/checkout",
+            "/fixture/checkout/nested",
+            "/fixture/home/.agents/new",
+            "/fixture/home/.local/state/agent-harness/fabric",
+            "/fixture/home/.local/state/provenant/new",
+            "/selected/workspace/.agent-run/new",
+            "/any/.agent-run/tail",
+            "/explicit/old/new",
+        ] {
+            input.state_dir = Some(forbidden.into());
+            assert!(
+                matches!(input.resolve(&Resolver), Err(RootError::Protected { .. })),
+                "{forbidden}"
+            );
+        }
+        input.state_dir = Some("/explicit/old-sibling".into());
+        assert!(input.resolve(&Resolver).is_ok());
+    }
+    #[test]
+    fn canonical_aliases_are_checked_after_binding_and_failures_are_not_absence() {
+        struct Aliases;
+        impl PathResolver for Aliases {
+            fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+                if let Ok(tail) = path.strip_prefix("/alias") {
+                    return Ok(Path::new("/fixture/home/.agents").join(tail));
+                }
+                if path == Path::new("/unreadable") {
+                    return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+                }
+                Ok(path.into())
+            }
+        }
+        let mut input = inputs();
+        input.state_dir = Some("/alias/missing/tail".into());
+        assert!(matches!(
+            input.resolve(&Aliases),
+            Err(RootError::Protected { .. })
+        ));
+        input.state_dir = Some("/unreadable".into());
+        assert!(matches!(
+            input.resolve(&Aliases),
+            Err(RootError::Resolution { .. })
+        ));
     }
 }

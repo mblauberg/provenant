@@ -1,7 +1,7 @@
 //! Receipt and sidecar metadata policy. Discovery and file cursors stay with the ledger owner.
-use crate::{costs, parse_time, Event, HostIdentity, Result, Sink, Usage};
+use crate::{Event, HostIdentity, Result, Sink, Usage, costs, parse_time};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -463,9 +463,11 @@ mod tests {
         assert_eq!(run.started_at.as_deref(), Some("2026-10-21T00:00:00+00:00"));
         assert_eq!(run.merge_commit.as_deref(), Some("good"));
         assert!(run.accepted);
-        assert!(!serde_json::to_string(&run.review_verdicts)
-            .unwrap()
-            .contains("secret"));
+        assert!(
+            !serde_json::to_string(&run.review_verdicts)
+                .unwrap()
+                .contains("secret")
+        );
     }
     #[test]
     fn unlinked_runs_never_appear_free() {

@@ -65,14 +65,14 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | records | Versioned serde records, canonical byte encoders, digest contracts | core |
 | config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
-| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy | core, records, config, supervisor's safe OS API |
-| providers | Adapter profiles, argv/environment builders, output classification and continuation | core, records, config, confinement |
-| quota | Windows, reset schedules, cooldowns and provider quota probes | core, records, config |
+| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
+| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota |
+| quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
 | telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
-| routing | Catalogue, preferences, live probes and route decisions | core, records, config, quota, providers |
-| run | Dispatch, attempts, admission, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing, telemetry |
+| routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
-| fabric-runtime | Identity, run registry/status, execution facade, federation and bounded graph owner | core, records, config, supervisor, run, fabric-store |
+| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement |
 | cli | Argument parsing and output/exit rendering for all commands | Libraries above as needed; no library imports cli |
@@ -82,6 +82,8 @@ identity and process-level setup. `help` and root resolution stay cheap: no
 threads, no SQLite, no provider probes. Break cycles with typed events and
 decisions, never by importing `run` into `providers` or `routing`. The
 install digest covers all workspace source, manifests and the lockfile.
+CLI composes run's `AttemptReader` with telemetry's `stats`; run has no
+telemetry dependency. Their shared `AttemptFact` lives in records.
 
 ## R3. Typed errors in libraries, rendering at the edge
 
@@ -127,7 +129,12 @@ writer lease early or kills a sibling lane.
 direct dependency list, decision 4 what is written in-house. Declare each
 crate once in `[workspace.dependencies]`; members use `{ workspace = true }`.
 A new crate, feature expansion or material transitive addition needs a rule
-change here with a reason. When parallel PRs conflict on `Cargo.lock`, take
+change here with a reason. Changes so far: `rusqlite` also serves run's
+registry store, so admission and operation insertion stay atomic in one
+database; `toml_edit` enables its `serde` feature (with `serde_spanned` and
+`toml_datetime`) so config is a typed model under R4. A workspace policy test checks every
+member's direct dependencies against this list, with `tempfile` in
+dev-dependencies only. When parallel PRs conflict on `Cargo.lock`, take
 `main`'s lockfile and run `cargo metadata --format-version 1 >/dev/null` in
 `tools/front-door`.
 
@@ -142,7 +149,7 @@ is no PyYAML comparison. Python-AST tooling is deleted with the Python.
 All first-party `unsafe` lives in `supervisor::sys` behind narrow safe
 wrappers with documented invariants. Every other crate, the binary included,
 has `#![forbid(unsafe_code)]`. A workspace `clippy.toml` `disallowed-methods`
-entry bans `std::process::Command::new` outside supervisor. Do not export
+entry bans `std::process::Command::new` outside supervisor. Until a crate is rewritten its root carries a `// Rewrite pending` allow for that lint; the crate's first build PR removes it, and the cli build removes the last one. Do not export
 raw owning descriptors or process handles that bypass custody. Each unsafe
 block states validity, ownership, lifetime, concurrency and error conditions,
 and a second reviewer checks it. Secret environment values stay off disk and
@@ -164,7 +171,10 @@ binary drive the real command tree and MCP server against a fake provider
 binary and an isolated state root. Process and custody behaviour (no healthy
 provider killed, terminal publication never lost, one writer, cancellation
 scope) is tested with process fixtures on Linux and macOS, using FIFO or
-handshake synchronisation instead of sleeps. Repo-file fixtures use
+handshake synchronisation instead of sleeps. Every test sets `HOME`, the
+state root and any harness config path to a temporary directory, so no test
+can read or write the old roots, the stable install or real harness config.
+Repo-file fixtures use
 `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..."))`; on macOS compare
 canonicalised temporary paths, because `/var` links to `/private/var`.
 
@@ -198,7 +208,10 @@ The user has delegated rewrite decisions to the chairs (2026-10-23): design,
 feature pruning and deletion are chair decisions, with a cross-family council
 for hard calls. Return to the user only for a dependency or ADR amendment
 outside R6, or anything that would touch the old state roots, credentials or
-the stable install. Escalate to the chair at once for weakened confinement
+the stable install. Each Mac's installed root is its primary checkout, and
+harness skills, workflows, hooks and MCP entries link into it: never pull,
+check out or reinstall there until cut-over. All work happens in worktrees
+from `origin/main`. Escalate to the chair at once for weakened confinement
 or custody, a healthy process signalled, or lost terminal publication. No
 lane may lower a gate, invent approval, read credentials or modify the stable
 install to get a green result.

@@ -32,7 +32,7 @@ LOCKED_CONSTRAINTS = {{LOCKED_CONSTRAINTS}}
 
 BUILD_CEILING     = {{BUILD_CEILING}}
 # ^ the explicit line between what the mission may build AUTONOMOUSLY and
-#   what requires human authorization / is owed / escalated.
+#   what requires human authorisation / is owed / escalated.
 
 ESCALATION_GATES  = {{ESCALATION_GATES}}
 # ^ the concrete instances, for THIS mission, of each of the 6 GENERIC gate

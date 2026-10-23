@@ -12,7 +12,7 @@ This layer assumes the loop and the state contract described in the sibling refe
 
 ## 1. Re-entrancy is the foundation
 
-Assume your context can be summarized, compacted, or wiped at any moment — between any two tool calls. The run must be fully reconstructable **from disk alone**. Two habits, both non-negotiable, make this true:
+Assume your context can be summarised, compacted, or wiped at any moment — between any two tool calls. The run must be fully reconstructable **from disk alone**. Two habits, both non-negotiable, make this true:
 
 - **RECORD-BEFORE-LAUNCH.** Before dispatching *any* background job, flip its `QUEUE.md` row to `LEASED` with `{lease-owner, lease-expiry, what, expected-output-path}` filled. Only then dispatch. A crash in the window between launch and record orphans the run — the job runs to completion on disk but no surviving record points to it. Recording *first* guarantees the run→work-item link survives a wipe.
 - **RECONCILE-FIRST.** Every iteration begins — before selecting any new work — by re-reading `QUEUE.md`'s `LEASED` rows and re-attaching each to its work-item:

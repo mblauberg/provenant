@@ -250,11 +250,8 @@ mod tests {
 mod child;
 pub(crate) mod pid;
 pub(crate) mod raw_exec;
-pub use child::ChildWaitError;
-pub(crate) use child::{anonymous_spool, OwnedChild};
 
 pub mod lane_files;
-pub mod process;
 
 pub(crate) mod fs;
 
@@ -265,3 +262,7 @@ pub mod errno {
         EOPNOTSUPP, EPERM, EXDEV,
     };
 }
+
+// Existing S2 implementation, pending the supervisor rewrite.
+#[doc(hidden)]
+pub mod legacy_lane;

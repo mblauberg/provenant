@@ -3,8 +3,8 @@ members = [".", "crates/*"]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
-rust-version = "1.94"
+edition = "2024"
+rust-version = "1.99.1"
 license = "MIT"
 
 # The only direct dependencies allowed (ADR 0028, PORTING.md R6). Member crates
@@ -20,7 +20,7 @@ serde_json = "1.0"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2.0"
-toml_edit = "0.25"
+toml_edit = { version = "0.25", features = ["serde"] }
 
 # Internal crates. Each member may depend only on the crates PORTING.md R2
 # allows it, as `provenant-<name> = { workspace = true }`.
@@ -40,6 +40,40 @@ provenant-fabric-mcp = { path = "crates/fabric-mcp" }
 provenant-workflow = { path = "crates/workflow" }
 provenant-cli = { path = "crates/cli" }
 
+# Rewrite lanes land inert (ADR 0028). Keep their shared path declarations
+# until cutover gives each a consumer; remove its ignore at that point.
+[workspace.metadata.cargo-shear]
+ignored = [
+  "provenant-cli",
+  "provenant-config",
+  "provenant-confinement",
+  "provenant-fabric-mcp",
+  "provenant-fabric-runtime",
+  "provenant-fabric-store",
+  "provenant-providers",
+  "provenant-quota",
+  "provenant-records",
+  "provenant-routing",
+  "provenant-run",
+  "provenant-telemetry",
+  "provenant-workflow",
+]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+float_cmp = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+disallowed_methods = "deny"
+
 [package]
 name = "provenant"
 version = "0.1.0"
@@ -50,11 +84,15 @@ publish = false
 license.workspace = true
 
 [features]
-fault-injection = []
+fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
-libc.workspace = true
 provenant-supervisor = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+toml_edit = { workspace = true }
+provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
 
 [profile.release]
 opt-level = "z"
@@ -67,3 +105,6 @@ strip = true
 # malformed LINKEDIT that rustc cannot load (E0463). Strip only the binary.
 [profile.release.build-override]
 strip = false
+
+[lints]
+workspace = true

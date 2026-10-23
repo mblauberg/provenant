@@ -4,24 +4,10 @@ components:
   - id: impeccable-modified-distribution
     origin: third-party
     exact: []
-    prefixes: [agents/, references/, scripts/]
+    prefixes: [agents/, references/]
     exclude:
       - references/emotional-design.md
-      - scripts/ui-evidence-paths.mjs
-      - scripts/ui-live-paths.mjs
-      - scripts/ui-runtime-paths.mjs
-    marker_required_exact:
-      - scripts/detect-csp.mjs
-      - scripts/live.mjs
-      - scripts/live-poll.mjs
-      - scripts/live-accept.mjs
-      - scripts/live-wrap.mjs
-      - scripts/live-inject.mjs
-      - scripts/live-server.mjs
-      - scripts/live-status.mjs
-      - scripts/live-resume.mjs
-      - scripts/live-complete.mjs
-      - scripts/detect.mjs
+    marker_required_exact: []
     marker_required_prefixes: [agents/, references/]
     modification_baseline: 160d110443677984fe033c32dd944d0fad0d4937
     source_url: https://github.com/pbakaus/impeccable
@@ -36,7 +22,4 @@ components:
     exact:
       - SKILL.md
       - references/emotional-design.md
-      - scripts/ui-evidence-paths.mjs
-      - scripts/ui-live-paths.mjs
-      - scripts/ui-runtime-paths.mjs
-    description: Local skill entrypoint, emotional-design reference, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.
+    description: Local skill entrypoint, emotional-design reference, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.

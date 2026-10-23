@@ -68,16 +68,17 @@ Chair decisions, informed by the deletion council of 2026-10-23 (two
 families) and a transcript usage check on the workshop Mac. A design doc may
 remove more; it records each removal with its reason.
 
-- **Dead code now:** `skills/deliver/scripts/select_security_evidence.py`,
+- **Dead code (deleted):** `skills/deliver/scripts/select_security_evidence.py`,
   `scripts/lib/projection.py` and Rust `cli::projection`, the workflow
   `generate_policy_fixtures.py`, and `tests/test_delivery_validator_structure.py`.
 - **Inert Rust emulation:** every `pending` module, `python_unicode` table,
   `core::py` and `core::js` emulation helper, `oracle.rs`/`test_support.rs`
   oracle harness and its generators, routing `casefold.rs` and the
-  `delivery_run_shape` copy. These exist only to reproduce Python or V8
-  behaviour, which R0 no longer requires.
-- **Tools:** the Herdr checker (`check_herdr_cli.py`), the `extract` utility
-  with its utility schema and Ajv validation, and the direct `cf_dispatch.py`
+  `delivery_run_shape` copy, and `crates/core/scripts/generate_unicode.py`.
+  These exist only to reproduce Python or V8 behaviour, which R0 no longer
+  requires. Each crate's first build step deletes its share.
+- **Tools:** the `extract` utility with its utility schema and Ajv validation,
+  and the direct `cf_dispatch.py`
   entry. Command aliases are dropped in the frozen command tree.
 - **Port machinery:** the unit graph and its generator, inventory, ported
   list and divergence log, which tracked a unit-by-unit port.
@@ -85,7 +86,9 @@ remove more; it records each removal with its reason.
   `tests/mcp_judge/`, `tests/lane_conformance/` and
   `tests/test_record_schemas.py` retire with the subjects they test.
   Rust integration tests in the new binary replace them (PORTING.md R9),
-  and lane conformance's custody invariants are rewritten there first.
+  and lane conformance's custody invariants are rewritten there first. The
+  cli build removes their CI steps and the `PROVENANT_PORT_*` oracle
+  variables in `.github/workflows/ci.yml` with them.
 - **Python and TS CI tooling** (`scripts/static-security-check.py`,
   `scripts/lint-timebomb-fixtures.py`, the layering test) goes when no
   Python or TS remains; R7's guards replace the security check.
@@ -94,8 +97,5 @@ Left to the owning design doc, with the evidence so far:
 - Session helpers (`context_audit`, `validate_idle_pause`,
   `bootstrap-autopilot`): the council proposed retiring them. Workshop
   transcripts mention them, so the workflow design checks for real use first.
-- UI tooling (`scripts/detect.mjs`, `scripts/live*.mjs`): the council
-  proposed retiring them in favour of the Playwright skill. The workshop
-  transcripts show no executions of either script.
 - Delivery telemetry and retrospectives: the workshop telemetry ledger holds
   no delivery or change rows.

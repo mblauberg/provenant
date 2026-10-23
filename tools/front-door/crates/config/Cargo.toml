@@ -6,16 +6,5 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[dependencies]
-provenant-core = { workspace = true }
-provenant-records = { workspace = true }
-provenant-supervisor = { workspace = true }
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-toml_edit = { workspace = true }
-sha2 = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+[lints]
+workspace = true
