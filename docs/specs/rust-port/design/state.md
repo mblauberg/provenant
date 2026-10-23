@@ -28,7 +28,7 @@ requirement.
 | One root resolver, host and project identities | Resolve at the binary edge; pass typed values. Persist random host-local IDs once; hostnames are labels. |
 | Source identity and managed installation | One release manifest, one receipt, per-entry skill links and conflict refusal. Explicit harness selection; preserve unmanaged files. |
 | Five live harness registrations | Claude Code, Codex, Cursor, Agy and OpenCode have active surfaces. Format-specific editors share one planner. |
-| Compiled presets and typed TOML | Optional user `profile =`; read-only `config show` and `config check`. Domain owners supply policy types and defaults. |
+| Compiled presets and typed TOML | Optional user `profile =`; read-only `config show` and `check config`. Domain owners supply policy types and defaults. |
 | External YAML subset | Agent Skills frontmatter and `agents/*.yaml` stay external inputs under ADR 0028. |
 
 | Drop | Reason and consequence |
@@ -50,6 +50,7 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | --- | --- |
 | Default root | `~/.local/share/provenant/v1`, one root per host on macOS and Linux |
 | Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then default; empty or relative explicit values fail. No XDG/old-root fallback. |
+| Environment | State owns the only product inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
 | User config | `<state>/config.toml`; optional, user-owned, only configuration file |
 | Host identity | `<state>/state.json` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/lock` |
@@ -197,11 +198,12 @@ there is no profile layering, per-request profile selector or generic knobs
 API. A preset never grants authority or a provider stop reason.
 
 Catalogue, adapter table and prices ship as TOML release assets, never copied
-into mutable state as defaults. Config owns section types to avoid dependency
-cycles; routing/providers/quota/workflow validate semantics. Telemetry owns
-the price schema and its replacement of `config/telemetry-prices.json` by a
-TOML asset. `config show` returns effective non-secret values and origins;
-`config check` validates without mutation or provider access. There are no
+into mutable state as defaults. Config owns non-price section types to avoid
+dependency cycles; routing/providers/quota/workflow validate semantics. Telemetry owns
+the price schema (`PriceTable`); state owns how bundled TOML assets load,
+including the replacement for `config/telemetry-prices.json`. `config show`
+returns effective non-secret values and origins;
+`check config` validates without mutation or provider access. There are no
 config/install MCP tools. Processes use an immutable startup snapshot.
 
 ## Commands and installation
@@ -220,10 +222,10 @@ A failed preview stream prevents writes.
 | Command | Inputs and behaviour |
 | --- | --- |
 | `root` | `--kind state\|assets\|project` (default state). Project requires `--project ABS` and prints that selection without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
-| `config show`, `config check` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
+| `config show`, `check config` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
 | `install [--dry-run]` | `--source ABS` identifies a staged release; `--harness NAME` repeatable and explicit; optional `--bin-dir ABS`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validate all destinations and print every replace/remove/create before writes. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS` source checkout for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
-| `remove` | Explicit `--harness NAME` repeatable; remove unchanged owned entries only. Keeps state, release assets, user skills/config and the running binary. No recursive deletion. |
+| `uninstall` | Explicit `--harness NAME` repeatable; remove unchanged owned entries only. Keeps state, release assets, user skills/config and the running binary. No recursive deletion. |
 
 ### Release identity and bootstrap
 
@@ -274,8 +276,10 @@ preview/receipt; they cannot be changed by a project/request.
 Every MCP entry executes the absolute stable binary with
 `--state-dir ABS fabric mcp --client NAME`; JSON/TOML clients use command and
 args, OpenCode uses a combined array. No checkout, Python, Node or secret env.
-CLI owns accepted startup arguments and fixture-backed hook verbs/events,
-matchers, stdin/stdout and exits. Codex fixtures must cover both the feature
+CLI owns accepted startup arguments and the `HookSpec` table (harness,
+protocol event, matcher, timeout, handler), the installer's source for hook
+entries, supplied to config by binary composition without a cli dependency.
+CLI's fixtures define stdin/stdout and exits. Codex fixtures cover the feature
 switch and `hooks.json`, rather than invent a Claude settings or notify hook.
 Unsupported hooks refuse before writes. When disabling/removing Codex hooks,
 remove only an unchanged installer-owned feature value; preserve pre-existing
@@ -322,7 +326,7 @@ independently of the new release's retained-skill list.
 | Four Claude hooks | Compiled commands for `<legacy>/skills/session/scripts/compact_reinject.py`, `<legacy>/skills/session/scripts/state_check.py --hook`, `<legacy>/scripts/utility_output_hook.py`, `<legacy>/scripts/lane_safety_guard.py`, at `SessionStart`/matcher `compact`, `PreCompact`/no matcher, `PostToolUse`/matcher `Bash` and `PreToolUse`/matcher `Bash`, respectively. Replace retained behaviour with CLI's Rust hook; remove retired behaviour. Preserve sibling commands, even in the same hook group. |
 | Skill links in all five skills directories | For each compiled name, `readlink` equals `<legacy>/skills/<name>` or `<legacy>/library/<name>` (normalised relative targets allowed). Replace retained names; remove retired names and `_shared`. A whole skills-directory link to exactly `<legacy>/skills` is unlinked and replaced by a real directory of managed entries; never traverse it. Foreign files/directories conflict. |
 | Claude workflow links | `codebase-polish.js`, `cross-verify.js`, `implement-run.js`, each targeting `<legacy>/workflows/<name>`. Remove all three; no JS workflow replacement. Handle an exact whole-directory link without traversal. |
-| Instructions and constitution | Replace Claude `CLAUDE.md` and Codex `AGENTS.md` links whose `readlink` is exactly `~/.agents/AGENTS.md`, plus the registry's instruction links to `<legacy>/AGENTS.md` and companions targeting `<legacy>/HARNESS.md`. Link directly to the new release instruction assets. Never open or change `~/.agents/AGENTS.md` or any `~/.agents` contents. |
+| Instructions and constitution | Replace Claude `CLAUDE.md` and Codex `AGENTS.md` links whose `readlink` is exactly `~/.agents/AGENTS.md`, plus the registry's instruction links to `<legacy>/AGENTS.md` and companions targeting `<legacy>/HARNESS.md`. Link directly to the new release instruction assets. Apply the authorised variable rewrite below before replacing links. |
 | OpenCode instruction array | Exact `instructions[]` strings for `~/.agents/AGENTS.md` and `<legacy>/HARNESS.md`: replace with new release instruction assets, preserving other array entries. Do not dereference old paths. |
 | MCP entries in all five clients | Match compiled old command/args/env shapes for the stable shim (`~/.local/bin/provenant`, absent/empty args and the exact environment below) only. Other launch commands conflict. Known path values may reference old stores but are never dereferenced. Replace with the new stdio entry and remove obsolete owned env keys. Unknown/secret-bearing variants conflict. |
 
@@ -342,11 +346,23 @@ utility output uses its recorded absolute Python interpreter with that
 rendering. Never accept arbitrary interpreters, shell suffixes, labels or env
 keys by pattern.
 
+At cut-over, rewrite `AGENT_FABRIC_LABEL` to `PROVENANT_AGENT_LABEL` in
+`~/.agents/AGENTS.md` and the files linked to it. New release instruction
+assets already use `PROVENANT_AGENT_LABEL` before publication. Print each
+path and exact before/after change before applying it; a failed preview prevents writes. The user has authorised this
+instruction-only exception to the old-root prohibition. Plan each regular
+instruction file once, verify its identity and unchanged bytes before atomic
+publication, and refuse unresolved or foreign links. Never write the primary
+checkout; replace a link into it with the updated release asset. No other
+old-root contents are opened or changed. Re-application accepts already
+updated text; `check install` verifies no old variable remains in these files.
+
 Absolute and relative link targets are compared lexically after resolving
-relative components against the link's parent; no target contents are read.
-Only named harness entries are changed, not old state, transcripts or the
-primary checkout. Print matched selector/target, disposition and replacement
-before any write. A required legacy entry left unresolved blocks cut-over;
+relative components against the link's parent; target contents are read only
+for the authorised instruction rewrite. Only named harness entries and those
+instructions change, not old runtime state, transcripts or the primary
+checkout. Print matched selector/target, disposition and replacement before
+any write. A required legacy entry left unresolved blocks cut-over;
 `check install` checks all compiled legacy selectors for residual references.
 No cleanup of unrelated historical files is implied.
 
@@ -355,9 +371,9 @@ stable regular executable, printing/pinning its exact identity and digest.
 It never authorises deletion or a broad legacy sweep; link replacement/removal
 requires the exact table match and `--legacy-checkout`. Foreign directories
 and symlinked executables refuse. Adopting inline secret env values refuses,
-so neither preview nor receipt becomes a credential store. Existing regular
-user instructions are preserved; report a manual include if no owned link
-can be installed. Do not seed or overwrite them.
+so neither preview nor receipt becomes a credential store. Apart from the
+authorised variable rewrite, preserve existing regular user instructions;
+report a manual include if no owned link can be installed. Do not seed them.
 
 ### Publication and recovery
 
@@ -392,11 +408,23 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 | core | Distinct `HostId`, `ProjectId`, `WorkspaceId`, `RepoId`, `ActorId`, `RunId`, `TaskId`, `AttemptId`, `DeliveryId`, `SessionId`, `InstallId`, `ImportId`; `GitOid`, `Digest`, `WorkScope`, `CancelToken`; `RootInputs -> Result<Roots>`, `RelativePath::parse`; `WallTime`/`UtcMicros`, `MonoTime`, `DurationMicros`, `Deadline`, `Clock`. No ambient discovery or I/O. |
 | records | `decode<T: DeserializeOwned>(reader, Limits)`, `encode<T: Serialize>`; `CanonicalV1::bytes`, record/file/source digests; `PathWire`; bounded frontmatter/sidecar/JSONC parsers; state/install/import models. Stored records and Serialize-only facts are separate types. |
 | records (CLI contract) | `CommandResult<T> { schema_version, command, status, data: Option<T>, error: Option<CommandError> }`, closed status enum and redacted typed errors; `Finding` and `HelpCatalog`. Output supports additive fields within v1. CLI constructs/renders envelopes and maps exits; no library imports cli. |
-| config | `load(roots, reader) -> Result<ResolvedConfig>` with origins and selected compiled preset; `bind_project(roots, ProjectLocation, SafeFs) -> Result<ProjectBinding>`; pure `plan_install(Release, Targets, Snapshots) -> Result<InstallPlan>`; `install(plan, SafeFs, reporter) -> Result<InstallOutcome>`; `check_install`, `remove`. Plan is ephemeral, not a persisted recovery protocol. |
+| config | `load(roots, reader) -> Result<ResolvedConfig>` with origins and selected compiled preset; `bind_project(roots, ProjectLocation, SafeFs) -> Result<ProjectBinding>`; pure `plan_install(Release, Targets, Snapshots) -> Result<InstallPlan>`; `install(plan, SafeFs, reporter) -> Result<InstallOutcome>`; `check_install`, `uninstall`. Plan is ephemeral, not a persisted recovery protocol. |
 | supervisor | Production `SystemClock` (`jiff` wall time), entropy, safe no-follow FS/locks/publication and bounded version/help smoke processes. `run_utility` for fixed Git/gh reads; test-only fixture binary with a scoped `Command::new` allow for process tests. |
 | confinement | `discover_project(Workspace, &DiscoveryAuthority) -> Result<ProjectLocation>` using supervisor Git reads; validates Git object format, repository/path membership and authority. Config consumes the result without a reverse dependency. |
 | fabric-runtime | Cross-host project key, `bind_federated_project`, external address-to-actor binding and federation routing of run queries. Fabric owns its read-only import and receipt. |
-| run | Registry, admission, attempts/status and atomic admission/operation insertion in run's durable store; top-level runs layout, `completed_attempt(AttemptId) -> AttemptFact` and terminal records. State owns no duplicate registry. |
+| run | Registry, admission, attempts/status and atomic admission/operation insertion in run's durable store; top-level runs layout, `completed_attempt(AttemptId) -> AttemptFact`, `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` and `snapshot` with active count. State owns no duplicate registry. |
+
+`AttemptFact` lives in records and derives `Serialize` only. Run constructs
+it from its store: task, attempt number, operation, project, terminal state,
+exit, started_at/finished_at, resolved route (provider, model, effort, account
+label), usage counts (`u64`), output paths, reviewer and `delivery_id`.
+Terminal records are immutable; highest attempt number selects the latest
+attempt. Telemetry's `stats(facts, &PriceTable, window) -> Stats` accepts any
+iterator of `AttemptFact`, filtering on `finished_at`, without revision dedupe.
+Retention is out of scope. CLI composes run's reader with telemetry, so run
+has no telemetry dependency; execution-run removes that R2 edge with a note.
+Routing owns account eligibility; run records the resolved account label and
+telemetry reads it from the fact. There is no `--account` flag.
 
 Records does not own lifecycle, cooldown, deletion or review policy. Config
 has no domain-runtime dependency: binary composition connects its values to
@@ -408,15 +436,18 @@ caller and permitted workspace paths, with no ProjectId. Composition calls
 `discover_project`, then `bind_project`, then constructs `ExecutionContext`.
 
 The other cross-area asks stay with their named owners: run's `wait(Any|All)`
-wakes on terminal or `InputRequired`, capped at 3600 s CLI/30 s MCP;
+wakes on terminal or `InputRequired`; every wait has an explicit budget,
+capped at 14400 s CLI/55 s MCP.
 `events(cursor)` is lazy pull, and cancel/resume/read_output/export take
 `&ExecutionContext`. Run owns `git_evidence_packet` via supervisor Git reads
 and completed-attempt facts with every field workflow consumed (terminal
 state/exit, subject, output, route, reviewer); dispatch carries optional
 `delivery_id`. The run-directory receipt/manifest/finaliser contract is cut
-in favour of run records plus `clean`. No telemetry `upsert_delivery` or
-reducers survive the no-ledger decision. Workflow owns writing-rule data and
-CLI freezes `lint`. Use an in-house snapshot helper, no `insta` dependency.
+in favour of run records plus `clean`. Telemetry drops `upsert_delivery` and
+the legacy delivery/change reducers; its terminal-record `stats` reducer stays.
+Workflow owns writing-rule data and
+CLI freezes `check writing PATHS`. Use an in-house snapshot helper, no `insta`
+dependency.
 
 ## Import, fixtures and cut-over
 
@@ -426,7 +457,8 @@ Fabric defines its command and receipt. Install/startup never imports. Do not
 read transcripts, revive runs/processes/claims/leases/sessions, or import
 telemetry/quota history. The old ledger remains available to the old install;
 telemetry owns retirement of the OTel collector. `tests/test_host_identity.py`
-is deleted once by state, not again by telemetry.
+and the OTel slices of `tests/test_install_harness.py` are counted/deleted
+once by state, excluded from telemetry's count.
 
 Source reads must not write SQLite journals, SHM or checkpoints. Require a
 quiescent self-contained source or supplied consistent snapshot; refuse a
@@ -454,7 +486,7 @@ MCP executables; old Python/TS output is not an oracle.
 | --- | --- |
 | Five harnesses | Accepted MCP config/stdio argv; Codex feature flag and hooks.json; TOML comments/inline tables; OpenCode JSONC comments/trailing commas; unrelated entries and unsupported-version refusal. |
 | Hooks | Actual enabled client event input, allow/no-op/deny output and exits, plus accepted registration. CLI supplies policy. No missing-fixture install. |
-| Legacy cut-over | Four exact hook commands (including recorded interpreter/quoting forms), all compiled skill links plus `_shared` across five harnesses, three workflow links, instruction/HARNESS links and live MCP entries. Include near-matches, mixed hook groups, foreign directories and broken links; assert no target/old-root contents are opened. |
+| Legacy cut-over | Four exact hook commands (including recorded interpreter/quoting forms), all compiled skill links plus `_shared` across five harnesses, three workflow links, instruction/HARNESS links, the global-instruction variable rewrite and live MCP entries. Include near-matches, mixed hook groups, foreign directories and broken links; assert only the authorised instruction files are read/changed in old roots, and every change is printed first. |
 | Skills/Git/MCP | Every tracked SKILL.md/agents YAML subset; primary/linked/non-Git discovery and SHA-1/SHA-256 repos; Fabric initialize/list/EOF/cancellation and stdout purity. |
 
 Unit tests prove ID/path/version/time overflow, canonical bytes and digest
@@ -463,8 +495,9 @@ presets, origins and editor byte preservation. Test cancellation scope and
 Serialize-only fact construction at the trusted edge. Integrations use real
 commands with synthetic release/provider/MCP fixtures: first install, no-op,
 partial failure then re-apply, drift, malformed config, adoption, exact legacy
-removals, check/remove and two independent host roots. Assert help/root creates
-nothing and unowned spans/old-state fixture trees remain byte-identical.
+removals, `check install`/`uninstall` and two independent host roots. Assert
+help/root creates nothing and unowned spans/old-state fixture trees remain byte-identical
+except the authorised instruction-variable rewrite.
 
 CI process tests on Linux/macOS use FIFO/handshake barriers for installer
 contention/deadlines, edits detected before publication, crash at each write,
@@ -483,13 +516,13 @@ PR; update surviving skill/hook/docs callers then, without forwarding adapters.
 
 | Slice | Python source/helper | Lines |
 | --- | --- | ---: |
-| 1 | `scripts/lib/roots.py` | 33 |
-| 1 | `skills/_shared/roots.py` | 45 |
-| 1 | `scripts/host_identity.py` | 102 |
+| 5 | `scripts/lib/roots.py` | 33 |
+| 5 | `skills/_shared/roots.py` | 45 |
+| 5 | `scripts/host_identity.py` | 102 |
 | 1 | `scripts/lib/jsonc.py` | 68 |
 | 1 | `tools/front-door/crates/core/scripts/generate_unicode.py` | 29 |
-| 2 | `skills/_shared/harness_profile.py` | 403 |
-| 2 | `scripts/harness_profile.py` | 212 |
+| 5 | `skills/_shared/harness_profile.py` | 403 |
+| 5 | `scripts/harness_profile.py` | 212 |
 | 3 | `scripts/lib/front_door_build.py` | 249 |
 | 3 | `scripts/lib/product_root_resolver.py` | 107 |
 | 3 | `scripts/write-product-root-pointer.py` | 27 |
@@ -506,9 +539,9 @@ PR; update surviving skill/hook/docs callers then, without forwarding adapters.
 
 | Slice | Deleted Python test | Lines |
 | --- | --- | ---: |
-| 1 | `tests/test_host_identity.py` | 129 |
+| 5 | `tests/test_host_identity.py` | 129 |
 | 1 | `tests/test_product_root_single_resolver.py` | 59 |
-| 2 | `tests/test_harness_profile.py` | 445 |
+| 5 | `tests/test_harness_profile.py` | 445 |
 | 3 | `tests/test_front_door_build.py` | 342 |
 | 3 | `tests/test_product_root_resolver.py` | 151 |
 | 3 | `tests/test_split_root_contract.py` | 147 |
@@ -525,7 +558,10 @@ slices: `scripts/provenant-profile` **5**, `scripts/install-skills` **87**,
 `scripts/install-harness` **702**; shell total **794**. The installation test
 module also tests collector/workflow/other hook subjects: those domain lanes
 must land their replacement tests or retire their subject before slice 4
-removes it; do not carry unrelated old tests into Rust config.
+removes it; state counts its OTel slices within the 2,427 lines, and telemetry
+excludes them. State deletes all of `tests/test_install_skills.py` with the old
+installer in slice 3; execution-run has no edit/deletion claim on that file.
+Do not carry unrelated old tests into Rust config.
 
 No TS file is wholly owned/deleted by this area. The dependent lanes delete
 these mixed files with their own consumers, without double-counting them here:
@@ -533,8 +569,9 @@ Fabric's `runtime/fabric/src/identity.ts` **196** and `run-root.ts` **96**;
 supervisor/Fabric's `process-identity.ts` **392** and associated TS tests.
 Likewise run owns `skills/orchestrate/scripts/layout.py` **245** and
 `tests/test_exec_layout.py` **158**, `attempt_evidence.py` **107** and
-`tests/test_attempt_evidence.py` **83**; run/supervisor owns
-`attempt_storage.py` **176**. Fabric/routing owns `fabric_records.py` **647**
+`tests/test_attempt_evidence.py` **83**; supervisor alone owns/deletes
+`attempt_storage.py` **176** with its last provider/cleanup importer.
+Fabric/routing owns `fabric_records.py` **647**
 and `tests/test_fabric_records.py` **816**. Their shared byte primitives call
 records; their domain logic does not move into records.
 
@@ -579,16 +616,24 @@ moves count once in their landing PR, not twice in subsystem estimates.
 Land these slices in dependency order:
 
 1. **Values and codecs:** core/records, clock trait, cancellation/scope/OID
-   types, stored models versus facts; delete root/host/JSONC and emulation
-   owners with their tests. Update Rust consumers; no old-language adapters.
+   types, stored models versus facts; delete JSONC and emulation owners with
+   their tests. Shared root/host leaves wait for slice 5. Update Rust consumers;
+   no old-language adapters.
 2. **Typed config:** single-file load, compiled presets, show/check; delete
-   profile/knob machinery and its tests. Domains land their TOML assets.
+   knob machinery and its tests; shared profile leaves wait for slice 5.
+   Domains land their TOML assets.
 3. **Release and managed files:** source stamping, manifest, receipt and
    idempotent install; delete builders, pointers and instance installers.
 4. **Harness cut-over:** fixture-backed editors, compiled legacy entries,
-   five-client MCP/hooks/links, check/remove; delete remaining installers and
-   update skill/docs callers. Domain tests retire with their subjects first.
-5. **Acceptance:** Fabric's bounded read-only importer, old-root no-write
+   five-client MCP/hooks/links, `check install`/`uninstall`; delete remaining
+   installers and update skill/docs callers. Domain tests retire with their subjects first.
+5. **Shared leaves, with the last importer:** state deletes both `roots.py`
+   helpers, `host_identity.py`, both `harness_profile.py` files and their tests
+   only after routing, providers, run, Fabric and workflow remove every static,
+   dynamic and test/oracle importer. Check the importer set in the deletion PR;
+   delay deletion to that owner's final consumer step if still live. This is
+   execution-run's last-importer rule, not an early slice 1/2 deletion.
+6. **Acceptance:** Fabric's bounded read-only importer, old-root no-write
    tests and both-Mac end-to-end checks; chairs own installation and rollback.
 
 Each build PR needs native diff review, chair/cross-family review and exact-head
