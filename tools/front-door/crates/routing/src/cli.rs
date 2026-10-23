@@ -33,7 +33,7 @@ pub struct RouteCli {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum RouteCommand {
-    Resolve(ResolveArgs),
+    Resolve(Box<ResolveArgs>),
     Snapshot(JsonArgs),
     Health(JsonArgs),
     Probe(ProbeArgs),
@@ -155,12 +155,12 @@ pub struct ResetArgs {
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
 pub struct PickArgs {
     #[arg(long, hide = true)]
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParsedCommand {
-    Command(RouteCommand),
+    Command(Box<RouteCommand>),
     LegacyPick(String),
 }
 
@@ -188,7 +188,7 @@ where
         }
     }
     RouteCli::try_parse_from(std::iter::once(OsString::from("model-route")).chain(args))
-        .map(|cli| ParsedCommand::Command(cli.command))
+        .map(|cli| ParsedCommand::Command(Box::new(cli.command)))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -222,7 +222,7 @@ mod tests {
     fn subcommands_parse_and_bare_route_names_remain_supported() {
         assert!(matches!(
             parse_command(["routes", "--all"]).unwrap(),
-            ParsedCommand::Command(RouteCommand::Routes(_))
+            ParsedCommand::Command(command) if matches!(*command, RouteCommand::Routes(_))
         ));
         assert_eq!(
             parse_command(["senior"]).unwrap(),
