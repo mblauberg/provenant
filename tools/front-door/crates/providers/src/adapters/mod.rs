@@ -16,6 +16,19 @@ impl Mode {
     }
 }
 
+/// Builder input, flattened from Python's dispatch plan.
+///
+/// All fields retain their Python top-level names except `add_dirs`, which
+/// maps from `p["applied"]["add_dirs"]`, and `endpoint_base_url`, which maps
+/// from `p["route"].get("endpoint_base_url")`. Missing and null endpoints are
+/// both false, while present JSON values use Python truthiness. The API-key
+/// environment value is injected into `claude` separately and is never stored
+/// or serialised in this record. Other provider configuration/environment facts
+/// (such as `agy_sandbox`) are supplied by the caller.
+///
+/// This is an inert builder API, not the persisted dispatch-plan schema.
+/// Unsigned timeout/context inputs intentionally remain a partial port; see
+/// RP-1303 in the divergence log before wiring a dynamic plan decoder.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Plan {
     pub mode: Mode,
@@ -29,8 +42,7 @@ pub struct Plan {
     pub session_id: String,
     pub cwd: String,
     pub add_dirs: Vec<String>,
-    pub claude_api_key: bool,
-    pub endpoint_base_url: Option<String>,
+    pub endpoint_base_url: Option<serde_json::Value>,
     pub context_ceiling: Option<u64>,
 }
 
@@ -99,79 +111,58 @@ pub mod kiro;
 #[cfg(test)]
 mod differential_tests {
     use super::*;
-    use std::io::Write;
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
 
     #[test]
     fn argv_profiles_match_python_on_shared_fixtures() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
-        let probe = Command::new("python3").arg("--version").output();
-        if matches!(probe, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound) {
-            eprintln!("skipping Python differential: python3 is unavailable");
-            return;
-        }
-        assert!(probe.unwrap().status.success(), "python3 --version failed");
-
-        for (mode, empty_options) in [
-            (Mode::ReadOnly, false),
-            (Mode::WorktreeWrite, false),
-            (Mode::ReadOnly, true),
-            (Mode::WorktreeWrite, true),
-        ] {
-            let plan = Plan {
-                mode,
-                prompt: "Compare the fixture exactly.".into(),
-                boundary_prompt: "Use file-reading tools only.".into(),
-                timeout_seconds: 30,
-                agy_sandbox: true,
-                resume_session: Some(if empty_options { "" } else { "session-fixture" }.into()),
-                model: Some(if empty_options { "" } else { "model-fixture" }.into()),
-                effort: Some(if empty_options { "" } else { "high" }.into()),
-                session_id: "session-id-fixture".into(),
-                cwd: "/workspace/fixture".into(),
-                add_dirs: vec!["/shared/fixture".into()],
-                claude_api_key: false,
-                endpoint_base_url: Some("https://example.invalid".into()),
-                context_ceiling: Some(if empty_options { 0 } else { 12_000 }),
-            };
-            let rust_profiles = [
-                ("agy", agy::agy(&plan)),
-                ("claude", claude::claude(&plan)),
-                ("copilot", copilot::copilot(&plan)),
-                ("cursor", cursor::cursor(&plan)),
-                ("kiro", kiro::kiro(&plan)),
-            ];
-            let mut input = serde_json::to_value(&plan).unwrap();
-            input["applied"] = serde_json::json!({"add_dirs": plan.add_dirs});
-            input["route"] = serde_json::json!({"endpoint_base_url": plan.endpoint_base_url});
-            let encoded = serde_json::to_vec(&input).unwrap();
-            for (name, profile) in rust_profiles {
-                let mut child = match Command::new("python3")
-                    .args(["-c", "import importlib,json,sys; p=json.load(sys.stdin); print(json.dumps(importlib.import_module(sys.argv[1]).argv(p), ensure_ascii=False))", &format!("skills.orchestrate.scripts.adapters.{name}")])
-                    .current_dir(&root)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                {
-                    Ok(child) => child,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        eprintln!("skipping Python differential: python3 disappeared");
-                        return;
+        for api_key in [None, Some(""), Some("fixture-key")] {
+            let mut fixtures = Vec::new();
+            let mut actual = Vec::new();
+            for mode in [Mode::ReadOnly, Mode::WorktreeWrite] {
+                for empty_options in [false, true] {
+                    for endpoint in [
+                        None,
+                        Some(serde_json::json!("")),
+                        Some(serde_json::json!("https://example.invalid")),
+                    ] {
+                        let plan = Plan {
+                            mode,
+                            prompt: "Compare the fixture exactly.".into(),
+                            boundary_prompt: "Use file-reading tools only.".into(),
+                            timeout_seconds: 30,
+                            agy_sandbox: true,
+                            resume_session: Some(
+                                if empty_options { "" } else { "session-fixture" }.into(),
+                            ),
+                            model: Some(if empty_options { "" } else { "model-fixture" }.into()),
+                            effort: Some(if empty_options { "" } else { "high" }.into()),
+                            session_id: "session-id-fixture".into(),
+                            cwd: "/workspace/fixture".into(),
+                            add_dirs: vec!["/shared/fixture".into()],
+                            endpoint_base_url: endpoint,
+                            context_ceiling: Some(if empty_options { 0 } else { 12_000 }),
+                        };
+                        let mut input = serde_json::to_value(&plan).unwrap();
+                        input["applied"] = serde_json::json!({"add_dirs": plan.add_dirs});
+                        input["route"] = match &plan.endpoint_base_url {
+                            Some(endpoint) => serde_json::json!({"endpoint_base_url": endpoint}),
+                            None => serde_json::json!({}),
+                        };
+                        fixtures.push(input);
+                        actual.push([
+                            agy::agy(&plan).argv,
+                            claude::claude(&plan, api_key).argv,
+                            copilot::copilot(&plan).argv,
+                            cursor::cursor(&plan).argv,
+                            kiro::kiro(&plan).argv,
+                        ]);
                     }
-                    Err(error) => panic!("could not start Python adapter oracle: {error}"),
-                };
-                child.stdin.take().unwrap().write_all(&encoded).unwrap();
-                let output = child.wait_with_output().unwrap();
-                assert!(
-                    output.status.success(),
-                    "{name} Python oracle failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let expected: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-                assert_eq!(profile.argv, expected, "{name} argv differs for {mode:?}");
+                }
             }
+            let Some(expected): Option<Vec<[Vec<String>; 5]>> = crate::oracle::python(
+                "import importlib,json,sys; modules=[importlib.import_module('skills.orchestrate.scripts.adapters.'+name) for name in ['agy','claude','copilot','cursor','kiro']]; print(json.dumps([[m.argv(p) for m in modules] for p in json.load(sys.stdin)]))",
+                &serde_json::json!(fixtures), api_key,
+            ) else { return; };
+            assert_eq!(actual, expected);
         }
     }
 }

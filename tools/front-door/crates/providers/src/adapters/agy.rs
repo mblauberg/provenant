@@ -64,7 +64,6 @@ pub(crate) mod tests {
             session_id: "session-1".into(),
             cwd: "/repo".into(),
             add_dirs: vec!["/shared".into()],
-            claude_api_key: false,
             endpoint_base_url: None,
             context_ceiling: Some(1000),
         }

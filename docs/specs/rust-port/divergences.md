@@ -73,3 +73,120 @@ They form the current baseline; they are not newly discovered port mismatches.
   listed as partial, not claimed as ported by this test.
 - Disposition: fixed in `a79987fe`; native repair review is clean. Independent
   J1 acceptance remains pending. No intentional exception is requested.
+
+## RP-1301 - Provider authentication and probe compatibility repair
+
+- Units: `skills/orchestrate/scripts/adapters/claude.py#unit-01` and
+  `skills/orchestrate/scripts/adapters/kiro.py#unit-01`, rulebook version 4
+  (`origin/docs/porting-v4`, PR #1297).
+- Class: `bug` (fixed) and `library` (fractional UTC-offset rounding, fixed).
+- Compared revisions: unchanged Python oracle at
+  `a7432845a039ad453a488191f6a1b7c46fd40b5f`; pre-repair Rust at
+  `fc14cd5f75da11b22581fdaaf06c451e94d462f9`; repaired source and judges in
+  PR #1298. The PR body pins the repair head and its checks.
+- Reproducer: `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-providers -j 2`
+  in `tools/front-door`, macOS arm64, Python 3.14.8. Oracles clear the
+  environment and retain only PATH plus an explicitly selected synthetic
+  ANTHROPIC_API_KEY; no provider/config state or temporary paths are used.
+- Expected / actual: Python's full `uses_api_key` predicate was represented
+  only by a caller-supplied boolean; endpoint-only fixtures hid both OAuth
+  and key-based authentication branches. Python accepts truthy JSON CLI
+  versions with Python equality (including `2 == 2.0`), while Rust required
+  strings. Python truncates timestamp fractions beyond six digits. Jiff also
+  rounds `+00:00:00.500000` to a whole-second offset: for
+  `2026-10-23T12:00:00+00:00:00.500000`, expected epoch microseconds are
+  `1792756799500000`, but the original parse gives `1792756799000000`.
+- Evidence: the added numeric-version / timestamp-boundary regression failed
+  with `prompt_only` versus `enforced` before repair. The exact timestamp
+  differential independently failed on the fractional offset above. Both
+  pass after repair, along with 180 argv comparisons, 36 predicate
+  comparisons, 2,093 probe comparisons and eleven exact timestamp cases.
+  Basic ISO date/time forms are included. Integers stay i64/u64; comparisons
+  never round integers through f64, and timestamps use integer microseconds.
+- Disposition: fixed; no intentional contract change. Exact-head CI and
+  independent J1/J2/J3 cut-over gates remain pending.
+- Follow-up: move JSON truth/equality and ISO timestamp adaptation from the
+  crate's `pending` module to `provenant-core` during integration. The CLI
+  pending module has repr/strip/digit helpers, but no JSON truth/equality or
+  ISO timestamp implementation to copy; these are extensions for core.
+
+## RP-1302 - Kiro fromisoformat parser coverage
+
+- Unit: `skills/orchestrate/scripts/adapters/kiro.py#unit-01`, rulebook version 4.
+- Class: `library` (open; not an approved exception).
+- Compared revisions: Python oracle at
+  `a7432845a039ad453a488191f6a1b7c46fd40b5f`; Rust parser and differential
+  fixture in the PR #1298 repair head pinned in its body.
+- Reproducer: `cargo test -p provenant-providers -j 2 recorded_fromisoformat -- --nocapture`
+  in `tools/front-door`, macOS arm64, Python 3.14.8. The fixture creates a
+  fresh probe one hour before its explicit microsecond clock and replaces
+  the timestamp's `T` with U+1F980 (crab).
+- Expected / actual: Python accepts an arbitrary single-character date/time
+  separator and returns `enforced`; Jiff rejects this spelling, so Rust
+  returns `prompt_only`. Basic format, long fractions, comma fractions and
+  fractional UTC offsets are adapted and compared separately in RP-1301.
+- Evidence: the retained differential asserts the exact old/new discrepancy;
+  it is mismatch evidence, not a passing parity claim. Other fromisoformat
+  grammar differences have not been exhaustively enumerated.
+- Disposition: open. Kiro is partial and excluded from the PR's `Units:` line.
+  No runtime cut-over or exception approval is requested.
+- Follow-up: adapt the remaining Python ISO grammar and replace the known
+  mismatch assertion with a parity assertion before claiming this unit.
+
+## RP-1303 - Unsigned provider plan fields narrow Python numeric inputs
+
+- Units: `skills/orchestrate/scripts/adapters/agy.py#unit-01` and
+  `skills/orchestrate/scripts/adapters/claude.py#unit-01`, rulebook version 4.
+- Class: `bug` (open; not an approved improvement).
+- Compared revisions: Python oracle at
+  `a7432845a039ad453a488191f6a1b7c46fd40b5f`; unsigned `Plan` fields retained
+  in the PR #1298 repair head pinned in its body.
+- Reproducer: call the unchanged Python `agy.argv` with otherwise-valid plans
+  and `timeout_seconds` set to `1.9`, `"30"`, and `-5`. The respective
+  `--print-timeout` arguments are exactly `1s`, `30s`, and `1s` because Python
+  applies `max(1, int(value))`. Rust's `u64` plan decoder refuses these values.
+  With `context_ceiling=-1`, Python `claude.argv` emits
+  `--autocompact -1`; Rust's `Option<u64>` cannot represent the input.
+- Evidence: reproduced with Python 3.14.8 in an environment containing only
+  PATH on macOS arm64. The supported unsigned-input cases remain covered
+  by argv differentials; these decoder gaps are not claimed as parity.
+- Disposition: open. Agy and Claude remain partial and are excluded from the
+  PR's `Units:` line until decoding/conversion is ported. The unsigned API
+  is retained for the inert crate only; it is not a new dynamic-plan contract.
+- Follow-up: port the input conversions at the typed boundary, preserving
+  Python ints as i64/u64. The new checked JSON boundary already refuses
+  values outside that range with typed `NumberOutOfRange` (RP-1304); it does
+  not yet implement the timeout/context coercions. The crate's `Plan` rustdoc records
+  the flattened `applied.add_dirs` / `route.endpoint_base_url` mapping.
+
+## RP-1304 - Provider JSON integer range refusal and malformed offsets
+
+- Units: provider JSON input boundary and
+  `skills/orchestrate/scripts/adapters/kiro.py#unit-01`, rulebook version 4.
+- Class: `improvement` for the required out-of-range refusal (R4); `bug` for
+  the fractional-offset overacceptance (fixed).
+- Compared revisions: Python oracle at
+  `a7432845a039ad453a488191f6a1b7c46fd40b5f`; Rust repair and native review
+  follow-up in PR #1298, exact candidate pinned in its body.
+- Reproducer: `cargo test -p provenant-providers -j 2 json_boundary` and
+  `cargo test -p provenant-providers -j 2 iso_timestamp_conversion` in
+  `tools/front-door`, macOS arm64, Python 3.14.8.
+- Expected / actual: Python keeps `18446744073709551616` and
+  `18446744073709551617` as distinct ints; serde_json's unchecked Value
+  decoder rounds both to the same float. The new checked JSON boundary
+  refuses these tokens with `DecodeError::NumberOutOfRange` before serde
+  parses them, as R4 requires. In-range signed/unsigned endpoints stay exact;
+  decimal/exponent JSON numbers remain floats. Pre-parsed Value APIs require
+  exact values and cannot recover information already lost by another decoder.
+  Python rejects offset `+01:02.500000`; the first fractional-offset repair
+  accepted it. Fractions now require explicit offset seconds, matching Python.
+- Evidence: native adversarial review found both issues; regression tests
+  failed on the unchecked oversized integer and malformed fractional offset
+  before the fixes. Tests cover the checked Kiro JSON entry point, both range
+  endpoints, integers above 2**53, integer-looking strings, and invalid offset
+  fractions after only hours or minutes. All pass after repair.
+- Disposition: fixed; oversized integer refusal follows the user's explicit
+  R4 instruction. No broader numeric input narrowing is approved (RP-1303).
+- Follow-up: move the checked JSON token preflight from `pending` to
+  `provenant-records` when its codec lands; use `decode_json` or
+  `read_only_guarantee_json` at dynamic input boundaries.
