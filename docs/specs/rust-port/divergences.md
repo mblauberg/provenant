@@ -1195,22 +1195,23 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
-## RP-CLI2-01: typed cleanup and PID integer bounds
+## RP-CLI2-01: typed cleanup integer bounds
 
 - Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
-- Units: `scripts/clean.py#interface`, `scripts/lane_safety_guard.py#unit-01`.
+- Unit: `scripts/clean.py#interface`.
   Source oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6` (unchanged through
   `cffeb4a54b6a702a008dbfee92bef5177803e8f3`). Author route:
   `codex/gpt-6.1-sol@high`.
-- Python accepts `18446744073709551616d` and the PID string
-  `18446744073709551616`. Rust returns typed `IntegerError::NumberOutOfRange`
-  instead of storing unbounded decimal strings or rounding through f64.
-  Accepted day values now remain u64. Hour durations retain Python's float
-  multiplication after the exact integer range check.
-- Python's separate 4300-digit conversion guard is preserved, including
+- Python accepts `18446744073709551616d`. Rust returns typed
+  `IntegerError::NumberOutOfRange` instead of storing unbounded decimal strings
+  or rounding through f64. Accepted day values remain u64. Hour durations retain
+  Python's float multiplication after the exact integer range check.
+- Cleanup preserves Python's separate 4300-digit conversion guard, including
   leading zeros and Unicode decimal digits, as `IntegerError::DigitLimit`.
-  `4301` decimal digits fail in both sources; this is not an improvement
-  divergence. Tests cover both typed failure classes and the accepted u64 edge.
+  Tests cover both typed failure classes and the accepted u64 edge.
+- This entry previously included PID bounds. That was a Rust bug: the PID
+  policy needs only a zero check and now accepts unbounded nonzero decimals.
+  The separate Python crash above 4300 PID digits is recorded in RP-CLI2-06.
 
 ## RP-CLI2-02: batch-1 compatibility repairs
 
@@ -1404,3 +1405,35 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   The seven-scenario differential suite includes exact ISO output/errors at
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
+
+
+## RP-CLI2-05: wrapper command boundaries and large literal PIDs
+
+- Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
+- The split wrapper search restarted its suffix match beyond command boundaries.
+  `sudo ls; echo pkill` and `sudo ls\necho pkill` now remain allowed, matching
+  Python's single regex. The suffix is anchored at both ends and checked for
+  each candidate name at a Python word boundary. Differential neighbours cover
+  semicolons, LF, pipes, ampersands, path prefixes and non-boundary names.
+- `99999999999999999999` is a nonzero literal PID in Python. Rust now checks
+  decimal digit values directly instead of parsing a u64. Differentials include
+  huge nonzero values and 4300-digit zero/nonzero ASCII and Unicode decimals.
+- Sidecar oracle tests probe PyYAML before importing the source: missing `yaml`
+  prints `skip:` and skips in optional mode, but fails when
+  `PROVENANT_PORT_DIFF_REQUIRED=1`. Required runs with PyYAML still check decoded
+  sidecar policy and the source's invalid-YAML diagnostics.
+
+## RP-CLI2-06: Python PID conversion digit-limit crash
+
+- Class: `python-bug`; explicit Rust improvement. Same rulebook/oracle/route as
+  RP-CLI2-01; unit `scripts/lane_safety_guard.py#unit-01`.
+- Under the oracle's default 4300-digit limit, Python's `int(target)` raises
+  `ValueError` for 4301-digit decimal PIDs, including all zeros and Unicode
+  decimals. The exception escapes the hook; Python makes no allow/deny decision.
+- Rust uses a decimal zero check with no conversion or digit limit. It allows
+  every nonzero literal PID and denies every all-zero PID with the normal
+  process-group reason, including values above 4300 digits. This decision does
+  not validate whether the operating system has a corresponding PID.
+- Evidence: `python_digit_limit_crash_has_an_explicit_safe_decision` checks both
+  source exceptions against Rust's explicit decisions; the adjacent regression
+  checks arbitrarily long and mixed Unicode zero/nonzero inputs.

@@ -84,6 +84,21 @@ mod tests {
     #[test]
     fn sidecar_policy_and_invalid_yaml_match_the_source() {
         use std::fs;
+        let Some(has_yaml): Option<bool> = crate::oracle::python(
+            "import importlib.util,json; print(json.dumps(importlib.util.find_spec('yaml') is not None))",
+            &json!(null),
+        ) else {
+            return;
+        };
+        if !has_yaml {
+            eprintln!("skip: Python oracle lacks PyYAML (yaml)");
+            assert_ne!(
+                std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref(),
+                Ok("1"),
+                "required Python oracle dependency PyYAML unavailable"
+            );
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let scripts = dir.path().join("scripts");
         fs::create_dir(&scripts).unwrap();

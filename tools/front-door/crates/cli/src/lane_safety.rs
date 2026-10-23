@@ -168,7 +168,7 @@ pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::IntegerErro
                 crate::pending::python_repr(target)
             )));
         }
-        if crate::pending::decimal_integer(target)? == 0 {
+        if target.chars().all(|c| crate::pending::decimal_digit(c) == Some(0)) {
             return Ok(Some("kill 0 signals the caller's process group".into()));
         }
     }
@@ -486,7 +486,7 @@ impl Guard {
                 r"sudo|doas|env|xargs|nice|timeout|nohup|exec|command|time|setsid|stdbuf",
             )?,
             wrapped: regex::Regex::new(
-                r"[^;&|\n]*?[\s\x1c-\x1f](?:[^\s\x1c-\x1f]*/)?(?:pkill|killall)",
+                r"\A[^;&|\n]*?[\s\x1c-\x1f](?:[^\s\x1c-\x1f]*/)?(?:pkill|killall)\z",
             )?,
             heredoc: regex::Regex::new(
                 r#"<<-?[\s\x1c-\x1f]*(['"])([\p{L}\p{N}_]+)(['"])[^\n]*\n"#,
@@ -513,13 +513,22 @@ impl Guard {
             {
                 continue;
             }
-            if self.wrapped.find_iter(&text[m.end()..]).any(|rest| {
-                text[m.end() + rest.end()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !word_character(c))
-            }) {
-                return true;
+            let suffix = &text[m.end()..];
+            // Check complete prefixes ending at a Python word boundary. Anchoring
+            // the suffix prevents its search from restarting after ;, |, & or LF.
+            // Trying every name also retains matches after a non-boundary name
+            // such as `sudo echo pkillx pkill`.
+            for name in ["pkill", "killall"] {
+                if suffix.match_indices(name).any(|(start, _)| {
+                    let end = start + name.len();
+                    suffix[end..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !word_character(c))
+                        && self.wrapped.is_match(&suffix[..end])
+                }) {
+                    return true;
+                }
             }
         }
         false
@@ -712,7 +721,26 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
                 "<<EOF\nbody\nEOF",
                 "echo \"\\\n$(kill 0)\"",
                 "cat <<A <<B\nx\nA\ny\nB",
-                "é=$(echo x) kill 42"
+                "é=$(echo x) kill 42",
+                "sudo ls; echo pkill",
+                "sudo ls\necho pkill",
+                "sudo ls & echo killall",
+                "sudo ls | echo pkill",
+                "sudo ls; pkill x",
+                "sudo ls\nkillall x",
+                "sudo ls pkill",
+                "sudo ls pkillx",
+                "sudo ls xpkill",
+                "sudo ls /usr/binxpkill",
+                "sudo ls /usr/bin/killall",
+                "sudo ls\n pkill",
+                "sudo ls; echo /usr/bin/pkill",
+                "sudo ls; echo ;/pkill",
+                "sudo ls\necho x/pkill",
+                "echo ${sudo pkillx pkill}",
+                "echo ${sudo killallx killall}",
+                "echo ${sudo a;/pkill}",
+                "echo ${sudo ls; echo pkill}"
             ]),
         ) else {
             return;
@@ -739,20 +767,49 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
     }
 
     #[test]
-    fn integer_bounds_are_typed_and_python_digit_limit_is_preserved() {
-        assert!(matches!(
-            kill_reason(&["7".repeat(4301)]),
-            Err(crate::IntegerError::DigitLimit { digits: 4301 })
-        ));
-        assert!(matches!(
-            kill_reason(&["18446744073709551616".into()]),
-            Err(crate::IntegerError::NumberOutOfRange)
-        ));
+    fn literal_pid_zero_check_has_no_integer_range_or_digit_limit() {
+        for target in [
+            "99999999999999999999".into(),
+            "7".repeat(4300),
+            "7".repeat(4301),
+            format!("{}١", "٠".repeat(4301)),
+        ] {
+            assert_eq!(kill_reason(&[target]).unwrap(), None);
+        }
+        for target in ["0".repeat(4300), "٠".repeat(4301)] {
+            assert_eq!(
+                kill_reason(&[target]).unwrap(),
+                Some("kill 0 signals the caller's process group".into())
+            );
+        }
+    }
+
+    #[test]
+    fn python_digit_limit_crash_has_an_explicit_safe_decision() {
+        let targets = ["7".repeat(4301), "٠".repeat(4301)];
+        let Some(errors): Option<Vec<String>> = crate::oracle::python(
+            r#"
+import json,sys
+from scripts.lane_safety_guard import _kill_reason
+errors=[]
+for target in json.load(sys.stdin):
+    try:
+        _kill_reason([target])
+        errors.append('no error')
+    except ValueError as error:
+        errors.append(type(error).__name__)
+print(json.dumps(errors))
+"#,
+            &serde_json::json!(targets),
+        ) else {
+            return;
+        };
+        assert_eq!(errors, ["ValueError", "ValueError"]);
+        assert_eq!(kill_reason(&targets[..1]).unwrap(), None);
         assert_eq!(
-            kill_reason(&["0".repeat(4300)]).unwrap(),
-            Some("kill 0 signals the caller's process group".into())
+            kill_reason(&targets[1..]).unwrap().as_deref(),
+            Some("kill 0 signals the caller's process group")
         );
-        assert_eq!(kill_reason(&[u64::MAX.to_string()]).unwrap(), None);
     }
 
     #[test]
@@ -850,6 +907,12 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
                 cases.push(words(&format!("{signal} {target}")));
             }
         }
+        cases.extend([
+            vec!["99999999999999999999".into()],
+            vec!["7".repeat(4300)],
+            vec!["0".repeat(4300)],
+            vec![format!("{}١", "٠".repeat(4299))],
+        ]);
         let Some(expected): Option<Vec<Option<String>>> = crate::oracle::python(
             "import json,sys; from scripts.lane_safety_guard import _kill_reason; print(json.dumps([_kill_reason(a) for a in json.load(sys.stdin)]))", &json!(cases)
         ) else { return; };
