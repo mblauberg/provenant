@@ -5,3 +5,4 @@ pub mod batch_execution;
 pub mod execution;
 pub mod gates;
 pub mod hosts;
+pub mod identity;
