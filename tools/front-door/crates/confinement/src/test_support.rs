@@ -26,14 +26,15 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
-        let git = PathBuf::from("/usr/bin/git");
-        if !git.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "system Git fixture is unavailable",
-            )
-            .into());
-        }
+        let git = [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Git fixture is unavailable"))?;
         let temp = tempfile::tempdir_in("/tmp")?;
         let root = temp.path().join("repo");
         let home = temp.path().join("home");
