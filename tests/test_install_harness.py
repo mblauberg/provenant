@@ -6,8 +6,10 @@ import stat
 import subprocess
 import sys
 import tomllib
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from tests.support.proc import run_cli
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,10 @@ def instance_root_for(home: Path) -> Path:
     return home / ".agents"
 
 
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def otel_tools(tmp_path, system="Darwin", swiftc=True):
     """A PATH prefix with a stand-in `uname` and, optionally, a stand-in `swiftc`."""
     tools = tmp_path / "tools"
@@ -43,12 +49,13 @@ def otel_tools(tmp_path, system="Darwin", swiftc=True):
 
 
 def otel_install(tmp_path, tools, path=None, **extra):
-    return subprocess.run(
+    return run_cli(
         [shutil.which("bash"), "-c", 'umask 022; exec "$1"', "bash", str(ROOT / "scripts/install-otel-collector")],
+        cwd=ROOT,
         env={**os.environ, "HOME": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state"),
              "PROVENANT_BIN_DIR": str(tmp_path / "bin"), "PROVENANT_OTEL_NO_LAUNCHCTL": "1",
              "PATH": path or f"{tools}{os.pathsep}{os.environ['PATH']}", **extra},
-        text=True, capture_output=True, timeout=5,
+        timeout=5,
     )
 
 
@@ -132,14 +139,10 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     # cases below, so a toolchain on the host must not change what they build.
     env["PROVENANT_FRONT_DOOR"] = "python"
     env.update(extra_env)
-    return subprocess.run(
-        [*([bash] if bash else []), str(SCRIPT), "--platform", platform, *arguments],
+    return run_cli(
+        [*([bash] if bash else []), SCRIPT, "--platform", platform, *arguments],
         cwd=ROOT,
         env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
 
 
@@ -187,13 +190,10 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
     environment.update(extra_env)
     if use_front_door_default:
         environment.pop("PROVENANT_FRONT_DOOR", None)
-    return subprocess.run(
-        [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
+    return run_cli(
+        [product / "scripts/install-harness", "--platform", platform, *arguments],
         cwd=product,
         env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
     )
 
 
@@ -213,14 +213,10 @@ def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path
         "PROVENANT_BIN_DIR": str(tmp_path / "bin-out"),
     })
     env.pop("PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL", None)
-    result = subprocess.run(
+    result = run_cli(
         [str(command), "--platform", "claude"],
         cwd=tmp_path,
         env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
 
     assert result.returncode == 3
@@ -228,13 +224,9 @@ def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path
 
 
 def run_workflow_installer(target: Path):
-    return subprocess.run(
+    return run_cli(
         [str(WORKFLOW_SCRIPT), "--target", str(target)],
         cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
 
 
@@ -388,13 +380,10 @@ def test_post_seed_failure_leaves_existing_product_pointer_unchanged(tmp_path):
         }
     )
 
-    result = subprocess.run(
+    result = run_cli(
         [str(product / "scripts/install-harness"), "--platform", "codex"],
         cwd=product,
         env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
     )
 
     assert result.returncode == 7
@@ -699,7 +688,7 @@ def test_workflow_install_recovers_after_interruption_during_link_publication(
     config = tmp_path / "claude-config"
     target = config / "workflows"
     target.mkdir(parents=True)
-    interrupt = subprocess.run(
+    interrupt = run_cli(
         [
             sys.executable,
             "-c",
@@ -718,10 +707,6 @@ def test_workflow_install_recovers_after_interruption_during_link_publication(
             ),
         ],
         cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
 
     assert interrupt.returncode == 99
@@ -749,13 +734,9 @@ def test_workflow_installer_preserves_a_directory_link_to_canonical_sources(
     target = platform_home / "workflows"
     target.symlink_to(fixture_root / "workflows", target_is_directory=True)
 
-    result = subprocess.run(
+    result = run_cli(
         [str(scripts / "install-workflows"), "--target", str(target)],
         cwd=fixture_root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -869,8 +850,9 @@ def test_all_installs_present_optional_provider_surfaces(tmp_path):
         ".gemini/config/mcp_config.json", ".cursor/mcp.json", ".kiro/settings/mcp.json",
     ):
         assert (tmp_path / relative).exists(), relative
-    checked = subprocess.run(
+    checked = run_cli(
         [str(ROOT / "scripts/check-provenant-install.py")],
+        cwd=ROOT,
         env={
             **os.environ,
             "HOME": str(tmp_path),
@@ -878,9 +860,6 @@ def test_all_installs_present_optional_provider_surfaces(tmp_path):
             "PROVENANT_BIN_DIR": str(tmp_path / ".local/bin"),
             "CODEX_HOME": str(tmp_path / ".codex"),
         },
-        text=True,
-        capture_output=True,
-        check=False,
     )
     assert checked.returncode == 0, checked.stderr
     assert len([line for line in checked.stdout.splitlines() if line.startswith("provider ")]) == 6
@@ -889,8 +868,8 @@ def test_all_installs_present_optional_provider_surfaces(tmp_path):
 
 def test_all_without_skipped_platforms_runs_under_bash_3(tmp_path):
     bash = Path("/bin/bash")
-    if not bash.exists() or "version 3." not in subprocess.run(
-        [str(bash), "--version"], text=True, capture_output=True, check=False
+    if not bash.exists() or "version 3." not in run_cli(
+        [str(bash), "--version"], cwd=ROOT
     ).stdout:
         pytest.skip("requires /bin/bash 3.x")
 
@@ -1039,7 +1018,8 @@ def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(
 
     product_catalogue = product / "config/model-routing.json"
     shipped = json.loads(product_catalogue.read_text())
-    shipped["catalog_date"] = "2999-01-01"
+    catalogue_date = max(date.today(), date.fromisoformat(shipped["catalog_date"]))
+    shipped["catalog_date"] = (catalogue_date + timedelta(days=1)).isoformat()
     shipped["task_class_routes"]["review"]["models"]["codex"] = ["new-product-route"]
     product_catalogue.write_text(json.dumps(shipped))
 
@@ -1050,11 +1030,11 @@ def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(
     assert refreshed["task_class_routes"]["review"]["models"]["codex"] == ["new-product-route"]
     assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
 
-    newer = {**shipped, "catalog_date": "2999-01-02"}
+    newer = {**shipped, "catalog_date": (catalogue_date + timedelta(days=2)).isoformat()}
     product_catalogue.write_text(json.dumps(newer))
     refreshed = run_product(product, "codex", tmp_path / "install")
     assert refreshed.returncode == 0, refreshed.stderr
-    assert json.loads(target.read_text())["catalog_date"] == "2999-01-02"
+    assert json.loads(target.read_text())["catalog_date"] == newer["catalog_date"]
     assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 2
 
     unchanged = run_product(product, "codex", tmp_path / "install", "--refresh-routing")
@@ -1075,7 +1055,7 @@ def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(
     (instance_root / "config/.model-routing.base.json").unlink()
     product_catalogue.write_text(json.dumps({
         **json.loads(product_catalogue.read_text()),
-        "catalog_date": "2999-01-03",
+        "catalog_date": (catalogue_date + timedelta(days=3)).isoformat(),
         "second_product_field": "newer",
     }))
     before_unbased_refresh = target.read_bytes()
@@ -1150,50 +1130,51 @@ def test_codex_skill_override_preserves_symlinked_config(tmp_path):
 UNMANAGED_BYTES = b"# My existing instructions\r\nsecond line, no trailing newline"
 
 
-def test_preserves_existing_unmanaged_instructions(tmp_path):
-    config = tmp_path / "claude-config"
+@pytest.mark.parametrize(
+    "platform, config_name, variable, instructions_name, expected_returncode",
+    [
+        pytest.param("claude", "claude-config", "CLAUDE_CONFIG_DIR", "CLAUDE.md", 3, id="claude"),
+        pytest.param("codex", "codex-home", "CODEX_HOME", "AGENTS.md", 3, id="codex"),
+    ],
+)
+def test_preserves_existing_unmanaged_instructions(
+    tmp_path, platform, config_name, variable, instructions_name, expected_returncode
+):
+    config = tmp_path / config_name
     config.mkdir()
-    instructions = config / "CLAUDE.md"
+    instructions = config / instructions_name
     instructions.write_bytes(UNMANAGED_BYTES)
 
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-    assert result.returncode == 3
-    # Unmanaged instructions are preserved byte-for-byte; the merge line names
-    # both ambient files (AC-P2 existing-unmanaged arm).
+    result = run(platform, tmp_path, **{variable: str(config)})
+    assert result.returncode == expected_returncode
     assert instructions.read_bytes() == UNMANAGED_BYTES
     assert not (config / "skills").exists()
 
 
-def test_preserves_existing_codex_instructions(tmp_path):
-    # AC-P2: the codex platform layout ($CODEX_HOME/AGENTS.md) must fail closed
-    # over an existing unmanaged instructions file exactly like claude does —
-    # exit 3, byte-identical preservation, merge line naming both ambient files.
-    config = tmp_path / "codex-home"
-    config.mkdir()
-    instructions = config / "AGENTS.md"
-    instructions.write_bytes(UNMANAGED_BYTES)
-
-    result = run("codex", tmp_path, CODEX_HOME=str(config))
-    assert result.returncode == 3
-    assert instructions.read_bytes() == UNMANAGED_BYTES
-    assert not (config / "skills").exists()
-
-
-def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
-    config = tmp_path / "claude-config"
+@pytest.mark.parametrize(
+    "platform, config_name, variable, instructions_name, expected_returncode, diagnostic",
+    [
+        pytest.param("claude", "claude-config", "CLAUDE_CONFIG_DIR", "CLAUDE.md", 0, "add this line", id="claude"),
+        pytest.param("codex", "codex-home", "CODEX_HOME", "AGENTS.md", 0, "add this line", id="codex"),
+    ],
+)
+def test_accepts_instruction_symlink_to_canonical_agents_file(
+    tmp_path, platform, config_name, variable, instructions_name, expected_returncode, diagnostic
+):
+    config = tmp_path / config_name
     config.mkdir()
     instance_agents = tmp_path / ".agents/AGENTS.md"
     instance_agents.parent.mkdir()
     instance_agents.write_text("# Instance instructions\n")
-    instructions = config / "CLAUDE.md"
+    instructions = config / instructions_name
     instructions.symlink_to(instance_agents)
 
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+    result = run(platform, tmp_path, **{variable: str(config)})
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == expected_returncode, result.stderr
     assert instructions.is_symlink()
     assert instructions.resolve() == instance_agents
-    assert "add this line" not in result.stderr
+    assert diagnostic not in result.stderr
 
 
 def test_claude_install_retires_duplicate_agents_symlink(tmp_path):
@@ -1291,23 +1272,6 @@ def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
     assert result.returncode == 0, result.stderr
     assert (real_config / "CLAUDE.md").resolve() == instance_agents
     assert "duplicate instructions retired" not in result.stdout
-
-
-def test_accepts_codex_instruction_symlink_to_canonical_agents_file(tmp_path):
-    config = tmp_path / "codex-home"
-    config.mkdir()
-    instance_agents = tmp_path / ".agents/AGENTS.md"
-    instance_agents.parent.mkdir()
-    instance_agents.write_text("# Instance instructions\n")
-    instructions = config / "AGENTS.md"
-    instructions.symlink_to(instance_agents)
-
-    result = run("codex", tmp_path, CODEX_HOME=str(config))
-
-    assert result.returncode == 0, result.stderr
-    assert instructions.is_symlink()
-    assert instructions.resolve() == instance_agents
-    assert "add this line" not in result.stderr
 
 
 def test_rejects_instruction_symlink_to_foreign_file(tmp_path):
@@ -1453,13 +1417,13 @@ def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path
         "owner": "agent-harness",
         # An older install may record a previous home directory.
         "target_root": str(legacy.resolve()) if receipt_root == "current" else "/Users/previous/.gemini/config/skills",
-        "updated_at": "2026-01-01T00:00:00Z",
+        "updated_at": utc_timestamp(),
         "managed": {
             "retired-skill": {
                 "owner": "agent-harness",
                 "source_target": str(tmp_path / "old-product/skills/retired-skill"),
                 "source_sha256": "0" * 64,
-                "installed_at": "2026-01-01T00:00:00Z",
+                "installed_at": utc_timestamp(),
                 "history": [],
             }
         },
@@ -1471,13 +1435,10 @@ def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path
         "HOME": str(tmp_path),
         "HARNESS_PYTHON": sys.executable,
     })
-    result = subprocess.run(
+    result = run_cli(
         [str(SCRIPT), "--check-legacy-skills"],
         cwd=ROOT,
         env=env,
-        text=True,
-        capture_output=True,
-        check=False,
     )
 
     assert result.returncode == 1
@@ -1505,13 +1466,13 @@ def test_claude_retired_agent_conflict_preflights_before_harness_mutation(tmp_pa
         "owner": "agent-harness",
         "surface": "claude-agents",
         "target_root": str(agents.resolve()),
-        "updated_at": "2026-01-01T00:00:00Z",
+        "updated_at": utc_timestamp(),
         "managed": {
             old_source.name: {
                 "owner": "agent-harness",
                 "source_target": str(old_source),
                 "source_sha256": "0" * 64,
-                "installed_at": "2026-01-01T00:00:00Z",
+                "installed_at": utc_timestamp(),
             }
         },
     }))
@@ -1917,13 +1878,10 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(
         "HOME": str(clean_home),
         **claude_mcp["mcpServers"]["fabric"]["env"],
     })
-    registered = subprocess.run(
+    registered = run_cli(
         [claude_mcp["mcpServers"]["fabric"]["command"], "root"],
         cwd=clean_home,
         env=registered_environment,
-        capture_output=True,
-        text=True,
-        check=False,
     )
     assert registered.returncode == 0, registered.stderr
     assert registered.stdout == f"{product.resolve()}\n"
@@ -2432,8 +2390,7 @@ def test_check_reports_an_unreadable_legacy_agy_receipt_and_still_lists_links(tm
     (legacy / "dangling-skill").symlink_to(tmp_path / "removed-product/skills/dangling-skill")
     (legacy.parent / ".agent-harness-installation.json").write_text("not json\n")
     env = {**os.environ, "HOME": str(tmp_path), "HARNESS_PYTHON": sys.executable}
-    result = subprocess.run([str(SCRIPT), "--check-legacy-skills"], cwd=ROOT, env=env,
-                            text=True, capture_output=True, check=False)
+    result = run_cli([str(SCRIPT), "--check-legacy-skills"], cwd=ROOT, env=env)
     assert result.returncode == 1
     assert "legacy agy skill stale=dangling-skill (dangling)" in result.stdout
     assert "legacy agy skill stale=.agent-harness-installation.json (unreadable receipt)" in result.stdout
