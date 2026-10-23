@@ -17,6 +17,7 @@ pub use policy::PolicyError;
 pub mod authority_mapping;
 pub mod check_herdr_cli;
 pub mod compact_reinject;
+pub mod context_audit;
 pub mod delivery_receipt_commands;
 pub mod delivery_receipt_process;
 pub mod dispatch_preflight;
