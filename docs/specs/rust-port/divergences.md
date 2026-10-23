@@ -1363,3 +1363,15 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   errors use rusqlite diagnostics rather than better-sqlite3's JavaScript
   diagnostics. Engine failure fixtures compare exact text; binding-only
   errors remain a cut-over compatibility gap, not a claim of byte parity.
+
+## RP-FS3-004: ECMAScript Number compatibility (library, deliberate exception)
+
+- Review repair 4, rulebook v4. This TypeScript store uses ECMAScript Number,
+  including fractional wait seconds and `Number(attempt)` in terminal notice
+  keys. These compatibility operations deliberately use f64: wait deadline
+  arithmetic, legacy parsed numeric keys and comparison with observed attempts.
+  They are exceptions to the integer rule for ECMAScript coercion only.
+- Retained integer IDs, generations, timestamps, cursors and serde records stay
+  i64/u64. Python values use `provenant_core::py`; its Python number and
+  whitespace semantics must not replace ECMAScript semantics. Checked JSON
+  integer decoding belongs to `provenant_records::checked_json`.
