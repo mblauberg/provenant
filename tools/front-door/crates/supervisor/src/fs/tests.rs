@@ -914,3 +914,59 @@ fn publication_sets_mode_before_rename_and_accepts_stable_install_lock() {
         Err(FsError::ReservedLockName { .. })
     ));
 }
+
+#[test]
+fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = temp.path().join("root");
+    std::fs::create_dir(&original).unwrap();
+    let mut directory = Directory::open_anchor(&original).unwrap();
+    let identity = directory.metadata().unwrap();
+    // Model a configured root reached across a mount from its original anchor.
+    directory.device = identity.device.checked_add(1).unwrap();
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(0).unwrap(),
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let budget =
+        provenant_core::WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1).unwrap();
+    let cancel = provenant_core::CancelToken::new();
+    assert!(matches!(
+        directory.lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            budget,
+            &cancel,
+            &clock
+        ),
+        Err(FsError::CrossDevice { .. })
+    ));
+    // Replace the pathname. Reanchoring must retain the validated inode,
+    // rather than reopening the different directory now at that path.
+    std::fs::rename(&original, temp.path().join("moved")).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    let mut directory = directory.into_anchor().unwrap();
+    assert!(directory.metadata().unwrap().same_identity(&identity));
+    let guard = directory
+        .lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            budget,
+            &cancel,
+            &clock,
+        )
+        .unwrap();
+    drop(guard);
+    // Descendant lock checks still enforce the newly pinned device boundary.
+    directory.device = identity.device.checked_add(1).unwrap();
+    assert!(matches!(
+        directory.lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            budget,
+            &cancel,
+            &clock
+        ),
+        Err(FsError::CrossDevice { .. })
+    ));
+}
