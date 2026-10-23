@@ -20,7 +20,11 @@ if unit == "observer_contract":
     source = root / "skills/orchestrate/scripts/provider_observer.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+if unit != "review_panel":
+    spec.loader.exec_module(module)
+if unit == "review_panel":
+    sys.path.insert(0, str(root))
+    from skills._shared import review_panel as module
 cases = json.load(sys.stdin)
 results = []
 
@@ -33,7 +37,22 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "observer_contract":
+    if unit == "review_panel":
+        try:
+            op = case["op"]
+            if op == "resolve":
+                results.append(module.resolve_panel(case["preset"], case.get("overrides"), **case.get("axis_overrides", {})))
+            elif op == "validate":
+                results.append(module.validate_panel(case["spec"], case["members"]))
+            elif op == "result":
+                results.append(module.panel_result(case["spec"], case["members"], case["output"]))
+            elif op == "validate_result":
+                results.append(module.validate_panel_result(case["spec"], case["members"], case["result"]))
+            elif op == "reduce":
+                results.append(module.REDUCERS[case["name"]](case["output"]))
+        except ValueError as error:
+            results.append({"error": str(error)})
+    elif unit == "observer_contract":
         observer = module.LiveObserver(case["plan"])
         for line in case["lines"]:
             observer.feed_stdout((json.dumps(line) + "\n").encode())

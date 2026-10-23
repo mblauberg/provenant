@@ -373,3 +373,31 @@ pub(crate) fn splitlines(text: &str) -> Vec<&str> {
     if start<text.len() {result.push(&text[start..]);}
     result
 }
+
+// port: belongs in provenant-core
+/// Exact JSON-domain Python equality, including bool/int/float comparisons.
+pub(crate) fn python_json_equal(left:&serde_json::Value,right:&serde_json::Value)->bool {
+    use serde_json::Value;
+    if let Some(integer)=python_integer_value(left) {
+        if let Some(other)=self::python_integer_value(right) {return integer==other;}
+        if let Some(float)=right.as_number().filter(|n|n.is_f64()).and_then(|n|n.as_f64()) {
+            return float.fract()==0.0 && (-9223372036854775808.0..18446744073709551616.0).contains(&float) && float as i128==integer;
+        }
+        return false;
+    }
+    if python_integer_value(right).is_some() {return python_json_equal(right,left);}
+    match (left,right) {
+        (Value::Array(a),Value::Array(b))=>a.len()==b.len() && a.iter().zip(b).all(|(a,b)|python_json_equal(a,b)),
+        (Value::Object(a),Value::Object(b))=>a.len()==b.len() && a.iter().all(|(k,v)|b.get(k).is_some_and(|b|python_json_equal(v,b))),
+        _=>left==right,
+    }
+}
+
+// port: belongs in provenant-core
+fn python_integer_value(value:&serde_json::Value)->Option<i128> {
+    match value {
+        serde_json::Value::Bool(b)=>Some(i128::from(*b)),
+        serde_json::Value::Number(n) if !n.is_f64()=>n.as_i64().map(i128::from).or_else(||n.as_u64().map(i128::from)),
+        _=>None,
+    }
+}
