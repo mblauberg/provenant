@@ -1612,10 +1612,7 @@ def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    try:
-        import model_route_cli
-    except ModuleNotFoundError:
-        model_route_cli = _sibling("model_route_cli")
+    model_route_cli = _sibling("model_route_cli")
     try:
         return model_route_cli._main(argv, model_route_cli._ModuleGlobals(globals()))
     except _pools.RenamedNameError as exc:

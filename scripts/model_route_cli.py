@@ -18,7 +18,10 @@ class _ModuleGlobals:
         object.__setattr__(self, "_namespace", namespace)
 
     def __getattr__(self, name: str) -> Any:
-        return self._namespace[name]
+        try:
+            return self._namespace[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
     def __setattr__(self, name: str, value: Any) -> None:
         self._namespace[name] = value
