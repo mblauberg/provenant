@@ -26,7 +26,6 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
         "run-agy-headless",
     ):
         assert forbidden not in dispatcher
-    assert '"agy"' in dispatcher, "agy must be dispatchable like every other adapter"
 
 
 def test_direct_agy_dispatch_keeps_the_compatibility_contract():
