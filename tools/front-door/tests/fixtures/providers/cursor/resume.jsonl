@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"FIXTURE_FILESYSTEM_PATH_OR_SNAPSHOT_001","session_id":"FIXTURE_SESSION_IDENTIFIER_005","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"FIXTURE_USER_OR_PROVIDER_TEXT_012"}]},"session_id":"FIXTURE_SESSION_IDENTIFIER_005"}
+{"type":"thinking","subtype":"delta","text":"FIXTURE_USER_OR_PROVIDER_TEXT_013","session_id":"FIXTURE_SESSION_IDENTIFIER_005","timestamp_ms":0}
+{"type":"thinking","subtype":"delta","text":"FIXTURE_USER_OR_PROVIDER_TEXT_014","session_id":"FIXTURE_SESSION_IDENTIFIER_005","timestamp_ms":0}
+{"type":"thinking","subtype":"completed","session_id":"FIXTURE_SESSION_IDENTIFIER_005","timestamp_ms":0}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"FIXTURE_USER_OR_PROVIDER_TEXT_002"}]},"session_id":"FIXTURE_SESSION_IDENTIFIER_005"}
+{"type":"result","subtype":"success","duration_ms":0,"duration_api_ms":0,"is_error":false,"result":"FIXTURE_USER_OR_PROVIDER_TEXT_002","session_id":"FIXTURE_SESSION_IDENTIFIER_005","request_id":"FIXTURE_EVENT_REQUEST_OR_MESSAGE_IDENTIFIER_028","usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}}

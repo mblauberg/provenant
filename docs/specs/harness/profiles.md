@@ -1,11 +1,5 @@
 # Spec: harness profiles for cost and quality trade-offs
 
-> Superseded by the [Rust state/config design](../rust-port/design/state.md#configuration).
-> The profile command and knob registry are retired by state build step 2.
-> The remaining text records the previous design; shared Python helpers wait
-> for their last importer in step 5.
-
-
 Status: **proposed**. GitHub owns delivery state; this file owns the durable
 requirements. It grants no authority beyond what the user approves by
 accepting it, and it does not relax any gate in `HARNESS.md`.
@@ -21,7 +15,7 @@ which combination produced it.
 - Every cost-versus-quality choice the harness hard-codes is listed below,
   with its location, current value and trade-off.
 - The choices that are safe to vary are named knobs in one registry,
-  `config/harness-knobs.json` (retired). A knob's
+  [`config/harness-knobs.json`](../../../config/harness-knobs.json). A knob's
   default is today's behaviour, so nothing changes until the user switches.
 - Presets name whole postures: `economy`, `balanced` (today) and `rigorous`.
 - Safety floors are not knobs.

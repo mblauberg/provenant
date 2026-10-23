@@ -189,8 +189,14 @@ compiled defaults; unreadable/malformed means error. No include,
 interpolation, executable configuration or automatic migration.
 
 The optional `profile = "balanced" | "economy" | "rigorous"` selects one
-compiled preset; omission selects `balanced`. Keep the preset behaviours as
-small TOML assets: balanced defaults; economy concurrency cap 4, context cap
+compiled profile; omission selects `balanced`. Domain crates export a
+`DomainSection { name, defaults: fn(Profile) -> &'static str, validate }`
+entry and their own per-profile TOML assets. Config nests each asset under
+`[domains.<name>]`; composition registers the entries with
+`DomainSections::<Aggregate>::new(&ENTRIES)`. `DomainSection::new::<Section>`
+uses the section's closed serde type and `DomainConfig::validate`, which returns
+all independent semantic failures. Config contains no domain policy assets or
+const-concatenation. These assets are the only preset channel: balanced defaults; economy concurrency cap 4, context cap
 200,000 and weighted pool rotation; rigorous effort +1 except mechanical/bulk,
 one additional review, cross-family required and full re-review. Domain
 owners validate those values and enforce their minima. The config crate
@@ -198,9 +204,31 @@ loads/validates user domain sections over the selected compiled defaults once;
 there is no profile layering, per-request profile selector or generic knobs
 API. A preset never grants authority or a provider stop reason.
 
+Every allowed section key appears in its complete default asset. Tables merge
+recursively; arrays replace as a whole. Structured arrays provide a complete
+representative default element, allowing key/type/range checks at each indexed
+leaf before merging. Domain types and assets live with their domain owner;
+config has no dependency on those runtimes. The aggregate supplied by composition
+remains typed. No `Preset` policy struct or config-owned policy asset remains.
+
+`load`/`read` refuse the first ordered finding. `config_show(roots, fs, sections)`
+and `check_config(roots, fs, sections, limit)` use the registered domains.
+`check_config` collects unknown-key, type, range and semantic findings, ordered
+by source line, column, dotted path and rule, with a limit of 1–100, a total count
+and a truncation flag. Messages cap key paths at 256 characters. CLI owns
+cursor/digest pagination and maps findings to exit 1; malformed TOML is a distinct
+`ConfigError::Syntax` mapped to exit 2. Unsupported integer schema versions are
+refused before header or domain decoding. Diagnostics retain one-based line and
+column, dotted key and `Origin` (syntax without a recoverable key uses `$`);
+invalid compiled assets are `Origin::Compiled`,
+never attributed to the user's file. `Redacted<T>` serialises and formats as
+`[redacted]`; domain owners use it for secret-bearing leaves. The `test-support`
+feature exports `assert_leaf_origins` for every serialised effective leaf,
+including array members and empty containers. A reader of `None` means the file
+is absent; no optional config-owned policy value remains.
+
 Catalogue, adapter table and prices ship as TOML release assets, never copied
-into mutable state as defaults. Config owns non-price section types to avoid
-dependency cycles; routing/providers/quota/workflow validate semantics. Telemetry owns
+into mutable state as defaults. Routing/providers/quota/workflow validate semantics. Telemetry owns
 the price schema (`PriceTable`); state owns how bundled TOML assets load,
 including the replacement for `config/telemetry-prices.json`. `config show`
 returns effective non-secret values and origins;
@@ -514,6 +542,24 @@ Counts are physical lines at the source baseline above (`wc -l`), including
 comments/tests. These are build-lane deletions, not changes in this design PR.
 Every listed replacement lands with its old subject/tests removed in the same
 PR; update surviving skill/hook/docs callers then, without forwarding adapters.
+
+Slice 2 / PR #1369 deletes **no live Python, shell, registry, help or golden
+fixture files**. Its repair restores `config/harness-knobs.json` and
+`tests/test_harness_profile.py` exactly from `origin/main`, along with the
+`provenant profile` launcher/wiring, rotation tests and surviving profile
+instructions. Silence-watchdog environment overrides, Fabric `--knob`,
+`PROVENANT_RISK_TIER` export and economy profiles remain live in Python.
+The old inert Rust config/knob implementation was already deleted by slice 1
+(PR #1367); it stays deleted. The three config-owned policy preset assets and
+`Preset` policy types introduced during slice 2 are withdrawn before landing,
+so they are not deletions relative to `origin/main`.
+
+Slice 5 removes `skills/_shared/harness_profile.py`,
+`scripts/harness_profile.py`, `config/harness-knobs.json`,
+`tests/test_harness_profile.py`, `scripts/provenant-profile` and its front-door,
+help/golden and caller-test wiring only after the last Python importer retires.
+It also removes surviving profile/knob instructions then. The final deletion
+inventory belongs to that slice, not to this typed-loader PR.
 
 | Slice | Python source/helper | Lines |
 | --- | --- | ---: |

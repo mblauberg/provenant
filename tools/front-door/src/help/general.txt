@@ -16,7 +16,7 @@ Commands
   graph ...      runtime/fabric/bin/fabric graph
   telemetry ...  scripts/provenant-telemetry
   stats|retro    scripts/provenant-telemetry
-  quota         provider quota
+  quota|profile  quota and harness profiles
   digest|classify|extract  validated utility operations
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...

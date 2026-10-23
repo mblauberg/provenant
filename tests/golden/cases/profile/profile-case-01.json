@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "profile",
+    "--help"
+  ],
+  "class": "help",
+  "exit_code": 0,
+  "files": [],
+  "stderr": "",
+  "stdin": "",
+  "stdout": "usage: provenant profile [-h] {list,show,use,set,reset,diff} ...\n\n`provenant profile`: list, inspect, switch and compare harness profiles.\n\npositional arguments:\n  {list,show,use,set,reset,diff}\n    list                knobs and presets\n    show                profile files, or the values in force with --resolved\n    use                 select a preset\n    set                 set knobs: NAME=VALUE ...\n    reset               drop knobs (or `preset`) from the profile file\n    diff                knobs two presets set differently\n\noptions:\n  -h, --help            show this help message and exit\n"
+}

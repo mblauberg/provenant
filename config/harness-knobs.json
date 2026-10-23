@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "knobs": {
+    "effort.shift": {
+      "type": "int", "min": -1, "max": 1, "default": 0, "status": "wired",
+      "reader": "scripts/model_route.py (task-class routes)",
+      "effect": "Moves a task-class route's effort one step along the effort ladder, never below the task class's policy minimum and only to an effort every configured model takes.",
+      "trade_off": "-1 saves reasoning tokens where a route sits above its minimum; +1 buys depth at roughly proportional token cost.",
+      "floor": {"crucial": 0}
+    },
+    "lanes.silence_seconds": {
+      "type": "int", "min": 1, "max": 3600, "default": 300, "status": "wired",
+      "reader": "skills/orchestrate/scripts/provider_exec.py",
+      "effect": "Re-check a silent provider after this many seconds and retain liveness, event and worktree observations; never kill it for silence.",
+      "trade_off": "Lower records silence sooner at the cost of more process and worktree observations."
+    },
+    "lanes.max_concurrency": {
+      "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
+      "reader": "skills/orchestrate/scripts/batch_run.py",
+      "effect": "Upper bound on lanes one batch runs at once; a lower requested concurrency still stands.",
+      "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
+    },
+    "context.ceiling_tokens": {
+      "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "wired",
+      "reader": "skills/orchestrate/scripts/dispatch_run.py",
+      "effect": "Auto-compaction ceiling for a dispatch that names none; null keeps the catalogue's context.ceiling_tokens.",
+      "trade_off": "Lower compacts sooner, so each turn re-reads fewer tokens, at more risk that a long lane loses detail."
+    },
+    "review.extra_reviewers": {
+      "project": "strengthen",
+      "type": "int", "min": 0, "max": 2, "default": 0, "status": "wired",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
+      "effect": "Independent reviews added on top of the HARNESS.md ladder minimum for the tier.",
+      "trade_off": "Each extra review costs one reviewer lane and adjudication time for wider defect coverage."
+    },
+    "review.cross_family": {
+      "project": "strengthen",
+      "type": "enum", "values": ["prefer", "require"], "default": "prefer", "status": "wired",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
+      "effect": "prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead.",
+      "trade_off": "require keeps decorrelated review at the price of waiting on quota or outages."
+    },
+    "review.rereview_scope": {
+      "project": "strengthen",
+      "type": "enum", "values": ["delta", "full"], "default": "delta", "status": "wired",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
+      "effect": "After a repair, re-review only the repair delta, or the whole change again.",
+      "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
+    },
+    "repair.max_cycles": {
+      "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
+      "reader": "skills/deliver/scripts/delivery_validation_common.py REPAIR_BUDGETS (2/4/5/5, fixed)",
+      "effect": "The chair's stopping point for repair cycles; null uses the risk-tier budget. It can only lower the validator's fixed ceiling.",
+      "trade_off": "Lower returns to the user sooner and spends less on repairs, at the cost of the user's attention."
+    },
+    "council.junior_size": {
+      "type": "int", "min": 1, "max": 8, "default": 3, "status": "advisory",
+      "reader": "skills/orchestrate/references/tiered-council.md (council: 3 per part)",
+      "effect": "Junior council members per part in a bottom-up tiered council.",
+      "trade_off": "Fewer juniors cut lens passes and tokens; more widen family spread on blind spots."
+    },
+    "routing.pool_mode": {
+      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "wired",
+      "reader": "scripts/model_route_pools.py pick",
+      "effect": "top always takes the highest-weight available model; rotate spreads picks by weight across the pool.",
+      "trade_off": "rotate spreads quota and families across models at some cost in consistency between lanes."
+    },
+    "writing.final_polish": {
+      "type": "enum", "values": ["off", "optional"], "default": "optional", "status": "advisory",
+      "reader": "skills/engineering-writing/SKILL.md step 6",
+      "effect": "Whether reader-facing prose may take a final voice pass by the dossier's polish model.",
+      "trade_off": "off saves one writing lane per document; optional improves voice at some risk of drift the chair must diff."
+    },
+    "context.summary_tokens": {
+      "type": "int", "min": 500, "max": 8000, "default": 2000, "status": "advisory",
+      "reader": "skills/orchestrate/references/layering-and-context.md (roughly 1-2k tokens)",
+      "effect": "Cap on a worker's returned summary; the file stays the record.",
+      "trade_off": "Smaller keeps the chair's context lean; larger carries more detail inline."
+    },
+    "quota.pace_tolerance": {
+      "type": "int", "min": 0, "max": 20, "default": 4, "status": "advisory",
+      "reader": "scripts/provider_quota.py PACE_TOLERANCE",
+      "effect": "Percentage points either side of even use before a quota window reads as ahead of pace or reserve.",
+      "trade_off": "Lower flags pacing pressure earlier (fewer limit hits, more rerouting); higher tolerates bursts."
+    }
+  },
+  "presets": {
+    "balanced": {
+      "description": "Today's behaviour: every knob at its registry default.",
+      "knobs": {}
+    },
+    "economy": {
+      "description": "Less usage per task, accepting slower runs and slightly thinner passes.",
+      "knobs": {
+        "lanes.max_concurrency": 4,
+        "context.ceiling_tokens": 200000,
+        "council.junior_size": 2,
+        "routing.pool_mode": "rotate",
+        "writing.final_polish": "off",
+        "context.summary_tokens": 1000
+      }
+    },
+    "rigorous": {
+      "description": "Correctness first: deeper effort, more independent review, full re-review.",
+      "knobs": {
+        "effort.shift": 1,
+        "review.extra_reviewers": 1,
+        "review.cross_family": "require",
+        "review.rereview_scope": "full",
+        "council.junior_size": 4
+      },
+      "task_classes": {
+        "mechanical": {"knobs": {"effort.shift": 0}},
+        "bulk": {"knobs": {"effort.shift": 0}}
+      }
+    }
+  }
+}

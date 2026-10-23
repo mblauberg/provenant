@@ -107,6 +107,21 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert not set(bulk) & {"claude/claude-sonnet-5-5", "codex/gpt-6.1-sol", "claude/claude-opus-5-5"}
 
 
+def test_profile_pool_mode_rotates_when_request_does_not_choose_a_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVENANT_KNOB_ROUTING_POOL_MODE", "rotate")
+    first = pick({"route": "senior"}, tmp_path)
+    second = pick({"route": "senior"}, tmp_path)
+    assert first["mode"] == second["mode"] == "rotate"
+    assert models(first) != models(second)
+
+
+def test_economy_profile_rotates_without_a_pool_mode_knob(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_KNOB_ROUTING_POOL_MODE", raising=False)
+    monkeypatch.setenv("PROVENANT_PROFILE", "economy")
+    result = pick({"route": "senior"}, tmp_path)
+    assert result["mode"] == "rotate"
+
+
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
     cooling = pick({"route": "senior"}, tmp_path, cooling=("claude/claude-opus-5-5",))
     assert models(cooling) == ["codex/gpt-6.1-sol"]
