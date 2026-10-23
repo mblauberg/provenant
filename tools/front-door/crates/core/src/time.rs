@@ -14,6 +14,10 @@ pub enum TimeError {
 }
 
 /// A UTC timestamp of exact microsecond precision. No system clock is read.
+/// Uses jiff's timestamp range, narrowed to RFC3339's nonnegative four-digit
+/// years: 0000-01-01T00:00:00.000000Z through jiff::Timestamp::MAX
+/// rounded down to microseconds (9999-12-31T11:59:59.999999Z).
+/// Jiff enforces the upper bound; construction rejects its signed-year range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct UtcMicros(jiff::Timestamp);
@@ -140,7 +144,7 @@ impl Deadline {
         now >= self.0
     }
     pub fn remaining(self, now: MonoTime) -> DurationMicros {
-        DurationMicros(self.0 .0.saturating_sub(now.0))
+        DurationMicros(self.0.0.saturating_sub(now.0))
     }
 }
 
@@ -271,28 +275,35 @@ mod tests {
         assert!(WaitBudget::cli(now, 14_401).is_err());
         assert!(WaitBudget::mcp(now, 55).is_ok());
         assert!(WaitBudget::mcp(now, 56).is_err());
-        assert!(WaitBudget::new(
-            now,
-            DurationMicros::from_micros(55_000_001),
-            WaitTransport::Mcp
-        )
-        .is_err());
+        assert!(
+            WaitBudget::new(
+                now,
+                DurationMicros::from_micros(55_000_001),
+                WaitTransport::Mcp
+            )
+            .is_err()
+        );
         assert!(WaitBudget::cli(MonoTime::from_micros(u64::MAX), 1).is_err());
         assert!(DurationMicros::from_seconds(u64::MAX).is_err());
-        assert!(DurationMicros::from_micros(u64::MAX)
-            .checked_add(DurationMicros::from_micros(1))
-            .is_err());
-        assert!(now
-            .checked_duration_since(MonoTime::from_micros(11))
-            .is_err());
+        assert!(
+            DurationMicros::from_micros(u64::MAX)
+                .checked_add(DurationMicros::from_micros(1))
+                .is_err()
+        );
+        assert!(
+            now.checked_duration_since(MonoTime::from_micros(11))
+                .is_err()
+        );
         assert!(WaitBudget::cli(now, 0).is_err());
         assert!(WaitBudget::mcp(now, 0).is_err());
-        assert!(WaitBudget::new(
-            now,
-            DurationMicros::from_micros(999_999),
-            WaitTransport::Mcp
-        )
-        .is_err());
+        assert!(
+            WaitBudget::new(
+                now,
+                DurationMicros::from_micros(999_999),
+                WaitTransport::Mcp
+            )
+            .is_err()
+        );
         let wait = WaitBudget::mcp(now, 1).unwrap();
         assert!(wait.deadline().is_expired(MonoTime::from_micros(1_000_010)));
         assert_eq!(

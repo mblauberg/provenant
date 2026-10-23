@@ -1,6 +1,6 @@
 use serde::{
-    de::{DeserializeOwned, Error as _},
     Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, Error as _},
 };
 use std::io::Read;
 use thiserror::Error;
@@ -195,6 +195,7 @@ where
 
 /// Encode one typed record as compact UTF-8 JSON without a final newline.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, EncodeError> {
+    crate::canonical::check_finite(value).map_err(|_| EncodeError)?;
     serde_json::to_vec(value).map_err(|_| EncodeError)
 }
 
@@ -244,16 +245,16 @@ fn validate_document(input: &[u8], limits: Limits) -> Result<ValidationFacts, De
 
 fn normalize_negative_zeroes(input: &mut [u8], positions: &[usize]) {
     for position in positions {
-        if let Some(digits) = input.get_mut(*position..position.saturating_add(2)) {
-            if let Some((minus, zero)) = digits.split_first_mut() {
-                if *minus == b'-' {
-                    *minus = b'0';
-                }
-                if let Some(zero) = zero.first_mut() {
-                    if *zero == b'0' {
-                        *zero = b' ';
-                    }
-                }
+        if let Some(digits) = input.get_mut(*position..position.saturating_add(2))
+            && let Some((minus, zero)) = digits.split_first_mut()
+        {
+            if *minus == b'-' {
+                *minus = b'0';
+            }
+            if let Some(zero) = zero.first_mut()
+                && *zero == b'0'
+            {
+                *zero = b' ';
             }
         }
     }

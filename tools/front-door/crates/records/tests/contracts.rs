@@ -1,9 +1,8 @@
 use std::io::Cursor;
 
 use provenant_records::{
-    decode, decode_v1, parse_frontmatter, parse_sidecar, AttemptFact, AttemptOutcome,
-    CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, PathWire, PathWireError,
-    RecordHeader, YamlValue,
+    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, PathWire,
+    RecordHeader, YamlValue, decode, decode_v1, parse_frontmatter, parse_sidecar,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -175,8 +174,8 @@ fn canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains() 
     let value = json!({"z": 2, "a": {"é": "line\n\u{0001}", "b": -0}});
     let bytes = CanonicalV1::bytes(&value).expect("integer-only canonical value");
     assert_eq!(
-        bytes,
-        r#"{"a":{"b":0,"é":"line\n\u0001"},"z":2}"#.as_bytes().to_vec()
+        bytes.as_bytes(),
+        r#"{"a":{"b":0,"é":"line\n\u0001"},"z":2}"#.as_bytes()
     );
 
     let attempt = CanonicalV1::record_digest("attempt", 1, &value).expect("digest");
@@ -322,14 +321,11 @@ fn yaml_subset_parses_frontmatter_and_sidecars_and_refuses_ambiguous_values() {
 }
 
 #[test]
-fn attempt_fact_is_a_serde_projection() {
-    fn assert_serialize<T: serde::Serialize>() {}
-    assert_serialize::<AttemptFact>();
-}
-
-#[test]
 fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
-    let utf8 = PathWire::Utf8("artifacts/result.md".to_owned());
+    let utf8 = PathWire::from_relative(
+        &provenant_core::RelativePath::parse("artifacts/result.md").expect("contained path"),
+    )
+    .expect("UTF-8 wire");
     assert_eq!(
         serde_json::to_string(&utf8).expect("path wire"),
         r#"{"encoding":"utf8","path":"artifacts/result.md"}"#
@@ -339,16 +335,12 @@ fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
         std::path::Path::new("artifacts/result.md")
     );
 
-    let escaped = PathWire::Utf8("../outside".to_owned());
-    assert!(matches!(
-        escaped.to_relative_path(),
-        Err(PathWireError::Relative(_))
-    ));
-    let malformed_hex = PathWire::NativeBytes("GG".to_owned());
-    assert!(matches!(
-        malformed_hex.to_relative_path(),
-        Err(PathWireError::InvalidHex)
-    ));
+    for invalid in [
+        r#"{"encoding":"utf8","path":"../outside"}"#,
+        r#"{"encoding":"native_bytes","path":"GG"}"#,
+    ] {
+        assert!(serde_json::from_str::<PathWire>(invalid).is_err());
+    }
 
     #[cfg(unix)]
     {
@@ -357,12 +349,29 @@ fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
         let relative = provenant_core::RelativePath::parse(native).expect("contained native path");
         let encoded = PathWire::from_relative(&relative).expect("native encoding");
         assert_eq!(
-            encoded,
-            PathWire::NativeBytes("61727469666163742fff".to_owned())
+            serde_json::to_string(&encoded).expect("native wire"),
+            r#"{"encoding":"native_bytes","path":"61727469666163742fff"}"#
         );
         assert_eq!(
             encoded.to_relative_path().expect("native path roundtrip"),
             relative
         );
     }
+}
+
+#[test]
+fn json_encode_rejects_nonfinite_values_without_losing_finite_floats() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(provenant_records::encode(&value).is_err());
+        assert!(provenant_records::encode(&vec![value]).is_err());
+    }
+    assert_eq!(provenant_records::encode(&1.5).unwrap(), b"1.5");
+}
+
+#[test]
+fn jsonc_rejects_a_byte_order_mark() {
+    assert!(
+        provenant_records::JsoncDocument::read(Cursor::new(b"\xef\xbb\xbf{}"), Limits::CONFIG)
+            .is_err()
+    );
 }

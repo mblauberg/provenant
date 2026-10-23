@@ -58,9 +58,11 @@ impl JsoncDocument {
         }
 
         let mut projection = bytes.clone();
-        let mut tokens = scan(&bytes, &mut projection)?;
-        mark_trailing_commas(&mut tokens, &mut projection);
+        // Validate bounds using a streaming scan before allocating the token list.
+        scan(&bytes, &mut projection, false)?;
         crate::json::decode::<serde_json::Value, _>(Cursor::new(&projection), limits)?;
+        let mut tokens = scan(&bytes, &mut projection, true)?;
+        mark_trailing_commas(&mut tokens, &mut projection);
 
         let source = String::from_utf8(bytes).map_err(|error| {
             let offset = error.utf8_error().valid_up_to();
@@ -100,8 +102,13 @@ where
     JsoncDocument::read(reader, limits)?.decode()
 }
 
-fn scan(source: &[u8], projection: &mut [u8]) -> Result<Vec<JsoncToken>, DecodeError> {
+fn scan(
+    source: &[u8],
+    projection: &mut [u8],
+    collect: bool,
+) -> Result<Vec<JsoncToken>, DecodeError> {
     let mut tokens = Vec::new();
+    let mut history = (None, None);
     let mut offset = 0usize;
     while let Some(byte) = source.get(offset).copied() {
         match byte {
@@ -116,11 +123,17 @@ fn scan(source: &[u8], projection: &mut [u8]) -> Result<Vec<JsoncToken>, DecodeE
                     offset += 1;
                 }
                 blank(projection, start, offset);
-                tokens.push(JsoncToken {
-                    kind: JsoncTokenKind::LineComment,
-                    start,
-                    end: offset,
-                });
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::LineComment,
+                        start,
+                        end: offset,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
             }
             b'/' if source.get(offset.saturating_add(1)) == Some(&b'*') => {
                 let start = offset;
@@ -138,36 +151,132 @@ fn scan(source: &[u8], projection: &mut [u8]) -> Result<Vec<JsoncToken>, DecodeE
                     return Err(syntax_error(source, start));
                 };
                 blank(projection, start, end);
-                tokens.push(JsoncToken {
-                    kind: JsoncTokenKind::BlockComment,
-                    start,
-                    end,
-                });
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::BlockComment,
+                        start,
+                        end,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
             }
             b'/' => return Err(syntax_error(source, offset)),
             b'"' => {
                 let start = offset;
                 offset = scan_string(source, offset)?;
-                tokens.push(JsoncToken {
-                    kind: JsoncTokenKind::String,
-                    start,
-                    end: offset,
-                });
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::String,
+                        start,
+                        end: offset,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
             }
-            b'{' => push_token(&mut tokens, JsoncTokenKind::ObjectStart, &mut offset),
-            b'}' => push_token(&mut tokens, JsoncTokenKind::ObjectEnd, &mut offset),
-            b'[' => push_token(&mut tokens, JsoncTokenKind::ArrayStart, &mut offset),
-            b']' => push_token(&mut tokens, JsoncTokenKind::ArrayEnd, &mut offset),
-            b':' => push_token(&mut tokens, JsoncTokenKind::Colon, &mut offset),
-            b',' => push_token(&mut tokens, JsoncTokenKind::Comma, &mut offset),
+            b'{' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::ObjectStart,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
+            b'}' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::ObjectEnd,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
+            b'[' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::ArrayStart,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
+            b']' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::ArrayEnd,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
+            b':' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::Colon,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
+            b',' => {
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::Comma,
+                        start: offset,
+                        end: offset + 1,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
+                offset += 1;
+            }
             b'-' | b'0'..=b'9' => {
                 let start = offset;
                 offset = scan_atom(source, offset);
-                tokens.push(JsoncToken {
-                    kind: JsoncTokenKind::Number,
-                    start,
-                    end: offset,
-                });
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind: JsoncTokenKind::Number,
+                        start,
+                        end: offset,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
             }
             b't' | b'f' | b'n' => {
                 let start = offset;
@@ -178,11 +287,17 @@ fn scan(source: &[u8], projection: &mut [u8]) -> Result<Vec<JsoncToken>, DecodeE
                     Some(b"null") => JsoncTokenKind::Null,
                     _ => return Err(syntax_error(source, start)),
                 };
-                tokens.push(JsoncToken {
-                    kind,
-                    start,
-                    end: offset,
-                });
+                emit_token(
+                    &mut tokens,
+                    JsoncToken {
+                        kind,
+                        start,
+                        end: offset,
+                    },
+                    &mut history,
+                    projection,
+                    collect,
+                );
             }
             _ => return Err(syntax_error(source, offset)),
         }
@@ -236,10 +351,10 @@ fn mark_trailing_commas(tokens: &mut [JsoncToken], projection: &mut [u8]) {
         if is_comment(kind) {
             continue;
         }
-        if let Some(comma_index) = candidate.take() {
-            if ends_value(kind) {
-                trailing.push(comma_index);
-            }
+        if let Some(comma_index) = candidate.take()
+            && ends_value(kind)
+        {
+            trailing.push(comma_index);
         }
         if kind == JsoncTokenKind::Comma
             && next_kind.is_some_and(|next| {
@@ -280,14 +395,31 @@ fn is_comment(kind: JsoncTokenKind) -> bool {
     )
 }
 
-fn push_token(tokens: &mut Vec<JsoncToken>, kind: JsoncTokenKind, offset: &mut usize) {
-    let start = *offset;
-    *offset += 1;
-    tokens.push(JsoncToken {
-        kind,
-        start,
-        end: *offset,
-    });
+fn emit_token(
+    tokens: &mut Vec<JsoncToken>,
+    token: JsoncToken,
+    history: &mut (Option<JsoncTokenKind>, Option<JsoncToken>),
+    projection: &mut [u8],
+    collect: bool,
+) {
+    if !is_comment(token.kind) {
+        if matches!(
+            token.kind,
+            JsoncTokenKind::ObjectEnd | JsoncTokenKind::ArrayEnd
+        ) && history.0.is_some_and(ends_value)
+            && let Some(comma) = history
+                .1
+                .filter(|previous| previous.kind == JsoncTokenKind::Comma)
+            && let Some(byte) = projection.get_mut(comma.start)
+        {
+            *byte = b' ';
+        }
+        history.0 = history.1.map(|previous| previous.kind);
+        history.1 = Some(token);
+    }
+    if collect {
+        tokens.push(token);
+    }
 }
 
 fn blank(projection: &mut [u8], start: usize, end: usize) {
@@ -319,7 +451,7 @@ fn location(source: &[u8], offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jsonc, JsoncDocument, JsoncTokenKind};
+    use super::{JsoncDocument, JsoncTokenKind, decode_jsonc};
     use crate::json::{DecodeError, Limits};
     use serde::Deserialize;
     use std::io::Cursor;

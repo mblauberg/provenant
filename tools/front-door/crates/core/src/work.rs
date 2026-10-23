@@ -1,8 +1,8 @@
 use crate::{ProjectId, RunId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// An in-memory cooperative request, never a process signal or authority.
