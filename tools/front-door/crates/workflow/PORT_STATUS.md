@@ -2,7 +2,7 @@
 
 Rulebook: PORTING.md version 4. Batch 2 source/oracle revision:
 `600dec09bcda3b6a86272e391420e89d38777953`. The assigned Python sources are
-unchanged through merged main `d0027d7cd8de987b15c2f7c855691ca3ddf488aa`.
+unchanged through merged main `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
 Batch 1 oracle remains `e897b10d58b27a46544969594eed08a5ed64c72c`.
 These are inert libraries: no command switches owner, no Python or TypeScript
 source is removed, and no stable install or provider configuration is used.
