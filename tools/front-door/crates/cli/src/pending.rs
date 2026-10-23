@@ -227,3 +227,22 @@ mod tests {
         }
     }
 }
+
+// port: belongs in provenant-core
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IntegerError {
+    #[error("Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit")]
+    DigitLimit { digits: usize },
+    #[error("integer outside i64/u64 range")]
+    NumberOutOfRange,
+}
+
+// port: belongs in provenant-core
+pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
+    let digits = text.chars().count();
+    if digits > 4300 { return Err(IntegerError::DigitLimit { digits }); }
+    text.chars().try_fold(0u64, |n, c| {
+        let d = decimal_digit(c).ok_or(IntegerError::NumberOutOfRange)?;
+        n.checked_mul(10).and_then(|n| n.checked_add(u64::from(d))).ok_or(IntegerError::NumberOutOfRange)
+    })
+}

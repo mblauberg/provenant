@@ -114,39 +114,28 @@ impl Arguments {
 /// Day durations remain exact integers; hour durations retain Python's float result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DurationDays {
-    Integer(String),
+    Integer(u64),
     Fractional(f64),
 }
 
-pub fn duration(value: &str) -> Result<DurationDays, String> {
-    let error = || "duration must be like 7d or 24h".to_owned();
-    let unit = value.chars().last().ok_or_else(error)?;
-    if !matches!(unit, 'd' | 'h') {
-        return Err(error());
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DurationError {
+    #[error("duration must be like 7d or 24h")]
+    Invalid,
+    #[error(transparent)]
+    Integer(#[from] crate::pending::IntegerError),
+}
+
+pub fn duration(value: &str) -> Result<DurationDays, DurationError> {
+    let unit = value.chars().last().ok_or(DurationError::Invalid)?;
+    if !matches!(unit, 'd' | 'h') { return Err(DurationError::Invalid); }
     let digits = &value[..value.len() - 1];
-    if digits.is_empty() {
-        return Err(error());
+    if digits.is_empty() || !digits.chars().all(|c| crate::pending::decimal_digit(c).is_some()) {
+        return Err(DurationError::Invalid);
     }
-    let mut normalized = String::new();
-    for c in digits.chars() {
-        let digit = crate::pending::decimal_digit(c).ok_or_else(error)?;
-        normalized.push(char::from(b'0' + digit));
-    }
-    let normalized = normalized.trim_start_matches('0');
-    let normalized = if normalized.is_empty() {
-        "0"
-    } else {
-        normalized
-    };
-    if unit == 'd' {
-        return Ok(DurationDays::Integer(normalized.to_owned()));
-    }
-    let number: f64 = normalized.parse().map_err(|_| error())?;
-    if !number.is_finite() {
-        return Err("int too large to convert to float".into());
-    }
-    Ok(DurationDays::Fractional(number * (1.0 / 24.0)))
+    let number = crate::pending::decimal_integer(digits)?;
+    if unit == 'd' { Ok(DurationDays::Integer(number)) }
+    else { Ok(DurationDays::Fractional(number as f64 * (1.0 / 24.0))) }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -211,6 +200,12 @@ mod tests {
     }
 
     #[test]
+    fn duration_refuses_python_digit_limit() {
+        assert!(duration(&format!("{}d", "7".repeat(4301))).is_err());
+        assert!(duration(&format!("{}h", "0".repeat(4301))).is_err());
+    }
+
+    #[test]
     fn approval_and_prune_selectors_are_validated_in_source_order() {
         for words in [vec!["--apply"], vec!["--plan", "sha256:x"]] {
             assert_eq!(
@@ -265,10 +260,10 @@ mod tests {
         for value in ["7", "-1d", "1.5d", "d", "7w"] {
             assert!(duration(value).is_err());
         }
-        assert_eq!(duration("7d").unwrap(), DurationDays::Integer("7".into()));
+        assert_eq!(duration("7d").unwrap(), DurationDays::Integer(7));
         assert_eq!(
             duration("9007199254740993d").unwrap(),
-            DurationDays::Integer("9007199254740993".into())
+            DurationDays::Integer(9007199254740993)
         );
         assert_eq!(duration("٠٢٤h").unwrap(), DurationDays::Fractional(1.0));
     }
