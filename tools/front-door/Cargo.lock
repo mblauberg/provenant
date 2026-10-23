@@ -432,6 +432,13 @@ dependencies = [
 [[package]]
 name = "provenant-run"
 version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-supervisor"
