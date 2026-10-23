@@ -1304,3 +1304,29 @@ fn pruned_paths_and_counters_roll_back_if_acquire_event_fails() {
     let next = store.acquire_claim(&old_input, &f.request()).unwrap();
     assert_eq!(next.generation, fence.generation + 1);
 }
+
+#[test]
+fn pruned_landing_observation_is_absent_and_reacquire_keeps_its_counter() {
+    let f = Fixture::new();
+    let store = f.open();
+    let input = landing(3);
+    let guard = store
+        .lock_landing(project(), &input.reference, &f.request())
+        .unwrap();
+    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
+    store.release_landing(&guard, &fence, &f.request()).unwrap();
+    store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
+    assert_eq!(
+        store
+            .landing(project(), &input.reference, &f.request())
+            .unwrap(),
+        None
+    );
+    let next = store.acquire_landing(&guard, &input, &f.request()).unwrap();
+    assert_eq!(next.id, fence.id);
+    assert_eq!(next.generation, fence.generation + 1);
+    assert!(matches!(
+        store.verify_landing(&guard, &fence, &f.request()),
+        Err(Error::StaleFence)
+    ));
+}

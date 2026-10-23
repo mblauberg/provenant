@@ -317,9 +317,11 @@ impl Store {
     ) -> Result<Option<Landing>> {
         reference(branch)?;
         request.retry(|| {
-            by_scope(&self.db, project, "landing", branch)?
-                .map(|r| decode(&r.bytes))
-                .transpose()
+            let bytes: Option<Vec<u8>> = self.db.query_row(
+                "SELECT substr(record,1,262145) FROM claims WHERE project=? AND kind='landing' AND scope_key=?",
+                params![project.to_string(), branch], |row| row.get(0),
+            ).optional()?;
+            bytes.map(|bytes| decode(&bytes)).transpose()
         })
     }
     pub fn renew_landing(

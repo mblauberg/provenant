@@ -235,7 +235,7 @@ pub(crate) fn claim_event(
     Ok(())
 }
 // CROSS JOIN pins path lookup before the claim liveness check, even without
-// ANALYZE statistics; otherwise SQLite may scan every claim in the project.
+// database statistics; otherwise SQLite may scan every claim in the project.
 // Binary ranges preserve component boundaries: /a/ <= descendants < /a0.
 pub(crate) const DESCENDANT_OVERLAP: &str = "SELECT p.claim FROM claim_paths p CROSS JOIN claims c ON c.project=p.project AND c.id=p.claim WHERE p.project=?1 AND p.path>=?2 AND p.path<?3 AND c.holder IS NOT NULL AND c.expires>?4 LIMIT 1";
 pub(crate) const ANCESTOR_OVERLAP: &str = "SELECT p.claim FROM claim_paths p CROSS JOIN claims c ON c.project=p.project AND c.id=p.claim WHERE p.project=?1 AND p.path=?2 AND c.holder IS NOT NULL AND c.expires>?3 LIMIT 1";
