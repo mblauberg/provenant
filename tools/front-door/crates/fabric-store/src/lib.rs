@@ -23,6 +23,14 @@ pub const MAX_BODY_BYTES: usize = 65_536;
 pub const MAX_RECORD_BYTES: usize = 262_144;
 pub const MAX_PAGE_ROWS: u64 = 100;
 
+/// Sequence pages expose byte-bound truncation. Resume after the last item's seq.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("SQLite operation failed")]
@@ -49,6 +57,10 @@ pub enum Error {
     Cancelled,
     #[error("unsupported database version {0}")]
     SchemaVersion(i64),
+    #[error("non-empty database has no schema version")]
+    UnversionedDatabase,
+    #[error("SQLite refused WAL journal mode (returned {0})")]
+    JournalMode(String),
     #[error("unsafe state component: {0}")]
     UnsafePath(std::path::PathBuf),
     #[error("stored record is invalid")]
@@ -59,6 +71,14 @@ pub enum Error {
     Time(#[from] provenant_core::TimeError),
     #[error("import exceeds its row or byte bound")]
     ImportLimit,
+    #[error("stop the old Fabric and retry with a cleanly closed source (journal sidecars remain)")]
+    ImportNotQuiescent,
+    #[error("cannot open import source read-only at {path}; stop the old Fabric and retry")]
+    ImportReadOnly {
+        path: std::path::PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error("import source must be a self-contained, quiescent snapshot")]
     ImportSource,
 }

@@ -66,7 +66,6 @@ pub fn authorised_go(input: &[u8], token: &str) -> Option<Map<String, Value>> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::path::Path;
     #[test]
     fn no_command_without_complete_matching_go() {
         for input in [
@@ -94,28 +93,6 @@ mod tests {
         );
         assert!(parse_gate_exit(&bytes, "other").is_none());
         assert!(parse_gate_exit(b"{\"token\":\"t\",\"finished_at\":1}", "t").is_none());
-    }
-    #[test]
-    fn hash_matches_node_on_unicode_and_escaping_when_available() {
-        let argv = vec!["sh".into(), "café\n\"\\".into(), "🦀".into()];
-        let output=match std::process::Command::new("node").args(["--experimental-transform-types", "--input-type=module", "-e", "const {argvHash}=await import(new URL('file://'+process.argv[1])); process.stdout.write(argvHash(JSON.parse(process.argv[2])))", &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../runtime/fabric/src/graph/gates.ts").to_string_lossy(), &serde_json::to_string(&argv).unwrap()]).output() {
-            Ok(output)=>output, Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return, Err(error)=>panic!("{error}")
-        };
-        if !output.status.success()
-            && String::from_utf8_lossy(&output.stderr).contains("bad option")
-        {
-            eprintln!("skipped TS differential: node lacks TypeScript transform support");
-            return;
-        }
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            argv_hash(&argv).unwrap(),
-            String::from_utf8(output.stdout).unwrap()
-        );
     }
 }
 

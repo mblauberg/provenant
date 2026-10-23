@@ -162,13 +162,17 @@ impl Store {
         after: Option<i64>,
         limit: u64,
         request: &Request<'_>,
-    ) -> Result<Vec<Delivery>> {
+    ) -> Result<Page<Delivery>> {
         let limit = page(after.unwrap_or(0), limit)?;
         request.retry(|| {
-            let mut statement=self.db.prepare("SELECT d.seq,substr(m.record,1,262145) FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
-            let mut rows=statement.query(params![project.to_string(),recipient.to_string(),after,limit])?; let mut output=Vec::new();let mut total=0;
-            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(1)?;total+=bytes.len();if total>1_048_576 { break; } output.push(Delivery {seq:row.get(0)?,message:decode(&bytes)?}); }
-            Ok(output)
+            let mut statement=self.db.prepare("SELECT d.seq,substr(m.record,1,262145),m.id FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
+            let mut rows=statement.query(params![project.to_string(),recipient.to_string(),after,limit])?; let mut output=Vec::new();let mut total=0; let mut truncated=false;
+            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(1)?;total+=bytes.len();if total>1_048_576 { truncated=true; break; }
+                let message: Message=decode(&bytes)?;
+                let id: String=row.get(2)?;
+                if message.project != project || message.id.to_string() != id { return Err(Error::Invalid("stored message identity")); }
+                output.push(Delivery {seq:row.get(0)?,message}); }
+            Ok(Page { items: output, truncated })
         })
     }
     /// The service supplies the authenticated recipient, never a mail sender.
@@ -177,13 +181,13 @@ impl Store {
         project: ProjectId,
         recipient: ActorId,
         seq: i64,
-        at: WallTime,
         request: &Request<'_>,
     ) -> Result<()> {
         if seq < 0 {
             return Err(Error::Invalid("mail cursor"));
         }
         self.write(request,|tx| {
+            let at = request.clock.wall_now()?;
             let highest:i64=tx.query_row("SELECT coalesce(max(seq),0) FROM deliveries WHERE project=? AND recipient=?",params![project.to_string(),recipient.to_string()],|r|r.get(0))?;
             if seq>highest { return Err(Error::Invalid("mail cursor")); }
             let previous:i64=tx.query_row("SELECT seq FROM mail_cursors WHERE project=? AND recipient=?",params![project.to_string(),recipient.to_string()],|r|r.get(0)).optional()?.unwrap_or(0);

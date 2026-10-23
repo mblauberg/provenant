@@ -99,7 +99,7 @@ impl Store {
         after: i64,
         limit: u64,
         request: &Request<'_>,
-    ) -> Result<Vec<Event>> {
+    ) -> Result<Page<Event>> {
         let limit = page(after, limit)?;
         request.retry(|| {
             let mut statement = self.db.prepare(
@@ -108,10 +108,12 @@ impl Store {
             let mut rows = statement.query(params![project.to_string(), after, limit])?;
             let mut output = Vec::new();
             let mut total = 0;
+            let mut truncated = false;
             while let Some(row) = rows.next()? {
                 let bytes: Vec<u8> = row.get(1)?;
                 total += bytes.len();
                 if total > 1_048_576 {
+                    truncated = true;
                     break;
                 }
                 output.push(Event {
@@ -119,7 +121,7 @@ impl Store {
                     record: decode(&bytes)?,
                 });
             }
-            Ok(output)
+            Ok(Page { items: output, truncated })
         })
     }
     pub fn event_cursor(

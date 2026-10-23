@@ -11,11 +11,15 @@ its idempotency key: an identical replay succeeds, changed content conflicts.
 `read_mail` with `None` uses that recipient's durable cursor; `Some(seq)` replays
 history without changing it. `mark_mail_read` advances monotonically up to that
 recipient's highest delivery. Actor IDs are bound to external addresses by F3.
-Rows and integer sequences are returned directly; this step does not introduce
-private copies of the shared `Page` or `Cursor` requested by the full design.
+Mail and event reads return store-owned `Page` values with integer sequences
+and a `truncated` flag for the 1 MiB byte bound; resume after the last sequence.
+Fabric-only records, `Page` and any future `Cursor` stay in fabric-store until
+a second owner needs them.
 
 Tasks start Open. Claims atomically activate them, increment the persistent
-generation and bind actor, token and expiry. Update, release and finish require
+generation and bind actor, token and expiry. Callers supply a lease duration;
+claim/fence decisions and mutation timestamps use `Request.clock` inside the store.
+Update, release and finish require
 the live fence. Release returns to Open; finish permits only Done or Cancelled.
 A new claimant can take over after expiry. Tokens come from the service's safe
 entropy boundary and are omitted from task reads, events and Debug output.
@@ -27,10 +31,14 @@ Other commit failures propagate and are never replayed automatically. The edge
 must preserve the original IDs if explicitly retrying an uncertain mutation.
 
 `import_snapshot` is explicit and one-shot per source ID. It accepts a supplied,
-quiescent, self-contained old-schema snapshot, opens it read-only, rejects WAL and
-sidecars before opening SQLite, and reads one transaction. No legacy-root lookup
-exists. Bounds are 64 MiB source, 10,000 task/delivery rows and 8 MiB selected
-text. Destination imports require an empty project. A failed transaction leaves
+quiescent, sidecar-free old-schema snapshot, including cleanly closed WAL-mode
+and rollback databases. It opens SQLite READ_ONLY with an encoded immutable URI
+and reads one deferred transaction, without creating source sidecars or performing
+recovery. Existing WAL/SHM/journal sidecars return a typed stop-old-Fabric-and-retry
+error. No legacy-root lookup exists. Bounds are 10,000 task/delivery rows and
+8 MiB selected text; the whole source file has no size cap. Invalid message/task
+rows and invalid individual deliveries are skipped with durable reason counts;
+valid sibling deliveries survive. Destination imports require an empty project. A failed transaction leaves
 no rows, cursor changes or marker. The source ID also binds the old/new project.
 Repeated completed imports return their receipt without reopening the source.
 

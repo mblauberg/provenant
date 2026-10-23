@@ -1,6 +1,6 @@
 use crate::events::{append, event};
 use crate::*;
-use provenant_core::TaskId;
+use provenant_core::{DurationMicros, TaskId};
 use provenant_records::RecordHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,8 +59,7 @@ pub struct TaskClaim {
     pub task: TaskId,
     pub actor: ActorId,
     pub token: [u8; 16],
-    pub at: WallTime,
-    pub expires_at: WallTime,
+    pub lease: DurationMicros,
 }
 /// Store-specific task fence. Tokens are supplied by the entropy-owning edge,
 /// returned only to the claimant and never included in task lists or events.
@@ -193,19 +192,16 @@ impl Store {
         })
     }
     pub fn claim_task(&self, claim: &TaskClaim, request: &Request<'_>) -> Result<TaskFence> {
-        let duration = claim
-            .expires_at
-            .as_micros()
-            .checked_sub(claim.at.as_micros())
-            .ok_or(Error::Invalid("task lease"))?;
-        if !(1_000_000..=3_600_000_000).contains(&duration) {
+        if !(1_000_000..=3_600_000_000).contains(&claim.lease.as_micros()) {
             return Err(Error::Invalid("task lease"));
         }
         self.write(request, |tx| {
+            let at = request.clock.wall_now()?;
+            let expires_at = at.checked_add(claim.lease)?;
             let mut task = load(tx, claim.project, claim.task)?;
             if !matches!(task.state, TaskState::Open | TaskState::Active)
                 || (task.state == TaskState::Active
-                    && task.expires_at.is_none_or(|expiry| expiry > claim.at))
+                    && task.expires_at.is_none_or(|expiry| expiry > at))
             {
                 return Err(Error::Conflict);
             }
@@ -215,8 +211,8 @@ impl Store {
                 .ok_or(Error::Invalid("task generation"))?;
             task.state = TaskState::Active;
             task.owner = Some(claim.actor);
-            task.expires_at = Some(claim.expires_at);
-            task.updated_at = claim.at;
+            task.expires_at = Some(expires_at);
+            task.updated_at = at;
             save(tx, &task, Some(&claim.token))?;
             append(
                 tx,
@@ -226,7 +222,7 @@ impl Store {
                     EventKind::TaskClaimed,
                     Some(task.id.to_string()),
                     task.generation.to_string(),
-                    claim.at,
+                    at,
                 ),
                 None,
             )?;
@@ -244,7 +240,6 @@ impl Store {
         fence: &TaskFence,
         objective: &str,
         note: Option<&str>,
-        at: WallTime,
         request: &Request<'_>,
     ) -> Result<()> {
         text(objective, "objective")?;
@@ -252,6 +247,7 @@ impl Store {
             text(note, "note")?;
         }
         self.write(request, |tx| {
+            let at = request.clock.wall_now()?;
             let mut task = fenced(tx, project, fence, at)?;
             task.objective = objective.into();
             task.note = note.map(Into::into);
@@ -276,33 +272,31 @@ impl Store {
         &self,
         project: ProjectId,
         fence: &TaskFence,
-        at: WallTime,
         request: &Request<'_>,
     ) -> Result<()> {
-        self.close_task(project, fence, TaskState::Open, at, request)
+        self.close_task(project, fence, TaskState::Open, request)
     }
     pub fn finish_task(
         &self,
         project: ProjectId,
         fence: &TaskFence,
         state: TaskState,
-        at: WallTime,
         request: &Request<'_>,
     ) -> Result<()> {
         if !matches!(state, TaskState::Done | TaskState::Cancelled) {
             return Err(Error::Invalid("finish state"));
         }
-        self.close_task(project, fence, state, at, request)
+        self.close_task(project, fence, state, request)
     }
     fn close_task(
         &self,
         project: ProjectId,
         fence: &TaskFence,
         state: TaskState,
-        at: WallTime,
         request: &Request<'_>,
     ) -> Result<()> {
         self.write(request, |tx| {
+            let at = request.clock.wall_now()?;
             let mut task = fenced(tx, project, fence, at)?;
             task.state = state;
             task.owner = None;

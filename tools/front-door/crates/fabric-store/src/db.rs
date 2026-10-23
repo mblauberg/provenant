@@ -10,6 +10,35 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Index + 1 is the schema version; each migration commits independently.
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("schema.sql"),
+    include_str!("migrations/002-import-skips.sql"),
+];
+fn schema_version(db: &Connection) -> Result<usize> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let version = usize::try_from(version)
+        .ok()
+        .filter(|v| *v <= MIGRATIONS.len())
+        .ok_or(Error::SchemaVersion(version))?;
+    if version == 0
+        && db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| {
+            r.get::<_, bool>(0)
+        })?
+    {
+        return Err(Error::UnversionedDatabase);
+    }
+    Ok(version)
+}
+fn enable_wal(db: &Connection) -> Result<()> {
+    let mode: String = db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Error::JournalMode(mode));
+    }
+    db.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+    Ok(())
+}
+
 /// The only blocking seam: called after rollback, with a bounded delay.
 pub trait RetryWait {
     fn wait(&self, delay: DurationMicros, cancel: &CancelToken);
@@ -120,31 +149,26 @@ impl Store {
         )?;
         db.busy_timeout(Duration::ZERO)?;
         // Refuse future versions before journal-mode changes or schema writes.
-        let version: i64 =
-            request.retry(|| Ok(db.pragma_query_value(None, "user_version", |row| row.get(0))?))?;
-        if !(0..=1).contains(&version) {
-            return Err(Error::SchemaVersion(version));
-        }
-        request.retry(|| {
-            db.execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
-            )?;
-            Ok(())
-        })?;
+        request.retry(|| schema_version(&db))?;
+        request.retry(|| enable_wal(&db))?;
         let store = Self {
             db,
             _owner: PhantomData,
         };
-        store.write(request, |tx| {
-            let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            match version {
-                0 => tx.execute_batch(include_str!("schema.sql"))?,
-                1 => return Ok(()),
-                other => return Err(Error::SchemaVersion(other)),
+        loop {
+            let done = store.write(request, |tx| {
+                let version = schema_version(tx)?;
+                let Some(sql) = MIGRATIONS.get(version) else {
+                    return Ok(true);
+                };
+                tx.execute_batch(sql)?;
+                tx.pragma_update(None, "user_version", (version + 1) as i64)?;
+                Ok(false)
+            })?;
+            if done {
+                break;
             }
-            tx.pragma_update(None, "user_version", 1)?;
-            Ok(())
-        })?;
+        }
         companions(&fabric, &path)?;
         Ok(store)
     }
@@ -198,4 +222,14 @@ fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> R
         device.unwrap_or(opened.device),
     )?;
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn refuses_a_vfs_that_cannot_enable_wal() {
+        let db = Connection::open_in_memory().unwrap();
+        assert!(matches!(enable_wal(&db), Err(Error::JournalMode(mode)) if mode == "memory"));
+    }
 }

@@ -112,11 +112,7 @@ fn claim(f: &Fixture, who: u8) -> TaskClaim {
         task: task(f).id,
         actor: actor(who),
         token: [who; 16],
-        at: f.now(),
-        expires_at: f
-            .now()
-            .checked_add(DurationMicros::from_seconds(1).unwrap())
-            .unwrap(),
+        lease: DurationMicros::from_seconds(1).unwrap(),
     }
 }
 #[test]
@@ -129,37 +125,39 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
     store.send(&m, &req).unwrap();
     let rows = store
         .read_mail(project(), actor(3), Some(0), 100, &req)
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].message, m);
     assert_eq!(
         store
             .read_mail(project(), actor(3), Some(0), 100, &req)
-            .unwrap(),
+            .unwrap()
+            .items,
         rows
     );
     let seq = rows[0].seq;
     assert!(
         store
-            .mark_mail_read(project(), actor(3), seq + 100, f.now(), &req)
+            .mark_mail_read(project(), actor(3), seq + 100, &req)
             .is_err()
     );
     store
-        .mark_mail_read(project(), actor(3), seq, f.now(), &req)
+        .mark_mail_read(project(), actor(3), seq, &req)
         .unwrap();
-    store
-        .mark_mail_read(project(), actor(3), 0, f.now(), &req)
-        .unwrap();
+    store.mark_mail_read(project(), actor(3), 0, &req).unwrap();
     assert!(
         store
             .read_mail(project(), actor(3), None, 100, &req)
             .unwrap()
+            .items
             .is_empty()
     );
     assert_eq!(
         store
             .read_mail(project(), actor(4), None, 100, &req)
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -167,6 +165,7 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
         store
             .read_mail(project(), actor(3), Some(0), 100, &req)
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -179,12 +178,14 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
         store
             .read_mail(project(), actor(3), None, 100, &req)
             .unwrap()
+            .items
             .is_empty()
     );
     assert_eq!(
         store
             .events(project(), 0, 100, &req)
             .unwrap()
+            .items
             .iter()
             .filter(|e| e.record.kind == EventKind::MailSent)
             .count(),
@@ -205,7 +206,7 @@ fn task_fences_survive_expiry_and_release_and_cannot_be_bypassed() {
     let mut wrong = first.clone();
     wrong.token = [9; 16];
     assert!(matches!(
-        store.finish_task(project(), &wrong, TaskState::Done, f.now(), &f.request()),
+        store.finish_task(project(), &wrong, TaskState::Done, &f.request()),
         Err(Error::StaleFence)
     ));
     f.clock
@@ -214,12 +215,10 @@ fn task_fences_survive_expiry_and_release_and_cannot_be_bypassed() {
     let next = store.claim_task(&claim(&f, 4), &f.request()).unwrap();
     assert_eq!(next.generation, first.generation + 1);
     assert!(matches!(
-        store.release_task(project(), &first, f.now(), &f.request()),
+        store.release_task(project(), &first, &f.request()),
         Err(Error::StaleFence)
     ));
-    store
-        .release_task(project(), &next, f.now(), &f.request())
-        .unwrap();
+    store.release_task(project(), &next, &f.request()).unwrap();
     let third = store.claim_task(&claim(&f, 4), &f.request()).unwrap();
     assert_eq!(third.generation, next.generation + 1);
     store
@@ -228,18 +227,11 @@ fn task_fences_survive_expiry_and_release_and_cannot_be_bypassed() {
             &third,
             "New objective",
             Some("blocker"),
-            f.now(),
             &f.request(),
         )
         .unwrap();
     store
-        .finish_task(
-            project(),
-            &third,
-            TaskState::Cancelled,
-            f.now(),
-            &f.request(),
-        )
+        .finish_task(project(), &third, TaskState::Cancelled, &f.request())
         .unwrap();
     assert!(matches!(
         store.claim_task(&claim(&f, 3), &f.request()),
@@ -306,12 +298,14 @@ fn sqlite_full_rolls_back_messages_deliveries_and_events() {
         store
             .events(project(), 0, 100, &f.request())
             .unwrap()
+            .items
             .is_empty()
     );
     assert!(
         store
             .read_mail(project(), actor(3), Some(0), 100, &f.request())
             .unwrap()
+            .items
             .is_empty()
     );
 }
@@ -358,7 +352,7 @@ fn event_failure_rolls_back_task_and_mail_mutations() {
     store.db.execute_batch("CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected event failure'); END").unwrap();
     assert!(
         store
-            .finish_task(project(), &fence, TaskState::Done, f.now(), &f.request())
+            .finish_task(project(), &fence, TaskState::Done, &f.request())
             .is_err()
     );
     assert_eq!(
@@ -418,13 +412,18 @@ fn event_replay_deduplication_and_durable_cursor() {
         0
     );
     assert_eq!(
-        store.events(project(), 0, 1, &f.request()).unwrap().len(),
+        store
+            .events(project(), 0, 1, &f.request())
+            .unwrap()
+            .items
+            .len(),
         1
     );
     assert!(
         store
             .events(ProjectId::from_bytes([9; 16]), 0, 1, &f.request())
             .unwrap()
+            .items
             .is_empty()
     );
 }
@@ -480,6 +479,7 @@ fn busy_retries_after_reserved_lock_release_without_sleep_or_open_transaction() 
         holder
             .read_mail(project(), actor(3), Some(0), 100, &f.request())
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -632,7 +632,8 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
         ImportReceipt {
             tasks: 2,
             messages: 2,
-            skipped: false
+            skipped: false,
+            skipped_rows: Default::default(),
         }
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -641,16 +642,19 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
         store
             .read_mail(project(), actor(3), None, 100, &f.request())
             .unwrap()
+            .items
             .is_empty()
     );
     let mail = store
         .read_mail(project(), actor(3), Some(0), 100, &f.request())
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(mail.len(), 2);
     assert_eq!(
         store
             .read_mail(project(), actor(4), Some(0), 100, &f.request())
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -677,7 +681,7 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
     assert!(store.import_snapshot(&plan, &f.request()).unwrap().skipped);
 }
 #[test]
-fn failed_import_is_atomic_retryable_and_refuses_wal() {
+fn failed_import_is_atomic_retryable_and_refuses_live_sidecars() {
     let f = Fixture::new();
     let store = f.open();
     let (path, db) = old_snapshot(&f);
@@ -714,11 +718,20 @@ fn failed_import_is_atomic_retryable_and_refuses_wal() {
     assert!(!store.import_snapshot(&plan, &f.request()).unwrap().skipped);
     let db = rusqlite::Connection::open(path).unwrap();
     db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    old_message(
+        &db,
+        "live",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
     let mut different = plan;
     different.source = "other-source".into();
     assert!(matches!(
         store.import_snapshot(&different, &f.request()),
-        Err(Error::ImportSource)
+        Err(Error::ImportNotQuiescent)
     ));
 }
 
@@ -738,7 +751,7 @@ fn cold_open_race_serialises_schema_setup() {
                         .db
                         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                         .unwrap(),
-                    1
+                    crate::db::MIGRATIONS.len() as i64
                 );
             })
         };
@@ -835,14 +848,16 @@ fn delivery_sequences_are_local_to_each_project_and_never_wrap() {
     assert_eq!(
         store
             .read_mail(first.project, actor(3), Some(0), 1, &f.request())
-            .unwrap()[0]
+            .unwrap()
+            .items[0]
             .seq,
         1
     );
     assert_eq!(
         store
             .read_mail(second.project, actor(3), Some(0), 1, &f.request())
-            .unwrap()[0]
+            .unwrap()
+            .items[0]
             .seq,
         1
     );
@@ -862,6 +877,7 @@ fn delivery_sequences_are_local_to_each_project_and_never_wrap() {
         store
             .read_mail(project(), actor(3), Some(0), 100, &f.request())
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -889,7 +905,8 @@ fn import_keeps_old_open_work_but_excludes_future_tasks_and_requests() {
         ImportReceipt {
             tasks: 1,
             messages: 0,
-            skipped: false
+            skipped: false,
+            skipped_rows: Default::default(),
         }
     );
     assert_eq!(
@@ -904,7 +921,7 @@ fn import_keeps_old_open_work_but_excludes_future_tasks_and_requests() {
     );
 }
 #[test]
-fn oversized_or_malformed_import_never_publishes_a_marker() {
+fn large_source_and_malformed_row_do_not_block_a_bounded_import() {
     let f = Fixture::new();
     let store = f.open();
     let (path, db) = old_snapshot(&f);
@@ -913,23 +930,538 @@ fn oversized_or_malformed_import_never_publishes_a_marker() {
         [],
     )
     .unwrap();
+    db.execute(
+        "INSERT INTO tasks VALUES('legacy-project','good','objective',NULL,'open',1,0)",
+        [],
+    )
+    .unwrap();
     drop(db);
-    assert!(matches!(
-        store.import_snapshot(&plan(&f, path.clone()), &f.request()),
-        Err(Error::Sqlite(_))
-    ));
-    assert_eq!(
-        store
-            .db
-            .query_row("SELECT count(*) FROM imports", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
     let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     file.set_len(67_108_865).unwrap();
     drop(file);
+    let receipt = store
+        .import_snapshot(&plan(&f, path), &f.request())
+        .unwrap();
+    assert_eq!(receipt.tasks, 1);
+    assert_eq!(
+        receipt.skipped_rows,
+        std::collections::BTreeMap::from([(ImportSkipReason::InvalidValue, 1)])
+    );
+}
+
+#[test]
+fn caller_timestamp_cannot_take_over_a_live_lease() {
+    let f = Fixture::new();
+    let store = f.open();
+    let mut future_task = task(&f);
+    future_task.created_at = f
+        .now()
+        .checked_add(DurationMicros::from_seconds(60).unwrap())
+        .unwrap();
+    future_task.updated_at = future_task.created_at;
+    store.create_task(&future_task, &f.request()).unwrap();
+    store.claim_task(&claim(&f, 3), &f.request()).unwrap();
+    // The caller can future-date stored input, but cannot supply decision time.
+    let mut future = claim(&f, 4);
+    future.lease = DurationMicros::from_seconds(3600).unwrap();
     assert!(matches!(
-        store.import_snapshot(&plan(&f, path), &f.request()),
-        Err(Error::ImportLimit)
+        store.claim_task(&future, &f.request()),
+        Err(Error::Conflict)
     ));
+    let active = store.task(project(), task(&f).id, &f.request()).unwrap();
+    assert_eq!(active.updated_at, f.now());
+    assert_eq!(
+        active.expires_at,
+        Some(
+            f.now()
+                .checked_add(DurationMicros::from_seconds(1).unwrap())
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn nonempty_unversioned_database_is_refused_before_mutation() {
+    let f = Fixture::new();
+    drop(f.open());
+    let db = rusqlite::Connection::open(f.path()).unwrap();
+    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA user_version=0")
+        .unwrap();
+    drop(db);
+    assert!(matches!(
+        Store::open(&f.root, &f.request()),
+        Err(Error::UnversionedDatabase)
+    ));
+    let db = rusqlite::Connection::open(f.path()).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+            .unwrap(),
+        "delete"
+    );
+}
+
+#[test]
+fn mail_refuses_a_record_with_another_message_id() {
+    let f = Fixture::new();
+    let store = f.open();
+    store.send(&message(&f, 5), &f.request()).unwrap();
+    let forged = encode(&message(&f, 9)).unwrap();
+    store
+        .db
+        .execute("UPDATE messages SET record=?", [forged])
+        .unwrap();
+    assert!(matches!(
+        store.read_mail(project(), actor(3), Some(0), 100, &f.request()),
+        Err(Error::Invalid("stored message identity"))
+    ));
+}
+
+#[test]
+fn byte_bounded_pages_report_truncation_and_resume_without_loss() {
+    let f = Fixture::new();
+    let store = f.open();
+    let mut m = message(&f, 0);
+    m.body = "x".repeat(MAX_BODY_BYTES);
+    for n in 1..=20 {
+        m.id = MessageId::from_bytes([n; 16]);
+        store.send(&m, &f.request()).unwrap();
+        let note = event(
+            project(),
+            None,
+            EventKind::Note,
+            None,
+            m.body.clone(),
+            f.now(),
+        );
+        store.note(&note, None, &f.request()).unwrap();
+    }
+    let mail = store
+        .read_mail(project(), actor(3), Some(0), 100, &f.request())
+        .unwrap();
+    assert!(mail.truncated);
+    let next = store
+        .read_mail(
+            project(),
+            actor(3),
+            mail.items.last().map(|r| r.seq),
+            100,
+            &f.request(),
+        )
+        .unwrap();
+    assert!(!next.truncated);
+    assert_eq!(mail.items.len() + next.items.len(), 20);
+    let events = store.events(project(), 0, 100, &f.request()).unwrap();
+    assert!(events.truncated);
+    let next = store
+        .events(
+            project(),
+            events.items.last().unwrap().seq,
+            100,
+            &f.request(),
+        )
+        .unwrap();
+    assert!(!next.truncated);
+    assert_eq!(events.items.len() + next.items.len(), 40);
+}
+
+#[test]
+fn cleanly_closed_wal_source_imports_without_changing_old_root() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (path, db) = old_snapshot(&f);
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    old_message(
+        &db,
+        "wal",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    drop(db);
+    assert_eq!(&std::fs::read(&path).unwrap()[18..20], &[2, 2]);
+    let before = std::fs::read(&path).unwrap();
+    let names = || {
+        std::fs::read_dir(f.temp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let entries = names();
+    assert_eq!(
+        store
+            .import_snapshot(&plan(&f, path.clone()), &f.request())
+            .unwrap()
+            .messages,
+        1
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(names(), entries);
+}
+
+#[test]
+fn invalid_legacy_row_does_not_abort_valid_import() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (path, db) = old_snapshot(&f);
+    old_message(
+        &db,
+        "bad",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    old_message(
+        &db,
+        "good",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    db.execute("UPDATE messages SET body=NULL WHERE message_id='bad'", [])
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        store
+            .import_snapshot(&plan(&f, path), &f.request())
+            .unwrap()
+            .messages,
+        1
+    );
+}
+
+#[test]
+fn import_counts_each_row_validation_reason_and_replays_the_receipt() {
+    for reason in [
+        ImportSkipReason::NullValue,
+        ImportSkipReason::InvalidValue,
+        ImportSkipReason::EmptyText,
+        ImportSkipReason::OversizeText,
+        ImportSkipReason::Nul,
+        ImportSkipReason::UnmappedActor,
+        ImportSkipReason::DuplicateRecipient,
+        ImportSkipReason::TooManyRecipients,
+        ImportSkipReason::RecordSize,
+    ] {
+        let f = Fixture::new();
+        let store = f.open();
+        let (path, db) = old_snapshot(&f);
+        old_message(
+            &db,
+            "bad",
+            f.now().as_micros() / 1000,
+            "request",
+            None,
+            None,
+            None,
+        );
+        old_message(
+            &db,
+            "good",
+            f.now().as_micros() / 1000,
+            "request",
+            None,
+            None,
+            Some("bad"),
+        );
+        let mut plan = plan(&f, path);
+        match reason {
+            ImportSkipReason::NullValue => {
+                db.execute("UPDATE messages SET body=NULL WHERE message_id='bad'", [])
+                    .unwrap();
+            }
+            ImportSkipReason::InvalidValue => {
+                db.execute(
+                    "UPDATE messages SET created_at=created_at-0.5 WHERE message_id='bad'",
+                    [],
+                )
+                .unwrap();
+            }
+            ImportSkipReason::EmptyText => {
+                db.execute("UPDATE messages SET body='' WHERE message_id='bad'", [])
+                    .unwrap();
+            }
+            ImportSkipReason::OversizeText => {
+                db.execute(
+                    "UPDATE messages SET body=? WHERE message_id='bad'",
+                    ["x".repeat(MAX_BODY_BYTES + 1)],
+                )
+                .unwrap();
+            }
+            ImportSkipReason::Nul => {
+                db.execute(
+                    "UPDATE messages SET body=? WHERE message_id='bad'",
+                    ["a\0b"],
+                )
+                .unwrap();
+            }
+            ImportSkipReason::UnmappedActor => {
+                db.execute(
+                    "UPDATE messages SET sender_id='unknown' WHERE message_id='bad'",
+                    [],
+                )
+                .unwrap();
+            }
+            ImportSkipReason::DuplicateRecipient => {
+                plan.actors.insert("alias".into(), actor(3));
+                db.execute(
+                    "INSERT INTO deliveries VALUES('bad','legacy-project','alias',NULL)",
+                    [],
+                )
+                .unwrap();
+            }
+            ImportSkipReason::TooManyRecipients => {
+                for n in 0..99_u8 {
+                    let label = format!("recipient-{n}");
+                    plan.actors.insert(label.clone(), actor(n + 5));
+                    db.execute(
+                        "INSERT INTO deliveries VALUES('bad','legacy-project',?,NULL)",
+                        [label],
+                    )
+                    .unwrap();
+                }
+            }
+            ImportSkipReason::RecordSize => {
+                db.execute(
+                    "UPDATE messages SET body=? WHERE message_id='bad'",
+                    ["\u{1}".repeat(MAX_BODY_BYTES)],
+                )
+                .unwrap();
+            }
+        }
+        drop(db);
+        let receipt = store.import_snapshot(&plan, &f.request()).unwrap();
+        let retained = matches!(
+            reason,
+            ImportSkipReason::DuplicateRecipient | ImportSkipReason::TooManyRecipients
+        );
+        assert_eq!(receipt.messages, if retained { 2 } else { 1 }, "{reason:?}");
+        assert_eq!(
+            receipt.skipped_rows,
+            std::collections::BTreeMap::from([(reason, 1)])
+        );
+        let mail = store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap();
+        let good = mail
+            .items
+            .iter()
+            .find(|row| row.message.legacy.as_ref().unwrap().id == "good")
+            .unwrap();
+        assert_eq!(
+            matches!(good.message.reply_to, Some(MessageRef::Local { .. })),
+            retained
+        );
+        if retained {
+            let bad = mail
+                .items
+                .iter()
+                .find(|row| row.message.legacy.as_ref().unwrap().id == "bad")
+                .unwrap();
+            assert!(bad.message.recipients.contains(&actor(3)));
+            assert!(bad.message.recipients.contains(&actor(4)));
+        }
+        let replay = store.import_snapshot(&plan, &f.request()).unwrap();
+        assert!(replay.skipped);
+        assert_eq!(replay.skipped_rows, receipt.skipped_rows);
+    }
+}
+
+#[test]
+fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
+    let mut f = Fixture::new();
+    let store = f.open();
+    let mut t = task(&f);
+    t.updated_at = f
+        .now()
+        .checked_add(DurationMicros::from_seconds(3600).unwrap())
+        .unwrap();
+    store.create_task(&t, &f.request()).unwrap();
+    let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
+    f.clock
+        .advance(DurationMicros::from_micros(500_000))
+        .unwrap();
+    store
+        .update_task(project(), &fence, "updated", None, &f.request())
+        .unwrap();
+    assert_eq!(
+        store
+            .task(project(), t.id, &f.request())
+            .unwrap()
+            .updated_at,
+        f.now()
+    );
+    store.send(&message(&f, 5), &f.request()).unwrap();
+    store
+        .mark_mail_read(project(), actor(3), 1, &f.request())
+        .unwrap();
+    let events = store.events(project(), 0, 100, &f.request()).unwrap();
+    assert_eq!(events.items.last().unwrap().record.at, f.now());
+    f.clock
+        .advance(DurationMicros::from_micros(500_000))
+        .unwrap();
+    assert!(matches!(
+        store.update_task(project(), &fence, "too late", None, &f.request()),
+        Err(Error::StaleFence)
+    ));
+    assert!(matches!(
+        store.release_task(project(), &fence, &f.request()),
+        Err(Error::StaleFence)
+    ));
+    assert!(matches!(
+        store.finish_task(project(), &fence, TaskState::Done, &f.request()),
+        Err(Error::StaleFence)
+    ));
+}
+
+#[test]
+fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
+    let f = Fixture::new();
+    drop(f.open());
+    let db = rusqlite::Connection::open(f.path()).unwrap();
+    db.execute_batch("ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
+    drop(db);
+    let store = f.open();
+    assert_eq!(
+        store
+            .db
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        crate::db::MIGRATIONS.len() as i64
+    );
+    assert_eq!(
+        store
+            .db
+            .query_row(
+                "SELECT skipped_rows FROM imports WHERE source='prior'",
+                [],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+        b"{}"
+    );
+    drop(store);
+    drop(f.open());
+}
+
+#[test]
+fn import_filename_cannot_inject_sqlite_uri_options() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (path, db) = old_snapshot(&f);
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    old_message(
+        &db,
+        "encoded",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    drop(db);
+    let encoded = f.temp.path().join("old ?mode=rwc#é%.sqlite3");
+    std::fs::rename(path, &encoded).unwrap();
+    let before = std::fs::read(&encoded).unwrap();
+    assert_eq!(
+        store
+            .import_snapshot(&plan(&f, encoded.clone()), &f.request())
+            .unwrap()
+            .messages,
+        1
+    );
+    assert_eq!(std::fs::read(encoded).unwrap(), before);
+    assert_eq!(std::fs::read_dir(f.temp.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn invalid_individual_deliveries_preserve_valid_recipients() {
+    for (recipient, reason) in [
+        (None, ImportSkipReason::NullValue),
+        (Some(String::new()), ImportSkipReason::EmptyText),
+        (
+            Some("x".repeat(MAX_BODY_BYTES + 1)),
+            ImportSkipReason::OversizeText,
+        ),
+        (Some("a\0b".into()), ImportSkipReason::Nul),
+        (Some("unknown".into()), ImportSkipReason::UnmappedActor),
+    ] {
+        let f = Fixture::new();
+        let store = f.open();
+        let (path, db) = old_snapshot(&f);
+        old_message(
+            &db,
+            "message",
+            f.now().as_micros() / 1000,
+            "request",
+            None,
+            None,
+            None,
+        );
+        db.execute(
+            "INSERT INTO deliveries VALUES('message','legacy-project',?,NULL)",
+            [recipient],
+        )
+        .unwrap();
+        drop(db);
+        let receipt = store
+            .import_snapshot(&plan(&f, path), &f.request())
+            .unwrap();
+        assert_eq!(receipt.messages, 1);
+        assert_eq!(
+            receipt.skipped_rows,
+            std::collections::BTreeMap::from([(reason, 1)])
+        );
+        let mail = store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap();
+        assert_eq!(mail.items[0].message.recipients, vec![actor(3), actor(4)]);
+        assert_eq!(
+            store
+                .read_mail(project(), actor(4), Some(0), 100, &f.request())
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn oversized_legacy_id_is_skipped_without_exhausting_selected_text_budget() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (path, db) = old_snapshot(&f);
+    old_message(
+        &db,
+        &"x".repeat(8_388_609),
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    old_message(
+        &db,
+        "good",
+        f.now().as_micros() / 1000,
+        "request",
+        None,
+        None,
+        None,
+    );
+    drop(db);
+    let receipt = store
+        .import_snapshot(&plan(&f, path), &f.request())
+        .unwrap();
+    assert_eq!(receipt.messages, 1);
+    assert_eq!(
+        receipt.skipped_rows,
+        std::collections::BTreeMap::from([(ImportSkipReason::OversizeText, 2)])
+    );
 }
