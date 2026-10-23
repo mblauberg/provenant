@@ -482,3 +482,34 @@ mod tests {
         assert_eq!(actual, expected);
     }
 }
+
+#[cfg(test)]
+mod policy_differential {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validators_and_reservations_match_python_on_malformed_and_valid_records() {
+        let catalog = json!({"model_patterns":[{"pattern":"claude|sonnet|opus","family":"anthropic"}],"adapters":{"claude":{"fixed_model_family":"anthropic"}}});
+        let valid = json!({"alias":"principal","default_effort":"high","maximum_effort":"ultra","roles":["lead","orchestrator"],"models":["claude-mythos-5"]});
+        let mut overrides = vec![json!(null), json!([]), json!({}), valid.clone()];
+        for (key, values) in [
+            ("alias", vec![json!(1),json!("strong"),json!(null)]),
+            ("roles", vec![json!(["lead","lead"]),json!(["lead"]),json!([" lead","worker"]),json!(["\u{1c}","worker"]),json!(null)]),
+            ("models", vec![json!([]),json!(["x","y"]),json!([1]),json!([" x"])]),
+            ("default_effort", vec![json!("unknown"),json!(true),json!("ultra")]),
+            ("maximum_effort", vec![json!("low"),json!(null)]),
+        ] {
+            for value in values { let mut item=valid.clone(); item[key]=value; overrides.push(item); }
+        }
+        let families = vec![json!(null),json!([]),json!({}),json!({"risk_tier_overrides":null}),json!({"risk_tier_overrides":[]}),json!({"ultra_eligible_roles":null}),json!({"ultra_eligible_roles":["lead"]}),json!({"ultra_eligible_roles":["lead "]}),json!({"aliases":{"senior":["sonnet",3]},"role_overrides":{"review":{"principal":["opus"]}},"risk_tier_overrides":{"crucial":valid}})];
+        let fixture=json!({"catalog":catalog,"overrides":overrides,"families":families});
+        let Some(expected): Option<Value> = crate::oracle::python(r#"
+import importlib.util,json,pathlib,sys
+s=importlib.util.spec_from_file_location('catalog',pathlib.Path('scripts/model_route_catalog.py')); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+d=json.load(sys.stdin); c=d['catalog']
+print(json.dumps({'overrides':[m.risk_tier_override_is_well_formed(x) for x in d['overrides']], 'roles':[m.ultra_eligible_roles_are_valid(x) for x in d['families']], 'families':[m.risk_tier_overrides_are_valid('anthropic',x,c) for x in d['families']]}))
+"#, &fixture) else { return; };
+        assert_eq!(json!({"overrides":overrides.iter().map(risk_tier_override_is_well_formed).collect::<Vec<_>>(),"roles":families.iter().map(ultra_eligible_roles_are_valid).collect::<Vec<_>>(),"families":families.iter().map(|x|risk_tier_overrides_are_valid("anthropic",x,&catalog)).collect::<Vec<_>>()}),expected);
+    }
+}
