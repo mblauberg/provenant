@@ -7,7 +7,8 @@ The front door is a binary built from `tools/front-door/`. A built binary
 embeds the managed-file marker and the line
 `provenant-front-door source-sha256=<hex>` as lines of their own, so the
 installer's marker rule and the install check both work on it unchanged. The
-hash covers `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/**`.
+hash covers the workspace manifest, lockfile and toolchain, plus the front
+door's and every `crates/*` member's manifest, `src/**` and `build.rs`.
 
 Commands (stdout carries only the answer; progress and reasons go to stderr):
 
@@ -31,7 +32,7 @@ import subprocess
 import sys
 
 CRATE_RELATIVE = "tools/front-door"
-HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml")
 MODES = ("rust",)
 RUSTUP_FIX = "fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 DEPLOYMENT_TARGET = "15.0"
@@ -47,16 +48,49 @@ class CargoUnavailable(FrontDoorError):
     """Install rustup before building the front door."""
 
 
+def _editor_litter(relative: Path) -> bool:
+    """Dotfiles (.DS_Store, .x.swp) and `~` backups never reach the compiler."""
+    return any(part.startswith(".") for part in relative.parts) or relative.name.endswith("~")
+
+
 def source_digest(crate: Path) -> str:
-    """Digest of the files a build depends on, in a path-sorted, framed order."""
+    """Hash the R2 workspace layout without requiring Cargo.
+
+    Start with HASHED_FILES in their listed order (when present), then all
+    remaining inputs sorted by workspace-relative POSIX path. The latter
+    include every package manifest, every file under its `src/` except
+    dotfiles and `~` backups, every Rust
+    source under the package (including custom target and build-script paths),
+    and any conventional `build.rs`. Each input is framed as UTF-8
+    `path\0byte-length\0` followed by its unmodified bytes.
+    """
     manifest = crate / "Cargo.toml"
     sources = crate / "src"
     if not manifest.is_file() or not sources.is_dir():
         raise FileNotFoundError(f"no Rust front door sources under {crate}")
     names = [name for name in HASHED_FILES if (crate / name).is_file()]
-    names += sorted(
-        path.relative_to(crate).as_posix() for path in sources.rglob("*") if path.is_file()
-    )
+    # PORTING.md R2 fixes workspace members at `.` and `crates/*`. Include
+    # every member, even before it becomes a dependency of the binary.
+    packages = [crate, *(path.parent for path in crate.glob("crates/*/Cargo.toml"))]
+    inputs = set()
+    for package in packages:
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in (package / "Cargo.toml", package / "build.rs")
+            if path.is_file()
+        )
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in (package / "src").rglob("*")
+            if path.is_file() and not _editor_litter(path.relative_to(package))
+        )
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in package.rglob("*.rs")
+            if path.is_file()
+            and not {"target", ".git"}.intersection(path.relative_to(package).parts)
+        )
+    names += sorted(inputs.difference(names))
     digest = hashlib.sha256()
     for name in names:
         content = (crate / name).read_bytes()

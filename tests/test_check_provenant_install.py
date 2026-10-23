@@ -243,8 +243,19 @@ def crate_product(tmp_path_factory) -> Path:
     crate = product / "tools/front-door"
     shutil.rmtree(crate, ignore_errors=True)
     (crate / "src").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\n')
+    (crate / "Cargo.toml").write_text(
+        '[workspace]\nmembers = [".", "crates/*"]\n[package]\nname = "provenant"\n'
+    )
     (crate / "src/main.rs").write_text("fn main() {}\n")
+    (crate / "crates/core/src").mkdir(parents=True)
+    (crate / "crates/core/Cargo.toml").write_text(
+        '[package]\nname = "provenant-core"\n'
+        'build = "scripts/build.rs"\n'
+        '[lib]\npath = "library.rs"\n'
+    )
+    (crate / "crates/core/scripts").mkdir()
+    (crate / "crates/core/scripts/build.rs").write_text("fn main() {}\n")
+    (crate / "crates/core/library.rs").write_text("// library\n")
     return product
 
 
@@ -307,6 +318,24 @@ def test_check_reports_a_rebuild_when_the_binary_predates_the_sources(
     assert result.returncode == 1
     assert "built from different sources" in result.stderr
     assert "rebuild: re-run install-harness" in result.stderr
+
+
+def test_check_detects_a_library_change_without_a_new_stamp(tmp_path, crate_product):
+    binary = install_binary(tmp_path, current_digest(crate_product))
+    stamped = binary.read_bytes()
+    source = crate_product / "tools/front-door/crates/core/library.rs"
+    original = source.read_bytes()
+    assert run_check_in(crate_product, tmp_path).returncode == 0
+    try:
+        source.write_bytes(original + b"// changed library\n")
+        result = run_check_in(crate_product, tmp_path)
+        assert result.returncode == 1
+        assert "built from different sources" in result.stderr
+        assert "rebuild: re-run install-harness" in result.stderr
+        assert binary.read_bytes() == stamped
+    finally:
+        source.write_bytes(original)
+    assert run_check_in(crate_product, tmp_path).returncode == 0
 
 
 def test_check_treats_an_unstamped_binary_as_stale(tmp_path: Path, crate_product: Path) -> None:
