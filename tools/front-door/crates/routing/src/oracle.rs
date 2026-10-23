@@ -43,7 +43,10 @@ fn run(command: &mut Command, input: &[u8]) -> std::io::Result<Output> {
             while child.try_wait()?.is_none() && Instant::now() < reap {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Python oracle deadline exceeded"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Python oracle deadline exceeded",
+            ));
         }
         std::thread::sleep(Duration::from_millis(5));
     };
@@ -53,16 +56,24 @@ fn run(command: &mut Command, input: &[u8]) -> std::io::Result<Output> {
         file.take(8 * 1024 * 1024).read_to_end(&mut data)?;
         Ok(data)
     }
-    Ok(Output { status, stdout: read(&mut stdout)?, stderr: read(&mut stderr)? })
+    Ok(Output {
+        status,
+        stdout: read(&mut stdout)?,
+        stderr: read(&mut stderr)?,
+    })
 }
 
 pub(crate) fn python<T: DeserializeOwned>(code: &str, input: &Value) -> Option<T> {
     let program = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .unwrap();
     let home = tempfile::tempdir().unwrap();
     let command = || {
         let mut command = Command::new(&program);
-        command.env_clear()
+        command
+            .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", home.path())
             .env("AGENT_FABRIC_STATE_ROOT", home.path().join("state"))
@@ -70,13 +81,36 @@ pub(crate) fn python<T: DeserializeOwned>(code: &str, input: &Value) -> Option<T
             .current_dir(root);
         command
     };
-    let version = run(command().args(["-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3,12) else 42)"]), b"");
+    let version = run(
+        command().args([
+            "-I",
+            "-c",
+            "import sys; sys.exit(0 if sys.version_info >= (3,12) else 42)",
+        ]),
+        b"",
+    );
     match version {
-        Err(error) => { unavailable(&format!("Python oracle {program:?} unavailable: {error}"))?; }
-        Ok(output) if output.status.code() == Some(42) => { unavailable(&format!("Python oracle {program:?} is older than 3.12"))?; }
-        Ok(output) => assert!(output.status.success(), "Python oracle version check failed: {}", String::from_utf8_lossy(&output.stderr)),
+        Err(error) => {
+            unavailable(&format!("Python oracle {program:?} unavailable: {error}"))?;
+        }
+        Ok(output) if output.status.code() == Some(42) => {
+            unavailable(&format!("Python oracle {program:?} is older than 3.12"))?;
+        }
+        Ok(output) => assert!(
+            output.status.success(),
+            "Python oracle version check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
     }
-    let output = run(command().args(["-I", "-c", code]), &serde_json::to_vec(input).unwrap()).unwrap();
-    assert!(output.status.success(), "Python oracle failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output = run(
+        command().args(["-I", "-c", code]),
+        &serde_json::to_vec(input).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "Python oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Some(serde_json::from_slice(&output.stdout).unwrap())
 }
