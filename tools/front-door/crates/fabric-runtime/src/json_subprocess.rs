@@ -30,13 +30,31 @@ pub enum JsonSubprocessError {
     /// AbortSignal reasons can be arbitrary values and must win over a timeout
     /// or overflow already recorded before close.
     #[error("JSON helper cancelled")]
-    Cancelled { reason: Value },
+    Cancelled { reason: AbortReason },
+}
+
+/// JSON reasons pass through unchanged. Nullish reasons use the DOMException
+/// default; arbitrary non-JSON JS objects remain a transport/value-owner seam.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AbortReason {
+    Value(Value),
+    Default,
+}
+impl AbortReason {
+    fn from_value(value: Value) -> Self {
+        if value.is_null() {
+            Self::Default
+        } else {
+            Self::Value(value)
+        }
+    }
 }
 
 pub enum Event<'a> {
     Stdout(&'a [u8]),
     Stderr(&'a [u8]),
     Timeout,
+    Tick(u64),
     Abort(Value),
     SpawnFailed(String),
     Closed(Option<i32>),
@@ -75,7 +93,8 @@ pub struct JsonCapture {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     failure: Option<SubprocessFailure>,
-    aborted: Option<Value>,
+    aborted: Option<AbortReason>,
+    deadline_ms: Option<u64>,
     settled: bool,
 }
 impl JsonCapture {
@@ -87,8 +106,26 @@ impl JsonCapture {
             stderr: Vec::new(),
             failure: None,
             aborted: None,
+            deadline_ms: None,
             settled: false,
         }
+    }
+    /// The caller checks this before spawning. No process is created for a
+    /// pre-aborted request, even when its reason is null.
+    pub fn start(
+        max_bytes: usize,
+        unavailable: impl Into<String>,
+        deadline_ms: u64,
+        pre_aborted: Option<Value>,
+    ) -> Result<Self, JsonSubprocessError> {
+        if let Some(reason) = pre_aborted {
+            return Err(JsonSubprocessError::Cancelled {
+                reason: AbortReason::from_value(reason),
+            });
+        }
+        let mut capture = Self::new(max_bytes, unavailable);
+        capture.deadline_ms = Some(deadline_ms);
+        Ok(capture)
     }
     pub fn step(&mut self, event: Event<'_>) -> Effect {
         if self.settled {
@@ -113,8 +150,16 @@ impl JsonCapture {
                 Effect::None
             }
             Event::Timeout => self.fail(SubprocessFailure::Timeout),
+            Event::Tick(now) => {
+                if self.deadline_ms.is_some_and(|deadline| now >= deadline) {
+                    self.deadline_ms = None;
+                    self.fail(SubprocessFailure::Timeout)
+                } else {
+                    Effect::None
+                }
+            }
             Event::Abort(reason) => {
-                self.aborted = Some(reason);
+                self.aborted = Some(AbortReason::from_value(reason));
                 Effect::Kill
             }
             Event::SpawnFailed(message) => {
@@ -259,7 +304,7 @@ mod tests {
         assert_eq!(
             finish(&mut capture, None).unwrap_err(),
             JsonSubprocessError::Cancelled {
-                reason: json!({"message":"stop"})
+                reason: AbortReason::Value(json!({"message":"stop"}))
             }
         );
         let mut capture = JsonCapture::new(1, "unavailable");
@@ -271,6 +316,52 @@ mod tests {
                 stderr: String::new()
             }
             .into()))
+        );
+    }
+    #[test]
+    fn pre_aborted_requests_match_node_without_starting_a_child() {
+        let reasons = json!([null, false, 0, "stop", {"reason":"stop"}]);
+        let script = r#"import {runJsonSubprocess} from './src/json-subprocess.ts';
+const values=JSON.parse(process.argv[1]); const out=[];
+for(const reason of values) {const c=new AbortController(); c.abort(reason);
+ try {await runJsonSubprocess('/must-not-spawn',[],{signal:c.signal,input:null,timeoutMs:1,maxBytes:1,unavailable:'unavailable'}); out.push('unexpected');}
+ catch(e) {out.push(e instanceof DOMException ? {name:e.name,message:e.message}:e);}}
+console.log(JSON.stringify(out));"#;
+        let Some(expected) = crate::test_support::node(script, &[reasons.to_string()]) else {
+            return;
+        };
+        let actual: Vec<_> = reasons
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reason| {
+                let Err(JsonSubprocessError::Cancelled { reason }) =
+                    JsonCapture::start(1, "unavailable", 10, Some(reason.clone()))
+                else {
+                    panic!("pre-abort accepted");
+                };
+                match reason {
+                    AbortReason::Default => {
+                        json!({"name":"AbortError","message":"This operation was aborted"})
+                    }
+                    AbortReason::Value(value) => value,
+                }
+            })
+            .collect();
+        assert_eq!(json!(actual), expected);
+    }
+    #[test]
+    fn explicit_deadline_fires_once_and_never_overrides_prior_failure() {
+        let mut capture = JsonCapture::start(1, "unavailable", 100, None).unwrap();
+        assert_eq!(capture.step(Event::Tick(99)), Effect::None);
+        assert_eq!(capture.step(Event::Tick(100)), Effect::Kill);
+        assert_eq!(capture.step(Event::Tick(101)), Effect::None);
+        assert_eq!(capture.step(Event::Abort(Value::Null)), Effect::Kill);
+        assert_eq!(
+            finish(&mut capture, None).unwrap_err(),
+            JsonSubprocessError::Cancelled {
+                reason: AbortReason::Default
+            }
         );
     }
 }
