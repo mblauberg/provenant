@@ -73,3 +73,27 @@ They form the current baseline; they are not newly discovered port mismatches.
   listed as partial, not claimed as ported by this test.
 - Disposition: fixed in `a79987fe`; native repair review is clean. Independent
   J1 acceptance remains pending. No intentional exception is requested.
+
+## RP-2001 - Quarantine paths lost Unix filename bytes
+
+- Unit: `skills/orchestrate/scripts/instruction_quarantine.py#interface`,
+  rulebook version 3.
+- Class: `bug` (fixed; no intended contract change).
+- Reproducer: `cargo test -j 2 -p provenant-confinement non_utf8_instruction_names_survive_restore_and_index_framing`
+  from `tools/front-door`, macOS arm64, Python oracle selected by `python3`.
+  Fixture paths contain literal bytes `ff` and `fe` below `.agents/`.
+- Compared revisions: Python oracle
+  `9b2da713b4cc3b188b1c8697eb7c6755ec0d8b0d`; faulty Rust interface
+  `d91b9dfbc1e744f7ee70d36f0fdfafe893050726`; repair is the commit adding this entry.
+- Expected / actual: Python's surrogateescape round trip retains these bytes
+  in restore-view keys and NUL-framed index input. Rust `String` keys could
+  not represent them and `.as_bytes()` could not reproduce their framing.
+- Evidence: native adversarial review identified the restriction. The added
+  regression exercises integration, restored views, quarantinability and
+  byte-for-byte framing against Python `_index_info` on the same fixture.
+- Disposition: fixed using `OsString` keys and raw Unix bytes. Snapshot values
+  are in-memory interface values; they emit no JSON here. The record owner
+  must supply the Python-compatible filename wire encoding before persistence
+  is integrated. No replacement JSON encoding is introduced.
+- Follow-up: retain the differential regression. Independent J2 schema and
+  mutant evidence remains a cut-over gate; this lane does not claim it.

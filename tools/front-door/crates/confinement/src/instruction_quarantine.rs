@@ -1,13 +1,17 @@
 //! Restore-view interface, independent of provider discovery and Git effects.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 
 /// Git's mode and object ID retain the Python two-element array encoding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Entry(pub String, pub String);
-pub type Entries = BTreeMap<String, Entry>;
+pub type Entries = BTreeMap<OsString, Entry>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// In-memory views preserve Unix filename bytes. Snapshot wire encoding is owned
+/// by the later record integration; this interface emits no snapshot JSON.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstructionSnapshot {
     pub head: String,
     pub object_format: String,
@@ -21,7 +25,7 @@ pub struct RestoreViews {
     pub head: Entries,
     pub index: Entries,
     pub disk: Entries,
-    pub integrated: BTreeSet<String>,
+    pub integrated: BTreeSet<OsString>,
 }
 
 pub const PATCHES: [(&str, &str); 3] = [
@@ -32,10 +36,11 @@ pub const PATCHES: [(&str, &str); 3] = [
 pub const QUARANTINE_NAME: &str = "Provenant Fabric";
 pub const QUARANTINE_EMAIL: &str = "fabric@provenant.invalid";
 
-pub fn quarantinable<'a>(changes: impl IntoIterator<Item = &'a str>) -> bool {
-    changes
-        .into_iter()
-        .all(|path| path.starts_with(".agents/") && !path.ends_with(" (unresolved conflict)"))
+pub fn quarantinable(changes: impl IntoIterator<Item = impl AsRef<OsStr>>) -> bool {
+    changes.into_iter().all(|path| {
+        let path = path.as_ref().as_bytes();
+        path.starts_with(b".agents/") && !path.ends_with(b" (unresolved conflict)")
+    })
 }
 
 /// Merge a qualifying integration ref after the caller establishes ancestry.
@@ -85,15 +90,19 @@ pub fn restore_views(start: &InstructionSnapshot, target: Entries) -> RestoreVie
 }
 
 /// Removals precede updates. BTree collections make unspecified set order deterministic.
-pub fn index_info(entries: &Entries, paths: &BTreeSet<String>, object_format: &str) -> Vec<u8> {
+pub fn index_info(entries: &Entries, paths: &BTreeSet<OsString>, object_format: &str) -> Vec<u8> {
     let zero = "0".repeat(if object_format == "sha256" { 64 } else { 40 });
     let mut result = Vec::new();
     for path in paths.iter().filter(|path| !entries.contains_key(*path)) {
-        result.extend_from_slice(format!("0 {zero}\t{path}\0").as_bytes());
+        result.extend_from_slice(format!("0 {zero}\t").as_bytes());
+        result.extend_from_slice(path.as_bytes());
+        result.push(0);
     }
     for path in paths {
         if let Some(Entry(mode, oid)) = entries.get(path) {
-            result.extend_from_slice(format!("{mode} {oid}\t{path}\0").as_bytes());
+            result.extend_from_slice(format!("{mode} {oid}\t").as_bytes());
+            result.extend_from_slice(path.as_bytes());
+            result.push(0);
         }
     }
     result
@@ -104,13 +113,18 @@ mod tests {
     use super::*;
     fn entries(rows: &[(&str, &str)]) -> Entries {
         rows.iter()
-            .map(|(path, oid)| (path.to_string(), Entry("100644".into(), oid.to_string())))
+            .map(|(path, oid)| {
+                (
+                    OsString::from(path),
+                    Entry("100644".into(), oid.to_string()),
+                )
+            })
             .collect()
     }
 
     #[test]
     fn only_ordinary_instruction_changes_are_quarantinable() {
-        assert!(quarantinable([]));
+        assert!(quarantinable(std::iter::empty::<&str>()));
         assert!(quarantinable([".agents/skills/x", ".agents/new"]));
         for path in [
             ".agents",
@@ -167,5 +181,42 @@ mod tests {
             serde_json::to_string(&entry).unwrap(),
             "[\"120000\",\"abc\"]"
         );
+    }
+    #[test]
+    fn non_utf8_instruction_names_survive_restore_and_index_framing() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b".agents/invalid-\xff".to_vec());
+        let deleted = OsString::from_vec(b".agents/deleted-\xfe".to_vec());
+        let entry = Entry("100644".into(), "a".repeat(40));
+        let tree = Entries::from([
+            (path.clone(), entry.clone()),
+            (deleted.clone(), entry.clone()),
+        ]);
+        let start = InstructionSnapshot {
+            head: "a".repeat(40),
+            object_format: "sha1".into(),
+            tree: tree.clone(),
+            index: tree.clone(),
+            disk: tree.clone(),
+        };
+        let target = Entries::from([(path.clone(), entry)]);
+        let restored = restore_views(&start, integrate(&tree, &target, &tree));
+        assert!(quarantinable([&path]));
+        assert_eq!(restored.disk, target);
+        assert_eq!(restored.integrated, BTreeSet::from([deleted.clone()]));
+        let framed = index_info(&restored.index, &BTreeSet::from([path, deleted]), "sha1");
+        let Some(expected) = crate::python::oracle(
+            r#"
+import instruction_quarantine, os
+path=os.fsdecode(b'.agents/invalid-\xff')
+deleted=os.fsdecode(b'.agents/deleted-\xfe')
+entries={path: ('100644', 'a'*40)}
+print(json.dumps(list(instruction_quarantine._index_info(entries, sorted([path, deleted]), '0'*40))))
+"#,
+            &serde_json::json!({}),
+        ) else {
+            return;
+        };
+        assert_eq!(serde_json::to_value(framed).unwrap(), expected);
     }
 }

@@ -41,8 +41,9 @@ Crate tests translate policy assertions from `tests/test_provider_exec.py`
 the trusted_git policy exercised by provider confinement. Tests use explicit
 identities, fixture clocks and bytes. No assertion sleeps or patched globals.
 
-Three optional Python differential tests compare interface decisions, trusted
-Git records/grants, and custody publication bytes/digest/tamper refusal. They
+Four optional Python differential tests compare interface decisions, trusted
+Git records/grants, non-UTF-8 quarantine index framing, and custody publication
+bytes/digest/tamper refusal. They
 skip when `python3` is absent. The custody differential deliberately compares
 only digest, bytes, retained symlink target bytes and refusal; virtual and real
 filesystem device/inode numbers are not compared. Source handles and OS
@@ -51,5 +52,6 @@ identity policy have separate model tests.
 J1 entry-point/error/exit coverage, J2 release/snapshot schema and mutant
 coverage, J3 caller transcripts, and real OS lane conformance have not run.
 Per rulebook v3 these are cut-over gates, not evidence claimed by this inert
-port. Cross-family review is chair-owned. No intended behaviour divergences
-are accepted by this batch; no Python/TypeScript source is deleted.
+port. Cross-family review is chair-owned. The fixed filename-byte defect is recorded as RP-2001 in divergences.md.
+Snapshot views remain in-memory; their persisted wire encoding belongs to the
+later record integration. No intended behaviour divergences are accepted; no Python/TypeScript source is deleted.
