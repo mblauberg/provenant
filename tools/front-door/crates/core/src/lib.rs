@@ -1,8 +1,11 @@
 //! Shared identity, root and path policy. Environment and host observations are values.
 #![forbid(unsafe_code)]
 
+pub mod bytes;
+pub use bytes::hex;
 pub mod excludes;
 pub mod host_identity;
+pub mod js;
 mod json_support;
 pub mod jsonc;
 pub mod paths;
