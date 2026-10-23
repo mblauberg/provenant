@@ -120,17 +120,14 @@ pub fn render(status: &Status, strict: bool, advisories: &[String]) -> CommandOu
 /// Byte boundary used by the executable edge. Unix Python stdout/stderr use
 /// surrogateescape for filesystem paths, so a path is never formatted via
 /// `Path::display()` at this boundary.
-pub fn render_bytes(status: &Status, strict: bool, advisories: &[String]) -> crate::CommandBytes {
+pub fn render_bytes(status: &Status, strict: bool, advisories: &[Vec<u8>]) -> crate::CommandBytes {
     use std::os::unix::ffi::OsStrExt;
-    let text = render(status, strict, advisories);
+    let text = render(status, strict, &[]);
     let mut result = crate::CommandBytes::from(text);
     match status {
         Status::Installed { command, .. } => {
-            let suffix = result
-                .stdout
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(result.stdout.len(), |i| i + 1);
+            let header = format!("provenant installed stub=ok path={}\n", command.display());
+            let suffix = header.len();
             let mut stdout = b"provenant installed stub=ok path=".to_vec();
             stdout.extend_from_slice(command.as_os_str().as_bytes());
             stdout.push(b'\n');
@@ -157,10 +154,7 @@ pub fn render_bytes(status: &Status, strict: bool, advisories: &[String]) -> cra
                 _ => None,
             };
             if let Some((prefix, path, suffix)) = path_and_text {
-                result.stderr = advisories
-                    .iter()
-                    .flat_map(|s| s.bytes().chain([b'\n']))
-                    .collect();
+                result.stderr.clear();
                 result.stderr.extend_from_slice(b"FAIL: ");
                 result.stderr.extend_from_slice(prefix);
                 result.stderr.extend_from_slice(path.as_os_str().as_bytes());
@@ -170,6 +164,12 @@ pub fn render_bytes(status: &Status, strict: bool, advisories: &[String]) -> cra
         }
         Status::NotOwned => {}
     }
+    let mut stderr: Vec<u8> = advisories
+        .iter()
+        .flat_map(|line| line.iter().copied().chain([b'\n']))
+        .collect();
+    stderr.extend(result.stderr);
+    result.stderr = stderr;
     result
 }
 
@@ -417,12 +417,12 @@ x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
             ),
         ] {
             let Some(expected): Option<Vec<u8>> = crate::oracle::python(
-                "import os,json,sys; x=json.load(sys.stdin); p=os.fsdecode(bytes(x['path'])); messages={'pointer':f'FAIL: product-root pointer is invalid or stale at {p}\\n','unmanaged':f'FAIL: {p} must be a regular managed copy; re-run install-harness\\n','executable':f'FAIL: {p} is not executable; re-run install-harness\\n','installed':f'provenant installed stub=ok path={p}\\n'}; print(json.dumps(list(messages[x['mode']].encode('utf-8','surrogateescape'))))",
+                "import os,json,sys; x=json.load(sys.stdin); p=os.fsdecode(bytes(x['path'])); messages={'pointer':f'FAIL: product-root pointer is invalid or stale at {p}\\n','unmanaged':f'FAIL: {p} must be a regular managed copy; re-run install-harness\\n','executable':f'FAIL: {p} is not executable; re-run install-harness\\n','installed':f'provenant installed stub=ok path={p}\\n'}; print(json.dumps(list((messages[x['mode']] + ('front-door=rust\\n' + ''.join(f'provider {p} present=no\\n' for p in ['claude','codex','opencode','agy','cursor','kiro']) if x['mode']=='installed' else '')).encode('utf-8','surrogateescape'))))",
                 &serde_json::json!({"path": b"/tmp/bad\xff\nname".to_vec(), "mode":mode}),
             ) else { return; };
             let output = render_bytes(&status, false, &[]);
             if mode == "installed" {
-                assert!(output.stdout.starts_with(&expected));
+                assert_eq!(output.stdout, expected);
             } else {
                 assert_eq!(output.stderr, expected);
             }
