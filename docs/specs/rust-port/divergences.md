@@ -1667,3 +1667,44 @@ The review-panel and authority-mapping unit claims hold. All three cycle
 interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
+
+### RP-FR3-003: generic JavaScript JSON remains an unresolved partial boundary
+
+- Class: `library`, unresolved, not an accepted change or cut-over exception.
+  Units: run-registry interface/unit, execution-input units and graph document
+  units, rulebook v4. Source/oracle baseline:
+  `a05bcb461f8a599a61637dc97153e65bc315ee81`; repairs in `e3112b01` and
+  `8db19f77` (with the accompanying oracle fixtures).
+- This qualifies RP-FR3-001: even an integer inside u64 can differ. Node reads
+  owner PID token 9007199254740993 as 9007199254740992; the Rust integer codec
+  retains 9007199254740993 rather than quietly rounding through f64. The
+  retained differential asserts this exact discrepancy, not parity. The
+  run-registry interface marker remains deliberately withdrawn.
+- Ordered top-level owner records and route arguments now retain property
+  order. Generic nested serde Values still lose original object insertion
+  order and cannot represent lone surrogates/non-finite values. Graph
+  canonicalisation sorts keys as specified but explicitly refuses integers
+  outside the safe JS integer range, which Node instead rounds when parsing.
+- Route numeric spelling (including 1e20) now matches the tested JavaScript
+  exponential thresholds. This finite-number helper is not a complete lossless
+  JS JSON codec. All affected runtime units remain partial until records owns
+  the full boundary, including unsafe-integer parsing and exhaustive numeric
+  rendering. No runtime calls these units and no exception is requested.
+- Native review also found whole-file dispatch-default parsing rejected exotic
+  unread values. Field-local opaque parsing repairs that bug; Node fixtures
+  cover unread 1e999/lone surrogates, selected non-finite values and invalid
+  bare NaN. Selected surrogate keys still need the lossless owner.
+
+### RP-FR3-004: bounded safe record read adapter
+
+- Class: `improvement` (proposed bounded API), unresolved for whole-unit parity.
+  Unit: run-registry unit 01, rulebook v4; same source/oracle baseline as
+  RP-FR3-003. Source `readJson` has no byte limit. The Rust safe-handle adapter
+  takes an explicit caller limit, checks both entry and opened-file metadata,
+  refuses links/non-regular files and returns typed `TooLarge` over that limit.
+- Fixture `safe_record_reads_refuse_links_non_files_malformed_and_oversize_values`
+  checks the exact seven-byte success/six-byte refusal boundary, plus absent,
+  malformed, array, directory and symlink inputs. The adapter is inert; there
+  is no default runtime byte limit or accepted cut-over refusal policy.
+- Run-registry stays partial. Its final public reader must settle the bound
+  and generic JavaScript JSON contract before claiming full source parity.
