@@ -92,13 +92,13 @@ CLI passes the bounded collection's iterator of `AttemptFact` to the reducer.
 No partial totals are published. Admission and operation insertion remain
 atomic in run's store; fabric-runtime owns identity and federation routing.
 
-`AttemptFact` lives in **records** and implements **Serialize only**. Run builds
+`AttemptFact` lives in **records** and implements **`Serialize` only**. Run builds
 it from decoded, validated stored records. Its fields are task, attempt number,
 operation, project, terminal state, exit, `started_at`/`finished_at`, resolved
 route (provider, model, effort, account label), usage counts (`u64`), output
 paths, reviewer and `delivery_id`. Usage categories are optional, disjoint
 uncached input, cache read, cache write, output excluding reasoning, and
-reasoning counts; unknown values stay unknown. `StatsReport` is Serialize-only.
+reasoning counts; unknown values stay unknown. `StatsReport` is `Serialize`-only.
 
 Terminal records are immutable. Every retry contributes usage once; the latest
 attempt for a task is the one with the **highest attempt number**. There is no
