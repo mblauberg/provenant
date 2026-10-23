@@ -94,7 +94,11 @@ fn saves_one_complete_receipt_and_rejects_a_stale_revision() {
     assert_eq!(first.updated_at(), time(20));
     assert_eq!(store.read().unwrap(), Some(first.clone()));
     assert!(save(&store, &first, 0, 30).is_err());
+    // A pre-rename crash can leave an unrelated staging file. Saves ignore it.
+    let orphan = directory(&store).join(".receipt.crashed");
+    std::fs::write(&orphan, b"partial receipt").unwrap();
     let second = save(&store, &first, 1, 30).unwrap();
+    assert_eq!(std::fs::read(orphan).unwrap(), b"partial receipt");
     assert_eq!(second.revision(), 2);
     assert_eq!(second.created_at(), first.created_at());
     assert_eq!(store.read().unwrap(), Some(second));
@@ -107,6 +111,14 @@ pub(super) trait FilesystemFaults {
     }
     fn lock(&self) -> Result<(), FsError> {
         Ok(())
+    }
+    fn atomic_write(&self, dir: &Directory, bytes: &[u8]) -> Result<Publication, FsError> {
+        dir.atomic_write(
+            OsStr::new("receipt.json"),
+            ".receipt.",
+            bytes,
+            PublishMode::Replace,
+        )
     }
 }
 
@@ -207,7 +219,14 @@ fn refuses_stale_subject_identity_versions_and_bounds_without_publication() {
     ] {
         std::fs::write(&file, bytes).unwrap();
         match kind {
-            "malformed" => assert!(matches!(store.read(), Err(StoreError::Malformed(_)))),
+            "malformed" => {
+                assert!(matches!(store.read(), Err(StoreError::Malformed(_))));
+                assert!(matches!(
+                    save(&store, &first, 1, 30),
+                    Err(StoreError::Malformed(_))
+                ));
+                assert_eq!(std::fs::read(&file).unwrap(), b"{");
+            }
             "limit" => assert!(matches!(store.read(), Err(StoreError::Limit))),
             _ => assert!(store.read().is_ok()),
         }
@@ -265,6 +284,28 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
             &almost_expired
         ),
         Err(StoreError::Contention)
+    ));
+    struct ExpiringClock(std::cell::Cell<u32>);
+    impl Clock for ExpiringClock {
+        fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
+            Ok(time(30))
+        }
+        fn mono_now(&self) -> MonoTime {
+            let call = self.0.get();
+            self.0.set(call + 1);
+            MonoTime::from_micros(if call < 2 { 999_999 } else { 1_000_000 })
+        }
+    }
+    assert!(matches!(
+        store.save(
+            &first,
+            1,
+            context(),
+            budget,
+            &CancelToken::new(),
+            &ExpiringClock(std::cell::Cell::new(0))
+        ),
+        Err(StoreError::Deadline)
     ));
     let other = ReceiptStore::new(
         store.root.clone(),
@@ -583,4 +624,134 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
             .revision(),
         2
     );
+}
+
+#[test]
+fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors() {
+    use provenant_supervisor::fs::{AtomicWriteOperations, FileHandle};
+    use std::{io::Write as _, path::Path};
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Fault {
+        Write,
+        NoSpace,
+        FileSync,
+        Rename,
+        DirectorySync,
+    }
+    fn failure(fault: Fault, path: &Path) -> FsError {
+        FsError::Io {
+            operation: "injected atomic write",
+            path: path.into(),
+            source: if fault == Fault::NoSpace {
+                io::Error::from_raw_os_error(28) // ENOSPC on both supported hosts.
+            } else {
+                io::Error::other("secret value")
+            },
+        }
+    }
+    impl AtomicWriteOperations for Fault {
+        fn write(
+            &mut self,
+            file: &mut FileHandle,
+            bytes: &[u8],
+            path: &Path,
+        ) -> Result<(), FsError> {
+            if matches!(self, Self::Write | Self::NoSpace) {
+                file.write_all(&bytes[..bytes.len() / 2]).unwrap();
+                Err(failure(*self, path))
+            } else {
+                file.write_all(bytes).map_err(|_| failure(*self, path))
+            }
+        }
+        fn sync_file(&mut self, file: &FileHandle) -> Result<(), FsError> {
+            if *self == Self::FileSync {
+                Err(failure(*self, Path::new("/private/secret-root")))
+            } else {
+                file.sync()
+            }
+        }
+        fn rename(
+            &mut self,
+            dir: &Directory,
+            temp: &OsStr,
+            name: &OsStr,
+            mode: PublishMode,
+        ) -> Result<(), FsError> {
+            if *self == Self::Rename {
+                Err(FsError::Rename {
+                    from_path: "/private/secret-root/temp".into(),
+                    to_path: "/private/secret-root/receipt.json".into(),
+                    source: io::Error::other("secret value"),
+                })
+            } else {
+                match mode {
+                    PublishMode::Replace => dir.replace(temp, dir, name),
+                    PublishMode::NoReplace => dir.rename_noreplace(temp, dir, name),
+                }
+            }
+        }
+        fn sync_directory(&mut self, dir: &Directory) -> Result<(), FsError> {
+            if *self == Self::DirectorySync {
+                Err(failure(*self, Path::new("/private/secret-root")))
+            } else {
+                dir.sync()
+            }
+        }
+    }
+    impl FilesystemFaults for Fault {
+        fn atomic_write(&self, dir: &Directory, bytes: &[u8]) -> Result<Publication, FsError> {
+            let mut fault = *self;
+            dir.atomic_write_with_faults(
+                OsStr::new("receipt.json"),
+                ".receipt.",
+                bytes,
+                PublishMode::Replace,
+                &mut fault,
+            )
+        }
+    }
+    for fault in [
+        Fault::Write,
+        Fault::NoSpace,
+        Fault::FileSync,
+        Fault::Rename,
+        Fault::DirectorySync,
+    ] {
+        let (_temp, mut store, candidate) = setup();
+        let first = save(&store, &candidate, 0, 20).unwrap();
+        let old_bytes = std::fs::read(directory(&store).join("receipt.json")).unwrap();
+        let next = changed(&first, |v| {
+            v["revision"] = 2.into();
+            v["updated_at"] = 30.into();
+        });
+        store.faults = Some(Box::new(fault));
+        let error = save(&store, &first, 1, 30).unwrap_err();
+        if fault == Fault::DirectorySync {
+            assert!(matches!(error, StoreError::Durability(_)));
+        } else {
+            assert!(matches!(error, StoreError::Io { .. }));
+        }
+        if fault == Fault::NoSpace {
+            assert!(matches!(&error, StoreError::Io { cause, .. } if cause.os_code == Some(28)));
+        }
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains(store.root.as_path().to_str().unwrap()));
+        store.faults = None;
+        let expected = if fault == Fault::DirectorySync {
+            next
+        } else {
+            first
+        };
+        assert_eq!(store.read().unwrap(), Some(expected.clone()));
+        let bytes = std::fs::read(directory(&store).join("receipt.json")).unwrap();
+        assert_eq!(bytes, receipt::canonical(&expected).unwrap().as_bytes());
+        assert_eq!(bytes == old_bytes, fault != Fault::DirectorySync);
+        let mut entries = std::fs::read_dir(directory(&store))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, ["receipt.json", "receipt.lock"]);
+    }
 }

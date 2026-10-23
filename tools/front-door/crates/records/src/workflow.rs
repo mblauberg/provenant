@@ -97,6 +97,8 @@ pub enum RecordError {
     DecisionBounds,
     #[error("receipt identity, authors or timestamps are invalid")]
     Receipt,
+    #[error("receipt revision overflow")]
+    RevisionOverflow,
 }
 impl RiskRecord {
     pub fn new(
@@ -387,22 +389,28 @@ impl DeliveryReceipt {
             updated_at: self.updated_at,
         })
     }
-    /// Store-owned commit metadata. Expected-revision locking belongs to workflow.
-    /// Consumes the candidate so invalid metadata cannot escape as a record.
+    /// Derives commit metadata and subject reset from stored claims and the clock.
+    /// Workflow owns the lock and supplies the receipt read under that lock.
     pub fn with_commit_metadata(
         mut self,
-        revision: u64,
-        created_at: UtcMicros,
-        updated_at: UtcMicros,
-        subject_changed: bool,
+        previous: Option<&Self>,
+        now: UtcMicros,
     ) -> Result<Self, RecordError> {
-        if subject_changed {
-            self.decision = Decision::pending();
-            self.review_attempts.clear();
+        if let Some(previous) = previous {
+            if self.delivery_id != previous.delivery_id || self.project_id != previous.project_id {
+                return Err(RecordError::Receipt);
+            }
+            if self.subject != previous.subject {
+                self.decision = Decision::pending();
+                self.review_attempts.clear();
+            }
         }
-        self.revision = revision;
-        self.created_at = created_at;
-        self.updated_at = updated_at;
+        self.revision = previous
+            .map_or(0, Self::revision)
+            .checked_add(1)
+            .ok_or(RecordError::RevisionOverflow)?;
+        self.created_at = previous.map_or(now, Self::created_at);
+        self.updated_at = previous.map_or(now, Self::updated_at).max(now);
         self.validate_shape()?;
         Ok(self)
     }
@@ -679,6 +687,75 @@ mod tests {
             policy
         );
         assert!(serde_json::from_value::<ReviewVerdict>(json!("unknown")).is_err());
+    }
+    #[test]
+    fn commit_metadata_is_derived_from_previous_receipt_and_clock() {
+        let mut candidate = receipt();
+        candidate.revision = 999;
+        candidate.created_at = time(0);
+        candidate.updated_at = time(900);
+        let committed = candidate.with_commit_metadata(None, time(20)).unwrap();
+        assert_eq!(committed.revision(), 1);
+        assert_eq!(committed.created_at(), time(20));
+        assert_eq!(committed.updated_at(), time(20));
+
+        let mut previous = committed;
+        previous.revision = 7;
+        previous.review_attempts = vec![AttemptId::from_bytes([8; 16])];
+        previous.decision = Decision::accept(
+            DecisionContext {
+                tier: RiskTier::Routine,
+                scope_requires_approval: false,
+                created_at: time(20),
+                updated_at: time(20),
+            },
+            approval().actor_id,
+            time(20),
+            "done".into(),
+            None,
+        )
+        .unwrap();
+        let mut candidate = previous.clone();
+        candidate.revision = 999;
+        candidate.created_at = time(0);
+        candidate.updated_at = time(900);
+        let unchanged = candidate
+            .clone()
+            .with_commit_metadata(Some(&previous), time(15))
+            .unwrap();
+        assert_eq!(unchanged.revision(), 8);
+        assert_eq!(unchanged.created_at(), time(20));
+        assert_eq!(unchanged.updated_at(), time(20));
+        assert_eq!(unchanged.decision(), previous.decision());
+        assert_eq!(unchanged.review_attempts(), previous.review_attempts());
+
+        candidate.subject = Subject::Pr {
+            repository: RepoId::from_bytes([3; 16]),
+            number: 1,
+            head: GitOid::Sha256([9; 32]),
+        };
+        let changed = candidate
+            .clone()
+            .with_commit_metadata(Some(&previous), time(30))
+            .unwrap();
+        assert_eq!(changed.revision(), 8);
+        assert_eq!(changed.created_at(), time(20));
+        assert_eq!(changed.updated_at(), time(30));
+        assert_eq!(changed.decision().status(), DecisionStatus::Pending);
+        assert!(changed.review_attempts().is_empty());
+        previous.delivery_id = DeliveryId::from_bytes([9; 16]);
+        assert_eq!(
+            candidate
+                .clone()
+                .with_commit_metadata(Some(&previous), time(30)),
+            Err(RecordError::Receipt)
+        );
+        previous.delivery_id = candidate.delivery_id;
+        previous.revision = u64::MAX;
+        assert_eq!(
+            candidate.with_commit_metadata(Some(&previous), time(30)),
+            Err(RecordError::RevisionOverflow)
+        );
     }
     #[test]
     fn receipt_and_risk_construction_expose_read_only_values() {

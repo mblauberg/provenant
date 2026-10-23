@@ -184,13 +184,22 @@ impl ReceiptStore {
         if let Some(faults) = &self.faults {
             faults.lock()?;
         }
-        let _lock = dir.lock(
-            OsStr::new("receipt.lock"),
-            LockMode::Exclusive,
-            budget,
-            cancel,
-            clock,
-        )?;
+        let _lock = dir
+            .lock(
+                OsStr::new("receipt.lock"),
+                LockMode::Exclusive,
+                budget,
+                cancel,
+                clock,
+            )
+            .map_err(|error| {
+                if matches!(error, FsError::LockTimeout { .. })
+                    && let Err(wait_error) = check_wait(budget, cancel, clock)
+                {
+                    return wait_error;
+                }
+                StoreError::from(error)
+            })?;
         check_wait(budget, cancel, clock)?;
         let previous = self.read_in(&dir)?;
         let observed = previous.as_ref().map_or(0, DeliveryReceipt::revision);
@@ -221,30 +230,35 @@ impl ReceiptStore {
             previous: prior_time,
             observed: now,
         });
-        let created_at = previous.as_ref().map_or(now, DeliveryReceipt::created_at);
         let committed = candidate
             .clone()
-            .with_commit_metadata(
-                observed
-                    .checked_add(1)
-                    .ok_or(StoreError::RevisionOverflow)?,
-                created_at,
-                prior_time.max(now),
-                previous
-                    .as_ref()
-                    .is_some_and(|r| r.subject() != candidate.subject()),
-            )
-            .map_err(receipt::ReceiptError::from)?;
+            .with_commit_metadata(previous.as_ref(), now)
+            .map_err(|error| match error {
+                provenant_records::workflow::RecordError::RevisionOverflow => {
+                    StoreError::RevisionOverflow
+                }
+                error => receipt::ReceiptError::from(error).into(),
+            })?;
         let bytes = receipt::canonical(&committed)?;
         // Cancellation/deadline boundary: finish staging, replacement and sync
         // after this check, even if a cancellation subsequently arrives.
         check_wait(budget, cancel, clock)?;
-        match dir.atomic_write(
-            OsStr::new("receipt.json"),
-            ".receipt.",
-            bytes.as_bytes(),
-            PublishMode::Replace,
-        )? {
+        let atomic_write = || {
+            dir.atomic_write(
+                OsStr::new("receipt.json"),
+                ".receipt.",
+                bytes.as_bytes(),
+                PublishMode::Replace,
+            )
+        };
+        #[cfg(test)]
+        let publication = match &self.faults {
+            Some(faults) => faults.atomic_write(&dir, bytes.as_bytes()),
+            None => atomic_write(),
+        };
+        #[cfg(not(test))]
+        let publication = atomic_write();
+        match publication? {
             Publication::Durable => Ok(SavedReceipt {
                 receipt: committed,
                 clock_regression: regression,

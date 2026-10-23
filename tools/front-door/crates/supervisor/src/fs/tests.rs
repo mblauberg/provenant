@@ -701,7 +701,6 @@ impl AtomicWriteOperations for FailAtomicWriteAt {
         }
     }
 }
-impl AtomicWriteFaults for FailAtomicWriteAt {}
 
 #[test]
 fn write_fsync_and_rename_faults_leave_the_previous_complete_file() {
@@ -801,8 +800,6 @@ impl AtomicWriteOperations for PauseAtAtomicWritePhase {
         LocalAtomicWriteOperations.sync_directory(directory)
     }
 }
-#[cfg(feature = "fixture")]
-impl AtomicWriteFaults for PauseAtAtomicWritePhase {}
 
 #[cfg(feature = "fixture")]
 #[test]
@@ -815,6 +812,8 @@ fn atomic_write_crash_fixture() {
         return;
     };
     let phase = match phase.to_str() {
+        Some("write") => AtomicWritePhase::Write,
+        Some("file-sync") => AtomicWritePhase::FileSync,
         Some("rename") => AtomicWritePhase::Rename,
         Some("directory-sync") => AtomicWritePhase::DirectorySync,
         _ => panic!("unknown atomic write fixture phase"),
@@ -868,6 +867,8 @@ fn kill_fixture(
 #[test]
 fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
     for (phase, expected) in [
+        ("write", &b"old complete receipt"[..]),
+        ("file-sync", &b"old complete receipt"[..]),
         ("rename", &b"old complete receipt"[..]),
         ("directory-sync", &b"new complete receipt"[..]),
     ] {
@@ -922,6 +923,30 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
             dir.read_bounded(OsStr::new("receipt.json"), 64).unwrap(),
             expected
         );
+        // Pre-rename kills can leave one staging file; publication consumes it.
+        let mut entries = names(&dir);
+        entries.retain(|entry| entry != "boundary.sock" && entry != "receipt.json");
+        assert_eq!(entries.len(), usize::from(phase != "directory-sync"));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.as_bytes().starts_with(b".receipt."))
+        );
+        let leftovers = entries;
+        dir.atomic_write(
+            OsStr::new("receipt.json"),
+            ".receipt.",
+            b"later complete receipt",
+            PublishMode::Replace,
+        )
+        .unwrap();
+        assert_eq!(
+            dir.read_bounded(OsStr::new("receipt.json"), 64).unwrap(),
+            b"later complete receipt"
+        );
+        let mut entries = names(&dir);
+        entries.retain(|entry| entry != "boundary.sock" && entry != "receipt.json");
+        assert_eq!(entries, leftovers);
     }
 }
 

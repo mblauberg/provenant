@@ -87,18 +87,27 @@ pub enum Publication {
     VisibleDurabilityUnconfirmed { sync_error: FsError },
 }
 
-trait AtomicWriteOperations {
-    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()>;
-    fn sync_file(&mut self, file: &FileHandle) -> Result<()>;
-    fn rename(
-        &mut self,
-        directory: &Directory,
-        temporary: &OsStr,
-        name: &OsStr,
-        mode: PublishMode,
-    ) -> Result<()>;
-    fn sync_directory(&mut self, directory: &Directory) -> Result<()>;
+// Fixture consumers exercise the real staging, cleanup and publication path.
+mod atomic_write_operations {
+    use super::*;
+    pub trait AtomicWriteOperations {
+        fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()>;
+        fn sync_file(&mut self, file: &FileHandle) -> Result<()>;
+        fn rename(
+            &mut self,
+            directory: &Directory,
+            temporary: &OsStr,
+            name: &OsStr,
+            mode: PublishMode,
+        ) -> Result<()>;
+        fn sync_directory(&mut self, directory: &Directory) -> Result<()>;
+    }
 }
+#[cfg(feature = "fixture")]
+#[doc(hidden)]
+pub use atomic_write_operations::AtomicWriteOperations;
+#[cfg(not(feature = "fixture"))]
+use atomic_write_operations::AtomicWriteOperations;
 
 struct LocalAtomicWriteOperations;
 impl AtomicWriteOperations for LocalAtomicWriteOperations {
@@ -134,9 +143,6 @@ enum AtomicWritePhase {
     Rename,
     DirectorySync,
 }
-
-#[cfg(test)]
-trait AtomicWriteFaults: AtomicWriteOperations {}
 
 /// Owning, non-cloneable flock lease. Closing the last owner releases the lock;
 /// the API intentionally has no explicit unlock or descriptor duplication.
@@ -571,14 +577,15 @@ impl Directory {
         let mut operations = LocalAtomicWriteOperations;
         self.atomic_write_with_operations(name, prefix, bytes, mode, &mut operations)
     }
-    #[cfg(test)]
-    fn atomic_write_with_faults(
+    #[cfg(any(test, feature = "fixture"))]
+    #[doc(hidden)]
+    pub fn atomic_write_with_faults(
         &self,
         name: &OsStr,
         prefix: &str,
         bytes: &[u8],
         mode: PublishMode,
-        faults: &mut dyn AtomicWriteFaults,
+        faults: &mut dyn AtomicWriteOperations,
     ) -> Result<Publication> {
         self.atomic_write_with_operations(name, prefix, bytes, mode, faults)
     }
