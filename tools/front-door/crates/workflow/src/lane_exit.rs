@@ -1,6 +1,6 @@
 //! Exit-cycle contracts. This module grants no process or filesystem authority.
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// A source member can be absent or present with null. Option alone loses this
 /// distinction when a record is decoded and retained again.
@@ -49,8 +49,9 @@ pub struct SupervisorRows {
     pub spared: Vec<DescendantRow>,
 }
 
+pub type ExitRecord = crate::pending::OrderedRecord<ExitRecordFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExitRecord {
+pub struct ExitRecordFields {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Member::is_absent")]
     pub pid: Member<Option<ProcessInteger>>,
@@ -93,7 +94,7 @@ pub struct ExitRecord {
     #[serde(default, skip_serializing_if = "Member::is_absent")]
     pub io_errors_truncated: Member<u64>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub extra: crate::pending::OrderedMap<crate::pending::OrderedValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,8 +130,7 @@ pub enum ExitError {
 
 impl ExitRecord {
     pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
-        provenant_records::checked_json::from_slice(raw)?;
-        Ok(serde_json::from_slice(raw)?)
+        Self::decode(raw)
     }
 
     pub fn receipt_fields(&self) -> Result<ReceiptFields, ExitError> {
@@ -205,6 +205,12 @@ mod tests {
         if let Some(expected) = crate::test_support::oracle("lane_exit_contract", &cases) {
             assert_eq!(json!(actual), expected);
         }
+    }
+    #[test]
+    fn exit_record_keeps_nested_extension_order() {
+        let raw = r#"{"schema":"provenant.lane.exit.v1","z":{"z":1,"a":2},"a":0}"#;
+        let record = ExitRecord::from_json(raw.as_bytes()).unwrap();
+        assert_eq!(serde_json::to_string(&record).unwrap(), raw);
     }
     #[test]
     fn exit_process_fields_refuse_bool_and_float() {

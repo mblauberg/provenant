@@ -365,3 +365,75 @@ pub enum OrderedValue {
     Array(Vec<OrderedValue>),
     Object(OrderedMap<OrderedValue>),
 }
+
+// port: belongs in provenant-records
+/// Typed retained record with the source's member order, recursively. The
+/// template carries order only: serialisation always takes values from `fields`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderedRecord<T> {
+    pub fields: T,
+    template: OrderedValue,
+}
+impl<T> std::ops::Deref for OrderedRecord<T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.fields }
+}
+impl<T> std::ops::DerefMut for OrderedRecord<T> {
+    fn deref_mut(&mut self) -> &mut T { &mut self.fields }
+}
+impl<T: serde::de::DeserializeOwned> OrderedRecord<T> {
+    pub fn decode(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
+        provenant_records::checked_json::from_slice(raw)?;
+        Ok(serde_json::from_slice(raw)?)
+    }
+}
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for OrderedRecord<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let template = OrderedValue::deserialize(deserializer)?;
+        let wire = serde_json::to_vec(&template).map_err(serde::de::Error::custom)?;
+        let fields = serde_json::from_slice(&wire).map_err(serde::de::Error::custom)?;
+        Ok(Self { fields, template })
+    }
+}
+impl<T: serde::Serialize> serde::Serialize for OrderedRecord<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        fn ordered(value: &mut OrderedValue, template: &OrderedValue) {
+            match (value, template) {
+                (OrderedValue::Object(values), OrderedValue::Object(template)) => {
+                    let mut rest = std::mem::take(&mut values.0);
+                    for (key, old) in &template.0 {
+                        if let Some(index) = rest.iter().position(|(k, _)| k == key) {
+                            let (key, mut value) = rest.remove(index);
+                            ordered(&mut value, old);
+                            values.0.push((key, value));
+                        }
+                    }
+                    values.0.extend(rest);
+                }
+                (OrderedValue::Array(values), OrderedValue::Array(template)) => {
+                    for (value, old) in values.iter_mut().zip(template) { ordered(value, old); }
+                }
+                _ => {}
+            }
+        }
+        let raw = serde_json::to_vec(&self.fields).map_err(serde::ser::Error::custom)?;
+        let mut value: OrderedValue = serde_json::from_slice(&raw).map_err(serde::ser::Error::custom)?;
+        ordered(&mut value, &self.template);
+        value.serialize(serializer)
+    }
+}
+
+// port: belongs in provenant-records
+/// Object wire encoding for an insertion-ordered vector of environment pairs.
+pub(crate) mod ordered_pairs {
+    pub fn serialize<S: serde::Serializer>(pairs: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(pairs.len()))?;
+        for (key, value) in pairs { map.serialize_entry(key, value)?; }
+        map.end()
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, String)>, D::Error> {
+        use serde::Deserialize;
+        super::OrderedMap::<String>::deserialize(deserializer).map(|map| map.0)
+    }
+}

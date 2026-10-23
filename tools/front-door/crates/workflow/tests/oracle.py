@@ -98,7 +98,7 @@ for case in cases:
         for line in case["lines"]:
             observer.feed_stdout((json.dumps(line) + "\n").encode())
         summary = observer.result()
-        results.append({"wire": json.dumps(summary), "failure_keys": list(summary["semantic_failures"])} if unit == "observer_contract_wire" else summary)
+        results.append({"wire": json.dumps(summary, ensure_ascii=False, separators=(",", ":")), "failure_keys": list(summary["semantic_failures"])} if unit == "observer_contract_wire" else summary)
     elif unit == "lane_launch_contract":
         directory = Path(case["root"])
         plan = {"adapter":"claude","model":"m","cwd":str(directory),"run_dir":str(directory),"mode":case["mode"],"timeout_seconds":1.125,"startup_seconds":0.025,"grace_seconds":0.050,"silence_seconds":0.125,"_lineage_token":"token","batch_id":"batch-001","attempt_identity":{"run_dir":str(directory / "run")}}

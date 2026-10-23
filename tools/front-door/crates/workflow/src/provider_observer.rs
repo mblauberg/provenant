@@ -2,7 +2,7 @@
 use crate::lane_exit::Member;
 pub use crate::pending::OrderedMap;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObserverPlan {
@@ -112,18 +112,20 @@ pub struct ModelChange {
     pub from: Option<String>,
     pub to: String,
 }
+pub type SemanticFailure = crate::pending::OrderedRecord<SemanticFailureFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SemanticFailure {
+pub struct SemanticFailureFields {
     pub status: String,
     pub signature: String,
     pub excerpt: String,
     pub reset_at: Value,
     pub retry_after: Value,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub extra: crate::pending::OrderedMap<crate::pending::OrderedValue>,
 }
+pub type ObserverSummary = crate::pending::OrderedRecord<ObserverSummaryFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ObserverSummary {
+pub struct ObserverSummaryFields {
     #[serde(default, skip_serializing_if = "Member::is_absent")]
     pub session_id: Member<Value>,
     #[serde(default, skip_serializing_if = "Member::is_absent")]
@@ -147,6 +149,10 @@ pub struct ObserverSummary {
     pub last_model: Option<String>,
     pub context: ContextUsage,
     pub models: ModelUsage,
+}
+
+impl ObserverSummary {
+    pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> { Self::decode(raw) }
 }
 
 #[cfg(test)]
@@ -203,7 +209,7 @@ mod tests {
         ]}]);
         if let Some(outputs) = crate::test_support::oracle("observer_contract_wire", &cases) {
             let wire = outputs[0]["wire"].as_str().unwrap();
-            let typed: ObserverSummary = serde_json::from_str(wire).unwrap();
+            let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
             let keys: Vec<_> = typed
                 .semantic_failures
                 .entries()
@@ -212,6 +218,7 @@ mod tests {
             assert_eq!(json!(keys), outputs[0]["failure_keys"]);
             assert_eq!(keys, vec!["usage_limited", "auth_required"]);
             let serialised = serde_json::to_string(&typed).unwrap();
+            assert_eq!(serialised, wire);
             let again: ObserverSummary = serde_json::from_str(&serialised).unwrap();
             assert_eq!(again.semantic_failures, typed.semantic_failures);
         }

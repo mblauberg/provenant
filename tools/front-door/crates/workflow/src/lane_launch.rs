@@ -2,14 +2,14 @@
 use crate::lane_exit::{ExitRecord, Member, ProcessInteger, ReceiptFields};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaunchSpec {
     pub schema: String,
     pub argv: Vec<String>,
     pub cwd: String,
-    pub env: BTreeMap<String, String>,
+    #[serde(with = "crate::pending::ordered_pairs")]
+    pub env: Vec<(String, String)>,
     pub stdin: StdinSpec,
     pub attempt_dir: String,
     pub run_token: String,
@@ -84,14 +84,15 @@ pub struct SparePolicy {
 
 /// Source stdout notifications also accept the older `type` discriminator. The
 /// raw notification remains open until the launcher applies that precedence.
+pub type LaunchNotification = crate::pending::OrderedRecord<LaunchNotificationFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LaunchNotification {
+pub struct LaunchNotificationFields {
     #[serde(default, skip_serializing_if = "Member::is_absent")]
     pub event: Member<Value>,
     #[serde(default, skip_serializing_if = "Member::is_absent", rename = "type")]
     pub legacy_type: Member<Value>,
     #[serde(flatten)]
-    pub fields: serde_json::Map<String, Value>,
+    pub fields: crate::pending::OrderedMap<crate::pending::OrderedValue>,
 }
 
 /// Provider identity is observation only, without an OS process handle.
@@ -137,7 +138,7 @@ mod tests {
                 assert_eq!(typed.timeouts_ms.startup, 25);
                 assert_eq!(typed.silence_observation_ms, 125);
                 assert_eq!(
-                    typed.env.get("SECRET_REFERENCE").unwrap(),
+                    typed.env.iter().find(|(key, _)| key == "SECRET_REFERENCE").map(|(_, v)| v).unwrap(),
                     "synthetic-value"
                 );
                 assert_eq!(typed.capture.events, "events.jsonl");
@@ -151,6 +152,18 @@ mod tests {
             let typed: LaunchNotification = serde_json::from_value(raw.clone()).unwrap();
             assert_eq!(serde_json::to_value(typed).unwrap(), raw);
         }
+    }
+    #[test]
+    fn notification_and_environment_preserve_source_order() {
+        let raw = r#"{"event":"started","z":{"z":1,"a":2},"a":3}"#;
+        let typed: LaunchNotification = serde_json::from_str(raw).unwrap();
+        assert_eq!(serde_json::to_string(&typed).unwrap(), raw);
+        #[derive(Serialize, Deserialize)]
+        struct Environment(#[serde(with="crate::pending::ordered_pairs")] Vec<(String, String)>);
+        let raw = r#"{"Z":"1","A":"2"}"#;
+        let typed: Environment = serde_json::from_str(raw).unwrap();
+        assert_eq!(typed.0[0].0, "Z");
+        assert_eq!(serde_json::to_string(&typed).unwrap(), raw);
     }
     #[test]
     fn stdin_builder_contract_has_no_null_path_variant() {
