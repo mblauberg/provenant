@@ -3053,7 +3053,7 @@ def _check_model(plan, env):
         router = exec_routing._model_route_module()
         deadline = time.monotonic() + min(20, plan["timeout_seconds"])
         for refresh in (False, True):
-            listing, code = router.probe_capabilities(
+            listing, code = router.model_route_probe.probe_capabilities(
                 plan["adapter"], plan["argv"][0], listing_only=True, refresh=refresh,
                 deadline=deadline, env=env, cache_failures=False,
             )
