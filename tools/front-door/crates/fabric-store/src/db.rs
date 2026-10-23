@@ -86,7 +86,7 @@ impl Store {
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                directory = directory.open_verified_directory(name)?;
+                directory = checked_directory(&directory, name, None)?;
             }
         }
         private(&directory, root.as_path())?;
@@ -95,7 +95,11 @@ impl Store {
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        let fabric = directory.open_verified_directory(OsStr::new("fabric"))?;
+        let fabric = checked_directory(
+            &directory,
+            OsStr::new("fabric"),
+            Some(directory.metadata()?.device),
+        )?;
         let path = root.as_path().join("fabric");
         private(&fabric, &path)?;
         let db_path = path.join("fabric.sqlite3");
@@ -176,4 +180,22 @@ fn companions(directory: &Directory, path: &std::path::Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// The configured root may live on another local volume than `/`. Once there,
+// Fabric descendants stay on that volume. Every component remains no-follow
+// with the supervisor's stat/open/stat identity verification.
+fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> Result<Directory> {
+    let before = parent.metadata_at(name, false)?;
+    let child = parent.open_directory(name)?;
+    let opened = child.metadata()?;
+    let after = parent.metadata_at(name, false)?;
+    provenant_supervisor::fs::verify_directory_identity(
+        name,
+        before,
+        opened,
+        after,
+        device.unwrap_or(opened.device),
+    )?;
+    Ok(child)
 }
