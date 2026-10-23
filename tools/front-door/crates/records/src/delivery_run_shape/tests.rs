@@ -175,38 +175,25 @@ for run in cases:
     })
 json.dump(out, sys.stdout, separators=(',', ':'))
 "#;
-    python.args(["-I", "-c", script]).arg(source);
+    python.args(["-c", script]).arg(source);
     python
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = python.spawn().unwrap();
+    let mut child = crate::oracle::spawn(&mut python).unwrap();
     let serialized = format!("[{}]", cases.join(","));
-    child
+    let write_result = child
+        .child_mut()
         .stdin
         .take()
-        .unwrap()
-        .write_all(serialized.as_bytes())
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while child.try_wait().unwrap().is_none() && std::time::Instant::now() < reap_deadline {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            panic!("python differential exceeded its 20-second bound");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        .expect("Python oracle stdin was not piped")
+        .write_all(serialized.as_bytes());
+    if let Err(error) = write_result {
+        let _ = child.wait();
+        panic!("cannot send cases to Python oracle: {error}");
     }
-    let output = child.wait_with_output().unwrap();
+    let output = child.wait().unwrap();
     assert!(
         output.status.success(),
         "python oracle: {}",
