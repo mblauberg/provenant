@@ -62,8 +62,9 @@ pub struct GlobalOptions {
     _help: Option<bool>,
 }
 
-/// Mount under the top-level CLI as `Worktree(WorktreeArgs)`.
+/// Manage registered Git worktrees.
 #[derive(Args, Clone, Debug)]
+#[command(disable_help_subcommand = true)]
 pub struct WorktreeArgs {
     #[command(subcommand)]
     pub command: WorktreeCommand,
@@ -129,7 +130,8 @@ pub struct WorktreeRequest {
 #[command(
     name = "provenant",
     disable_version_flag = true,
-    disable_help_flag = true
+    disable_help_flag = true,
+    disable_help_subcommand = true
 )]
 struct WorktreeOnlyCli {
     #[command(flatten)]
@@ -302,6 +304,9 @@ pub fn execute(request: WorktreeRequest, cancel: &CancelToken) -> Result<Value, 
 }
 
 fn selected_project_path(project: Option<&Path>) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(project) = project.filter(|path| path.is_absolute()) {
+        return Ok(project.to_path_buf());
+    }
     let current = match current_process() {
         ProcessObservation::Present(fact) => fact,
         ProcessObservation::Absent | ProcessObservation::Unknown(_) => {

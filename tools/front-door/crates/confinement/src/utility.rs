@@ -21,6 +21,8 @@ const DEFAULT_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(14_400);
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
+const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &["--no-pager", "--no-optional-locks", "--literal-pathspecs"];
 const GIT_CONFIG_OVERRIDES: [(&str, &str); 13] = [
     ("core.hooksPath", "/dev/null"),
@@ -57,6 +59,12 @@ pub enum UtilityError {
     InvalidOperationValue,
     #[error("GitHub repository identity is bound to another Git common directory")]
     RepositoryBindingMismatch,
+    #[error("repository Git filters or config includes are not permitted")]
+    UnsafeGitConfiguration,
+    #[error("repository info/attributes is not permitted")]
+    RepositoryAttributes,
+    #[error("pinned Git does not support a verified attribute source")]
+    AttributeSourceUnsupported,
     #[error("utility {stream} exceeded its capture limit; output cannot be used as evidence")]
     Truncated { stream: &'static str },
     #[error("utility read timed out; output cannot be used as evidence")]
@@ -585,8 +593,15 @@ pub fn run_utility(
     runtime.revalidate()?;
     repo.revalidate()?;
     verify_repo_binding(runtime, repo)?;
+    verify_local_git_configuration(executor, repo, runtime, budget, cancel)?;
+    reject_info_attributes(repo)?;
+    let attribute_source = empty_attribute_source(executor, repo, runtime, budget, cancel)?;
     let (program, args, github) = match operation {
-        UtilityRead::Git(read) => (&runtime.git, git_args(read, repo)?, false),
+        UtilityRead::Git(read) => (
+            &runtime.git,
+            git_args(read, repo, &attribute_source)?,
+            false,
+        ),
         UtilityRead::GitHub(read) => (
             runtime
                 .gh
@@ -600,7 +615,8 @@ pub fn run_utility(
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(program.path.as_os_str().to_owned());
     argv.extend(args);
-    let env = environment(runtime, repo, github);
+    let mut env = environment(runtime, repo, github);
+    env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
     let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
     options.env = Some(&env);
     options.stop_on_output_limit = true;
@@ -655,7 +671,11 @@ fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
     Ok(outcome)
 }
 
-fn git_args(operation: GitRead, repo: &VerifiedRepo) -> Result<Vec<OsString>, UtilityError> {
+fn git_args(
+    operation: GitRead,
+    repo: &VerifiedRepo,
+    attribute_source: &str,
+) -> Result<Vec<OsString>, UtilityError> {
     let mut args = vec![
         OsString::from("--git-dir"),
         repo.private_git_dir().as_os_str().to_owned(),
@@ -663,6 +683,7 @@ fn git_args(operation: GitRead, repo: &VerifiedRepo) -> Result<Vec<OsString>, Ut
         repo.root_path().as_os_str().to_owned(),
     ];
     args.extend(GIT_COMMON.iter().map(OsString::from));
+    args.push(format!("--attr-source={attribute_source}").into());
     let tail = match operation {
         GitRead::Status => vec![
             "status".into(),
@@ -992,11 +1013,16 @@ pub(crate) fn execute_git_mutation(
     runtime.revalidate()?;
     repo.revalidate()?;
     verify_repo_binding(runtime, repo)?;
+    verify_local_git_configuration(executor, repo, runtime, budget, cancel)?;
+    reject_info_attributes(repo)?;
+    let attribute_source = empty_attribute_source(executor, repo, runtime, budget, cancel)?;
     let (args, stdin) = mutation_args(mutation)?;
-    let mut argv = Vec::with_capacity(args.len() + 1);
+    let mut argv = Vec::with_capacity(args.len() + 2);
     argv.push(runtime.git.path.as_os_str().to_owned());
+    argv.push(format!("--attr-source={attribute_source}").into());
     argv.extend(args);
-    let env = environment(runtime, repo, false);
+    let mut env = environment(runtime, repo, false);
+    env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
     let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
     options.env = Some(&env);
     options.stdin = stdin.as_deref();
@@ -1012,6 +1038,174 @@ pub(crate) fn execute_git_mutation(
     options.cancel = Some(cancel);
     let outcome = executor.execute(options)?;
     validate_outcome(outcome)
+}
+
+/// Inspect only Git config key names, without following include directives or
+/// exposing values. Attribute-selected filters can execute only when a driver
+/// is configured; includes are refused because later Git commands would follow
+/// them and could supply such a driver.
+fn verify_local_git_configuration(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<(), UtilityError> {
+    runtime.git.verify(runtime.fs.as_ref())?;
+    let mut argv = vec![
+        runtime.git.path.as_os_str().to_owned(),
+        OsString::from("--git-dir"),
+        repo.private_git_dir().as_os_str().to_owned(),
+        OsString::from("--work-tree"),
+        repo.root_path().as_os_str().to_owned(),
+    ];
+    argv.extend(GIT_COMMON.iter().map(OsString::from));
+    argv.extend([
+        OsString::from("config"),
+        OsString::from("--no-includes"),
+        OsString::from("--name-only"),
+        OsString::from("--null"),
+        OsString::from("--list"),
+    ]);
+    let env = environment(runtime, repo, false);
+    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture {
+        limit: budget.stdout_limit,
+    };
+    options.stderr = StreamPolicy::Capture {
+        limit: budget.stderr_limit,
+    };
+    options.stop_on_output_limit = true;
+    options.terminate_grace = budget.terminate_grace;
+    options.reap_timeout = budget.reap_timeout;
+    options.cancel = Some(cancel);
+    let outcome = validate_outcome(executor.execute(options)?)?;
+    if outcome.termination != Termination::Exit(0)
+        || (!outcome.stdout.bytes.is_empty() && !outcome.stdout.bytes.ends_with(&[0]))
+    {
+        return Err(UtilityError::UnsafeGitConfiguration);
+    }
+    for key in outcome.stdout.bytes.split(|byte| *byte == 0) {
+        let lower = key
+            .iter()
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if lower.starts_with(b"filter.")
+            || lower.starts_with(b"include.")
+            || lower.starts_with(b"includeif.")
+        {
+            return Err(UtilityError::UnsafeGitConfiguration);
+        }
+    }
+    Ok(())
+}
+
+/// Refuse repository-local attribute files, which Git consults even when an
+/// empty tree is selected with `--attr-source`. Both linked-worktree and common
+/// Git directories are checked because Git's lookup spans those locations.
+fn reject_info_attributes(repo: &VerifiedRepo) -> Result<(), UtilityError> {
+    for directory in [repo.private_dir(), repo.common_dir()] {
+        let info_name = OsStr::new("info");
+        let info_metadata = match directory.metadata_at(info_name, false) {
+            Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+            Ok(_) => return Err(UtilityError::RepositoryAttributes),
+            Err(error) if is_not_found(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let info = directory.open_verified_directory(info_name)?;
+        if !info_metadata.same_identity(&info.metadata()?) {
+            return Err(UtilityError::RepositoryAttributes);
+        }
+        match info.metadata_at(OsStr::new("attributes"), false) {
+            Ok(_) => return Err(UtilityError::RepositoryAttributes),
+            Err(error) if is_not_found(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn is_not_found(error: &FsError) -> bool {
+    matches!(error, FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Resolve the repository object format without writing an object, then
+/// preflight the global attribute-source option. The canonical empty tree is a
+/// valid attribute source even when it is not present in the object database.
+fn empty_attribute_source(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<String, UtilityError> {
+    let format_args = [
+        OsString::from("rev-parse"),
+        OsString::from("--show-object-format"),
+    ];
+    let format_outcome = run_git_probe(executor, repo, runtime, budget, cancel, &format_args)?;
+    if format_outcome.termination != Termination::Exit(0) {
+        return Err(UtilityError::AttributeSourceUnsupported);
+    }
+    let format = std::str::from_utf8(&format_outcome.stdout.bytes)
+        .map_err(|_| UtilityError::AttributeSourceUnsupported)?
+        .trim();
+    let source = match format {
+        "sha1" => EMPTY_TREE_SHA1,
+        "sha256" => EMPTY_TREE_SHA256,
+        _ => return Err(UtilityError::AttributeSourceUnsupported),
+    };
+    let source_option: OsString = format!("--attr-source={source}").into();
+    let preflight_args = [
+        source_option,
+        OsString::from("rev-parse"),
+        OsString::from("--show-object-format"),
+    ];
+    let preflight = run_git_probe(executor, repo, runtime, budget, cancel, &preflight_args)?;
+    if preflight.termination != Termination::Exit(0)
+        || std::str::from_utf8(&preflight.stdout.bytes)
+            .map(str::trim)
+            .ok()
+            != Some(format)
+    {
+        return Err(UtilityError::AttributeSourceUnsupported);
+    }
+    Ok(source.to_owned())
+}
+
+fn run_git_probe(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    command: &[OsString],
+) -> Result<ExecOutcome, UtilityError> {
+    runtime.git.verify(runtime.fs.as_ref())?;
+    let mut argv = vec![
+        runtime.git.path.as_os_str().to_owned(),
+        OsString::from("--git-dir"),
+        repo.private_git_dir().as_os_str().to_owned(),
+        OsString::from("--work-tree"),
+        repo.root_path().as_os_str().to_owned(),
+    ];
+    argv.extend(GIT_COMMON.iter().map(OsString::from));
+    argv.extend(command.iter().cloned());
+    let env = environment(runtime, repo, false);
+    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture {
+        limit: budget.stdout_limit,
+    };
+    options.stderr = StreamPolicy::Capture {
+        limit: budget.stderr_limit,
+    };
+    options.stop_on_output_limit = true;
+    options.terminate_grace = budget.terminate_grace;
+    options.reap_timeout = budget.reap_timeout;
+    options.cancel = Some(cancel);
+    validate_outcome(executor.execute(options)?)
 }
 
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
@@ -1281,6 +1475,106 @@ pub(crate) mod tests {
         );
         assert_eq!(fixture.runtime.git_program_path(), fixture.git.as_path());
         assert!(fixture.home.is_dir());
+        let tiny_capture = UtilityBudget::new(
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+            1,
+            256,
+        )?;
+        assert!(
+            run_utility(
+                &fixture.executor,
+                UtilityRead::Git(GitRead::Status),
+                &fixture.repo,
+                &fixture.runtime,
+                tiny_capture,
+                &CancelToken::new()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn filter_config_is_refused_and_empty_tree_source_suppresses_worktree_attributes()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let tracked = fixture.root.join("tracked.txt");
+        fs::write(&tracked, "baseline\n")?;
+        fixture.run(&["add", "--", "tracked.txt"])?;
+        fixture.run(&["commit", "-m", "tracked fixture"])?;
+
+        let marker = fixture._temp.path().join("filter-executed");
+        let filter = format!("touch {}; cat", marker.display());
+        fixture.run(&["config", "filter.poison.clean", filter.as_str()])?;
+        fs::write(
+            fixture.root.join(".gitattributes"),
+            "tracked.txt filter=poison\n",
+        )?;
+        fs::write(&tracked, "modified\n")?;
+
+        let source = empty_attribute_source(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let source_option = format!("--attr-source={source}");
+        let raw = fixture.run(&[source_option.as_str(), "status", "--porcelain=v2", "-z"])?;
+        assert_eq!(raw.termination, Termination::Exit(0));
+        assert!(!marker.exists());
+
+        let result = run_utility(
+            &fixture.executor,
+            UtilityRead::Git(GitRead::Status),
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        );
+        assert!(matches!(result, Err(UtilityError::UnsafeGitConfiguration)));
+        assert!(!marker.exists());
+        fixture.run(&["config", "--unset", "filter.poison.clean"])?;
+        fixture.run(&["config", "extensions.worktreeConfig", "true"])?;
+        fixture.run(&[
+            "config",
+            "--worktree",
+            "filter.poison.process",
+            filter.as_str(),
+        ])?;
+        assert!(matches!(
+            run_utility(
+                &fixture.executor,
+                UtilityRead::Git(GitRead::Status),
+                &fixture.repo,
+                &fixture.runtime,
+                fixture.budget()?,
+                &CancelToken::new()
+            ),
+            Err(UtilityError::UnsafeGitConfiguration)
+        ));
+        assert!(!marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn utility_refuses_private_or_common_info_attributes() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let info = fixture.repo.common_git_dir().join("info");
+        fs::create_dir_all(&info)?;
+        fs::write(info.join("attributes"), "*.txt filter=unknown\n")?;
+
+        let result = run_utility(
+            &fixture.executor,
+            UtilityRead::Git(GitRead::Status),
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        );
+        assert!(matches!(result, Err(UtilityError::RepositoryAttributes)));
         Ok(())
     }
 

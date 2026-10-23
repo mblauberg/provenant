@@ -10,7 +10,7 @@ use crate::utility::GitRead;
 use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::custody::{Recovery, RecoveryState, Scope};
-use provenant_supervisor::fs::{FsError, Publication, PublishMode, SafeDir};
+use provenant_supervisor::fs::{FileKind, FsError, Metadata, Publication, PublishMode, SafeDir};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -64,8 +64,9 @@ impl Git<'_> {
         &self,
         scope: Scope,
         protected: &[ProtectedPath],
+        quarantine_dir: &dyn SafeDir,
     ) -> Result<InstructionSnapshot, QuarantineError> {
-        capture_instruction_snapshot(self, scope, protected)
+        capture_instruction_snapshot(self, scope, protected, quarantine_dir)
     }
 
     pub fn quarantine_instructions(
@@ -82,11 +83,13 @@ impl Git<'_> {
 pub enum QuarantineError {
     #[error("protected path or Git record is invalid")]
     InvalidPath,
+    #[error("quarantine must be a private same-device directory bound before launch")]
+    ArchiveBinding,
     #[error("protected path is not a tracked ordinary file")]
     NotTracked,
     #[error("quarantine requires the matching, confirmed quiescence receipt")]
     QuiescenceUnconfirmed,
-    #[error("protected evidence changed concurrently; no restore was attempted")]
+    #[error("protected evidence changed concurrently; review is required")]
     ConcurrentChange,
     #[error("protected evidence is incomplete or exceeds its bound")]
     Incomplete,
@@ -128,6 +131,7 @@ pub struct InstructionSnapshot {
     index: IndexFingerprint,
     index_records: Vec<u8>,
     files: Vec<InitialFile>,
+    archive_identity: Metadata,
 }
 impl InstructionSnapshot {
     pub fn head(&self) -> GitOid {
@@ -206,7 +210,12 @@ fn capture_instruction_snapshot(
     git: &Git<'_>,
     scope: Scope,
     protected: &[ProtectedPath],
+    quarantine_dir: &dyn SafeDir,
 ) -> Result<InstructionSnapshot, QuarantineError> {
+    // Bind restoration custody before any provider may be launched. Cross-device
+    // rename has no atomic preservation primitive; refuse rather than copy/unlink.
+    let archive_identity = quarantine_dir.metadata()?;
+    validate_archive(git.repo.root_identity().device, &archive_identity)?;
     let executor = git.executor;
     let repo = git.repo;
     let runtime = git.runtime;
@@ -317,7 +326,19 @@ fn capture_instruction_snapshot(
         index,
         index_records,
         files,
+        archive_identity,
     })
+}
+
+fn validate_archive(device: u64, metadata: &Metadata) -> Result<(), QuarantineError> {
+    if metadata.kind != FileKind::Directory
+        || metadata.device != device
+        || metadata.uid != provenant_supervisor::fs::effective_uid()
+        || metadata.mode & 0o077 != 0
+    {
+        return Err(QuarantineError::ArchiveBinding);
+    }
+    Ok(())
 }
 
 /// Archive status, pinned HEAD/index/worktree patches and tracked blobs before
@@ -334,6 +355,11 @@ fn quarantine_instruction_changes(
     let runtime = git.runtime;
     let budget = git.budget;
     let cancel = git.cancel;
+    let archive_identity = quarantine_dir.metadata()?;
+    validate_archive(repo.root_identity().device, &archive_identity)?;
+    if !snapshot.archive_identity.same_identity(&archive_identity) {
+        return Err(QuarantineError::ArchiveBinding);
+    }
     if recovery.scope() != snapshot.scope || recovery.observe() != RecoveryState::Absent {
         return Err(QuarantineError::QuiescenceUnconfirmed);
     }
@@ -679,6 +705,7 @@ fn quarantine_instruction_changes(
             repo.root_dir(),
             &file.protected.path,
             &file.bytes,
+            file.fingerprint.mode.ok_or(QuarantineError::Incomplete)? & 0o777,
             latest.as_ref(),
             quarantine_dir,
             OsStr::new(&retained_name(index)),
@@ -741,7 +768,7 @@ fn write_result(
 }
 
 fn put(directory: &dyn SafeDir, name: &OsStr, bytes: &[u8]) -> Result<(), QuarantineError> {
-    match directory.atomic_write(name, ".quarantine-", bytes, PublishMode::NoReplace)? {
+    match directory.atomic_write(name, ".quarantine-", bytes, 0o600, PublishMode::NoReplace)? {
         Publication::Durable => Ok(()),
         Publication::VisibleDurabilityUnconfirmed { .. } => {
             Err(QuarantineError::DurabilityUnconfirmed)
@@ -760,6 +787,7 @@ fn restore_file(
     root: &dyn SafeDir,
     path: &RepoPath,
     bytes: &[u8],
+    permissions: u32,
     observed: Option<&FileSnapshot>,
     archive: &dyn SafeDir,
     retained: &OsStr,
@@ -790,9 +818,22 @@ fn restore_file(
         &leaf,
         ".instruction-restore-",
         bytes,
+        permissions,
         PublishMode::NoReplace,
     )? {
-        Publication::Durable => Ok(()),
+        Publication::Durable => {
+            if let Some(observed) = observed {
+                let retained_path =
+                    RepoPath::new(Path::new(retained)).map_err(|_| QuarantineError::InvalidPath)?;
+                let mut retained_fingerprint =
+                    read_tracked_file(archive, &retained_path, MAX_DISCLOSURE_BYTES)?.fingerprint;
+                retained_fingerprint.path = observed.fingerprint.path.clone();
+                if retained_fingerprint != observed.fingerprint {
+                    return Err(QuarantineError::ConcurrentChange);
+                }
+            }
+            Ok(())
+        }
         Publication::VisibleDurabilityUnconfirmed { .. } => {
             Err(QuarantineError::DurabilityUnconfirmed)
         }
@@ -1039,6 +1080,29 @@ mod restore_race_tests {
     use std::io::Write;
 
     #[test]
+    fn archive_device_and_privacy_are_checked_before_launch() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let archive = LocalFs.open_anchor(temp.path())?;
+        let mut observation = archive.metadata()?;
+        validate_archive(observation.device, &observation)?;
+        let device = observation.device;
+        observation.device = device.wrapping_add(1);
+        assert!(matches!(
+            validate_archive(device, &observation),
+            Err(QuarantineError::ArchiveBinding)
+        ));
+        observation.device = device;
+        observation.mode |= 0o020;
+        assert!(matches!(
+            validate_archive(device, &observation),
+            Err(QuarantineError::ArchiveBinding)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn restored_baseline_preserves_future_writes_to_displaced_inode() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -1058,6 +1122,7 @@ mod restore_race_tests {
             root.as_ref(),
             &path,
             b"baseline",
+            0o644,
             Some(&observed),
             archive.as_ref(),
             OsStr::new("retained"),
@@ -1091,6 +1156,7 @@ mod restore_race_tests {
                 root.as_ref(),
                 &path,
                 b"baseline",
+                0o644,
                 Some(&observed),
                 archive.as_ref(),
                 OsStr::new("retained")
@@ -1105,6 +1171,7 @@ mod restore_race_tests {
                 root.as_ref(),
                 &path,
                 b"baseline",
+                0o644,
                 Some(&now),
                 archive.as_ref(),
                 OsStr::new("occupied")
@@ -1212,7 +1279,8 @@ mod custody_integration_tests {
             &token,
         );
         let scope = scope();
-        let snapshot = git.snapshot_instructions(scope, &protected()?)?;
+        let archive = archive_dir(&fixture, "ordinary-archive")?;
+        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
 
         fs::write(
@@ -1223,7 +1291,6 @@ mod custody_integration_tests {
             fixture.root.join("unrelated.txt"),
             b"unrelated edit retained\n",
         )?;
-        let archive = archive_dir(&fixture, "ordinary-archive")?;
         let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
 
         match outcome {
@@ -1269,11 +1336,11 @@ mod custody_integration_tests {
             &token,
         );
         let scope = scope();
-        let snapshot = git.snapshot_instructions(scope, &protected()?)?;
+        let archive = archive_dir(&fixture, "staged-archive")?;
+        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
         fs::write(fixture.root.join(".agents/a.md"), b"staged ordinary edit\n")?;
         fixture.run(&["add", "--", ".agents/a.md"])?;
-        let archive = archive_dir(&fixture, "staged-archive")?;
 
         let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
 
@@ -1312,10 +1379,10 @@ mod custody_integration_tests {
             &token,
         );
         let scope = scope();
-        let snapshot = git.snapshot_instructions(scope, &protected()?)?;
+        let archive = archive_dir(&fixture, "policy-archive")?;
+        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
         fs::write(fixture.root.join("AGENTS.md"), b"changed policy\n")?;
-        let archive = archive_dir(&fixture, "policy-archive")?;
 
         let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
 
@@ -1355,13 +1422,13 @@ mod custody_integration_tests {
             &token,
         );
         let scope = scope();
-        let snapshot = git.snapshot_instructions(scope, &protected()?)?;
+        let archive = archive_dir(&fixture, "failed-archive")?;
+        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
         fs::write(
             fixture.root.join(".agents/a.md"),
             b"must remain on archive failure\n",
         )?;
-        let archive = archive_dir(&fixture, "failed-archive")?;
         fs::write(
             fixture._temp.path().join("failed-archive/git-status.z"),
             b"pre-existing collision",
@@ -1392,6 +1459,14 @@ mod custody_integration_tests {
             fixture.budget()?,
             &token,
         );
+        let selected = RepoPath::new(".agents/a.md")?;
+        fs::write(fixture.root.join(".agents/a.md"), b"tracked disk change\n")?;
+        let evidence = git.evidence(base, std::slice::from_ref(&selected))?;
+        assert_eq!((evidence.base, evidence.head), (base, base));
+        assert_eq!(evidence.selected_paths, vec![selected]);
+        assert!(!evidence.worktree_diff.is_empty());
+        assert_eq!(evidence.before, evidence.after);
+        assert_eq!(git.verify_tip(base)?, base);
         fs::write(fixture.root.join(".agents/untracked.md"), b"untracked\n")?;
         let untracked = RepoPath::new(".agents/untracked.md")?;
         assert!(matches!(
@@ -1424,7 +1499,8 @@ mod custody_integration_tests {
             fixture.budget()?,
             &token,
         );
-        let snapshot = git.snapshot_instructions(scope(), &protected()?)?;
+        let archive = archive_dir(&fixture, "classification-archive")?;
+        let snapshot = git.snapshot_instructions(scope(), &protected()?, &archive)?;
         assert_eq!(snapshot.scope().generation, 1);
         assert_eq!(snapshot.head(), base);
         assert_eq!(

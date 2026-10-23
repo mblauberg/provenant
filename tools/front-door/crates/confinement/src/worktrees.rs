@@ -286,11 +286,7 @@ impl WorkerObserver for SystemWorkerObserver {
                             continue;
                         }
                     };
-                    if let Some(root) = longest_containing_root(roots, &canonical)
-                        && let Some(state) = states.get_mut(root)
-                    {
-                        *state = WorkerState::Live;
-                    }
+                    record_live_path(&mut states, &canonical);
                 }
             }
         }
@@ -337,11 +333,12 @@ fn observe_same_process(
     }
 }
 
-fn longest_containing_root<'a>(roots: &'a [PathBuf], cwd: &Path) -> Option<&'a PathBuf> {
-    roots
-        .iter()
-        .filter(|root| cwd == root.as_path() || cwd.starts_with(root))
-        .max_by_key(|root| root.components().count())
+fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) {
+    for (root, state) in states {
+        if cwd == root.as_path() || cwd.starts_with(root) {
+            *state = WorkerState::Live;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -682,7 +679,7 @@ fn write_identity(
     mode: PublishMode,
 ) -> Result<(), WorktreeError> {
     let bytes = serde_json::to_vec(identity).map_err(|_| WorktreeError::InvalidOutput)?;
-    match directory.atomic_write(OsStr::new(IDENTITY), ".identity-", &bytes, mode)? {
+    match directory.atomic_write(OsStr::new(IDENTITY), ".identity-", &bytes, 0o600, mode)? {
         provenant_supervisor::fs::Publication::Durable => Ok(()),
         provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { .. } => {
             Err(WorktreeError::RegistrationUnconfirmed)
@@ -1036,6 +1033,13 @@ pub fn create(
         }
         Err(error) => return Err(error.into()),
     };
+    let root_identity = worktree_root.metadata()?;
+    if root_identity.uid != provenant_supervisor::fs::effective_uid()
+        || root_identity.mode & 0o022 != 0
+        || root_identity.device != context.repo.root_identity().device
+    {
+        return Err(WorktreeError::UnknownWriter);
+    }
     let path_name = request.branch.replace('/', "-");
     if path_name.is_empty() || path_name.len() > 240 || path_name.as_bytes().contains(&0) {
         return Err(WorktreeError::InvalidRequest);
@@ -1090,6 +1094,13 @@ pub fn create(
         Err(error) if error.is_not_found() => None,
         Err(_) => return Err(WorktreeError::UnknownWriter),
     };
+    let named_root = context
+        .repo
+        .root_dir()
+        .metadata_at(OsStr::new(WORKTREE_ROOT), false)?;
+    if !root_identity.same_identity(&named_root) {
+        return Err(WorktreeError::UnknownWriter);
+    }
     execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -1823,6 +1834,22 @@ mod tests {
     }
 
     #[test]
+    fn recorded_multiple_branch_tips_keep_git_record_newlines_separate() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/external/git/branch-tips-sha1.z"
+        ));
+        let parsed = parse_branch_tips(fixture.as_bytes()).expect("recorded Git branch tips");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.keys().any(|name| name.as_str() == "refs/heads/main"));
+        assert!(
+            parsed
+                .keys()
+                .any(|name| name.as_str() == "refs/heads/feature/recorded")
+        );
+    }
+
+    #[test]
     fn malformed_git_records_refuse_without_partial_interpretation() {
         let missing_head = b"worktree /tmp/tree\0branch refs/heads/topic\0\0";
         let duplicate_head = b"worktree /tmp/tree\0HEAD 0000000000000000000000000000000000000000\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/topic\0\0";
@@ -1982,6 +2009,58 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn nested_worker_protects_all_containing_worktrees() {
+        let mut states = BTreeMap::from([
+            (PathBuf::from("/project/outer"), WorkerState::Free),
+            (PathBuf::from("/project/outer/nested"), WorkerState::Free),
+            (PathBuf::from("/project/sibling"), WorkerState::Free),
+        ]);
+        record_live_path(&mut states, Path::new("/project/outer/nested/src"));
+        assert_eq!(
+            states.get(Path::new("/project/outer")),
+            Some(&WorkerState::Live)
+        );
+        assert_eq!(
+            states.get(Path::new("/project/outer/nested")),
+            Some(&WorkerState::Live)
+        );
+        assert_eq!(
+            states.get(Path::new("/project/sibling")),
+            Some(&WorkerState::Free)
+        );
+    }
+
+    #[test]
+    fn creation_refuses_a_shared_writable_worktree_parent() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::create_dir(fixture.root.join(WORKTREE_ROOT))?;
+        fs::set_permissions(
+            fixture.root.join(WORKTREE_ROOT),
+            fs::Permissions::from_mode(0o777),
+        )?;
+        let test_context = TestContext::new(&fixture)?;
+        assert!(matches!(
+            create(
+                &test_context.context(),
+                WorktreeCreate {
+                    branch: "feature/refused".to_owned(),
+                    base: None
+                },
+                &cancel()
+            ),
+            Err(WorktreeError::UnknownWriter)
+        ));
+        assert!(
+            !fixture
+                .root
+                .join(WORKTREE_ROOT)
+                .join("feature-refused")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         fixture.run(&["branch", "-M", "main"])?;
@@ -2073,6 +2152,7 @@ mod lifecycle_tests {
             OsStr::new(RESERVATION),
             ".reservation-",
             b"malformed reservations remain authoritative",
+            0o600,
             PublishMode::Replace,
         )?;
         assert!(matches!(

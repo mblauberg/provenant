@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::permissions::{PathGrant, PathScope, PermissionError};
+use crate::permissions::{PathGrant, PathScope, PermissionError, validate_noncredential_grant};
 use crate::redact::{Redactor, RedactorError};
 
 pub const MAX_DISCLOSURE_FILES: u64 = 10_000;
@@ -52,7 +52,8 @@ pub enum DisclosureError {
 }
 
 /// Filesystem scope whose contents may be disclosed to a prompt-training
-/// route. The prompt is a path identity for overlap checks; it is never read.
+/// route. The prompt is scanned as an exact file unless a selected subtree
+/// already covers it.
 pub struct DisclosureRequest<'a> {
     pub prompt_path: &'a Path,
     pub cwd: &'a PathGrant,
@@ -79,8 +80,8 @@ pub fn scan_disclosure(
         path: request.prompt_path.to_owned(),
         scope: PathScope::Exact,
     };
-    prompt.validate().map_err(DisclosureError::Grant)?;
-    request.cwd.validate().map_err(DisclosureError::Grant)?;
+    validate_noncredential_grant(&prompt).map_err(DisclosureError::Grant)?;
+    validate_noncredential_grant(request.cwd).map_err(DisclosureError::Grant)?;
     if request.cwd.scope != PathScope::Subtree {
         return Err(DisclosureError::InvalidPath);
     }
@@ -90,7 +91,7 @@ pub fn scan_disclosure(
         return Err(DisclosureError::BudgetExceeded);
     }
     for root in request.read_roots.iter().chain(request.protected_roots) {
-        root.validate().map_err(DisclosureError::Grant)?;
+        validate_noncredential_grant(root).map_err(DisclosureError::Grant)?;
     }
     require_canonical_path(request.prompt_path)?;
     for grant in std::iter::once(request.cwd)
@@ -100,8 +101,9 @@ pub fn scan_disclosure(
         require_canonical_path(&grant.path)?;
     }
 
-    let mut candidates = Vec::with_capacity(request.read_roots.len() + 1);
+    let mut candidates = Vec::with_capacity(request.read_roots.len() + 2);
     candidates.push(request.cwd.clone());
+    candidates.push(prompt.clone());
     candidates.extend(request.read_roots.iter().cloned());
     for candidate in &candidates {
         if request
@@ -392,6 +394,7 @@ mod tests {
     use super::*;
     use provenant_supervisor::fs::LocalFs;
     use std::fs;
+    use std::path::PathBuf;
 
     fn request<'a>(
         prompt: &'a Path,
@@ -486,6 +489,46 @@ mod tests {
             &request(&prompt_path, &cwd, &[], &[], &[b"token-abc-123".to_vec()]),
         );
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
+    }
+
+    #[test]
+    fn prompt_outside_read_roots_is_scanned_for_known_secrets() {
+        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
+        let temporary_root = temp.path().join("work");
+        fs::create_dir(&temporary_root).expect("work directory");
+        let prompt_path = temp.path().join("prompt.txt");
+        fs::write(&prompt_path, b"prompt contains secret-123").expect("prompt file");
+        let prompt_path =
+            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
+        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
+            .expect("canonical temporary root");
+        let cwd = PathGrant {
+            path: root,
+            scope: PathScope::Subtree,
+        };
+        let result = scan_disclosure(
+            &LocalFs,
+            &request(&prompt_path, &cwd, &[], &[], &[b"secret-123".to_vec()]),
+        );
+        assert!(matches!(result, Err(DisclosureError::SecretMatch)));
+    }
+
+    #[test]
+    fn direct_credential_root_is_rejected_before_disclosure() {
+        let credential = PathGrant {
+            path: PathBuf::from("/Users/alice/.ssh"),
+            scope: PathScope::Subtree,
+        };
+        let prompt = Path::new("/tmp/prompt.txt");
+        let cwd = PathGrant {
+            path: PathBuf::from("/tmp/work-scoped"),
+            scope: PathScope::Subtree,
+        };
+        let result = scan_disclosure(&LocalFs, &request(prompt, &cwd, &[credential], &[], &[]));
+        assert!(matches!(
+            result,
+            Err(DisclosureError::Grant(PermissionError::CredentialRoot))
+        ));
     }
 
     #[test]

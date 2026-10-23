@@ -1,0 +1,1 @@
+{"schema_version":1,"tool":"git version 2.54.0 (Apple Git-157)","recorded_at":"2026-10-24","argv":["for-each-ref","--format=%(refname)%00%(objectname)%00","refs/heads"],"stdout_file":"branch-tips-sha1.z","exit_code":0}

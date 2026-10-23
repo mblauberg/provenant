@@ -491,8 +491,11 @@ fn run(args: &[OsString]) -> u8 {
             Err(error) => fail(&error.to_string()),
         };
     }
-    if worktree_cli::is_worktree_invocation(args) {
-        return worktree_cli::run(args);
+    let worktree_args: Vec<OsString> = std::iter::once(OsString::from("provenant"))
+        .chain(args.iter().cloned())
+        .collect();
+    if worktree_cli::is_worktree_invocation(&worktree_args) {
+        return worktree_cli::run(&worktree_args);
     }
     match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
         Route::Print {
@@ -600,6 +603,12 @@ mod tests {
     }
 
     #[test]
+    fn native_worktree_entry_receives_program_and_frozen_arguments() {
+        assert_eq!(run(&args(&["worktree", "--help"])), 0);
+        assert_eq!(run(&args(&["worktree", "list", "--unsupported"])), 2);
+    }
+
+    #[test]
     fn every_help_verb_has_an_owner_or_special_route() {
         for verb in [
             "route",
@@ -630,7 +639,7 @@ mod tests {
                 matches!(
                     route(&args(&[verb]), false),
                     Route::Owner { .. } | Route::Check(_)
-                ) || worktree_cli::is_worktree_invocation(&args(&[verb])),
+                ) || worktree_cli::is_worktree_invocation(&args(&["provenant", verb])),
                 "{verb}"
             );
         }

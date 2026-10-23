@@ -77,7 +77,8 @@ impl OutputCustody {
             destination_name,
             ".provenant-output-",
             &bytes,
-            PublishMode::Replace,
+            0o600,
+            PublishMode::NoReplace,
         )?;
         match publication {
             Publication::Durable => {}
@@ -223,6 +224,17 @@ mod tests {
             OsStr::new("result"),
             64,
         )?;
+        OutputCustody::verify(parent.as_ref(), OsStr::new("result"), &receipt, 64)?;
+        assert!(
+            OutputCustody::install(
+                parent.as_ref(),
+                OsStr::new("source"),
+                parent.as_ref(),
+                OsStr::new("result"),
+                64
+            )
+            .is_err()
+        );
         OutputCustody::verify(parent.as_ref(), OsStr::new("result"), &receipt, 64)?;
         std::fs::write(root.path().join("result"), b"changed output")?;
         assert!(matches!(

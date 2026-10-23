@@ -419,8 +419,8 @@ name = "provenant"
 version = "0.1.0"
 dependencies = [
  "clap",
- "provenant-confinement",
  "provenant-config",
+ "provenant-confinement",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
