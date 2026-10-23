@@ -1,0 +1,514 @@
+# Execution: routing, providers and quota
+
+Status: proposed for chair acceptance under [PORTING v7](../PORTING.md).
+Author route: `codex/gpt-6.1-sol@high` via Fabric.
+The [cross-area decisions](README.md#cross-area-decisions) bind this design.
+
+`routing` resolves explicit model choices and named routes; `providers` prepares
+CLI invocations and interprets provider evidence; `quota` schedules current
+allowance reads and supplies admission advice. Run owns the registry, atomic
+admission/operation insertion, attempts, retries and publication. Supervisor owns
+process custody and signalling; confinement owns disclosure and access grants.
+These libraries add no daemon, third-party dependency or second execution registry.
+
+## Evidence and feature decisions
+
+Source/count baseline: `1b3d48e4c549811ce3636edc30b047f36fd24ada`.
+The council's 24 October audit includes Claude and Codex transcript stores,
+Codex JavaScript exec calls and MCP calls. Its reproduction scripts are
+`route_{usage,tally,exec}.py` under the council scratch directory
+`/private/tmp/claude-503/-Users-mikey-Repos-provenant/1c21e420-fb1c-4a3f-be95-eb42e8489edb/scratchpad/port/w7/scripts/`.
+Counts describe observed requests, not successful execution or global usage.
+Transcripts and run recordings are research inputs only, never runtime state.
+
+| Evidence | Decision |
+| --- | --- |
+| 1,116 `fabric_dispatch` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council is a caller-supplied list of distinct exact models, expanded into ordinary tasks by run/Fabric; no council selector or filling algorithm. |
+| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`); no tier aliases. Named routes are one small TOML table. |
+| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Drop pools, weights, rotation, the selection store, `--commit-selection`, preferences and inferred class/size policy. Keep pure `route list\|resolve`. |
+| Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
+| Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
+| Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
+| Council observed the running `dev.provenant.quota-menubar` LaunchAgent | Keep `quota show\|tick`. [QuotaModel.swift:123](../../../../apps/quota-menubar/Sources/QuotaMenuBar/QuotaModel.swift#L123) calls `quota tick --trigger TRIGGER --power POWER --json`; the [app README](../../../../apps/quota-menubar/README.md) defines its LaunchAgent. |
+
+Also drop hidden model classification, shadow stages, the routing-context hook,
+`extract`/Ajv, old-tier migration, typo guessing, manual credit/history/forecast
+commands and OpenCode's speculative spend estimator. Preserve current quota
+windows/reset advice and refusal backoff, without cooldown mutation commands.
+Provider quota pools are measured allowance scopes, not routing pools.
+No old transcript quota/identity reads, general home mirroring or Python shim
+survives. Confinement retains only a bounded safe Agy home recipe.
+
+## Resolution and command contract
+
+`RouteRequest` has exactly one `Model(ADAPTER/ID)` or `NamedRoute(NAME)`,
+optional effort and `Fallback::None | Models(BoundedModels<2>)`, default none.
+IDs retain the full provider/model path after the first adapter separator.
+A route name expands to one exact model and optional effort from TOML; it does
+not choose a tier, pool, account or native seat. No inferred adapter, model
+upgrade or hidden downgrade. An explicit unknown ID remains unverified and can
+run only if activation, disclosure and confinement are independently established.
+
+Resolve once against immutable catalogue, provider availability and quota
+snapshots. Validate activation/executable and access, filter confidentiality and
+eligibility, apply recorded effort support, then return one `ResolvedRoute` with
+at most two ordered explicit alternatives and exclusion reasons. Run never
+reconstructs candidates. Read-only fallback needs explicit opt-in and a typed
+transient failure within run's retry budget; every alternative passes the same
+checks. Writers never replay automatically. Unknown quota is not exhausted;
+stale data cannot create a fresh refusal. Unsupported effort fails explicitly;
+any permitted clamp is recorded with requested/applied/observed values separate.
+No inferred effort default. OpenCode transports effort as `model#variant`.
+
+There is no `NativeSeat` or host-adapter avoidance. Fabric supplies identity and
+placement; native subagent selection is outside this dispatch API. Every council
+member is an explicit distinct model task. Workflow decides whether verified
+family facts satisfy its review policy; distinct model IDs alone prove no
+cross-family diversity. **Never enable fast or priority service.** Codex sends
+`service_tier="default"` and rejects conflicting inherited overrides.
+
+The CLI freeze is `route list|resolve` and `quota show|tick`. All use cli's
+`{schema_version,command,status,data,error}` envelope, 1 MiB cap and exits from
+the cross-area table: 0 ok, 1 failure/refusal/findings, 2 invalid input/version,
+3 setup/I/O/contention, 124 wait deadline, 130 cancelled. There is no exit 4.
+Partial coverage and input-required belong in `data`; a satisfied wait exits 0.
+Redacted diagnostics go to stderr. No library chooses exits or renders JSON.
+
+| Command | Inputs and result |
+| --- | --- |
+| `route list` | Optional `--adapter ADAPTER`; catalogue revision, exact models/efforts, named routes and cached availability with reasons/age. No probe. |
+| `route resolve` | Exactly one `--model ADAPTER/ID` or `--route NAME`; optional `--effort VALUE`, `--fallback none\|ADAPTER/ID[,ADAPTER/ID]`. Returns `ResolvedRoute`, alternatives and reasons; pure, no admission or state mutation. Dispatch uses the same route fields. |
+| `quota show` | Optional `--provider ADAPTER`; cached windows/reset/source/age, coverage and `report_path`. No refresh. |
+| `quota tick` | Optional `--provider ADAPTER`; `--trigger timer\|panel\|manual\|wake\|power` (default manual), `--power ac\|battery\|low` (default ac). Refresh due sources, publish the current report, return per-source results and next due without sleeping. |
+
+Route preview uses a read-only context; dispatch supplies its separately
+validated access/confinement context to the same resolver.
+Every verb accepts `--json`. No account, confidential, native, task-class,
+endpoint, pool, council, probe, cooldown or selection-commit flag remains.
+Tick reports partial stale/unknown coverage in data, exiting 0 for a completed
+partial report; a wholly failed refresh uses the typed failure mapping above.
+The Swift consumer moves to the new root/report and envelope at cut-over,
+removing its old-CLI fallback. No new MCP tool is owned here: Fabric dispatch
+and status call the same APIs, with bounded waits from the cross-area table.
+
+## Records, state and writes
+
+Config owns one user `S/config.toml`; bundled catalogue and adapter data are
+TOML assets. `[routing.routes]` maps names to `{ model = "ADAPTER/ID", effort =
+"VALUE" }` (effort optional). `[quota]` holds refresh scheduling settings;
+adapter activation uses typed config keys over the bundled adapter table.
+No profile layering, project overlays, per-knob environment variables,
+preferences or extra config files. Unknown owned fields/versions fail closed.
+`S` is the fresh host state root from the cross-area table, never an old root.
+
+| Path relative to S | Version 1 contents |
+| --- | --- |
+| `routing/availability/<adapter>.json` | `AvailabilityRecord`: executable/version, activation and fixture evidence, exact observed IDs, catalogue revision, account label, observation/expiry and last preflight error. |
+| `quota/<account-key>/<adapter>.json` | Last good windows, source/observation time, reset/refusal scope, refresh revision, claim/deadline and backoff. Account keys are opaque and host-local. |
+| `quota/report.json` | Current account rows, coverage, generated time, refreshing IDs and next due. No ledger/history. |
+
+Providers own account identity: each adapter detects its own account label;
+routing owns eligibility; run records the resolved label. Labels are non-secret,
+never emails, token substrings or raw auth paths. Quota scopes readings by the
+providers-supplied identity; config neither detects nor pins accounts.
+Account detection failures remain unknown/auth-required, never guessed identities.
+
+Stored snapshots are typed, versioned serde records. Edge-built
+`VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
+`Serialize` only. Persist separate `AvailabilityRecord`, `FamilyEvidenceRecord`
+and run-owned `PermitRecord` projections (`Serialize, Deserialize`), never nested
+fact types. Permit records bind operation/attempt, quota snapshot revision and
+expiry. On recovery the owning edge validates stored evidence/revision/expiry
+before reconstructing a fact; stored bytes cannot assert fresh availability or
+admission. Records owns shared value types and bounded codecs; domain crates
+own validation. Provider envelopes may have extra fields but required
+fields, duplicate keys and sizes are checked. Integers stay i64/u64, percentages
+use basis points and money uses checked scaled integers; no integer through
+f64. Inject core clocks; use jiff for reset interpretation and reject ambiguous
+local times.
+
+Quota returns typed update intents, applied by the CLI/run composition through
+supervisor's safe filesystem API: bounded lock, re-read revision, atomic replace,
+file/parent fsync; 0700 directories and 0600 files. Reserve a refresh claim with
+token/deadline, release the lock, execute, then commit only the matching revision.
+No lock spans a provider wait. Expired claims cannot leave permanent refreshing
+rows; stale completion cannot overwrite newer data. Keep last good data on
+failure and label its age. Failed writes are typed errors, never provider stops.
+There is no route selection store or rotation transaction.
+
+Quota statuses are available, credit-only, exhausted, stale, unknown,
+auth-required and unsupported. Refusals remain model/account-scoped unless wire
+evidence proves wider scope; independent allowance pools do not exhaust each
+other. A newer comparable observation or reset expires only that scoped refusal;
+unknown data preserves it. Unknown reset has a one-hour backoff. No pin bypass.
+
+Tick TTLs (timer/panel seconds): Claude 300/120, Codex 900/300, Cursor 1800/600,
+Agy 1200/900. Manual has a 30 s floor and respects backoff. Battery doubles
+intervals; low power quadruples them and skips Agy. Network/429 backoff is
+120–3600 s, auth 3600 s, missing CLI 86400 s; Retry-After is a lower bound capped
+at 86400 s. At most three cheap probes concurrently, Agy alone; each has a
+deadline and 1 MiB response bound. Tick's wall budget is at most 55 s.
+
+## Shared APIs and provider registration
+
+The API table matches run's route, admission and launch types. Methods run on
+scoped handles carrying immutable inputs and clocks. The provider signatures
+below abbreviate `Result<T, ProviderError>`; failures are always typed.
+
+| Owner / consumer | Contract |
+| --- | --- |
+| routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
+| quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account readiness only. Run stores its `PermitRecord` projection and consumes the validated permit for the exact attempt with its own resource reservation; no second admission ledger. |
+| providers / run | `prepare(ResolvedRoute, ConfinedPlan, Prompt, Continuation) -> AdapterLaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
+| providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
+| routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |
+
+`VerifiedLineage` contains the exact observed model ID, catalogue revision,
+`family: Option<FamilyId>`, evidence reference and provenance. Only provider
+protocol evidence verified against that catalogue revision establishes a family;
+never infer it from model spelling, a broker name, requested ID or seat.
+Absent/mismatched evidence yields unknown and cannot satisfy cross-family review.
+Workflow may use ChairAttested provenance for same-family legs only. Facts are
+built at the composition edge from providers-verified evidence, never deserialised
+from caller claims. Availability reports are bounded, paginated projections of validated cached
+`AvailabilityRecord`s; list/resolve never starts a process to populate them.
+
+One `Adapter` trait in providers exposes account detection, preflight
+planning/decoding, `prepare`, stream state/`observe`, `finish`, continuation
+and verified lineage.
+One `QuotaSource` trait exposes `probe(&AccountScope, &QuotaProbeInput) ->
+Result<QuotaProbePlan, QuotaError>` and `decode(&QuotaProbePlan, &ProbeCapture)
+-> Result<QuotaSnapshot, QuotaError>`. `QuotaSource`, `QuotaProbeInput`,
+`QuotaProbePlan`, `ProbeCapture`, `QuotaSnapshot` and `QuotaError` live in quota;
+`ResolvedRoute` is a records data type. Records owns no adapter traits.
+Confinement constructs validated `ConfinedPlan` values without a
+records-to-confinement dependency. Providers implements both traits in one
+module per provider and exports one static registry of `{ adapter, quota_source? }` entries;
+the binary injects providers' registry as `&[&dyn QuotaSource]` into quota. No per-crate
+adapter switches or quota-to-providers dependency. Adding an adapter changes
+one provider module, one registry entry and one bundled TOML row with its
+fixture/activation requirements. Config validates policy; registration cannot
+bypass it. Quota owns scheduling/admission, not adapter wire decoding.
+
+`AdapterLaunchSpec` holds executable identity, OsString argv/cwd, env delta,
+stdin mode, decoder and safe home preparation/finalisation recipe in memory.
+Persist only a redacted launch summary. Bound argv prompts to 64 KiB; prompt
+retention is run's confined artifact contract. `Continuation` binds exact
+adapter/session/account/host/model and sent controls; reject incompatible grants
+or identity changes. Confinement freezes Codex clean/inherited policy and denies
+unconfined hooks/MCP/plugins for read-only execution or fails closed. It supplies
+Agy's private home recipe and conflict-safe copy-back; providers adds no syscall.
+
+Observation decoders use documented event positions, never recursively search
+tool/subagent output for answering identity. Emit assistant text, usage,
+session/model evidence, refusal/reset, terminal or malformed-protocol facts.
+Structured errors outrank claimed success; answer prose mentioning quota is not
+a refusal. Recovered transport retries clear transient evidence. Terminal answer
+and process exit are separate facts. OpenCode's exit-after-output exception
+requires recorded terminal evidence; Agy timeout text remains partial. Providers
+never signals a process or publishes run completion.
+
+Core/config supply roots, typed IDs, `ActorId`, `CancelToken`, `WorkScope`,
+SHA-1/SHA-256 `GitOid`, clocks as values and immutable policy; confinement supplies
+`ConfinedPlan`. Supervisor executes all launch/preflight/quota effects, locks
+and safe reads; these crates never call `Command::new` or own raw handles.
+Run owns custody handoff, continuation, retries, home finalisation and publication.
+Telemetry reads run's terminal facts; quota does not read/import telemetry.
+Workflow receives family/availability facts through the composition edge.
+
+## Credentials and external contracts
+
+**R7/R8 invariant:** quota credentials are read into memory only, never logged,
+written, captured to a file, placed on argv or put in a child environment;
+drop token/raw-response buffers after the probe. The owning provider's
+`QuotaSource` implements extraction/decoding, quota schedules it, and supervisor
+performs bounded I/O/process effects. No generic secret resolver or new source.
+
+| Source retained from current product | Owner and execution rule |
+| --- | --- |
+| Claude selected config directory's `.credentials.json` (`claudeAiOauth.accessToken`), otherwise macOS keychain `Claude Code-credentials` (existing config-path hash suffix for non-default directories) | `providers::claude`; `security find-generic-password -s ITEM -w` through supervisor, with **memory-only stdout and stderr capture**, bypassing ordinary attempt capture/spooling even on error/overflow/cancel. File bytes use a bounded memory-only read. |
+| Cursor `User/globalStorage/state.vscdb`, `ItemTable` key `cursorAuth/accessToken` | `providers::cursor`; read-only fixture-shaped query into memory, no database copy, auth-store export or raw row in diagnostics. |
+
+Runtime access requires recorded user authority identifying actor, exact source,
+purpose and expiry, checked before reading; retain only its non-secret authority
+reference with the probe result. This design permission preserves the existing
+sources; it grants no live credential read in this revision. Tests use fake
+`security` and fixture databases, never the real keychain or credential files.
+No Agy keychain, additional account store or endpoint token source is added.
+Codex and Agy quota use their CLI protocols, not direct auth-store reads.
+
+Claude/Cursor HTTPS uses fixed allowlisted URLs
+`https://api.anthropic.com/api/oauth/usage` and
+`https://cursor.com/api/usage-summary`: system `curl --config -`, header only on
+stdin, no redirects, verbose or trace, bounded time/body and system trust/proxy
+behaviour (ADR 0028). Responses containing credentials use memory-only capture;
+only decoded non-secret quota facts may be stored. No raw request/response log.
+
+External argv comes from the existing adapters, not a new command convention.
+Square brackets below denote optional segments, not literal argv. Confinement
+adds only its verified permission/config arguments; no raw caller argv.
+
+| Adapter | Current wire form and controls to fixture |
+| --- | --- |
+| Codex | `codex exec [resume ID] --json --skip-git-repo-check -c service_tier="default" -c approval_policy="never" [-m MODEL] [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Permission profile/config isolation and fresh/resume acceptance must be recorded. No fast/priority tier or context-ceiling override. |
+| Claude | `claude -p --safe-mode\|--bare --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose [--resume ID\|--session-id ID] [--model MODEL] [--effort EFFORT]`; prompt on stdin. Auth mode and confined tool/system-prompt/add-dir arguments are explicit in each recording. No endpoint profile. |
+| Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
+| Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
+| OpenCode v2 | `opencode run --standalone --format json --auto --print-logs --log-level error [-s ID] [--model PROVIDER/MODEL#VARIANT] PROMPT`; argv prompt, stdin null, cwd selects project. Verify `OPENCODE_CONFIG_CONTENT` permissions/MCP isolation; no v1/shared-server fallback. |
+
+Before build step 1, land a **recording PR** using only redacted event/result
+streams already on disk under `.agent-run/runs/*/dispatch/tasks/*/attempt-*/`
+and `tests/fixtures/fabric-context/*.jsonl`. Read sources without changing them;
+inspect selected bounded streams, redact in memory, and store sanitised fixtures
+at `tools/front-door/tests/fixtures/providers/<adapter>/`. Do not run a live
+provider or read auth stores to fill gaps. An adapter without a qualifying
+on-disk recording stays disabled until one exists; this also applies to heavily
+used Codex/Agy (about 800/250 tasks). Usage counts do not prove a wire form.
+
+Each capture manifest records source provenance, CLI version/platform, redacted
+argv, fresh/resume and access mode, exit and redaction rules. It must prove the
+exact selector/effort/default service controls and confinement form being enabled.
+Keep session/answering-model positions distinct from tool/subagent models;
+retain success, refusal, recovered retry, malformed/partial and terminal/exit
+cases. Listing seeds in `tests/fixtures/model-listings/` support listing only;
+`fabric-v1/provider-*.json` is synthetic. Quota recordings need windows/resets,
+missing data, 401/429 and Retry-After; never auth-store bytes. Fake inputs cover
+negative cases missing from recordings without claiming real CLI acceptance.
+
+## Tests and acceptance (R9)
+
+Unit tests inject clocks, immutable config and evidence. Cover exact selectors,
+route expansion, bounded explicit fallbacks, always-on confidentiality, effort
+support, family evidence/revision mismatch, availability age and account scope.
+Replay recordings through actual decoders for nested identity, recovered retries,
+terminal/exit combinations and bounded malformed input. Quota tests distinguish
+unknown/zero/stale, independent allowance pools, resets/DST, Retry-After and
+revision/claim expiry. Delete Python/V8 coercion, differential and old-output
+judges; types replace redundant validators. Use an in-house snapshot helper
+(about 80 lines), without `insta`.
+
+Every binary integration/process test sets `HOME`, `PROVENANT_STATE_DIR`,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR` to temporary directories.
+Inject temporary Cursor and Agy homes (including macOS Application Support and
+Agy's shim/state directory); forbid passwd-derived real-home/keychain fallback.
+Put fake `curl`, `security` and all provider CLIs on PATH. Absolute system-tool
+paths are injected too, so `/usr/bin/security` cannot escape the fake. No test
+reads/writes the old roots, stable install or real harness config.
+
+Drive real CLI/MCP rendering: no process on help/list/show/resolve, exact
+envelope/exits/size cap, tick partial coverage and revision races, failure keeping
+last good data. Fake curl/security assert token absence from argv, environment,
+files and diagnostics, including overflow/cancel/error; only curl stdin receives
+the header. Fixture databases cover read-only auth extraction and expired tokens.
+Update Swift report decoding/fixtures with the new report path and envelope.
+
+Linux/macOS handshake/FIFO fixtures, never sleeps, cover late probe completion,
+competing refresh writers, ENOSPC, output overflow and home/copy-back races.
+Supervisor proves custody/cancellation; run proves one writer, atomic admission
+and terminal publication. These crates prove routing policy and wire decoding.
+Bookkeeping failure cannot signal a healthy provider or lose terminal evidence.
+Compare canonicalised macOS temporary paths. Local checks are fast targeted
+checks; CI runs workspace/process and macOS release checks. No live smoke.
+
+## Deletion ledger
+
+Counts are `wc -l` at the source baseline, including comments and blanks.
+Whole-file removals below are counted only by this area; deletion lands in
+the last-importer step below, including coupled run/Fabric PRs. No adapter bridge.
+Mixed files are assigned separately so two areas do not claim the same saving.
+
+| Python source removed | Lines |
+| --- | ---: |
+| `scripts/model_route.py` | 1,614 |
+| `scripts/model_route_catalog.py` | 279 |
+| `scripts/model_route_cli.py` | 471 |
+| `scripts/model_route_live.py` | 404 |
+| `scripts/model_route_pools.py` | 702 |
+| `scripts/model_route_preferences.py` | 567 |
+| `scripts/model_route_probe.py` | 404 |
+| `scripts/task_classifier.py` | 190 |
+| `scripts/utility.py` | 241 |
+| `skills/orchestrate/scripts/cf_dispatch.py` | 969 |
+| `skills/orchestrate/scripts/fabric_records.py` | 647 |
+| `scripts/provider_identity.py` | 133 |
+| `skills/orchestrate/scripts/capabilities.py` | 374 |
+| `skills/orchestrate/scripts/exec_routing.py` | 370 |
+| `skills/orchestrate/scripts/provider_output.py` | 548 |
+| `skills/orchestrate/scripts/adapters/__init__.py` | 17 |
+| `skills/orchestrate/scripts/adapters/agy.py` | 31 |
+| `skills/orchestrate/scripts/adapters/claude.py` | 65 |
+| `skills/orchestrate/scripts/adapters/codex.py` | 313 |
+| `skills/orchestrate/scripts/adapters/copilot.py` | 34 |
+| `skills/orchestrate/scripts/adapters/cursor.py` | 22 |
+| `skills/orchestrate/scripts/adapters/kiro.py` | 48 |
+| `skills/orchestrate/scripts/adapters/opencode.py` | 112 |
+| `scripts/provider_quota.py` | 1,611 |
+| `scripts/quota_schedule.py` | 326 |
+| `scripts/quota_display.py` | 399 |
+| `scripts/quota_providers/agy.py` | 162 |
+| `scripts/quota_providers/claude.py` | 193 |
+| `scripts/quota_providers/codex.py` | 174 |
+| `scripts/quota_providers/cursor.py` | 78 |
+| `scripts/quota_providers/opencode.py` | 182 |
+
+| Tests and Python helpers removed | Lines |
+| --- | ---: |
+| `tests/test_model_route.py` | 4,790 |
+| `tests/test_model_route_pools.py` | 986 |
+| `tests/test_task_classifier.py` | 107 |
+| `tests/test_cf_dispatch.py` | 2,905 |
+| `tests/cf_dispatch_support.py` | 31 |
+| `tests/test_utility.py` | 154 |
+| `tests/test_fabric_records.py` | 816 |
+| `tests/test_capabilities.py` | 404 |
+| `tests/test_actual_effort.py` | 284 |
+| `tests/test_provider_quota.py` | 2,188 |
+| `tests/test_quota_schedule.py` | 195 |
+| `tests/test_quota_display.py` | 580 |
+| `tests/support/quota.py` | 54 |
+| `apps/quota-menubar/Fixtures/make_fixtures.py` | 103 |
+| `tools/front-door/crates/quota/src/tests/oracle.py` | 84 |
+
+Whole-file Python total: **25,361 lines removed**. Execution-route also deletes
+`scripts/utility-schema.cjs` (16 JavaScript lines) with utility below.
+Fabric owns/counts
+`catalogue.ts`, `pools.ts` and `catalogue.test.ts` (642); CLI owns/counts
+`routing_context_hook.py` (85). These 727 lines are excluded here.
+
+| Data, schemas, help and docs removed (not code savings) | Lines |
+| --- | ---: |
+| `config/model-routing.json` | 1,090 |
+| `config/model-preferences.json` | 17 |
+| `schemas/model-routing.schema.json` | 129 |
+| `schemas/model-preferences.schema.json` | 97 |
+| `schemas/quota-snapshot.schema.json` | 590 |
+| `schemas/adapter-receipt.schema.json` | 881 |
+| `tools/front-door/src/help/route.txt` | 6 |
+| `tools/front-door/src/help/routes.txt` | 6 |
+| `tools/front-door/src/help/quota.txt` | 6 |
+| `tools/front-door/src/help/capabilities.txt` | 4 |
+| `skills/orchestrate/references/routing-and-tiers.md` | 301 |
+| `skills/orchestrate/references/tiered-council.md` | 72 |
+
+Also remove `scripts/model-route` (15), `scripts/provenant-quota` (5),
+`config/adapter-compatibility.yaml` (306; replaced by bundled TOML), and seven
+synthetic `tests/fixtures/fabric-v1/provider-*.json` (455 total).
+Keep real listing/stream recordings; they are not deletion savings.
+
+Remove these old golden judges with their subject: quota in build step 2,
+route/routes/capabilities/extract in step 3. Shared golden runner/manifest/tests
+belong to CLI's final golden retirement; remove these registrations there.
+
+| Golden fixture removed | Lines |
+| --- | ---: |
+| `tests/golden/cases/route/route-case-01.json` | 12 |
+| `tests/golden/cases/route/route-case-02.json` | 12 |
+| `tests/golden/cases/route/route-resolve.json` | 13 |
+| `tests/golden/cases/routes/routes-case-01.json` | 12 |
+| `tests/golden/cases/routes/routes-case-02.json` | 12 |
+| `tests/golden/cases/routes/routes-catalog.json` | 12 |
+| `tests/golden/cases/capabilities/capabilities-case-01.json` | 12 |
+| `tests/golden/cases/capabilities/capabilities-case-02.json` | 12 |
+| `tests/golden/cases/quota/quota-case-01.json` | 12 |
+| `tests/golden/cases/quota/quota-case-02.json` | 12 |
+| `tests/golden/cases/extract/extract-case-01.json` | 12 |
+| `tests/golden/cases/extract/extract-case-02.json` | 14 |
+
+| Shared file | Lines at baseline | Deletion boundary |
+| --- | ---: | --- |
+| `skills/orchestrate/scripts/provider_exec.py` | 2,760 | Run/supervisor deletes the whole file once its lifecycle lands; adapter builders/observations above replace only the provider portion. |
+| `tests/test_provider_exec.py` | 9,272 | Run/supervisor removes this suite with that subject, after new custody/process tests exist. |
+| `skills/orchestrate/scripts/agy_home.py` | 268 | Confinement/run deletes the file after the safe home recipe and supervisor shim replacement land. Providers supplies adapter policy, not syscalls. |
+| `runtime/fabric/src/execution-input.ts` | 610 | Fabric/run replaces the mixed file. Delete route selector helpers and `routeArguments` here; do not count the entire file twice. |
+
+This area owns whole-file deletion of `cf_dispatch.py`, `fabric_records.py` and
+their tests, after run/Fabric replace their final callers with typed APIs in a
+coupled deletion PR. `provider_identity.py` moves to providers account detection
+and is counted above. Run owns surviving `test_dispatch_run` cases; CLI owns
+installation/front-door assertions and routing-hook registration removal.
+Shared fake-CLI/module helpers survive until their final caller is removed.
+CLI removes the output-digest hook and its test before utility's deletion.
+
+The three existing crates contain **18,275 Rust lines** (routing 8,230,
+providers 4,519, quota 5,526), including inline tests. Replace these owners,
+retaining useful algorithms but discarding all old wire/format emulation.
+Whole-file emulation deletions include routing `casefold.rs` (2,329),
+`pending.rs` (424), `ordered_json.rs` (121), `oracle.rs` (116); providers
+`pending.rs` (171), `ordered_json.rs` (278), `oracle.rs` (135),
+`dispatch_contract.rs` (385), `exec_contract.rs` (192); quota `pending.rs`
+(1,048), `pending/python_unicode.rs` (749), `oracle.rs` (114) and the obsolete
+`policy_tests.rs` (1,553). Remove every inline differential/oracle test and
+Python formatting helper in the rewritten modules as well. The quota Python
+oracle's 84 lines are already in the Python table, not this Rust count.
+
+Planning ceiling: **4,000 new Rust lines**, including parsers, policy and
+unit/binary integration tests. Removal totals
+**25,361 Python + 18,275 existing Rust = 43,636 lines**. At the ceiling,
+expected net Python/TS/Rust change is **−39,636 lines or lower**. This excludes
+the 16 JavaScript lines, mixed-owner removals, data/schemas, shell, help/docs
+and new real recordings.
+Each build PR reports measured `Net lines:`; the ceiling never weakens fixture,
+confinement or custody acceptance.
+
+## Build order
+
+0. **Recording PR before implementation.** Promote qualifying existing on-disk
+   recordings with provenance/redaction manifests and an activation matrix.
+   Missing recordings keep the corresponding adapter/mode disabled; no live
+   provider run. This is a concrete prerequisite for step 1.
+1. **Provider interfaces and registry.** After core/records/config/confinement
+   and quota's trait/data API, land the providers-owned `Adapter`, static
+   registry, five provider modules and fixture-backed parsers/account detection.
+   Delete providers' Rust emulation and only old leaves/tests whose importers
+   are all retired in this area; shared Python waits for the matrix gate.
+   Disabled wire forms have no pending implementation. Confinement
+   and supervisor land memory-only secret capture before quota auth is enabled.
+2. **Quota.** Land scheduling/admission, current snapshots/report intents and
+   fake-curl/security/database tests. Delete quota Rust emulation/oracles, old
+   golden judges and only Python leaves/tests with no outside importer.
+   `provider_quota.py` and its dependencies wait for the matrix gate.
+   Wire `quota show|tick` and update Swift report/fixtures together. Runtime secret reads still require
+   recorded user authority; fixtures never grant it.
+3. **Routing.** Land explicit model/named-route resolution, at most two explicit
+   alternatives, family/availability facts and route CLI. Delete routing Rust
+   emulation, old golden judges and only leaves/config/schemas/help/docs whose
+   importers/callers are all retired in this area. Shared routing Python waits
+   for the matrix gate. No preferences, rotation or pool engine.
+   Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
+   in step 3, which removes `task_classifier`'s utility calls, gated on their last
+   importer. This includes CLI removing utility verbs and the output-digest hook.
+   CLI removes the routing hook and its registration; Fabric deletes
+   its own catalogue/pools, without counting them here.
+4. **Composition and final callers.** Run/Fabric consume the shared APIs and own
+   atomic admission, attempt records, retries and publication. Couple deletion
+   of `cf_dispatch.py`/`fabric_records.py` and their tests/helpers with replacement
+   of their final importers; this area counts those files once. Run owns the
+   run-directory contract cut and `git_evidence_packet`; its `AttemptReader::attempt` facts replace
+   workflow receipt readers. No new scaffold or import is added here. Finish
+   isolated fake-provider dispatch/MCP acceptance and remove shared leaves only
+   when their last old caller is gone.
+
+Steps 1–3 land Rust primitives; they do not delete a still-imported Python leaf.
+R2+R3, R4 and R5 below name the numbered steps in execution-run's build order:
+**Durable dispatch and admission + Bounded batches**, **Controls and recovery
+library**, and **Facade, run-directory cut and shared leaves**. Execution-route
+alone counts/deletes the following leaves and subject tests in those coupled
+PRs; outside owners remove their callers first. Recheck direct, dynamic and CLI
+callers before deletion; a surviving importer moves the deletion later.
+
+| Leaf | Importers/callers and deletion gate |
+| --- | --- |
+| `provider_output.py` | `dispatch_run`/`dispatch_preflight` (R2+R3), `provider_exec` and `provider_observer` (R4+R5), plus `cf_dispatch`/`fabric_records`' transitive provider use. Delete in R5 with the last facade/provider caller. |
+| `provider_identity.py` | `provider_quota`, `quota_providers/*`, `telemetry.py` and `fabric_records`. Delete in R5 after telemetry and quota remove their imports and Fabric retires `fabric_records`. |
+| `exec_routing.py` | `dispatch_run`/`dispatch_preflight`/`batch_run` (R2+R3), `provider_exec` (R4+R5), `provider_output`, `utility.py` (route step 3) and `fabric_records`. Delete in R5 after all retire. |
+| `provider_quota.py` | `exec_routing`, `provider_exec`, `model_route_live`, `telemetry.py` and quota-menubar's fixture generator. Delete in R5 after these and old quota consumers retire; quota leaves stay until this gate. |
+| `capabilities.py` | `dispatch_run`/`dispatch_preflight`/`batch_run` (R2+R3), `provider_exec`, `provider_confinement`, Codex's old adapter and `cf_dispatch`. Delete in R5 with the last facade/provider caller. |
+| `model_route_live.py`, `model_route_probe.py` | `model_route.py` exposes both to `provider_exec` and `exec_routing`; preflight, `utility.py`, `cf_dispatch` and `fabric_records` use that router directly or dynamically. Delete in R5 with the last router caller, not route step 3. |
+| `utility.py`, `test_utility.py`, `utility-schema.cjs` | Execution-route step 3 removes `task_classifier`'s utility calls and deletes all three, after CLI removes utility verbs, the output-digest hook and all remaining direct callers/tests. No run/workflow deletion claim. |
+| `cf_dispatch.py`, `fabric_records.py`, their tests and `cf_dispatch_support.py` | R2+R3 removes dispatch/preflight/batch callers; R5 replaces Fabric's facade and last direct callers. Delete in R5; subject helpers retire with their last test. |
+
+Each build PR lands Rust and deletes its subjects/tests together; no Python→Rust
+bridge, selector or old-output oracle. Chairs arrange cross-family review and
+accept/merge on CI. This lane updates the existing design PR and does not merge
+or arm auto-merge.
