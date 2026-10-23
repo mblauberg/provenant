@@ -1373,19 +1373,16 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
         let Some(raw_number) = object.get("number") else {
             continue;
         };
-        let (id_number, pr) = match raw_number {
+        let (id_number, raw_pr) = match raw_number {
             Value::Bool(value) => (
                 if *value { "True" } else { "False" }.to_owned(),
-                i64::from(*value),
+                Value::Number(i64::from(*value).into()),
             ),
             Value::Number(number) => {
-                let Some(number) = number
-                    .as_i64()
-                    .or_else(|| number.as_u64().and_then(|n| i64::try_from(n).ok()))
-                else {
+                if number.is_f64() {
                     continue;
-                };
-                (number.to_string(), number)
+                }
+                (number.to_string(), Value::Number(number.clone()))
             }
             _ => continue,
         };
@@ -1433,14 +1430,21 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
             }
             None => None,
         };
-        let merge_commit = sqlite_text_binding(merge_commit_value, 4)?;
         let Some(merged_at) = merged_at_value.as_str() else {
-            return Err(ChangeError::Invalid(
-                "mergedAt must be an ISO timestamp".into(),
-            ));
+            return Err(ChangeError::Invalid(format!(
+                "'{}' object has no attribute 'replace'",
+                python_type(merged_at_value)
+            )));
         };
         let parsed = clock.parse_time(merged_at)?;
         let stamp = clock.iso(parsed);
+        // Python evaluates the full INSERT tuple before SQLite binds parameters.
+        // Resolve expressions first, then bind in SQL order: PR (3), commit (4), title (6).
+        let pr = raw_pr
+            .as_i64()
+            .or_else(|| raw_pr.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .ok_or(ChangeError::NumberOutOfRange)?;
+        let merge_commit = sqlite_text_binding(merge_commit_value, 4)?;
         let title = sqlite_text_binding(object.get("title"), 6)?;
         let change = ChangeRecord {
             change_id: format!("pr:{id_number}"),
@@ -2786,19 +2790,45 @@ for index, row in enumerate(input.get('events', [])):
     #[test]
     fn upsert_malformed_values_match_python_sort_and_attribute_errors() {
         let clock = clock();
-        let input = json!({"now":"2026-10-23T00:00:00Z"});
+        let cases = json!({
+            "mixed_labels":{"number":21,"mergedAt":"2026-10-06T00:00:00Z","labels":[{"name":null},{"name":"x"}]},
+            "bad_merge_commit":{"number":21,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":"bad"},
+            "large_valid":{"number":9223372036854775808u64,"mergedAt":"2026-10-06T00:00:00Z"},
+            "large_bad_labels":{"number":9223372036854775808u64,"mergedAt":"2026-10-06T00:00:00Z","labels":[{"name":null},{"name":"x"}]},
+            "large_bad_merge_commit":{"number":9223372036854775808u64,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":"bad"},
+            "large_bad_stamp":{"number":9223372036854775808u64,"mergedAt":123},
+            "large_bad_oid_binding":{"number":9223372036854775808u64,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":{"oid":[]}},
+            "large_bad_title_binding":{"number":9223372036854775808u64,"mergedAt":"2026-10-06T00:00:00Z","title":{}},
+            "bad_oid_binding":{"number":22,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":{"oid":[]}},
+            "bad_title_binding":{"number":22,"mergedAt":"2026-10-06T00:00:00Z","title":{}},
+            "truthy_bool_stamp":{"number":22,"mergedAt":true},
+            "truthy_int_stamp":{"number":22,"mergedAt":1},
+            "truthy_list_stamp":{"number":22,"mergedAt":[1]}
+        });
+        let input = json!({"now":"2026-10-23T00:00:00Z","cases":cases});
         let oracle = python_oracle(
-            "def error(row):\n try: owner.upsert(t,db,[row])\n except Exception as exc: return str(exc)\n raise AssertionError('expected error')\nbase={'number':21,'mergedAt':'2026-10-06T00:00:00Z'}\nerrors={'mixed_labels':error({**base,'labels':[{'name':None},{'name':'x'}]}),'bad_merge_commit':error({**base,'mergeCommit':'bad'})}\nprint(json.dumps(errors))",
+            "def error(row):\n try: owner.upsert(t,db,[row])\n except OverflowError: return 'NumberOutOfRange'\n except Exception as exc: return str(exc)\n raise AssertionError('expected error')\nprint(json.dumps({name:error(row) for name,row in input['cases'].items()}))",
             &input,
         );
-        let mut store = MemoryStore::default();
-        let mixed_labels = json!({"number":21,"mergedAt":"2026-10-06T00:00:00Z","labels":[{"name":null},{"name":"x"}]});
-        let bad_merge_commit =
-            json!({"number":21,"mergedAt":"2026-10-06T00:00:00Z","mergeCommit":"bad"});
-        let rust = json!({
-            "mixed_labels":upsert(&clock, &mut store, &[mixed_labels]).unwrap_err().to_string(),
-            "bad_merge_commit":upsert(&clock, &mut store, &[bad_merge_commit]).unwrap_err().to_string()
-        });
+        let rust = Value::Object(
+            cases
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, row)| {
+                    let error = match upsert(
+                        &clock,
+                        &mut MemoryStore::default(),
+                        std::slice::from_ref(row),
+                    ) {
+                        Err(ChangeError::NumberOutOfRange) => "NumberOutOfRange".into(),
+                        Err(error) => error.to_string(),
+                        Ok(_) => "expected error".into(),
+                    };
+                    (name.clone(), Value::String(error))
+                })
+                .collect(),
+        );
         if let Some(oracle) = oracle {
             crate::differential::equal(&rust, &oracle);
         }
