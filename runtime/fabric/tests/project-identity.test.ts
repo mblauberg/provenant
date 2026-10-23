@@ -305,7 +305,7 @@ it('stores linked and symlinked cwd runs in the primary run root', async () => {
  });
 
 it('computes the ledger once per selected worktree and skips terminal brief rows', async () => {
- const {statusRows}=await import('../src/run-registry.js');
+ const {statusRows}=await import('../src/run-status.js');
  const {chmodSync,existsSync}=await import('node:fs');
  const executable=execFileSync('/usr/bin/which',['git'],{encoding:'utf8'}).trim();
  const bin=join(fixture,'bin'),log=join(fixture,'git-calls');mkdirSync(bin);

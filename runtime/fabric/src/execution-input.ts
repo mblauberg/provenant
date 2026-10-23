@@ -87,6 +87,7 @@ export interface RouteInput {
   reviewer_id?: string;
   preface?: boolean;
   read_roots?: string[];
+  knobs?: string[];
   host?: string;
   operation_id?: string;
   placement_fallback?: { from_host: string; reason: string; detail?: string };
@@ -160,6 +161,7 @@ export interface NormalisedRoute {
   allow_secrets?: boolean;
   capabilities?: DispatchCapability[];
   confidential?: boolean;
+  knobs?: string[];
   pick_reason?: string;
   read_roots?: string[];
   warnings?: string[];
@@ -316,6 +318,9 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   )) {
     throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
   }
+  if (input.knobs !== undefined && (!Array.isArray(input.knobs) || input.knobs.some((value) => typeof value !== "string" || !value.trim()))) {
+    throw new InputError("knobs_invalid", "Pass knobs as non-empty NAME=VALUE strings.");
+  }
   let selector =
     input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) && tierAlias(input.alias) === undefined
       ? input.alias : undefined);
@@ -405,6 +410,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(input.worktree === undefined ? {} : { worktree: resolve(identity.cwd, input.worktree) }),
     ...(warnings.length ? { warnings } : {}),
     ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
+    ...(input.knobs?.length ? { knobs: [...input.knobs] } : {}),
     ...Object.fromEntries(
       ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason", "task_class", "orchestrator_family", "risk_tier", "model_override_tier", "reviewer_id", "preface", "delivery_run_id"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
@@ -424,6 +430,8 @@ export function routeArguments(route: NormalisedRoute): string[] {
       for (const dir of value as string[]) args.push("--add-dir", dir);
     } else if (key === "read_roots") {
       for (const dir of value as string[]) args.push("--read-root", dir);
+    } else if (key === "knobs") {
+      for (const knob of value as string[]) args.push("--knob", knob);
     } else if (key === "allow_secrets" || key === "confidential") {
       if (value === true) args.push(`--${key.replaceAll("_", "-")}`);
     } else args.push(`--${key.replaceAll("_", "-")}`, typeof value === "string" ? value : JSON.stringify(value));

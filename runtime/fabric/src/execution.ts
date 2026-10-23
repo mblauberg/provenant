@@ -53,8 +53,6 @@ import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS 
 import { runRoot, databasePath, projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
-  fabricStatus,
-  statusRows,
   findRecordedRun,
   readOwnerRecord,
   processStartedAt,
@@ -67,6 +65,7 @@ import {
   type OwnerRecord,
   type RecordedRun,
 } from "./run-registry.js";
+import { fabricStatus, statusRows } from "./run-status.js";
 
 import { laneTaskId, Store } from "./store.js";
 import { digest } from "./surface.js";
@@ -955,7 +954,7 @@ function normaliseTask(
 
 export function batchDefaults(input: BatchInput): Record<string, any> {
   return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", "delivery_run_id", ...POOL_FIELDS].includes(key))));
+    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", "delivery_run_id", "knobs", ...POOL_FIELDS].includes(key))));
 }
 
 export function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
