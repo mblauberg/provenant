@@ -12,8 +12,6 @@
 mod check;
 mod exec;
 mod help;
-mod json;
-use provenant_supervisor::sys::legacy_lane as lane;
 mod resolve;
 mod stale;
 
@@ -97,7 +95,6 @@ enum Route {
         status: u8,
     },
     Root,
-    Lane(Vec<OsString>),
     Mcp,
     Check(Vec<OsString>),
     Owner {
@@ -168,9 +165,6 @@ fn route(args: &[OsString], seat: bool) -> Route {
             status: 0,
         });
     }
-    if command == "lane" {
-        return Route::Lane(rest);
-    }
     if command == "root" {
         return if rest.is_empty() {
             Route::Root
@@ -228,9 +222,13 @@ fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked:
 }
 
 fn run(args: &[OsString]) -> u8 {
-    // The supervisor is built in even during the front-door Python trial.
-    if args.first().is_some_and(|v| v == "lane") {
-        return lane::run(&args[1..]);
+    if args.first().is_some_and(|v| v == "internal")
+        && args.get(1).is_some_and(|v| v == "supervise")
+    {
+        return match provenant_supervisor::supervise(&args[2..], Default::default()) {
+            Ok(()) => 0,
+            Err(error) => fail(&error.to_string()),
+        };
     }
     let settings = Settings::from_process();
     match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
@@ -242,7 +240,6 @@ fn run(args: &[OsString]) -> u8 {
             print(&text, stderr);
             status
         }
-        Route::Lane(rest) => lane::run(&rest),
         Route::Root => match resolve::product_root(&settings) {
             Ok(root) => {
                 let mut line = root.as_os_str().as_bytes().to_vec();

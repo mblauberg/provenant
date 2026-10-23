@@ -150,6 +150,15 @@ enum AtomicWritePhase {
 pub struct LockGuard {
     _file: File,
 }
+impl LockGuard {
+    // Only the private guardian handoff can duplicate custody descriptions.
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self._file
+    }
+    pub(crate) fn from_handoff(file: File) -> Self {
+        Self { _file: file }
+    }
+}
 
 impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
@@ -320,35 +329,58 @@ pub enum PublishMode {
 pub struct Directory {
     file: File,
     device: u64,
+    // True only for handles derived from a trusted anchor without following links.
+    anchorable: bool,
     // Diagnostic only; never used to resolve an operation. Relative to anchor.
     path: PathBuf,
 }
 impl Directory {
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self.file
+    }
+    pub(crate) fn from_handoff(file: File) -> Result<Self> {
+        Self::from_file(file, PathBuf::new(), false)
+    }
     /// The initial path is trusted; symlinks in ancestors (e.g. macOS /var) are
     /// permitted. The final component must be a directory, never a symlink.
     pub fn open_anchor(path: &Path) -> Result<Self> {
         Self::from_file(
             os::open_anchor(path).map_err(error("open anchor", path))?,
             PathBuf::new(),
+            true,
         )
     }
     /// Open / or . without resolving a held directory back to a pathname.
     pub fn root(absolute: bool) -> Result<Self> {
         Self::open_anchor(Path::new(if absolute { "/" } else { "." }))
     }
-    fn from_file(file: File, path: PathBuf) -> Result<Self> {
+    fn from_file(file: File, path: PathBuf, anchorable: bool) -> Result<Self> {
         let device = file
             .metadata()
             .map_err(error("fstat directory", &path))?
             .dev();
-        Ok(Self { file, device, path })
+        Ok(Self {
+            file,
+            device,
+            anchorable,
+            path,
+        })
     }
     /// Establish this held directory as a new filesystem-device boundary.
     /// Call only after the caller has validated the configured root. Unlike
     /// open_anchor, this consumes the existing handle without resolving a path
     /// again; descendant operations retain the usual no-cross-device policy.
+    /// Handles derived from a followed link or private guardian handoff are
+    /// refused, so link expansion cannot launder a cross-device child into an
+    /// anchor and guardian-side handles cannot establish new boundaries.
     pub fn into_anchor(self) -> Result<Self> {
-        Self::from_file(self.file, self.path)
+        if !self.anchorable {
+            return Err(FsError::Symlink {
+                path: self.path,
+                source: io::Error::from_raw_os_error(errno::ELOOP),
+            });
+        }
+        Self::from_file(self.file, self.path, true)
     }
     pub fn metadata(&self) -> Result<Metadata> {
         self.file
@@ -373,6 +405,7 @@ impl Directory {
             os::open_directory(&self.file, name, follow)
                 .map_err(error("openat directory", &self.path.join(name)))?,
             self.path.join(name),
+            self.anchorable && !follow,
         )?;
         child.device = self.device;
         Ok(child)
@@ -413,6 +446,24 @@ impl Directory {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
+        let remaining = budget.remaining(clock.mono_now());
+        let timeout = Duration::from_micros(remaining.as_micros());
+        self.lock_with_timeout(name, mode, timeout, cancel)
+    }
+
+    /// Attempt one nonblocking acquisition with the same verified inode checks.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn try_lock(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+        self.lock_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+    }
+
+    fn lock_with_timeout(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> Result<LockGuard> {
         let name = component(name)?;
         if !name.as_bytes().ends_with(b".lock") {
             return Err(FsError::InvalidLockName { name: name.into() });
@@ -421,8 +472,6 @@ impl Directory {
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled { path });
         }
-        let remaining = budget.remaining(clock.mono_now());
-        let timeout = Duration::from_micros(remaining.as_micros());
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
@@ -789,6 +838,9 @@ pub struct FileHandle {
     path: PathBuf,
 }
 impl FileHandle {
+    pub(crate) fn handoff_file(&self) -> &File {
+        &self.file
+    }
     fn regular(file: File, path: &Path) -> Result<Self> {
         if !file
             .metadata()

@@ -88,7 +88,9 @@ impl Worker {
                         if let Slot::Child(child) = slot {
                             match child.try_wait() {
                                 Ok(None) => has_child = true,
-                                Ok(Some(_)) => {
+                                Ok(Some(_status)) => {
+                                    #[cfg(feature = "fixture")]
+                                    record_exit_status(child.id(), _status);
                                     *slot = Slot::Free;
                                     #[cfg(feature = "fixture")]
                                     {
@@ -315,4 +317,29 @@ impl Drop for Permit {
             }
         }
     }
+}
+
+// Test-only, bounded observations from the actual owning wait path.
+#[cfg(feature = "fixture")]
+static EXIT_STATUSES: Mutex<std::collections::VecDeque<(u32, std::process::ExitStatus)>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+#[cfg(feature = "fixture")]
+fn record_exit_status(pid: u32, status: std::process::ExitStatus) {
+    let mut statuses = EXIT_STATUSES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if statuses.len() == 128 {
+        statuses.pop_front();
+    }
+    statuses.push_back((pid, status));
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) fn take_exit_status(pid: u32) -> Option<std::process::ExitStatus> {
+    let mut statuses = EXIT_STATUSES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let index = statuses.iter().rposition(|(seen, _)| *seen == pid)?;
+    statuses.remove(index).map(|(_, status)| status)
 }

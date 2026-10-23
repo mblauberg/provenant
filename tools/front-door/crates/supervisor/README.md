@@ -1,14 +1,14 @@
 # Safe OS owner
 
 `provenant-supervisor` owns the operating system boundary under PORTING.md v7,
-step S1 of `design/supervisor.md`. All first-party unsafe code lives in `sys`.
+steps S1 and S2 of `design/supervisor.md`. All first-party unsafe code lives in `sys`.
 
 `exec::SystemExecutor` is constructed once at the process edge and shared with
 consumers through `Executor`. Its clones share fixed-capacity cleanup admission,
 reserved before spawn. Every child is reaped explicitly or transferred to that
 reaper. Error paths send SIGKILL before transfer; dropping an owner never waits.
 All executor instances share one reaper worker, which parks when idle. Utilities
-have direct-child authority only. Provider custody and the guardian belong to S2.
+have direct-child authority only. Providers use the dedicated same-binary guardian, persistent writer reservation and explicit census/cleanup described in `PORT.md`.
 
 Each stream selects `Capture`, `Discard` or `Tee`. Capture defaults to 8 MiB and
 refuses limits over 64 MiB. Discard creates no pipe. Tee uses a bounded

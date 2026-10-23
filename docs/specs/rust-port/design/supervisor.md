@@ -119,6 +119,39 @@ Linux subreaping and process-wide signal setup run only in the guardian;
 macOS uses kqueue plus SIGCHLD. Explicit cleanup precedes consuming reap; abort
 or `Drop` is never a provider cleanup mechanism.
 
+On macOS, quiescence requires the provider to be reaped and two complete
+libproc census snapshots at least 20 ms apart. Libproc enumerates all PIDs;
+foreign-UID services that deny full BSD records use the short BSD record plus
+the public `KERN_PROC_PID` start-time prefix. Two matching native reads bracket
+PID/ppid/group/status/session and start time; failed or racing reads remain
+unknown and make the snapshot incomplete. Both must contain no other
+process in the provider's session or process group and no surviving identity
+or descendant (ppid edges checked against native start-time identity) from the
+guardian's recorded census history. Each tick prunes identities proved absent
+or replaced; overflow or incomplete proof keeps the attempt fenced.
+The provider inherits the writer lease's open file description. After the
+requester closes its copy on acknowledged handoff, the guardian closes its own
+copy without unlocking and attempts a fresh nonblocking writer lock on the
+original device/inode. Success proves no surviving descendant retains the
+inherited lease description; the new guard remains held through terminal
+publication. Failure keeps the durable reservation fenced.
+A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
+drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
+The exit's `settlement_evidence` records
+`darwin_census_and_writer_lease`, `linux_kernel_children`, `never_spawned` or
+`unresolved`. Linux requires two identical complete per-thread kernel children
+snapshots, including stable thread membership, before cleanup settlement.
+The Linux global census skips rows whose process group or session is 0 (host
+kernel tasks and container shims; never a descendant of the guardian's
+session); a direct observation of such a PID stays unknown.
+
+A macOS daemon that escapes with `setsid` before ever being sampled and closes
+the inherited lease is the residual: libproc cannot reconstruct that missing
+history. It grants no signalling authority. Census observations never grant
+arbitrary PID or process-group signal authority; only the unreaped provider
+and kernel-confirmed adopted children may receive signals.
+
+
 Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
 strict text decoding, private direct-child custody, CWD, append/lock and marker APIs. Correct
 #1348 before its consumers land:
@@ -530,6 +563,22 @@ macOS release plus process/custody tests, and remaining Python/TS subjects.
 Unsafe gets a second reviewer; the chair owns cross-family design acceptance.
 Healthy-process signalling, weakened confinement or lost publication escalates
 under R11. Live-provider recordings require user authority.
+
+### Run settlement attestations
+
+After its canonical terminal transaction and quarantine commit, Run durably
+publishes private v1 `terminal-commit.json` and `quarantine/manifest.json`, with
+exact `scope` (run, attempt, generation), `schema_version: 1`, and `kind` equal
+to `canonical_terminal` and `quarantine_manifest`, respectively. It then
+publishes `release.json` with the same scope/version and `terminal_digest` and
+`quarantine_digest` as `CanonicalV1::file_digest` values over the exact raw
+artifact bytes. These attestations are bounded to 1 MiB each, reject unknown
+fields and duplicates, and remain excluded from provider mutation. Run owns
+and protects their directories and publication order. Supervisor checks the
+original attempt inode and custody lock, verifies both digests and scopes,
+and syncs held files/directories before minting `SettlementCommit`. That
+receipt permits classified scratch settlement and fence clearing under writer
+exclusion; an absent or invalid attestation retains the fence.
 
 ## Deletions and build order
 
