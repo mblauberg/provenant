@@ -1,0 +1,25 @@
+# Rewrite design docs
+
+One accepted design per area of the [Rust rewrite](../README.md). Each doc
+lands here after its cross-family council.
+
+## Cross-area decisions
+
+The chairs settle these once. Area docs cite this table, not each other, and
+a revision that disagrees proposes a change here first.
+
+| Topic | Decision | Detail owner |
+|---|---|---|
+| State root | Default `~/.local/share/provenant/v1`; `--state-dir ABS` overrides `PROVENANT_STATE_DIR`. No fallback to any old root, and a root inside an old root is refused. | state |
+| Layout | One state root per host, not per project. Run owns `runs/<RunId>/` and its store at the top level; Fabric owns `fabric/`; install owns `install/` and `releases/`. `ProjectId` is host-local and recorded on each run; fabric-runtime owns the cross-host project key used by federation. | state, with each area's subtree |
+| Command contract | `design/cli.md`'s JSON envelope (`schema_version`, `command`, `status`, `data`, `error`), its 1 MiB result cap and its exit codes: 0 ok, 1 failed, refused or findings, 2 invalid input or version, 3 cannot proceed (setup, I/O, contention), 124 wait deadline, 130 cancelled. There is no exit 4: partial coverage and input-required are reported in `data`. A wait that ends because its condition was met, including `InputRequired`, exits 0. | cli |
+| Waits | Every wait takes an explicit budget. CLI waits allow up to 14400 s (transcripts show 22 lane waits above 3600 s, up to 14400 s); MCP waits allow up to 55 s, below the client's tool timeout. | execution-run, fabric |
+| Run verbs | Run owns its verbs at the top level, because lane status is the busiest surface (696 transcript invocations): `dispatch`, `lanes [--wait]`, `output`, `cancel`, `resume` and `reconcile` (recover queued and orphaned work after a scheduler dies). The `fabric` subtree keeps messaging, tasks, the agent label, peer hosts and MCP, and drops named sessions (run `resume` covers continuation); `supervisor` adds no run verbs. `design/cli.md` freezes the exact flags. | cli, execution-run |
+| Config | One user-owned `config.toml` under the state root. Compiled presets and bundled data (prices, catalogue, adapter table) ship as TOML assets. No profile layering, project overlays, per-knob environment variables or profile mutation verbs; `config show` and `check config` remain, plus an optional `profile =` key. | state |
+| Environment | Product inputs are `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (identity: separate inboxes for several agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider and harness variables pass through as their tools define them. No other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. The user has authorised the cut-over to update the global agent instructions (`~/.agents/AGENTS.md` and the files linked to it) automatically when it switches the variable (2026-10-24). | state, fabric |
+| Checks and hooks | `check` is the one verifying verb, with subjects `config`, `install`, `harness`, `release` and `writing PATHS` (workflow's writing rules, replacing the proposed `provenant lint`); each reports `Finding`s and exits 1 on findings. Repo-only lints such as date checks are workspace tests, not commands. Hooks are one `HookSpec` data table in cli (harness, protocol event, matcher, timeout, handler) that the installer also reads; handlers from any area register there, invoked as `hook <harness> <event>`. A guard hook denies input it cannot read or bound. | cli, with workflow and state |
+| Records | Stored records are typed serde models with versioned headers. Fact types that only edge code builds are `Serialize` only. | each area |
+| Telemetry | No ledger. `telemetry stats` reduces run's terminal records with the price table. The old ledger is neither imported nor deleted; its history stays on disk for the old install. The OTel collector retires at cut-over. | telemetry |
+| Import | Read-only, one shot, at cut-over: open and blocked Fabric tasks and unacknowledged requests from the last 14 days. Nothing else. | fabric |
+| Installer | `install [--dry-run]`, `check install` and `uninstall`; re-applying `install` is the recovery path. Rollback reinstalls the `pre-rust-rewrite` tag. Cut-over replaces or removes the old install's harness entries (hooks, skill and workflow links, MCP entries, instruction links) from a compiled list matched by exact command or link target under `--legacy-checkout ABS`, reading links with `readlink` only. It prints every harness-config change before applying it. | state |
+| Dependencies | `rusqlite` may serve run's store as well as Fabric's. `toml_edit` gains its `serde` feature for typed config (PORTING.md R6). | chairs |
