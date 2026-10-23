@@ -469,7 +469,7 @@ confinement or custody acceptance.
    atomic admission, attempt records, retries and publication. Couple deletion
    of cf_dispatch/fabric_records and their tests with replacement of their final
    importers; this area counts those files once. Run owns the run-directory
-   contract cut and git_evidence_packet; its completed_attempt facts replace
+   contract cut and git_evidence_packet; its `AttemptReader::attempt` facts replace
    workflow receipt readers. No new scaffold or import is added here. Finish
    isolated fake-provider dispatch/MCP acceptance and remove shared leaves only
    when their last old caller is gone.
