@@ -1351,3 +1351,15 @@ JavaScript JSON.parse. Process IDs outside u64 remain refused rather than
 rounded into an integer. This inert boundary does not claim parity for
 JavaScript integers outside the Rust integer domain; no command is cut over.
 Unknown and mistyped unvalidated owner fields are retained verbatim.
+
+### RP-FR3-002: remaining policy value representation boundary
+
+Class: `library`, unresolved and not accepted for cut-over. Shared core
+`python_value_repr` fixes quote selection, controls, non-printable characters
+and exponent spelling. It iterates serde_json's sorted map, so it cannot
+recover Python insertion order from a decoded Value. Core has
+`python_dict_repr` for ordered entries but no Python-compatible lossless JSON
+value decoder for lone surrogates/non-finite constants. This lane does not
+copy repr. `fabric_policy` remains partial: selected exclusions/tools containing
+such values or nested objects still need a lossless ordered value owner.
+Unread fields stay opaque and no longer affect independent policy results.

@@ -79,7 +79,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         let Some(value) = entry.as_str().filter(|value| !value.is_empty()) else {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                crate::pending::python_repr(entry)
+                provenant_core::py::python_value_repr(entry)
             ));
             continue;
         };
@@ -87,14 +87,14 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         if path.is_absolute() {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                crate::pending::python_repr(entry)
+                provenant_core::py::python_value_repr(entry)
             ));
             continue;
         }
         let candidate = match crate::pending::resolve_path(&root.join(path)) {
             Ok(candidate) => candidate,
             Err(_) => {
-                warnings.push(format!("{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}", crate::pending::python_repr(entry)));
+                warnings.push(format!("{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}", provenant_core::py::python_value_repr(entry)));
                 continue;
             }
         };
@@ -103,7 +103,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
         } else {
             warnings.push(format!(
                 "{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}",
-                crate::pending::python_repr(entry)
+                provenant_core::py::python_value_repr(entry)
             ));
         }
     }
@@ -339,5 +339,27 @@ print(json.dumps(m.instruction_changes(pathlib.Path(sys.argv[2]))))"#,
                 expected
             );
         }
+    }
+    #[test]
+    fn shared_repr_covers_quotes_controls_nonprintable_and_exponents() {
+        let values = serde_json::json!([
+            "../it's",
+            "\u{0000}\u{0008}\u{001c}\u{200b}",
+            1e20,
+            "a'b\"c"
+        ]);
+        let Some(expected) = crate::test_support::python(
+            "import json,sys; print(json.dumps([repr(v) for v in json.loads(sys.argv[1])]))",
+            &[serde_json::to_string(&values).unwrap()],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = values
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(provenant_core::py::python_value_repr)
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }
