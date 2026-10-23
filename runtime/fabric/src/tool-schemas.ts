@@ -27,6 +27,7 @@ const route = {
     message: "Pass capabilities as a list of distinct postgres or browser values.",
   }).optional(),
   add_dirs: z.array(z.string()).optional(),
+  knobs: z.array(z.string()).optional().meta({ description: "Per-dispatch profile overrides as NAME=VALUE strings; repeated values are forwarded to the routing owner and recorded in the attempt profile stamp." }),
   allow_secrets: z.boolean().optional(),
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])

@@ -2,7 +2,7 @@
 import { closeSync, readFileSync, writeFileSync } from "node:fs";
 import { identify, databasePath } from "./identity.js";
 import { dispatchConfiguredProvider, dispatchConfiguredBatch, cancelConfiguredRun, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
-import { statusRows, fabricOutput } from "./run-registry.js";
+import { statusRows, fabricOutput } from "./run-status.js";
 import { readRuns } from "./run-reader.js";
 import { resumeConfiguredProvider, handoffDispatch } from "./resume.js";
 import { sessionDispatch } from "./sessions.js";

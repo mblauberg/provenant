@@ -96,14 +96,15 @@ def cost_per_accepted(telemetry, db, since=None):
         key = (row['source'], row['event_id'], telemetry.same_host(row['host'], aliases))
         if key not in lanes or row['host'] == current:
             lanes[key] = row
-    prices, free_patterns = telemetry.load_prices()
-    adapters = telemetry.catalogue()
+    costs = telemetry.costs_owner()
+    prices, free_patterns = costs.load_prices(telemetry)
+    adapters = costs.catalogue(telemetry)
     for row in lanes.values():
         group = run_groups.get(row['delivery_run_id'])
         if group is None:
             continue
-        row['model'] = telemetry.normalise_model(row['adapter'], row['provider'], row['model'], adapters)
-        cost = telemetry.estimated_cost(row, prices, telemetry.price_entry(row, prices, free_patterns))
+        row['model'] = costs.normalise_model(row['adapter'], row['provider'], row['model'], adapters)
+        cost = costs.estimated_cost(telemetry, row, prices, costs.price_entry(row, prices, free_patterns))
         group['usage_rows'] = group.get('usage_rows', 0) + 1
         group['unpriced_rows'] = group.get('unpriced_rows', 0) + int(cost is None)
         group['cost'] = group.get('cost', 0.0) + (cost or 0.0)

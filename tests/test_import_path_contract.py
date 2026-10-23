@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Both files run a probe under `python -I`, which ignores PYTHONPATH by design
@@ -40,16 +42,17 @@ def _mutates_sys_path(path: Path) -> bool:
     )
 
 
-def test_no_sys_path_mutation_under_tests():
+@pytest.mark.parametrize(
+    "directory",
+    (
+        pytest.param("tests", id="test_no_sys_path_mutation_under_tests"),
+        pytest.param("scripts", id="test_no_sys_path_mutation_under_scripts"),
+    ),
+)
+def test_no_sys_path_mutation(directory):
+    # issue #755
     offenders = [
-        str(path.relative_to(ROOT)) for path in _sources("tests") if _mutates_sys_path(path)
-    ]
-    assert offenders == []
-
-
-def test_no_sys_path_mutation_under_scripts():
-    offenders = [
-        str(path.relative_to(ROOT)) for path in _sources("scripts") if _mutates_sys_path(path)
+        str(path.relative_to(ROOT)) for path in _sources(directory) if _mutates_sys_path(path)
     ]
     assert offenders == []
 

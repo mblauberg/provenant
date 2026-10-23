@@ -5,8 +5,9 @@ import { once } from "node:events";
 import * as ps from "../src/ps.mjs";
 import { afterEach, expect, it, vi } from "vitest";
 import { scratchRoot } from "./helpers/temp-root.js";
-import { listRecordedRuns, processStartedAt, reapAttemptRuns, reapOrphanedRuns, signalRecordedProcess, statusRows,
+import { listRecordedRuns, processStartedAt, reapAttemptRuns, reapOrphanedRuns, signalRecordedProcess,
   signalRecordedRun, terminateRecordedRun, writeOwnerRecord } from "../src/run-registry.js";
+import { statusRows } from "../src/run-status.js";
 
 const directories: string[] = [];
 const children: ChildProcess[] = [];

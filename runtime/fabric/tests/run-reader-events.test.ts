@@ -8,7 +8,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { Store } from "../src/store.js";
 import { databasePath } from "../src/identity.js";
 import { readRuns, readEvents } from "../src/run-reader.js";
-import { fabricStatus } from "../src/run-registry.js";
+import { fabricStatus } from "../src/run-status.js";
 import { lanesDigest, runView } from "../src/surface.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 

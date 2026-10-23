@@ -1038,6 +1038,12 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     fixture_attempt_tmpl = ROOT / "runtime/fabric/tests/fixtures/attempt.json"
     template_data = json.loads(fixture_attempt_tmpl.read_text()) if fixture_attempt_tmpl.exists() else {}
 
+    # Recent stamps: lanes hides terminal rows older than its window.
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def stamp(seconds: int) -> str:
+        return (base + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
     for i in range(1, 16):
         task_id = f"term-{i:02d}"
         run_name = f"20261022-1000-dispatch-fixture-{task_id}"
@@ -1049,8 +1055,8 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
             "task_id": task_id,
             "state": "terminal",
             "status": "ok",
-            "started_at": f"2026-10-22T00:10:{i:02d}.000Z",
-            "ended_at": f"2026-10-22T00:10:{i:02d}.000Z",
+            "started_at": stamp(600 + i),
+            "ended_at": stamp(600 + i),
             "paths": {"result": f"tasks/{task_id}/attempt-001/result.md"},
         })
         (attempt_dir / "attempt.json").write_text(json.dumps(data))
@@ -1067,7 +1073,7 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
             "task_id": task_id,
             "state": "running",
             "status": "running",
-            "started_at": f"2026-10-22T00:01:{i:02d}.000Z",
+            "started_at": stamp(60 + i),
             "ended_at": None,
             "paths": {"result": f"tasks/{task_id}/attempt-001/result.md"},
         })

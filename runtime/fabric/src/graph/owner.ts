@@ -14,8 +14,9 @@ import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {
   listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
-  signalRecordedGroup, statusRows, type RecordedGroup,
+  signalRecordedGroup, type RecordedGroup,
 } from "../run-registry.js";
+import { statusRows } from "../run-status.js";
 import { Store } from "../store.js";
 import { readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";
 import { argvHash, launchGate, readGateExit } from "./gates.js";

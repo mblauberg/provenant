@@ -78,44 +78,37 @@ RESUME PROTOCOL: restart-on: gate-answer, external-completion
     assert load_module().validate(state) == []
 
 
-def test_pause_without_external_resume_trigger_is_rejected(tmp_path):
-    state = tmp_path / "STATE.md"
-    state.write_text(base_state(resume="wait and see", lease="released"))
-    write_clean_queue(tmp_path)
-
-    assert any("external resume" in error for error in load_module().validate(state))
-
-
-def test_pause_rejects_negated_resume_trigger(tmp_path):
-    state = tmp_path / "STATE.md"
-    state.write_text(
-        base_state(resume="do not restart after any human directive.", lease="released")
-    )
-    write_clean_queue(tmp_path)
-
-    assert any("external resume" in error for error in load_module().validate(state))
-
-
-def test_pause_rejects_negative_synonym_in_resume_prose(tmp_path):
-    state = tmp_path / "STATE.md"
-    state.write_text(
-        base_state(resume="restart after refusing every human directive.", lease="released")
-    )
-    write_clean_queue(tmp_path)
-
-    assert any("external resume" in error for error in load_module().validate(state))
-
-
 @pytest.mark.parametrize(
     "resume",
     (
-        "restart-on: human-directive, human-directive",
-        "restart-on: human-directive, timer-expiry",
-        "restart-on: human-directive after checking state",
-        "restart-on: human-directive.",
+        pytest.param("wait and see", id="pause_without_external_resume_trigger_is_rejected"),
+        pytest.param(
+            "do not restart after any human directive.",
+            id="pause_rejects_negated_resume_trigger",
+        ),
+        pytest.param(
+            "restart after refusing every human directive.",
+            id="pause_rejects_negative_synonym_in_resume_prose",
+        ),
+        pytest.param(
+            "restart-on: human-directive, human-directive",
+            id="pause_rejects_noncanonical_structured_resume_values-duplicate",
+        ),
+        pytest.param(
+            "restart-on: human-directive, timer-expiry",
+            id="pause_rejects_noncanonical_structured_resume_values-extra-trigger",
+        ),
+        pytest.param(
+            "restart-on: human-directive after checking state",
+            id="pause_rejects_noncanonical_structured_resume_values-trailing-prose",
+        ),
+        pytest.param(
+            "restart-on: human-directive.",
+            id="pause_rejects_noncanonical_structured_resume_values-trailing-period",
+        ),
     ),
 )
-def test_pause_rejects_noncanonical_structured_resume_values(tmp_path, resume):
+def test_pause_rejects_invalid_resume_trigger(tmp_path, resume):
     state = tmp_path / "STATE.md"
     state.write_text(base_state(resume=resume, lease="released"))
     write_clean_queue(tmp_path)
@@ -143,26 +136,23 @@ def test_pause_rejects_negated_status(tmp_path):
     assert any("PAUSED" in error for error in load_module().validate(state))
 
 
-def test_pause_rejects_pending_queue_rows(tmp_path):
+@pytest.mark.parametrize(
+    "row",
+    (
+        pytest.param(
+            "| W001 | PENDING | none | - | - | Select the next implementation slice. |",
+            id="pause_rejects_pending_queue_rows",
+        ),
+        pytest.param(
+            "| W001 | LEASED | none | agent-a | 2026-07-15T00:00:00Z | in flight |",
+            id="pause_rejects_leased_queue_rows",
+        ),
+    ),
+)
+def test_pause_rejects_unfinished_queue_rows(tmp_path, row):
     state = tmp_path / "STATE.md"
     state.write_text(base_state())
-    write_clean_queue(
-        tmp_path,
-        CLEAN_QUEUE
-        + "| W001 | PENDING | none | - | - | Select the next implementation slice. |\n",
-    )
-
-    assert any("PENDING" in error or "LEASED" in error for error in load_module().validate(state))
-
-
-def test_pause_rejects_leased_queue_rows(tmp_path):
-    state = tmp_path / "STATE.md"
-    state.write_text(base_state())
-    write_clean_queue(
-        tmp_path,
-        CLEAN_QUEUE
-        + "| W001 | LEASED | none | agent-a | 2026-07-15T00:00:00Z | in flight |\n",
-    )
+    write_clean_queue(tmp_path, CLEAN_QUEUE + row + "\n")
 
     assert any("PENDING" in error or "LEASED" in error for error in load_module().validate(state))
 

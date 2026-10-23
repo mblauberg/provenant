@@ -41,12 +41,6 @@
       "effect": "After a repair, re-review only the repair delta, or the whole change again.",
       "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
     },
-    "repair.escalate_after": {
-      "type": "int", "min": 0, "max": 3, "default": 1, "status": "advisory",
-      "reader": "skills/implement/SKILL.md step 2 (prose: one repair at the same tier)",
-      "effect": "Repairs a failed gate gets at the writer's tier before the writer escalates one tier.",
-      "trade_off": "Higher keeps cheaper writers longer; 0 escalates at once and spends frontier tokens sooner."
-    },
     "repair.max_cycles": {
       "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
       "reader": "skills/deliver/scripts/delivery_validation_common.py REPAIR_BUDGETS (2/4/5/5, fixed)",
@@ -60,8 +54,8 @@
       "trade_off": "Fewer juniors cut lens passes and tokens; more widen family spread on blind spots."
     },
     "routing.pool_mode": {
-      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "advisory",
-      "reader": "scripts/model_route_pools.py pick (mode when a request sets no rotate)",
+      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "wired",
+      "reader": "scripts/model_route_pools.py pick",
       "effect": "top always takes the highest-weight available model; rotate spreads picks by weight across the pool.",
       "trade_off": "rotate spreads quota and families across models at some cost in consistency between lanes."
     },
@@ -92,17 +86,12 @@
     "economy": {
       "description": "Less usage per task, accepting slower runs and slightly thinner passes.",
       "knobs": {
-        "effort.shift": -1,
         "lanes.max_concurrency": 4,
         "context.ceiling_tokens": 200000,
-        "repair.escalate_after": 2,
         "council.junior_size": 2,
         "routing.pool_mode": "rotate",
         "writing.final_polish": "off",
         "context.summary_tokens": 1000
-      },
-      "task_classes": {
-        "critical-review": {"knobs": {"effort.shift": 0}}
       }
     },
     "rigorous": {
@@ -112,7 +101,6 @@
         "review.extra_reviewers": 1,
         "review.cross_family": "require",
         "review.rereview_scope": "full",
-        "repair.escalate_after": 0,
         "council.junior_size": 4
       },
       "task_classes": {
