@@ -2,14 +2,14 @@
 //! Strict means no `NaN`, no trailing commas and no control characters in
 //! strings; duplicate keys keep the last value, as Python's `json` does.
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
     Bool(bool),
     /// An integer literal (no fraction or exponent) that fits in `i64`.
     Int(i64),
     /// Any other number, including integers too large for `i64`.
-    Float,
+    Float(f64),
     Str(String),
     Array(Vec<Value>),
     Object(Vec<(String, Value)>),
@@ -181,7 +181,11 @@ impl Reader<'_> {
         let literal = std::str::from_utf8(&self.bytes[start..self.at]).unwrap_or_default();
         match literal.parse::<i64>() {
             Ok(n) if integer => Ok(Value::Int(n)),
-            _ => Ok(Value::Float),
+            _ => Ok(Value::Float(
+                literal
+                    .parse::<f64>()
+                    .map_err(|_| self.fail("invalid number"))?,
+            )),
         }
     }
 
@@ -276,9 +280,9 @@ mod tests {
     fn distinguishes_integers_from_other_numbers_and_types() {
         assert_eq!(pointer("1"), Value::Int(1));
         assert_eq!(pointer("-0"), Value::Int(0));
-        assert_eq!(pointer("1.0"), Value::Float);
-        assert_eq!(pointer("1e0"), Value::Float);
-        assert_eq!(pointer("99999999999999999999"), Value::Float);
+        assert_eq!(pointer("1.0"), Value::Float(1.0));
+        assert_eq!(pointer("1e0"), Value::Float(1.0));
+        assert_eq!(pointer("99999999999999999999"), Value::Float(1e20));
         assert_eq!(pointer("true"), Value::Bool(true));
         assert_eq!(pointer("null"), Value::Null);
         assert_eq!(pointer("\"1\""), Value::Str("1".into()));
