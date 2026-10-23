@@ -418,7 +418,9 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "libc",
+ "provenant-core",
  "provenant-supervisor",
 ]
 
