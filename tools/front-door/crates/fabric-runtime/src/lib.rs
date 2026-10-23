@@ -6,3 +6,4 @@ pub mod execution;
 pub mod gates;
 pub mod hosts;
 pub mod identity;
+pub mod json_subprocess;
