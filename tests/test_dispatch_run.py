@@ -3449,7 +3449,7 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     assert result['routes'][0]['resolved_model'] == 'sonnet'
     warning = result['routes'][0]['warnings'][-1]
     assert 'resolved against the fresh product snapshot' in warning
-    assert 'scripts/install-harness --platform all --refresh-routing' in warning
+    assert 'use the current release routing catalogue' in warning
 
 
 def test_effort_rejection_retries_once_at_nearest_lower_capability(tmp_path):

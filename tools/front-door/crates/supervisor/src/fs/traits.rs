@@ -40,12 +40,14 @@ pub trait SafeDir: Send + Sync {
     fn replace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn symlink(&self, target: &Path, name: &OsStr) -> Result<()>;
+    fn read_link(&self, name: &OsStr) -> Result<PathBuf>;
     fn sync(&self) -> Result<()>;
     fn atomic_write(
         &self,
         name: &OsStr,
         prefix: &str,
         bytes: &[u8],
+        permissions: u32,
         mode: PublishMode,
     ) -> Result<Publication>;
     fn replace_link(&self, name: &OsStr, target: &Path) -> Result<Publication>;
@@ -74,6 +76,35 @@ impl SafeFs for LocalFs {
     }
     fn temporary_name(&self) -> Result<OsString> {
         temporary_name()
+    }
+}
+
+struct PermissionedAtomicWriteOperations {
+    inner: LocalAtomicWriteOperations,
+    permissions: u32,
+}
+impl AtomicWriteOperations for PermissionedAtomicWriteOperations {
+    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
+        self.inner.write(file, bytes, path)?;
+        use std::os::unix::fs::PermissionsExt;
+        file.file
+            .set_permissions(std::fs::Permissions::from_mode(self.permissions))
+            .map_err(error("fchmod staging file", path))
+    }
+    fn sync_file(&mut self, file: &FileHandle) -> Result<()> {
+        self.inner.sync_file(file)
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> Result<()> {
+        self.inner.rename(directory, temporary, name, mode)
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> Result<()> {
+        self.inner.sync_directory(directory)
     }
 }
 
@@ -141,6 +172,10 @@ impl SafeDir for Directory {
     fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
         Directory::symlink(self, target, name)
     }
+    fn read_link(&self, name: &OsStr) -> Result<PathBuf> {
+        let name = component(name)?;
+        os::read_link(&self.file, name).map_err(error("readlinkat", &self.path.join(name)))
+    }
     fn sync(&self) -> Result<()> {
         Directory::sync(self)
     }
@@ -149,9 +184,14 @@ impl SafeDir for Directory {
         name: &OsStr,
         prefix: &str,
         bytes: &[u8],
+        permissions: u32,
         mode: PublishMode,
     ) -> Result<Publication> {
-        Directory::atomic_write(self, name, prefix, bytes, mode)
+        let mut operations = PermissionedAtomicWriteOperations {
+            inner: LocalAtomicWriteOperations,
+            permissions,
+        };
+        Directory::atomic_write_with_operations(self, name, prefix, bytes, mode, &mut operations)
     }
     fn replace_link(&self, name: &OsStr, target: &Path) -> Result<Publication> {
         Directory::replace_link(self, name, target)

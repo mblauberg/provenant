@@ -6,8 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 
-pub const REPAIR: &str =
-    "repair: re-run install-harness from the product checkout, or set AGENT_FABRIC_PRODUCT_ROOT";
+pub const REPAIR: &str = "repair: restore the installed release and try again";
 
 /// Git variables that would redirect a checker away from the checkout it
 /// was selected for. Only `check` removes them.
@@ -29,10 +28,7 @@ pub use provenant_supervisor::sys::is_executable;
 pub struct Launch<'a> {
     pub program: &'a Path,
     pub args: &'a [OsString],
-    /// When set, `AGENT_FABRIC_PRODUCT_ROOT` and `AGENTS_HOME` are pointed at it.
-    pub root: Option<&'a Path>,
     pub scrub_git: bool,
-    pub stale_checked: bool,
 }
 
 /// The libc error text without Rust's ` (os error N)` suffix.
@@ -47,19 +43,10 @@ pub fn describe(error: &io::Error) -> String {
 /// Replace this process. Returns only on failure, with the exit status to use.
 pub fn replace_process(launch: &Launch) -> u8 {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    if let Some(root) = launch.root {
-        // The instance root is never defaulted here: inventing one would turn
-        // a default into an explicit selection (#563).
-        env.insert("AGENT_FABRIC_PRODUCT_ROOT".into(), root.into());
-        env.insert("AGENTS_HOME".into(), root.into());
-    }
     if launch.scrub_git {
         for name in GIT_REDIRECTS {
             env.remove(OsStr::new(name));
         }
-    }
-    if launch.stale_checked {
-        env.insert("PROVENANT_STALE_CHECKED".into(), "1".into());
     }
     let env: Vec<_> = env.into_iter().collect();
     let error = provenant_supervisor::sys::replace_process(launch.program, launch.args, &env);

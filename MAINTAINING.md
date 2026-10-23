@@ -167,13 +167,11 @@ Audit usage periodically. Retire zero-use skills that add no durable capability,
 but preserve required third-party notices and use repository history instead of
 live backup folders as the normal safety boundary.
 
-Record current skill ownership in the managed installation manifest.
-Test the reconciliation path; do not rely on users deleting or replacing
-global links by hand. Run `scripts/manage_installation.py plan --target
-<skills-dir>`, then `scripts/manage_installation.py reconcile --target
-<skills-dir>`. Reconciliation retires safe managed leftovers and preserves
-unmanaged paths; the manifest is the current ownership record.
-Never claim or overwrite an unmanaged target.
+The `provenant-config` crate owns source stamping, typed `release.json`,
+immutable release installation and the managed-file receipt. Its library
+supports dry-run previews, digest checks and removal of unchanged owned entries.
+The `install`, `check install` and `uninstall` CLI verbs and client-specific edits remain for the later CLI cut-over; the old Python manager
+commands are retired.
 
 ## Change the delivery kernel
 

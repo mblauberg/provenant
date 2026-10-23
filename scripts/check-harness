@@ -164,7 +164,6 @@ fi
 source "$SCRIPTS_ROOT/lib/harness-python.sh"
 
 cd "$PRODUCT_ROOT"
-run_test "$SCRIPTS_ROOT/check-provenant-install.py"
 run_test "$SCRIPTS_ROOT/check_harness.py"
 
 while IFS= read -r -d '' script; do

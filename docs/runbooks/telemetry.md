@@ -510,10 +510,10 @@ remain receipt-only. Neither missing coverage is represented as zero use.
 
 The legacy [Swift collector](../../tools/otlp-collector/otlp-collector.swift),
 plist template and `scripts/install-otel-collector` remain live through state
-slice 4 (harness cut-over), including split-root installation. The collector
+slice 4 (harness cut-over). The collector
 accepts OTLP/HTTP JSON on loopback, stores NDJSON under the state root's `otel/`
 directory and supports launchd socket activation. Install with
-`scripts/install-harness --platform claude --otel-collector`; uninstall with
-`scripts/install-harness --uninstall-otel-collector`. Uninstall preserves data.
+`scripts/install-otel-collector install`; uninstall with
+`scripts/install-otel-collector uninstall`. Uninstall preserves data.
 The Python ingest consumer is retired; collector retention supplies the legacy
 installer and the authorised cut-over checklist, not new report ingestion.

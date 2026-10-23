@@ -68,6 +68,7 @@ def pytest_configure(config) -> None:
     _keep_tmpdir_outside_git()
     # Before collection: modules cache the product root at import. Per-test
     # monkeypatch overrides still apply on top of this.
+    os.environ["PROVENANT_ROOT"] = str(ROOT)
     os.environ["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     for inherited in ("PROVENANT_SCRIPTS_ROOT", "PROVENANT_SKILLS_ROOT", "PROVENANT_TESTS_ROOT"):
         os.environ.pop(inherited, None)
@@ -120,6 +121,7 @@ def pytest_unconfigure(config) -> None:
 @pytest.fixture(autouse=True)
 def _checkout_under_test_is_product_root(monkeypatch):
     """Resolve the product root to this checkout, never an inherited live one."""
+    monkeypatch.setenv("PROVENANT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
 
 
@@ -154,8 +156,6 @@ def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
                 "PROVENANT_NESTED_CUSTODY_FD", "PROVENANT_PARENT_RUN_TOKEN",
                 "PROVENANT_RUN_DIR", "PROVENANT_RUN_ID"):
         monkeypatch.delenv(key, raising=False)
-    if request.node.path.name == "test_install_harness.py":
-        return
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
     monkeypatch.setenv("PROVENANT_BIN_DIR", str(tmp_path_factory.mktemp("bin-dir")))
 
@@ -165,8 +165,6 @@ def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
     """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both.
 
     The installer tests build their own HOME and expect CODEX_HOME to follow it."""
-    if request.node.path.name == "test_install_harness.py":
-        return
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state-home")))
 
@@ -175,8 +173,6 @@ def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
 def _codex_mcp_discovery_from_user_config(monkeypatch, request):
     """Tests never run the real `codex mcp list`; read the pinned CODEX_HOME config instead.
     Tests of discovery itself (project layers, failure) patch `_discover_mcp_servers` again."""
-    if request.node.path.name == "test_install_harness.py":
-        return
     import tomllib
 
     def discover(cwd):

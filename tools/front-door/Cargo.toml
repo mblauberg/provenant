@@ -54,7 +54,6 @@ ignored-paths = [
 ]
 ignored = [
   "provenant-cli",
-  "provenant-config",
   "provenant-confinement",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
@@ -92,10 +91,18 @@ publish = false
 license.workspace = true
 
 [dependencies]
-serde_json = { workspace = true }
+provenant-records = { workspace = true }
+provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
 
+[build-dependencies]
+provenant-records = { workspace = true }
+toml_edit = { workspace = true }
+
 [dev-dependencies]
+provenant-core = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
 
@@ -104,6 +111,7 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "unwind"
+debug = 0
 strip = true
 
 # Stripping a proc-macro dylib (serde_derive, thiserror-impl) on macOS leaves a

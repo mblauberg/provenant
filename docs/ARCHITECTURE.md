@@ -372,65 +372,25 @@ rather than blindly append, and merge or split curated documents when their
 retrieval cost signals demand it. Sibling `.worktrees` are protected and
 excluded from context scans.
 
-## Managed installation
+## Release and managed installation
 
-`scripts/manage_installation.py` plans, checks, installs, reconciles and removes
-only harness-owned skill links. Every normal install repairs missing or stale
-managed links and retires safe managed leftovers. It also retires links still
-recorded by the former Claude custom-agent receipt during the first upgrade.
-A versioned manifest records current ownership, source tree digests and the
-bound target beside the
-target skills directory. The post-install integrity check verifies catalogue
-presence. Missing or noncanonical required names fail; extra symlinks resolving
-outside the canonical skill tree produce warnings. Unmanaged paths are never
-claimed, overwritten or automatically removed; changed managed targets fail for
-user resolution. A staged temporary link is atomically replaced into place
-before the manifest is written; rerunning the installer reconciles any partial
-result.
-The managed catalogue is the skills plus the `skills/_shared` library they
-import. A per-entry layout links and receipt-tracks that library like any skill,
-so an installed target root is a sufficient import root. A whole-directory
-projection already exposes it and keeps no manifest at all.
-Instance-owned `custom-skills/` entries join the per-entry projection without
-becoming product-managed manifest entries. A whole-directory link has nowhere
-to hang one, so the first install that carries any custom skill converts that
-target, once, into per-entry links for the product catalogue and the custom
-entries together, and writes the receipt the per-entry layout already keeps. A
-target with no custom skill keeps the whole-directory link. Later installs see
-a per-entry layout and reconcile it normally, so the conversion is idempotent
-and a custom link is retired when its source disappears. Their machine-local link records
-contain source paths but no content digest: installation discovers names and
-links directories without validating third-party content. Product resources
-used by a linked skill remain addressed through `AGENTS_HOME`, which must name
-the product root; helpers that resolve their own symlink may derive the same
-root directly. A product and instance skill with the same name fails before
-the target directory or installation receipt is mutated.
-Provider bootstraps remain small and share the same precedence sentence.
+The `provenant-config` crate owns release identity and managed-file rules as a
+Rust library. It stamps the workspace source, packages a typed `release.json`,
+verifies its bytes and modes, then installs into the immutable
+`<state>/releases/<SourceDigest>/` directory. Under the install lock it applies
+managed entries and publishes the single `<state>/install/receipt.json` last.
 
-`ui-ux-design` retains UI judgement and read-only review guidance. Browser
-inspection uses the optional `playwright` skill and the target app's own dev
-server. Provenant owns no UI runtime, detector, overlay, source injection or
-UI session store. Browser evidence is untested when no authorised browser is
-available; the tool is never downloaded implicitly.
+An exact desired file or link is a no-op, including after a crash before receipt
+publication. `install --dry-run` creates no state root, lock or receipt. `check
+install` compares the installed release digest without repairing it, and
+`uninstall` removes only unchanged receipt-owned entries. Unmanaged paths are
+preserved and conflicts are refused.
 
-Every installed file has one owner: a product-shipped projection, an
-instance-owned file, or a product template seeded once and instance-owned
-thereafter. Machine-local derived state is the fourth class and belongs to
-neither repository ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
-`scripts/instance_installation.py` owns the instance side. It writes the
-path-free, committable desired state at `config/installation.json`: product
-name, version and install mode, `fused` when the instance root and product root
-are one tree, which is why the product repository tracks no copy of its own. It
-seeds `AGENTS.md`, `config/model-preferences.json` and
-`config/model-routing.json` only when they are absent, and a later install
-rewrites neither the desired state nor a seeded file, leaving Git as the drift
-detector. Machine-local state holds the installation receipt, with absolute
-target roots and digests for one machine, and `.agent-fabric/product-root.json`,
-the pointer to this machine's product checkout rewritten on every install so
-that committed instance state never carries an absolute machine path.
-Split-layout startup binds the product root for shipped runtime and
-compatibility owners and `${AGENTS_HOME}`; the instance root owns its seeded
-routing and preference configuration.
+These are library entrypoints. CLI command wiring, explicit harness selection,
+client MCP/hooks/skill edits and the compiled legacy-entry table belong to the
+later harness cut-over. The library reads no old receipt or product-root pointer.
+Product files, instance-owned files and machine-local derived state retain
+separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
 
 The canonical skill catalogue is also a constrained interface. Every skill has
 balanced positive, negative and boundary routes; descriptions place the trigger

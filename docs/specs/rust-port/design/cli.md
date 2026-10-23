@@ -500,7 +500,7 @@ to empty):
 | --- | ---: |
 | `scripts/check-harness` | 259 |
 | `scripts/check_harness.py` | 365 |
-| `scripts/check_target.py` | 164 |
+| `scripts/check_target.py` (baseline only; retired by state slice 3, with checkout selection in Rust) | 164 |
 | `scripts/gate` | 54 |
 | `scripts/public-release-check` | 6 |
 | `scripts/public_release_check.py` | 571 |
@@ -537,7 +537,7 @@ net estimate. Shell launchers `scripts/worktree` (7) and `scripts/provenant-pr`
 
 | Owner | Files and lines |
 | --- | --- |
-| state | `scripts/check-provenant-install.py` (165); `scripts/lib/front_door_build.py` (249); `scripts/install-provenant-command.py` (272); `scripts/lib/product_root_resolver.py` (107); `tests/test_check_provenant_install.py` (358); `tests/test_front_door_build.py` (342); `tests/test_install_provenant_command.py` (272); `scripts/install-harness` (702); `tests/test_install_harness.py` (2,427) |
+| state | `scripts/check-provenant-install.py` (165); `scripts/lib/front_door_build.py` (249); `scripts/install-provenant-command.py` (272); `scripts/lib/product_root_resolver.py` (107); `tests/test_check_provenant_install.py` (358); `tests/test_front_door_build.py` (342); `tests/test_install_provenant_command.py` (272); `scripts/install-harness` (702); `tests/test_install_harness.py` (2,177; OTel tests retained separately) |
 | supervisor | `scripts/clean.py` (953); `scripts/worktree.py` (982); `scripts/reap.py` (258); `tests/test_clean.py` (1,526); `tests/test_worktree_policy.py` (1,018); `tests/test_run_artifact_cleanup.py` (199) |
 | run (Git reads via supervisor) | `scripts/git_evidence.py` (341); `tests/test_git_evidence.py` (346) |
 | workflow | `scripts/provenant_lint.py` (207); `tests/test_provenant_lint.py` (231); `scripts/provenant_pr.py` (223); `tests/test_provenant_pr.py` (186); `skills/session/scripts/state_check.py` (282); `skills/session/scripts/compact_reinject.py` (169); `tests/test_session_state_check.py` (509); `tests/test_ci_repository_assurance_policy.py` (772) |

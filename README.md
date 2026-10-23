@@ -59,139 +59,33 @@ flowchart TB
 
 ## Quick start
 
-Requirements:
+The `provenant-config` Rust crate owns release stamping and managed-file
+installation. It packages typed `release.json`, installs immutable releases and
+publishes the install receipt last. These are library entrypoints; CLI wiring for
+`install`, `check install` and `uninstall` is a later cut-over. The legacy
+`install-harness`, `install-skills` and `check-provenant-install.py` entrypoints
+refuse the retired Python installation path.
 
-- **Git** and **Python 3.11+**
-- **Claude Code** or **Codex**, subscription-authenticated, per primary client
-- **Node.js** `>=24.15.0 <25` and **npm** `>=11.12.1 <12` for repository
-  verification (the suite shells out to `node`)
-- **[uv](https://docs.astral.sh/uv/)**, or an already-built harness interpreter.
-  `scripts/install-harness` and `scripts/check-harness` both select their
-  interpreter through `scripts/lib/harness-python.sh`, which refuses to run
-  without one, so this is a hard prerequisite rather than a convenience
-- **PyYAML** and **pytest** for harness checks (`uv sync --locked --only-group
-  test` installs the locked versions into `.venv/`; `scripts/check-harness`
-  honours `HARNESS_PYTHON` if you would rather point at your own interpreter)
-
-Install either platform independently, or both:
+For checkout development, install the locked Python and Node tools, then run the
+Rust config checks and Node preflight:
 
 ```sh
-git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
-cd "<PRODUCT_ROOT>"
-
-# build the harness interpreter; install-harness cannot run without one
 uv sync --locked --only-group test
-
-# install the pinned workspace dependencies
 npm ci
-
-scripts/install-harness --platform all
-
-# discover the command tree
-provenant help
-
-# run the repository gates when changing Provenant
-provenant check   # harness policy gate
-npm run check     # checkout-local Node dependency preflight
+(cd tools/front-door && cargo test -p provenant-config)
+npm run check
 ```
 
-Each installer command registers the Fabric MCP server for the platform it
-installs. Pass `--mcp-clients all` to either one to register all six clients
-instead.
-
-With `--platform all`, installation links skills into both primary clients and
-installs Claude workflows. Both clients also receive the
-instance-owned skills in `<instance-root>/custom-skills/`; `scripts/instance_installation.py validate`
-reports how many it will project. A custom skill whose name matches a product
-skill fails the install rather than shadowing it. If a client still exposes the
-product catalogue as one directory-level link, the first install carrying a
-custom skill converts that directory into per-entry links. A single-platform install changes
-only that primary. Every install also writes a managed copy of the thin
-`provenant` command (a small Rust binary; see [`docs/runbooks/front-door.md`](docs/runbooks/front-door.md)) in
-`${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
-on `PATH`, and never edits shell startup files. During an upgrade, the installer
-also retires prior managed Claude custom-agent links recorded by the old
-installation receipt, while preserving changed or unrecorded files. It
-replaces only the legacy link to the old instance dispatcher, including a
-dangling link. It preserves
-other files and links as user-owned. If the installer exits
-non-zero, follow the message it prints: exit `3` flags a command collision,
-incompatible instruction target, or managed skill-link conflict, and
-instruction conflicts include the bootstrap line to add.
-
-For global instructions, Claude uses `~/.claude/CLAUDE.md` and Codex uses
-`~/.codex/AGENTS.md`. A fresh install writes a short bootstrap in the selected
-entrypoint; an existing symlink from that entrypoint to the instance
-`AGENTS.md` is preserved. The installer does not create `~/.claude/AGENTS.md`.
-On reinstall, it removes that extra path only when it is a symlink resolving to
-the instance doctrine. A regular `~/.claude/AGENTS.md` is preserved and
-reported for review.
-
-Exit `3` also covers a missing harness interpreter, which is what a machine
-without `uv` meets first:
-
-```text
-harness-python: unusable interpreter: <PRODUCT_ROOT>/.venv/bin/python
-repair: uv sync --project <PRODUCT_ROOT> --locked --only-group test
-```
-
-Run the repair line the message prints, or export `HARNESS_PYTHON` pointing at a
-Python 3.11+ interpreter that already imports `yaml` and `pytest`. Every
-`install-harness` and `check-harness` step is gated on this, so nothing else in
-the quickstart runs until it resolves. `scripts/check-harness --doctor` reports
-whether `uv` is on `PATH`.
-
-To move the product checkout while retaining a small instance root, follow the
-[split-product relocation runbook](docs/runbooks/split-product-relocation.md).
-
-During the Rust rewrite, this checkout's TS Fabric CLI and MCP runtime are
-retired. The [Rust Fabric design](docs/specs/rust-port/design/fabric.md) owns
-their replacements; the stable install remains frozen until cut-over.
-`provenant check` runs the harness policy gate from the registered checkout
-containing the caller, so a linked-worktree check cannot certify the primary
-checkout. `npm run check` validates checkout-local Node dependencies. It
-reports missing dependencies for that exact checkout and tells the
-operator to run `npm ci`; it never installs or borrows another checkout's tree.
-
-<details>
-<summary>Filesystem layout, Codex config and uninstall</summary>
-
-```text
-<PRODUCT_ROOT>/                product checkout
-  HARNESS.md                      product constitution
-  runtime/  skills/
-  scripts/  config/
-          |
-          | scripts/install-harness
-          v
-~/.agents/                        thin instance
-  AGENTS.md                       instance-owned instructions
-  config/                         instance-owned configuration
-  .agent-fabric/product-root.json machine-local product pointer
-
-~/.claude/skills/                 managed links
-~/.codex/skills/                  managed links
-~/.claude/workflows/              retired links, removed at final cut-over
-~/.local/bin/provenant            managed command
-```
-
-The Codex installer appends one block to `~/.codex/config.toml` disabling
-Codex's bundled `skill-creator`, leaving `skill-craft` canonical; the rest of
-that file is preserved.
-
-From the product checkout,
-`scripts/manage_installation.py uninstall-managed --target <skills-dir>`
-reclaims the harness-owned skill links and nothing else. The bootstrap line and
-the Codex block remain until removed by hand.
-
-</details>
+`scripts/check-harness` runs the remaining harness checks in the selected
+checkout. `npm run check` validates dependencies for that checkout and reports
+missing packages; it never installs or borrows another checkout's tree.
 
 ## Providers
 
-The [Fabric MCP installer](docs/runbooks/fabric-mcp-registration.md) supports
-the six host clients below. Fabric registration and direct provider execution
-are separate; current dispatch activation is owned by
-[adapter compatibility](config/adapter-compatibility.yaml).
+The [Fabric MCP registration notes](docs/runbooks/fabric-mcp-registration.md)
+document the legacy registry editor and the pending Rust client cut-over. Fabric
+registration and direct provider execution are separate; current dispatch
+activation is owned by [adapter compatibility](config/adapter-compatibility.yaml).
 
 | Client or provider | Fabric MCP registration | Direct provider execution |
 |---|---|---|

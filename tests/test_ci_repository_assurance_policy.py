@@ -64,7 +64,6 @@ JOB_PERMISSIONS = {
     "harness-checks": {"contents": "read"},
     "python-tests": {"contents": "read"},
     "docs": {"contents": "read"},
-    "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
     "rust-macos-release": {"contents": "read"},
     "rust-dependencies": {"contents": "read"},
@@ -279,7 +278,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
     assert set(outputs) == {
-        "harness", "docs", "split-root", "workflows", "rust", "tree", "passed-tree"
+        "harness", "docs", "workflows", "rust", "tree", "passed-tree"
     }
     # `docs`, `tree` and `passed-tree` are computed from the PR file list or
     # tested checkout, not path filters. They do not cover tracked paths.
@@ -449,7 +448,7 @@ def test_ci_runs_complete_harness_gates() -> None:
     )
     assert pin_index < install_index
 
-    for job_name in ("harness-checks", "python-tests", "split-root"):
+    for job_name in ("harness-checks", "python-tests"):
         steps = _steps(_job(document, job_name))
         uses = [str(step.get("uses", "")) for step in steps]
         checkout_index = next(index for index, action in enumerate(uses) if action.startswith("actions/checkout@"))

@@ -4,9 +4,10 @@ Companion to [the spec](rust-supervisor.md). Measured on `origin/main` at
 `59bb0ba4`. A count is the test body's span (decorators included; for
 TypeScript, the lines from one top-level `test(` to the next). File headers,
 imports and shared helpers are not counted. A test is deleted with its slice's
-Python fallback, never when Rust first lands.
-Names below include later watchdog regressions; the counts remain the baseline
-measurement.
+Python fallback, never when Rust first lands. The baseline includes a 49-line
+S1 installer-template test group, removed by release slice 3 and omitted
+below. Names include later watchdog regressions; counts otherwise remain based
+on the stated baseline.
 
 **Firm** tests check only mechanics that Rust takes over and that the lane
 conformance suite or Rust unit tests cover. **Conditional** tests go only when
@@ -14,16 +15,16 @@ the stated condition holds; otherwise they stay.
 
 | Slice | Firm tests | Firm lines | Conditional tests | Conditional lines |
 |---|---|---|---|---|
-| S1 | 123 | 1,549 | 0 | 0 |
+| S1 | 119 | 1,500 | 0 | 0 |
 | S2 | 70 | 1,826 | 4 | 75 |
 | S3 | 23 | 830 | 3 | 98 |
 | S4 | 36 | 832 | 35 | 758 |
-| **Total** | **252** | **5,037** | **42** | **931** |
+| **Total** | **248** | **4,988** | **42** | **931** |
 
 For scale, all test bodies on that commit span 69,537 lines (59,745 in 3,182
 Python tests, 9,792 in TypeScript), in 88,941 lines of test files. Firm
-deletions are 7.2% of test-body lines and 5.7% of test-file lines; with the
-conditional ones, 8.6% and 6.7%. Helpers used only by firm deletions add 137
+deletions are 7.2% of test-body lines and 5.6% of test-file lines; with the
+conditional ones, 8.5% and 6.7%. Helpers used only by firm deletions add 137
 lines, and the parity suite's support files (`parity_support.py`,
 `conftest.py`, `bench_front_door.py`, 485 lines) go except for the git helpers
 `test_stale.py` keeps. The firm Python deletions hold 68 of the 153 `sleep(`
@@ -79,11 +80,6 @@ The user dropped timed trials on 2026-10-23; see the supervisor spec.
   - `test_python_mode_never_looks_at_the_crate`
   - `test_auto_without_a_crate_is_the_template_with_no_note`
   - `test_auto_without_cargo_falls_back_with_the_reason`
-- `tests/test_install_harness.py` (4 tests, 49 lines):
-  - `test_updates_a_managed_provenant_file_to_the_current_template`
-  - `test_python_mode_rolls_an_installed_binary_back_to_the_template`
-  - `test_auto_mode_falls_back_to_the_template_when_the_build_fails`
-  - `test_auto_mode_without_a_crate_installs_the_template_quietly`
 - `tests/test_clean.py` (1 test, 8 lines):
   - `test_installed_template_routes_clean_to_product_owner`
 
