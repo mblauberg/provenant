@@ -1,6 +1,8 @@
 # Australian prose; API identifiers and malformed fixtures retain their spelling.
 [default]
 locale = "en-au"
+# Code spans quote identifiers verbatim, including upstream API spellings.
+extend-ignore-re = ["`[^`\\n]+`"]
 
 [files]
 # Vendored bundles are generated upstream.

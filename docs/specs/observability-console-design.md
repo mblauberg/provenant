@@ -92,7 +92,7 @@ All verified in the macOS 27.0 SDK interfaces.
 | `GlassEffectContainer` | `init(spacing: CGFloat? = nil, content:)` | 26.0 |
 | `glassEffectID` | `func glassEffectID(_ id: (some Hashable & Sendable)?, in namespace: Namespace.ID)` | 26.0 |
 | `glassEffectUnion` | `func glassEffectUnion(id: (some Hashable & Sendable)?, namespace: Namespace.ID)` | 26.0 |
-| `glassEffectTransition` | `.matchedGeometry`, `.materialise`, `.identity` | 26.0 |
+| `glassEffectTransition` | `.matchedGeometry`, `.materialize`, `.identity` | 26.0 |
 | Glass button styles | `.buttonStyle(.glass)`, `.buttonStyle(.glassProminent)` | 26.0 |
 | `ToolbarSpacer` | `init(_ sizing: SpacerSizing = .flexible, placement: ToolbarItemPlacement = .automatic)`; `SpacerSizing.fixed`, `.flexible` | 26.0 |
 | `sharedBackgroundVisibility` | `func sharedBackgroundVisibility(_ visibility: Visibility) -> some ToolbarContent` | 26.0 |
@@ -108,7 +108,7 @@ All verified in the macOS 27.0 SDK interfaces.
 | `NSGlassEffectView`, `NSGlassEffectContainerView` | AppKit equivalents | 26.0 |
 | `NSGlassEffectView.effectIsInteractive` | pointer-tuned interactive glass | **27.0** |
 | `inspector(isPresented:content:)`, `inspectorColumnWidth(min:ideal:max:)`, `InspectorCommands` (Control-Command-I) | | 14.0 |
-| `DisclosureTableRow`, `TableColumnCustomisation`, `alternatingRowBackgrounds` | | 14.0 |
+| `DisclosureTableRow`, `TableColumnCustomization`, `alternatingRowBackgrounds` | | 14.0 |
 | `defaultLaunchBehavior(_:)`, `restorationBehavior(_:)` | scene modifiers | 15.0 |
 | Charts vectorised `LinePlot`, `AreaPlot`, `BarPlot` | | 15.0 |
 | `EnvironmentValues.appearsActive` | dim custom content in inactive windows (WWDC26 269 advice) | available |
@@ -117,7 +117,7 @@ All verified in the macOS 27.0 SDK interfaces.
 **Not available on macOS** (present only for iOS or visionOS in this SDK), so
 the design does not use them: `tabViewBottomAccessory`, `ToolbarOverflowMenu`,
 `ToolbarItemPlacement.topBarPinnedTrailing`, `listSectionMargins`. No
-`toolbarMinimiseBehavior` symbol exists in the macOS interface.
+`toolbarMinimizeBehavior` symbol exists in the macOS interface.
 
 ### 2.3 Accessibility fallbacks
 
@@ -508,7 +508,7 @@ at 8000 characters. No snapshot of the file is stored.
   (`arrow.down.right`, `arrow.up.right`) and words, never colour alone.
 - The chart is one hue (accent) because the job is magnitude, not identity
   (dataviz rule: colour by job). Grouping is a toolbar picker, not a legend.
-- `Table` with `TableColumnCustomisation` so the user can hide and reorder
+- `Table` with `TableColumnCustomization` so the user can hide and reorder
   columns, persisted per pane.
 
 ### 3.10 Accounts
