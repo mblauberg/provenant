@@ -96,15 +96,18 @@ fn differential_python_slug_and_non_git_workspace() {
     let slugs = ["test lane", "é😀中文", "-..x__y..-", ".", &"a".repeat(80)];
     let oracle =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-    let output=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command.args(["-c",r#"
 import json,re,sys
 sys.path.insert(0,sys.argv[1]);import layout
 slugs=json.loads(sys.argv[4])
 print(json.dumps({'slugs':[re.sub(r'[^a-zA-Z0-9._-]+','-',s).strip('-.')[:64] or 'task' for s in slugs],'workspace':str(layout.run_workspace(sys.argv[3],sys.argv[2])),'contains':layout.contains_run(sys.argv[3],sys.argv[2])}))
-"#]).arg(oracle).arg(&cwd).arg(&explicit).arg(serde_json::to_string(&slugs).unwrap()).output() {
-        Ok(output)=>output,
-        Err(error)=>panic!("cannot run Python oracle: {error}"),
-    };
+"#]).arg(oracle).arg(&cwd).arg(&explicit).arg(serde_json::to_string(&slugs).unwrap());
+    let output = crate::oracle::run(&mut command)
+        .unwrap_or_else(|error| panic!("cannot run Python oracle: {error}"));
     assert!(
         output.status.success(),
         "{}",

@@ -122,3 +122,41 @@ contract/binding is still missing on main. Do not invert that dependency or
 add path-based deletion to make the crate callable. The chair must settle the
 contract's owner; RP-records-003 also remains a pending boundary decision.
 Other units and generic codec ownership can proceed independently.
+
+## Generic owner APIs added by lane rrc-3
+
+Implementation route: `codex/gpt-6.1-sol@high` via Fabric. The copy inventory was
+compared with its Python owners; consumer crates remain unchanged in this lane.
+
+| Copy family | Shared owner / disposition |
+| --- | --- |
+| Checked decode, integer token validation, schema-one, bounded JSON reads | `checked_json::{from_str_as, from_slice_as, check_integer_tokens, schema_one, read_json, ReadJsonError}`; original Value decode API stays stable |
+| Python `json.dumps`, ASCII/UTF-8, sort/indent/compact variants | `python_json::{dumps, DumpsOptions, EncodeError}` |
+| OS path JSON and telemetry identity | `python_json::{path_json, PathEncodingError, identity}` |
+| Ordered dynamic values and Python object diagnostics | `ordered_json::{OrderedValue, OrderedObject, from_str}` |
+| Exact mixed numeric comparisons and checked arithmetic | `numeric::{Numeric, NumericError}` |
+| Hex and SHA-256 encoding | crate-root `hex`, `sha256_hex`; existing `digest_bytes` delegates to them |
+| Missing/null/value generic field | crate-root `Field` re-export, `Field::as_ref`, `From<Option<T>>` |
+| Quota reports, telemetry events/usage, run leases/receipts | Stay in their domain crates, as required by the graph |
+
+The JavaScript non-finite preprocessing adapter remains Fabric-runtime policy;
+it is not silently folded into the strict Python checked decoder. Domain
+numeric caps and domain error-message mapping also stay at their boundaries.
+Object order is explicit: use `OrderedValue` when observable, rather than
+passing through `serde_json::Value`. The public numeric representation exposes
+only i64/u64/f64; checked arithmetic returns a typed range error. Encoder integer
+overflow is typed too. Python-compatible floating decode uses lexical parsing
+so serde's default decimal rounding does not change exact comparisons.
+
+The new public APIs have translated and differential fixtures covering encoder
+variants, ordering, escaping, numeric boundaries, negative zero, token failures,
+unknown-field overflow, typed and bounded decoding, and retained diagnostics.
+The shared Python interpreter gate uses isolated mode and an explicit
+environment. Source boundary limitations for lone surrogates/non-finite decode
+remain documented above; no consumer cut-over is performed here.
+
+Sorted NaN object keys are explicitly refused with `EncodeError::NaNKey`.
+CPython sorts such keys using a non-total order that Rust's standard sort does
+not reproduce. Unsorted NaN keys and non-finite values retain Python spellings.
+No inventoried string-keyed consumer depends on NaN-key sorting; RP-RRC3-003
+keeps this library boundary visible before any migration requires it.
