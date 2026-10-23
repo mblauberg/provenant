@@ -1,5 +1,0 @@
-pool_selection = "highest_weight"
-effort = "default"
-additional_reviews = 0
-cross_family = "prefer"
-rereview_scope = "delta"

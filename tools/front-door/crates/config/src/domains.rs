@@ -1,50 +1,73 @@
 use crate::Profile;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::marker::PhantomData;
 use thiserror::Error;
+use toml_edit::{DocumentMut, Table};
 
-/// Until domains land, even an empty unknown section fails closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoDomains {}
 
-/// Semantic failures expose a static field identifier and code, never a value.
+/// Domain-local dotted field path and a static code; never a rejected value.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{field}: {code}")]
 pub struct SectionError {
-    pub field: &'static str,
+    pub field: String,
     pub code: &'static str,
 }
 
-/// Registration is immutable data, with no runtime registry or global state.
-///
-/// `T` is a closed serde struct whose fields are domain section types, all with
-/// `deny_unknown_fields`. Domain owners provide one complete TOML default asset
-/// per preset and validate their semantics here. User `[domains.<name>]` tables
-/// override the selected defaults once, before `T` is constructed and validated.
-/// Config owns non-price types; composition supplies the aggregate without a
-/// dependency from config to any domain runtime. Secret-bearing fields do not
-/// belong in this model: `config_show` serialises its effective values.
-///
-/// Arrays replace as a whole. Tables merge recursively; all keys, including
-/// empty tables, must be accepted by `T`. There are no includes or interpolation.
-pub struct DomainSections<T> {
-    pub balanced: &'static str,
-    pub economy: &'static str,
-    pub rigorous: &'static str,
-    pub validate: fn(&T) -> Result<(), SectionError>,
+/// Implement on a domain's closed serde section, alongside its TOML assets.
+pub trait DomainConfig: DeserializeOwned {
+    /// Return all independent semantic failures. An empty vector means valid.
+    fn validate(&self) -> Vec<SectionError> {
+        Vec::new()
+    }
 }
-impl<T: DeserializeOwned + Serialize> DomainSections<T> {
-    pub(crate) fn defaults(&self, profile: Profile) -> &'static str {
-        match profile {
-            Profile::Balanced => self.balanced,
-            Profile::Economy => self.economy,
-            Profile::Rigorous => self.rigorous,
+
+/// One domain's immutable entry. Assets contain section-local keys: config
+/// nests them under `[domains.<name>]`. Defaults include every accepted key.
+/// Arrays replace as a whole; tables (including inline tables) merge recursively.
+pub struct DomainSection {
+    pub name: &'static str,
+    pub defaults: fn(Profile) -> &'static str,
+    pub validate: fn(&Table) -> Vec<SectionError>,
+}
+impl DomainSection {
+    /// Erase only the registration function, never the resolved section type.
+    pub const fn new<T: DomainConfig>(
+        name: &'static str,
+        defaults: fn(Profile) -> &'static str,
+    ) -> Self {
+        Self {
+            name,
+            defaults,
+            validate: validate::<T>,
         }
     }
 }
-pub(crate) const NO_DOMAINS: DomainSections<NoDomains> = DomainSections {
-    balanced: "",
-    economy: "",
-    rigorous: "",
-    validate: |_| Ok(()),
-};
+fn validate<T: DomainConfig>(table: &Table) -> Vec<SectionError> {
+    match toml_edit::de::from_document::<T>(DocumentMut::from(table.clone())) {
+        Ok(value) => value.validate(),
+        Err(error) => vec![SectionError {
+            field: crate::loader::key_at(table, error.span().map_or(0, |s| s.start)),
+            code: "schema",
+        }],
+    }
+}
+
+/// Composition supplies a closed aggregate `T` and the domain-owned entries.
+/// No domain content, runtime dependency, registry mutation or const-concat is
+/// needed in config. Each domain's name must be unique and a simple identifier.
+pub struct DomainSections<T> {
+    pub entries: &'static [DomainSection],
+    marker: PhantomData<fn() -> T>,
+}
+impl<T> DomainSections<T> {
+    pub const fn new(entries: &'static [DomainSection]) -> Self {
+        Self {
+            entries,
+            marker: PhantomData,
+        }
+    }
+}
+pub(crate) const NO_DOMAINS: DomainSections<NoDomains> = DomainSections::new(&[]);

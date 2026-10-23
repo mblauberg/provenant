@@ -30,6 +30,7 @@ const DETAILS: &[(&str, &str)] = &[
     ("stats", include_str!("help/stats.txt")),
     ("retro", include_str!("help/retro.txt")),
     ("quota", include_str!("help/quota.txt")),
+    ("profile", include_str!("help/profile.txt")),
     ("dispatch", include_str!("help/dispatch.txt")),
     ("batch", include_str!("help/batch.txt")),
     ("run", include_str!("help/run.txt")),

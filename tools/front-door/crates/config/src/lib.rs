@@ -1,25 +1,28 @@
 //! One bounded, user-owned TOML configuration and immutable startup snapshots.
 //!
 //! `load` accepts an already opened optional reader; `read` uses supervisor's
-//! no-follow filesystem boundary. Neither discovers environment, creates state,
-//! reads project config, nor contacts a provider. CLI owns envelopes and exits.
+//! no-follow filesystem boundary. CLI owns envelopes, pagination and exits:
+//! syntax errors map to invalid/2 and check findings to findings/1.
 #![forbid(unsafe_code)]
 
 mod domains;
 mod loader;
 mod presets;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 
-pub use domains::{DomainSections, NoDomains, SectionError};
+pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
 pub use loader::{check_config, config_show, load, load_with_domains, read, read_with_domains};
-pub use presets::{CrossFamily, EffortPolicy, PoolSelection, Preset, Profile, RereviewScope};
+pub use presets::Profile;
+pub use provenant_records::Finding;
 
-use serde::Serialize;
-use std::{collections::BTreeMap, io, path::PathBuf};
+use serde::{Deserialize, Serialize, Serializer};
+use std::{collections::BTreeMap, fmt, io, path::PathBuf};
 use thiserror::Error;
 
-/// Errors never contain TOML text, rejected values or a parser's input excerpt.
+/// Errors never contain TOML text, rejected values or parser input excerpts.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot encode config path at {path}")]
@@ -38,22 +41,27 @@ pub enum ConfigError {
     TooLarge { path: PathBuf, limit: u64 },
     #[error("config at {path} has invalid UTF-8")]
     InvalidUtf8 { path: PathBuf },
-    #[error("invalid TOML at {path}, byte {offset}")]
-    Syntax { path: PathBuf, offset: usize },
-    #[error("config at {path} does not match its closed schema, byte {offset}")]
-    Schema { path: PathBuf, offset: usize },
-    #[error("config at {path} needs schema_version = 1")]
-    MissingVersion { path: PathBuf },
-    #[error("unsupported config schema version at {path}")]
-    UnsupportedVersion { path: PathBuf },
-    #[error("config at {path} exceeds collection bounds")]
-    CollectionLimit { path: PathBuf },
-    #[error("invalid domain configuration at {path}: {source}")]
+    #[error("invalid TOML at {location}")]
+    Syntax { location: Location },
+    #[error("{rule} at {location}")]
+    Schema {
+        location: Location,
+        rule: &'static str,
+    },
+    #[error("config needs schema_version = 1 at {location}")]
+    MissingVersion { location: Location },
+    #[error("unsupported config schema version at {location}")]
+    UnsupportedVersion { location: Location },
+    #[error("config exceeds collection bounds at {location}")]
+    CollectionLimit { location: Location },
+    #[error("invalid domain configuration at {location}: {source}")]
     Domain {
-        path: PathBuf,
+        location: Location,
         #[source]
         source: SectionError,
     },
+    #[error("finding limit must be between 1 and 100")]
+    InvalidLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -68,19 +76,64 @@ pub enum Origin {
     },
 }
 
-/// The startup snapshot contains typed, validated values, never an untyped bag.
-/// `D` is the composition edge's closed aggregate of registered domain sections.
+/// One-based character line/column and the dotted key path in the source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Location {
+    pub origin: Origin,
+    pub key_path: String,
+    pub line: usize,
+    pub column: usize,
+}
+impl fmt::Display for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} {}:{}:{}",
+            self.origin, self.key_path, self.line, self.column
+        )
+    }
+}
+
+/// Secret values can be decoded and used by their owner but every serialiser
+/// and Debug formatter emits a placeholder. Display/show cannot expose `T`.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Redacted<T>(T);
+impl<T> Redacted<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &T {
+        &self.0
+    }
+}
+impl<T> Serialize for Redacted<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("[redacted]")
+    }
+}
+impl<T> fmt::Debug for Redacted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// `D` is composition's closed, typed aggregate of registered domain sections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedConfig<D = NoDomains> {
     pub schema_version: u64,
     pub profile: Profile,
-    pub preset: Preset,
     pub domains: D,
     pub origins: BTreeMap<String, Origin>,
 }
 
+/// A bounded first page, ordered by source line, column, key and rule. `count`
+/// includes omitted findings. CLI owns digest-bound cursors for further pages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigCheck {
     pub schema_version: u64,
     pub profile: Profile,
+    pub findings: Vec<Finding>,
+    pub count: usize,
+    pub truncated: bool,
 }
