@@ -4,6 +4,8 @@ from pathlib import Path
 import hashlib
 import sys
 
+import pytest
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "session" / "scripts" / "context_audit.py"
 SPEC = importlib.util.spec_from_file_location("context_audit", SCRIPT)
@@ -39,8 +41,21 @@ def test_audit_reports_context_growth_without_deleting(tmp_path):
     assert any(item.code == "root-scratch" and item.path == backup.name for item in findings)
 
 
-def test_audit_reports_incomplete_run_index(tmp_path):
-    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-dispatch-one-a1b2c3"
+@pytest.mark.parametrize(
+    "run_dir",
+    (
+        pytest.param(
+            ".agent-run/runs/20260923-1000-dispatch-one-a1b2c3",
+            id="test_audit_reports_incomplete_run_index",
+        ),
+        pytest.param(
+            ".work/wf/implement/one",
+            id="test_audit_reports_incomplete_claude_workflow_run",
+        ),
+    ),
+)
+def test_audit_reports_incomplete_run(tmp_path, run_dir):
+    run = tmp_path / run_dir
     run.mkdir(parents=True)
     (run / "MANIFEST.md").write_text("manifest")
     findings = context_audit.audit(tmp_path)
@@ -69,14 +84,6 @@ def test_audit_ignores_retired_root_level_run_directories(tmp_path):
     retired.mkdir(parents=True)
     (retired / "MANIFEST.md").write_text("old layout")
     assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
-
-
-def test_audit_reports_incomplete_claude_workflow_run(tmp_path):
-    run = tmp_path / ".work" / "wf" / "implement" / "one"
-    run.mkdir(parents=True)
-    (run / "MANIFEST.md").write_text("manifest")
-    findings = context_audit.audit(tmp_path)
-    assert "incomplete-run-index" in codes(findings)
 
 
 def test_cli_is_advisory_unless_strict(tmp_path):

@@ -137,9 +137,19 @@ def test_clean_distinct_provider_lineage_is_certifying_even_without_route_boolea
     assert leg["certifying_vote"] is True
 
 
-def test_missing_provider_family_fails_closed():
+@pytest.mark.parametrize(
+    "model_family",
+    (
+        pytest.param("", id="test_missing_provider_family_fails_closed"),
+        pytest.param(
+            "xai",
+            id="test_missing_provider_family_fails_closed_even_with_model_family",
+        ),
+    ),
+)
+def test_missing_provider_family_fails_closed(model_family):
     leg = normalise_dispatch_review(
-        dispatch_result(provider_family="", model_family=""),
+        dispatch_result(provider_family="", model_family=model_family),
         worker_result(),
         review_verdict="approve",
         chair_family="anthropic",
@@ -194,21 +204,6 @@ def test_missing_dispatcher_output_is_not_a_transcript():
 
     assert leg["status"] == "failed"
     assert leg["reason"] == "missing-transcript"
-    assert leg["certifying_vote"] is False
-
-
-def test_missing_provider_family_fails_closed_even_with_model_family():
-    leg = normalise_dispatch_review(
-        dispatch_result(provider_family="", model_family="xai"),
-        worker_result(),
-        review_verdict="approve",
-        chair_family="anthropic",
-        transcript_available=True,
-        dispatcher_output_available=True,
-    )
-
-    assert leg["status"] == "unavailable"
-    assert leg["reason"] == "provider-unavailable"
     assert leg["certifying_vote"] is False
 
 

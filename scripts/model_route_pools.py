@@ -542,7 +542,10 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         confidential = request.get("confidential", defaults.get("confidential", label == "utility"))
         allow_free = request.get("allow_free", defaults.get("allow_free", label != "utility"))
         entries = pool(router, catalog, label, effort_order)
-        mode = "council" if council else "rotate" if request.get("rotate") else "top"
+        rotate = request.get("rotate")
+        if rotate is None:
+            rotate = router._harness_profile().value("routing.pool_mode", "top") == "rotate"
+        mode = "council" if council else "rotate" if rotate else "top"
         if request.get("adapter"):
             entries = [entry for entry in entries if entry["adapter"] == request["adapter"]]
             if not entries:
