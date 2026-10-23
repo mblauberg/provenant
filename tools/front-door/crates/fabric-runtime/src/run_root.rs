@@ -1,4 +1,5 @@
 //! Fixture-root and product-root policy. Executable owner probing remains at the OS edge.
+use crate::field::Field;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -6,20 +7,20 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum RunRootError {
     #[error("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path")]
     ProductRootRelative,
     #[error("fixture run refused: {0} is not under an acceptable temp root ({1}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)")]
     FixtureRefused(String, String),
-    #[error("could not resolve path: {0}")]
-    Resolve(String),
+    #[error(transparent)]
+    Cwd(#[from] std::io::Error),
 }
 
 pub fn canonical(path: &Path) -> Result<PathBuf, RunRootError> {
     fs::canonicalize(path)
         .or_else(|_| absolute_normal(path))
-        .map_err(|_| RunRootError::Resolve(path.display().to_string()))
+        .map_err(RunRootError::Cwd)
 }
 
 fn absolute_normal(path: &Path) -> std::io::Result<PathBuf> {
@@ -56,8 +57,7 @@ pub fn product_root(
 }
 
 fn real_path(path: &Path) -> Result<PathBuf, RunRootError> {
-    let absolute =
-        absolute_normal(path).map_err(|_| RunRootError::Resolve(path.display().to_string()))?;
+    let absolute = absolute_normal(path).map_err(RunRootError::Cwd)?;
     let mut candidate = absolute.clone();
     let mut missing = Vec::new();
     loop {
@@ -66,8 +66,7 @@ fn real_path(path: &Path) -> Result<PathBuf, RunRootError> {
             for component in missing.iter().rev() {
                 result.push(component);
             }
-            return absolute_normal(&result)
-                .map_err(|_| RunRootError::Resolve(path.display().to_string()));
+            return absolute_normal(&result).map_err(RunRootError::Cwd);
         }
         let Some(parent) = candidate.parent() else {
             return Ok(absolute);
@@ -112,10 +111,10 @@ pub fn acceptable_fixture_temp_root(root: &Path) -> Result<bool, RunRootError> {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FixtureRoute {
-    #[serde(default)]
-    pub model: Option<serde_json::Value>,
-    #[serde(default)]
-    pub cli_version: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub model: Field<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub cli_version: Field<serde_json::Value>,
 }
 
 pub fn assert_fixture_run_root(
@@ -125,18 +124,14 @@ pub fn assert_fixture_run_root(
     fabric_test_tmpdir: Option<&Path>,
 ) -> Result<(), RunRootError> {
     if !routes.iter().any(|route| {
-        route.model.as_ref().and_then(serde_json::Value::as_str) == Some("fixture")
-            || route
-                .cli_version
-                .as_ref()
-                .and_then(serde_json::Value::as_str)
-                == Some("fixture")
+        matches!(&route.model, Field::Value(value) if value.as_str() == Some("fixture"))
+            || matches!(&route.cli_version, Field::Value(value) if value.as_str() == Some("fixture"))
     }) {
         return Ok(());
     }
     let root = real_path(agent_run)?;
     let mut temp_roots = vec![temp.to_path_buf(), PathBuf::from("/tmp")];
-    if let Some(path) = fabric_test_tmpdir {
+    if let Some(path) = fabric_test_tmpdir.filter(|path| !path.as_os_str().is_empty()) {
         temp_roots.push(path.to_path_buf());
     }
     let mut real_roots = Vec::new();
@@ -186,10 +181,10 @@ mod tests {
 
     #[test]
     fn product_root_requires_absolute_configuration_and_canonicalises_paths() {
-        assert_eq!(
+        assert!(matches!(
             product_root(Some("relative"), Path::new("/default")),
             Err(RunRootError::ProductRootRelative)
-        );
+        ));
         let root = tempfile::tempdir().unwrap();
         assert_eq!(
             product_root(None, root.path()).unwrap(),
@@ -210,8 +205,8 @@ mod tests {
     fn fixtures_are_bounded_to_temp_or_scratch_but_real_routes_are_unrestricted() {
         let temp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let route = [FixtureRoute {
-            model: Some(serde_json::Value::String("fixture".into())),
-            cli_version: None,
+            model: Field::Value(serde_json::Value::String("fixture".into())),
+            cli_version: Field::Missing,
         }];
         let under_temp = assert_fixture_run_root(
             &temp.path().join("workspace/.agent-run"),
@@ -255,7 +250,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let link = temp.path().join("dangling");
         symlink(temp.path().join("missing-target"), &link).unwrap();
-        assert_eq!(real_path(&link).unwrap(), fs::canonicalize(temp.path()).unwrap().join("dangling"));
+        assert_eq!(
+            real_path(&link).unwrap(),
+            fs::canonicalize(temp.path()).unwrap().join("dangling")
+        );
     }
 
     #[test]
@@ -265,51 +263,75 @@ mod tests {
             "cli_version": {"name": "fixture"}
         }))
         .unwrap();
-        assert_eq!(route.model, Some(serde_json::json!(17)));
+        assert_eq!(route.model, Field::Value(serde_json::json!(17)));
     }
 
     #[test]
-    fn node_differential_matches_fixture_temp_root_fence() {
-        use std::process::Command;
+    fn node_differential_covers_fixture_fences_errors_product_root_and_optional_fields() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join(".git")).unwrap();
-        fs::create_dir(root.path().join("sub")).unwrap();
-        let node = std::env::var_os("PROVENANT_PORT_NODE").unwrap_or_else(|| "node".into());
-        let script = r#"import { acceptableFixtureTempRoot } from './src/run-root.ts';
-console.log(JSON.stringify(process.argv.slice(-2).map(path => acceptableFixtureTempRoot(path))));"#;
-        let result = Command::new(node)
-            .args([
-                "--experimental-strip-types",
-                "--input-type=module",
-                "-e",
-                script,
-                "--",
-            ])
-            .arg(root.path())
-            .arg(root.path().join("sub"))
-            .current_dir(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../../runtime/fabric"
-            ))
-            .output();
-        let Ok(result) = result else {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!("PROVENANT_PORT_NODE is required but unavailable");
-            }
-            eprintln!("skip: Node differential interpreter unavailable");
+        let repo = root.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let paths = vec![
+            root.path().to_path_buf(),
+            repo.clone(),
+            repo.join("sub"),
+            root.path().join(".agent-run/runs"),
+            root.path().join(".agent-run"),
+        ];
+        let cases = serde_json::json!([
+            ["/repo/.agent-run", [{"model":"fixture"}]],
+            ["/repo/.agent-run/scratch", [{"model":"fixture"}]],
+            ["/repo/.agent-run/scratch/run/.agent-run", [{"cli_version":"fixture"}]],
+            ["/tmp/fr3-fixture/.agent-run", [{"model":"fixture"}]],
+            ["/repo/.agent-run", [{"model":17}]],
+            [root.path().join("child/.agent-run"), [{"model":"fixture"}]]
+        ]);
+        let script = r#"import * as m from './src/run-root.ts';
+const [paths,cases,temp,configured,defaultRoot] = process.argv.slice(1).map(JSON.parse);
+const capture = f => {try { return f() ?? null; } catch(e) {return e.message;}};
+console.log(JSON.stringify({
+ roots: paths.map(m.acceptableFixtureTempRoot),
+ fixtures: cases.map(([path,routes])=>capture(()=>m.assertFixtureRunRoot(path,routes,temp))),
+ products:[capture(()=>m.productRoot({AGENT_FABRIC_PRODUCT_ROOT:'relative'})),m.productRoot({AGENT_FABRIC_PRODUCT_ROOT:configured}),m.productRoot({})]
+}));"#;
+        let default_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let args = [
+            serde_json::to_string(&paths).unwrap(),
+            cases.to_string(),
+            serde_json::to_string(&repo).unwrap(),
+            serde_json::to_string(root.path()).unwrap(),
+            serde_json::to_string(&default_root).unwrap(),
+        ];
+        let Some(expected) = crate::test_support::node(script, &args) else {
             return;
         };
-        if !result.status.success() {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!(
-                    "Node differential failed: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
-            eprintln!("skip: Node does not support source type stripping");
-            return;
-        }
-        let actual: Vec<bool> = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(actual, [false, false]);
+        let fixtures: Vec<_> = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| {
+                let routes: Vec<FixtureRoute> = serde_json::from_value(case[1].clone()).unwrap();
+                assert_fixture_run_root(Path::new(case[0].as_str().unwrap()), &routes, &repo, None)
+                    .err()
+                    .map(|error| error.to_string())
+            })
+            .collect();
+        assert_eq!(
+            serde_json::json!({
+                "roots":paths.iter().map(|path| acceptable_fixture_temp_root(path).unwrap()).collect::<Vec<_>>(),
+                "fixtures":fixtures,
+                "products":[product_root(Some("relative"), &default_root).unwrap_err().to_string(),
+                    product_root(Some(root.path().to_str().unwrap()), &default_root).unwrap().to_string_lossy(),
+                    product_root(None, &default_root).unwrap().to_string_lossy()]
+            }),
+            expected
+        );
+        let absent: FixtureRoute = serde_json::from_value(serde_json::json!({})).unwrap();
+        let null: FixtureRoute = serde_json::from_value(serde_json::json!({"model":null})).unwrap();
+        assert_eq!(serde_json::to_value(absent).unwrap(), serde_json::json!({}));
+        assert_eq!(
+            serde_json::to_value(null).unwrap(),
+            serde_json::json!({"model":null})
+        );
     }
 }
