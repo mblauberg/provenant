@@ -337,7 +337,9 @@ mod registry_tests {
                 .iter()
                 .map(|r| r.capabilities.name)
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
+            [
+                "claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"
+            ]
         );
         let plan = plan(Mode::ReadOnly);
         for row in REGISTRY {
@@ -417,8 +419,11 @@ mod differential_tests {
             }
             let Some(expected): Option<Vec<[Vec<String>; 5]>> = crate::oracle::python(
                 "import importlib,json,sys; modules=[importlib.import_module('skills.orchestrate.scripts.adapters.'+name) for name in ['agy','claude','copilot','cursor','kiro']]; print(json.dumps([[m.argv(p) for m in modules] for p in json.load(sys.stdin)]))",
-                &serde_json::json!(fixtures), api_key,
-            ) else { return; };
+                &serde_json::json!(fixtures),
+                api_key,
+            ) else {
+                return;
+            };
             assert_eq!(actual, expected);
         }
     }

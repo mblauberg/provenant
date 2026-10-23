@@ -357,9 +357,11 @@ mod fallback_tests {
         assert_eq!((row.ppid, row.pgid, row.rss, row.uid), (2, 3, 123, -1));
         assert_eq!(row.tty, "??");
         assert!(ps_process_output(42, output, None, None).unwrap().is_none());
-        assert!(ps_process_output(42, "42 2", Some("start"), None)
-            .unwrap()
-            .is_none());
+        assert!(
+            ps_process_output(42, "42 2", Some("start"), None)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             ps_process_output(42, "42 bad 3 00:10 0:00 S 123 command", Some("start"), None)
                 .unwrap()
@@ -378,9 +380,11 @@ mod fallback_tests {
             "42 2 bad 00:10 0:00 S 123 command",
             "42 2 3 00:10 0:00 S bad command",
         ] {
-            assert!(ps_process_output(42, output, Some("start"), None)
-                .unwrap()
-                .is_none());
+            assert!(
+                ps_process_output(42, output, Some("start"), None)
+                    .unwrap()
+                    .is_none()
+            );
         }
         let row = ps_process_output(42, "42 2 3 00:10 0:00 S 123 ../", Some("start"), None)
             .unwrap()

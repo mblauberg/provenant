@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn structured_and_plain_listings_match_python_without_accepting_error_text() {

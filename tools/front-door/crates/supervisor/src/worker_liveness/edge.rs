@@ -279,7 +279,10 @@ mod tests {
             .unwrap();
             assert_eq!(out.exit_code, code);
             if code == 0 {
-                assert_eq!(out.stdout, "{\"classification\": \"complete\", \"exit_status\": 7, \"observed_exit\": true, \"pid\": 83}\n");
+                assert_eq!(
+                    out.stdout,
+                    "{\"classification\": \"complete\", \"exit_status\": 7, \"observed_exit\": true, \"pid\": 83}\n"
+                );
             } else {
                 assert!(out.stderr.starts_with("worker-liveness: "));
                 assert!(out.stdout.is_empty());
@@ -481,8 +484,10 @@ mod collection_tests {
             .collect_observed(temp.path(), Some(&cwd), Some(&previous))
             .unwrap();
         assert_eq!(workers.len(), 2);
-        assert!(workers
-            .iter()
-            .all(|worker| worker.output_size.is_none() && !worker.stalled));
+        assert!(
+            workers
+                .iter()
+                .all(|worker| worker.output_size.is_none() && !worker.stalled)
+        );
     }
 }

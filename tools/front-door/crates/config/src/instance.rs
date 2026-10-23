@@ -3,7 +3,7 @@
 //! Desired state is path-free and committed; pointers and installation receipts
 //! are machine-local. Routing reconciliation and seeded-file publication remain
 //! with the later implementation/integration units, never in the pointer owner.
-use crate::{invalid, pending, Result};
+use crate::{Result, invalid, pending};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -299,10 +299,12 @@ mod tests {
         let mut value = serde_json::to_value(state).unwrap();
         for reference in ["/opt/product", "~/.agents", "C:\\product", "${ROOT}"] {
             value["product"]["ref"] = reference.into();
-            assert!(validate_desired_state_value(value.clone())
-                .unwrap_err()
-                .to_string()
-                .contains("path-free"));
+            assert!(
+                validate_desired_state_value(value.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("path-free")
+            );
         }
         value["product"]["ref"] = Value::Null;
         assert_eq!(
@@ -487,7 +489,13 @@ mod tests {
                     .unwrap();
             value["product"]["ref"] = reference;
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-            let Some(output) = crate::oracle::python("scripts/instance_installation.py", "import json\ntry: print(json.dumps(m.validate_desired_state(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))", &path) else { return; };
+            let Some(output) = crate::oracle::python(
+                "scripts/instance_installation.py",
+                "import json\ntry: print(json.dumps(m.validate_desired_state(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))",
+                &path,
+            ) else {
+                return;
+            };
             let old: Value = serde_json::from_slice(&output).unwrap();
             match validate_desired_state_value(value) {
                 Ok(v) => assert_eq!(old, serde_json::to_value(v).unwrap()),
@@ -608,7 +616,7 @@ mod contract_tests {
             )
             .unwrap();
         }
-        let body="import json\nroot=p/'product'; instance=p/'instance'\nout=[]\nfor action in ['show','validate','seed','show','validate','refresh-routing']:\n out.append(m.execute(action,root,instance,write_product_pointer=False))\nprint(json.dumps(out))";
+        let body = "import json\nroot=p/'product'; instance=p/'instance'\nout=[]\nfor action in ['show','validate','seed','show','validate','refresh-routing']:\n out.append(m.execute(action,root,instance,write_product_pointer=False))\nprint(json.dumps(out))";
         let Some(output) =
             crate::oracle::python("scripts/instance_installation.py", body, dir.path())
         else {
@@ -643,11 +651,13 @@ mod contract_tests {
         };
         assert_eq!(
             serde_json::from_slice::<Value>(&output).unwrap(),
-            serde_json::json!(custom_skill_names(dir.path())
-                .unwrap()
-                .iter()
-                .map(|s| s.to_str().unwrap())
-                .collect::<Vec<_>>())
+            serde_json::json!(
+                custom_skill_names(dir.path())
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.to_str().unwrap())
+                    .collect::<Vec<_>>()
+            )
         );
     }
 }

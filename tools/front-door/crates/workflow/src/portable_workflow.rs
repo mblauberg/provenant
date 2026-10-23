@@ -322,8 +322,10 @@ mod tests {
         let result = execute(&skill, &context, &output).unwrap();
         assert_eq!(result.source_digest, digest(&context).unwrap());
         let bytes = fs::read_to_string(&output).unwrap();
-        assert!(bytes
-            .starts_with("{\"adapters_used\": [], \"artifact_basis\": \"project-artifacts\", "));
+        assert!(
+            bytes
+                .starts_with("{\"adapters_used\": [], \"artifact_basis\": \"project-artifacts\", ")
+        );
         assert!(bytes.contains("\\u00e9vidence"));
         assert!(bytes.ends_with("\n"));
         assert!(bytes.is_ascii());

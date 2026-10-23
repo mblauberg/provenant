@@ -42,14 +42,16 @@ fn nested_non_git_cwd_accepts_only_explicit_workspace_runs() {
         false
     ));
     assert!(!layout.contains_run(run, cwd, true));
-    assert!(layout
-        .run_path(
-            "2026-10-23T00:00:00Z".parse().unwrap(),
-            RunKind::Dispatch,
-            "test",
-            [0; 3]
-        )
-        .starts_with(cwd));
+    assert!(
+        layout
+            .run_path(
+                "2026-10-23T00:00:00Z".parse().unwrap(),
+                RunKind::Dispatch,
+                "test",
+                [0; 3]
+            )
+            .starts_with(cwd)
+    );
 }
 #[test]
 fn names_use_explicit_utc_time_sanitized_slug_and_entropy() {

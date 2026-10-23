@@ -515,7 +515,7 @@ jobs:
       # The runner image ships rustup; the toolchain is pinned here and in
       # tools/front-door/rust-toolchain.toml (ADR 0027).
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Cache Rust build artifacts
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
@@ -579,7 +579,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door

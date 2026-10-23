@@ -92,7 +92,12 @@ pub fn queue_has_active_rows(text: &str) -> Result<(bool, Option<String>), regex
             return Ok((true, None));
         }
         if !["DONE", "BLOCKED", "DEFERRED"].contains(&status.as_str()) {
-            return Ok((true,Some(format!("unrecognized queue status '{status}' — controlled vocabulary is PENDING, LEASED, DONE, BLOCKED, DEFERRED"))));
+            return Ok((
+                true,
+                Some(format!(
+                    "unrecognized queue status '{status}' — controlled vocabulary is PENDING, LEASED, DONE, BLOCKED, DEFERRED"
+                )),
+            ));
         }
     }
     Ok((false, None))
@@ -199,22 +204,28 @@ mod tests {
     fn idle_pause_rejects_active_unknown_and_malformed_queue_rows() {
         assert!(validate_text(&state(), "## Tier 0\n").unwrap().is_empty());
         for status in ["PENDING", "LEASED", "ACTIVE"] {
-            assert!(!validate_text(
+            assert!(
+                !validate_text(
+                    &state(),
+                    &format!("## Tier 0\n| A | {status} | - | - | - | note |\n")
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+        assert!(
+            validate_text(
                 &state(),
-                &format!("## Tier 0\n| A | {status} | - | - | - | note |\n")
+                "## Tier 0\n| A | DEFERRED | - | - | - | A \\| B |\n"
             )
             .unwrap()
-            .is_empty());
-        }
-        assert!(validate_text(
-            &state(),
-            "## Tier 0\n| A | DEFERRED | - | - | - | A \\| B |\n"
-        )
-        .unwrap()
-        .is_empty());
-        assert!(!validate_text(&state(), "## Tier 0\n| A | DONE |\n")
-            .unwrap()
-            .is_empty());
+            .is_empty()
+        );
+        assert!(
+            !validate_text(&state(), "## Tier 0\n| A | DONE |\n")
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn pause_sentinels_and_fallback_fields_match_python() {

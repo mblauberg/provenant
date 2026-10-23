@@ -242,7 +242,7 @@ mod tests {
 
 mod child;
 pub use child::ChildWaitError;
-pub(crate) use child::{anonymous_spool, OwnedChild};
+pub(crate) use child::{OwnedChild, anonymous_spool};
 
 pub mod process;
 

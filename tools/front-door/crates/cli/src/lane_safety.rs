@@ -728,9 +728,22 @@ pub fn hook_event(event: &serde_json::Value) -> Result<crate::CommandOutput, Hoo
     let Some(reason) = deny_reason(command)? else {
         return Ok(crate::CommandOutput::default());
     };
-    let record=HookEnvelope {output:HookDecision {event:"PreToolUse".into(),decision:"deny".into(),reason:format!("Refused: {reason}. A pattern, group or expanded kill can hit another lane's process. Stop explicit PIDs with `provenant reap <pid>… [--tree]`.")}};
+    let record = HookEnvelope {
+        output: HookDecision {
+            event: "PreToolUse".into(),
+            decision: "deny".into(),
+            reason: format!(
+                "Refused: {reason}. A pattern, group or expanded kill can hit another lane's process. Stop explicit PIDs with `provenant reap <pid>… [--tree]`."
+            ),
+        },
+    };
     let quote = crate::pending::ascii_json_string;
-    let stdout=format!("{{\"hookSpecificOutput\": {{\"hookEventName\": {}, \"permissionDecision\": {}, \"permissionDecisionReason\": {}}}}}\n",quote(&record.output.event)?,quote(&record.output.decision)?,quote(&record.output.reason)?);
+    let stdout = format!(
+        "{{\"hookSpecificOutput\": {{\"hookEventName\": {}, \"permissionDecision\": {}, \"permissionDecisionReason\": {}}}}}\n",
+        quote(&record.output.event)?,
+        quote(&record.output.decision)?,
+        quote(&record.output.reason)?
+    );
     Ok(crate::CommandOutput {
         stdout,
         ..Default::default()
@@ -877,9 +890,12 @@ print(json.dumps(errors))
             vec!["timeout", "--signal"],
             vec!["", "kill"],
         ];
-        let Some(expected): Option<Vec<(Vec<String>,bool)>> = crate::oracle::python(
-            "import json,sys; from scripts.lane_safety_guard import _unwrap; print(json.dumps([_unwrap(x) for x in json.load(sys.stdin)]))", &serde_json::json!(cases)
-        ) else { return; };
+        let Some(expected): Option<Vec<(Vec<String>, bool)>> = crate::oracle::python(
+            "import json,sys; from scripts.lane_safety_guard import _unwrap; print(json.dumps([_unwrap(x) for x in json.load(sys.stdin)]))",
+            &serde_json::json!(cases),
+        ) else {
+            return;
+        };
         for (words, expected) in cases.into_iter().zip(expected) {
             let words: Vec<String> = words.into_iter().map(str::to_owned).collect();
             let (remaining, xargs) = unwrap_command(&words);
@@ -969,8 +985,11 @@ print(json.dumps(errors))
             vec![format!("{}١", "٠".repeat(4299))],
         ]);
         let Some(expected): Option<Vec<Option<String>>> = crate::oracle::python(
-            "import json,sys; from scripts.lane_safety_guard import _kill_reason; print(json.dumps([_kill_reason(a) for a in json.load(sys.stdin)]))", &json!(cases)
-        ) else { return; };
+            "import json,sys; from scripts.lane_safety_guard import _kill_reason; print(json.dumps([_kill_reason(a) for a in json.load(sys.stdin)]))",
+            &json!(cases),
+        ) else {
+            return;
+        };
         for (argv, expected) in cases.iter().zip(expected) {
             assert_eq!(kill_reason(argv), expected, "{argv:?}");
         }
@@ -987,9 +1006,12 @@ print(json.dumps(errors))
             serde_json::json!({"tool_name":"Bash","tool_input":{"command":"kill 😀"}}),
             serde_json::json!({"tool_name":"Bash","tool_input":{"command":"pkill x"}}),
         ];
-        let Some(expected):Option<Vec<(String,String,u8)>>=crate::oracle::python(
-            "import json,sys,subprocess; events=json.load(sys.stdin); print(json.dumps([(r.stdout,r.stderr,r.returncode) for event in events for r in [subprocess.run([sys.executable,'scripts/lane_safety_guard.py'],input=json.dumps(event),capture_output=True,text=True,timeout=10)]]))", &serde_json::json!(events)
-        ) else {return;};
+        let Some(expected): Option<Vec<(String, String, u8)>> = crate::oracle::python(
+            "import json,sys,subprocess; events=json.load(sys.stdin); print(json.dumps([(r.stdout,r.stderr,r.returncode) for event in events for r in [subprocess.run([sys.executable,'scripts/lane_safety_guard.py'],input=json.dumps(event),capture_output=True,text=True,timeout=10)]]))",
+            &serde_json::json!(events),
+        ) else {
+            return;
+        };
         for (event, (stdout, stderr, exit_code)) in events.iter().zip(expected) {
             assert_eq!(
                 hook_input(&serde_json::to_vec(event).unwrap()).unwrap(),

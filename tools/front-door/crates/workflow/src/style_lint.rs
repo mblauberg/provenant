@@ -971,7 +971,7 @@ pub fn prose_word_count(path: impl AsRef<Path>, latex: bool) -> Result<usize, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn actual(case: &Value) -> Value {
         let text = case["text"].as_str().unwrap_or_default();

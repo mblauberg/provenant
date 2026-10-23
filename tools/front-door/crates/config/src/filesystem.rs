@@ -1,5 +1,5 @@
 //! Installation-specific path preparation around the supervisor's safe API.
-use crate::{io, Result};
+use crate::{Result, io};
 use provenant_supervisor::fs::{Directory, PublishMode};
 use std::{fs, path::Path};
 

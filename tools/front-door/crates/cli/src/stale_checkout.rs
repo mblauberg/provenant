@@ -271,13 +271,21 @@ mod tests {
         state.default_branch = Some("trunk".into());
         state.branch = Branch::Detached;
         state.counts = Some((1, 2));
-        assert_eq!(warnings(Path::new("/p"), &state, 0.0), [
-            "warning: product checkout is on a detached HEAD, not trunk; run: git -C /p switch trunk",
-            "warning: product checkout diverged from origin/trunk (1 ahead, 2 behind); run: git -C /p rebase origin/trunk (or merge)"
-        ]);
+        assert_eq!(
+            warnings(Path::new("/p"), &state, 0.0),
+            [
+                "warning: product checkout is on a detached HEAD, not trunk; run: git -C /p switch trunk",
+                "warning: product checkout diverged from origin/trunk (1 ahead, 2 behind); run: git -C /p rebase origin/trunk (or merge)"
+            ]
+        );
         state.branch = Branch::Named("trunk".into());
         state.counts = Some((0, 2));
-        assert_eq!(warnings(Path::new("/p"), &state, 0.0), ["warning: product checkout is 2 commits behind origin/trunk; run: git -C /p pull --ff-only"]);
+        assert_eq!(
+            warnings(Path::new("/p"), &state, 0.0),
+            [
+                "warning: product checkout is 2 commits behind origin/trunk; run: git -C /p pull --ff-only"
+            ]
+        );
     }
 
     #[test]
@@ -362,8 +370,11 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let input = serde_json::json!({"root":root, "now":1000000.0});
         let Some(expected): Option<Vec<String>> = crate::oracle::python(
-            "import json,sys; from pathlib import Path; sys.path.insert(0,'scripts'); from lib.stale_checkout import check_stale_checkout; x=json.load(sys.stdin); print(json.dumps(check_stale_checkout(Path(x['root']),now=x['now'])))", &input
-        ) else { return; };
+            "import json,sys; from pathlib import Path; sys.path.insert(0,'scripts'); from lib.stale_checkout import check_stale_checkout; x=json.load(sys.stdin); print(json.dumps(check_stale_checkout(Path(x['root']),now=x['now'])))",
+            &input,
+        ) else {
+            return;
+        };
         let mut local_git = |query: GitQuery<'_>| {
             assert_eq!(query.timeout, std::time::Duration::from_secs(1));
             assert!(query.stdin_null);

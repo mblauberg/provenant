@@ -60,11 +60,7 @@ pub fn read_only_guarantee(route: &serde_json::Value, now: jiff::Timestamp) -> &
         )
     })()
     .unwrap_or(false);
-    if valid {
-        "enforced"
-    } else {
-        "prompt_only"
-    }
+    if valid { "enforced" } else { "prompt_only" }
 }
 
 /// Checked JSON boundary for the version-bound probe policy.
@@ -188,10 +184,12 @@ print(json.dumps([now.isoformat(), routes, [read_only_guarantee(r) for r in rout
         let mut p = plan(Mode::ReadOnly);
         p.model = Some("auto".into());
         let adapter = kiro(&p).unwrap();
-        assert!(adapter
-            .argv
-            .windows(2)
-            .any(|v| v == ["--agent-engine", "v3"]));
+        assert!(
+            adapter
+                .argv
+                .windows(2)
+                .any(|v| v == ["--agent-engine", "v3"])
+        );
         assert!(!adapter.argv.contains(&"--model".into()));
         assert_eq!(adapter.argv.last().unwrap(), "Read only\n\ndo it");
     }

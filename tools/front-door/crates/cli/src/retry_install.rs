@@ -260,7 +260,12 @@ print(json.dumps([bool(m.RETRYABLE.search(s)) for s in json.load(sys.stdin)]))
     fn empty_command_usage_and_separator_follow_main() {
         for args in [vec![], vec!["--"]] {
             let values: Vec<_> = args.iter().map(std::ffi::OsString::from).collect();
-            let Some(expected):Option<(String,String,u8)>=crate::oracle::python("import json,sys,subprocess; args=json.load(sys.stdin); r=subprocess.run([sys.executable,'scripts/retry-npm-install.py',*args],capture_output=True,text=True,timeout=10); print(json.dumps([r.stdout,r.stderr,r.returncode]))",&serde_json::json!(args)) else {return;};
+            let Some(expected): Option<(String, String, u8)> = crate::oracle::python(
+                "import json,sys,subprocess; args=json.load(sys.stdin); r=subprocess.run([sys.executable,'scripts/retry-npm-install.py',*args],capture_output=True,text=True,timeout=10); print(json.dumps([r.stdout,r.stderr,r.returncode]))",
+                &serde_json::json!(args),
+            ) else {
+                return;
+            };
             let error = command(&values).unwrap_err();
             assert_eq!((error.stdout, error.stderr, error.exit_code), expected);
         }

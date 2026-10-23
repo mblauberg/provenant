@@ -78,9 +78,11 @@ pub(crate) mod tests {
             ]
         );
         let writer = agy(&plan(Mode::WorktreeWrite)).unwrap();
-        assert!(writer
-            .argv
-            .contains(&"--dangerously-skip-permissions".into()));
+        assert!(
+            writer
+                .argv
+                .contains(&"--dangerously-skip-permissions".into())
+        );
         assert_eq!(writer.argv.last().unwrap(), "Read only\nTask:\ndo it");
     }
 }

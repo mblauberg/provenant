@@ -91,7 +91,7 @@ fn command() -> Option<Command> {
     ) {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return unavailable("Python interpreter absent")
+            return unavailable("Python interpreter absent");
         }
         Err(error) => panic!("could not probe Python oracle: {error}"),
     };

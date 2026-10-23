@@ -1,5 +1,5 @@
 //! Repository-owned Claude workflows and their ownership receipt.
-use crate::{invalid, io, pending, Result};
+use crate::{Result, invalid, io, pending};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -512,7 +512,13 @@ mod tests {
     fn python_differential_install_and_receipt() {
         let (_dir, source, target) = fixture();
         let result = install(&source, &target, NOW).unwrap();
-        let Some(output) = crate::oracle::python("scripts/install-workflows", "import json\nm.SOURCE=p.parent/'workflows'\nm._now=lambda: '2026-10-23T00:00:00Z'\nt=p.parent/'python'/'workflows'\nr=m.install(t)\nd=m._load_manifest(t)\nd['target_root']='TARGET'\nprint(json.dumps([r,d]))", &source) else { return; };
+        let Some(output) = crate::oracle::python(
+            "scripts/install-workflows",
+            "import json\nm.SOURCE=p.parent/'workflows'\nm._now=lambda: '2026-10-23T00:00:00Z'\nt=p.parent/'python'/'workflows'\nr=m.install(t)\nd=m._load_manifest(t)\nd['target_root']='TARGET'\nprint(json.dumps([r,d]))",
+            &source,
+        ) else {
+            return;
+        };
         let old: Value = serde_json::from_slice(&output).unwrap();
         let mut new = serde_json::to_value(load(&target, NOW).unwrap()).unwrap();
         new["target_root"] = "TARGET".into();
@@ -611,7 +617,10 @@ mod validation_tests {
     fn invalid_receipt_uses_first_inserted_entry_not_alphabetical_order() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("workflows");
-        let value=format!("{{\"schema_version\":1,\"owner\":\"agent-harness\",\"surface\":\"claude-workflows\",\"target_root\":{},\"managed\":{{\"z.js\":{{}},\"a.js\":{{}}}}}}",serde_json::to_string(&target).unwrap());
+        let value = format!(
+            "{{\"schema_version\":1,\"owner\":\"agent-harness\",\"surface\":\"claude-workflows\",\"target_root\":{},\"managed\":{{\"z.js\":{{}},\"a.js\":{{}}}}}}",
+            serde_json::to_string(&target).unwrap()
+        );
         fs::write(manifest_path(&target), value).unwrap();
         let Some(old) = crate::oracle::python(
             "scripts/install-workflows",

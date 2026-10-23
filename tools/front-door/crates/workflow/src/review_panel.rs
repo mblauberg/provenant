@@ -2,7 +2,7 @@
 
 use crate::review_ladder::{REVIEW_PLAN_STATUSES, SKIPPED_STATUSES};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -633,10 +633,12 @@ mod tests {
             crate::test_support::oracle("review_panel", &json!([{"op":"raw_shortfall","raw":raw}]))
         {
             assert!(outputs[0]["errors"].as_array().unwrap().is_empty());
-            assert!(outputs[0]["wire"]
-                .as_str()
-                .unwrap()
-                .contains("1000000000000000000000000000000"));
+            assert!(
+                outputs[0]["wire"]
+                    .as_str()
+                    .unwrap()
+                    .contains("1000000000000000000000000000000")
+            );
         }
         let spec = json!({"degradation":{"minimum_members":u64::MAX}});
         assert_eq!(
@@ -808,9 +810,11 @@ mod tests {
             ),
             (council_spec(), json!("not-members")),
         ];
-        assert!(cases
-            .iter()
-            .all(|(spec, rows)| !validate_panel(spec, rows).is_empty()));
+        assert!(
+            cases
+                .iter()
+                .all(|(spec, rows)| !validate_panel(spec, rows).is_empty())
+        );
         assert!(resolve_panel("missing", None, &Map::new()).is_err());
         assert_eq!(
             resolve_panel(

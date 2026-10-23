@@ -55,7 +55,7 @@ fn run(mut command: Command, name: &str) -> Option<Value> {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return unavailable(&format!("{name} interpreter absent"))
+            return unavailable(&format!("{name} interpreter absent"));
         }
         Err(e) => panic!("cannot launch {name} oracle: {e}"),
     };

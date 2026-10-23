@@ -1,5 +1,5 @@
 use super::Plan;
-use super::{profile, AdapterProfile, BuildError, Mode};
+use super::{AdapterProfile, BuildError, Mode, profile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;

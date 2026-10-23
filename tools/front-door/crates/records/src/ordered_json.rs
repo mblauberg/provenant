@@ -1,8 +1,8 @@
 //! JSON values that retain Python dictionary insertion order.
 use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
     ser::SerializeMap,
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::{Number, Value};
 use std::fmt;

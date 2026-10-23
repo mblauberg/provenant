@@ -1,5 +1,5 @@
 mod common;
-use common::{Sandbox, BINARY};
+use common::{BINARY, Sandbox};
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -94,12 +94,33 @@ impl Fixture {
     fn spec(&self) -> String {
         let dir = quote(&self.sandbox.dir.to_string_lossy());
         let helper = quote(&std::env::current_exe().unwrap().to_string_lossy());
-        format!(concat!("{{\"schema\":\"provenant.lane.launch.v1\",\"argv\":[\"/bin/sh\",\"-c\",{}],\"cwd\":{},\"attempt_dir\":{},\"run_token\":\"test\",",
-            "\"env\":{{\"PATH\":\"/usr/bin:/bin\",\"S2_HELPER\":{},\"S2_DIR\":{}}},\"stdin\":{{}},\"capture\":{{\"events\":\"events.jsonl\",\"stderr\":\"stderr.log\",\"max_bytes\":{}}},",
-            "\"silence_observation_ms\":{},\"timeouts_ms\":{{\"startup\":{},\"wall\":{},\"settle\":40,\"child_grace\":40,\"root_flush\":150}},",
-            "\"progress\":{},\"cancel_markers\":{},\"observer\":{{\"argv\":{}}},\"spare\":{{\"code_mode_host\":true}}}}"),
-            quote(&self.script),dir,dir,helper,dir,self.cap,self.silence,self.startup,self.wall,
-            if self.writer {format!("{{\"writer_tree\":{{\"root\":{},\"exclude\":[\"ignored\"]}}}}",dir)}else {"{}".into()},self.markers,self.observer)
+        format!(
+            concat!(
+                "{{\"schema\":\"provenant.lane.launch.v1\",\"argv\":[\"/bin/sh\",\"-c\",{}],\"cwd\":{},\"attempt_dir\":{},\"run_token\":\"test\",",
+                "\"env\":{{\"PATH\":\"/usr/bin:/bin\",\"S2_HELPER\":{},\"S2_DIR\":{}}},\"stdin\":{{}},\"capture\":{{\"events\":\"events.jsonl\",\"stderr\":\"stderr.log\",\"max_bytes\":{}}},",
+                "\"silence_observation_ms\":{},\"timeouts_ms\":{{\"startup\":{},\"wall\":{},\"settle\":40,\"child_grace\":40,\"root_flush\":150}},",
+                "\"progress\":{},\"cancel_markers\":{},\"observer\":{{\"argv\":{}}},\"spare\":{{\"code_mode_host\":true}}}}"
+            ),
+            quote(&self.script),
+            dir,
+            dir,
+            helper,
+            dir,
+            self.cap,
+            self.silence,
+            self.startup,
+            self.wall,
+            if self.writer {
+                format!(
+                    "{{\"writer_tree\":{{\"root\":{},\"exclude\":[\"ignored\"]}}}}",
+                    dir
+                )
+            } else {
+                "{}".into()
+            },
+            self.markers,
+            self.observer
+        )
     }
     fn run(&self) -> String {
         let output = invoke(&self.spec());
@@ -166,7 +187,10 @@ fn fast_exit_before_process_watch_is_still_published() {
 }
 #[test]
 fn capture_over_cap_retains_fixed_head_and_rolling_tail() {
-    let mut f=Fixture::new("lane-cap","printf HEAD; i=0; while [ $i -lt 1000 ]; do printf abcdefgh; i=$((i+1)); done; printf TAIL");
+    let mut f = Fixture::new(
+        "lane-cap",
+        "printf HEAD; i=0; while [ $i -lt 1000 ]; do printf abcdefgh; i=$((i+1)); done; printf TAIL",
+    );
     f.cap = 128;
     let record = f.run();
     let capture = fs::read(f.sandbox.dir.join("events.jsonl")).unwrap();
@@ -259,7 +283,10 @@ impl Drop for EscapeCleanup {
 #[test]
 fn new_session_grandchild_is_cleaned_up() {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f=Fixture::new("lane-escaped","S2_ESCAPE=1 \"$S2_HELPER\" --exact escaped_child_helper --nocapture & while [ ! -f escaped.pid ]; do :; done; printf ready; read release < finish.fifo; exit 0");
+    let mut f = Fixture::new(
+        "lane-escaped",
+        "S2_ESCAPE=1 \"$S2_HELPER\" --exact escaped_child_helper --nocapture & while [ ! -f escaped.pid ]; do :; done; printf ready; read release < finish.fifo; exit 0",
+    );
     f.wall = 5000;
     let fifo = f.sandbox.dir.join("finish.fifo");
     let name = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
@@ -384,9 +411,17 @@ fn persistent_full_disk_returns_record_on_stdout_with_75() {
 
 #[test]
 fn observer_overflow_revokes_late_stop_requests() {
-    let mut f=Fixture::new("lane-overflow","i=0; while [ $i -lt 8000 ]; do printf 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\\n'; i=$((i+1)); done; : > producer.done; /bin/sleep 0.1; exit 0");
+    let mut f = Fixture::new(
+        "lane-overflow",
+        "i=0; while [ $i -lt 8000 ]; do printf 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\\n'; i=$((i+1)); done; : > producer.done; /bin/sleep 0.1; exit 0",
+    );
     f.cap = 128;
-    f.observer=format!("[\"/bin/sh\",\"-c\",{}]",quote("while [ ! -f producer.done ]; do :; done; printf '{\"stop\":\"usage_limited\"}\\n'; cat >/dev/null"));
+    f.observer = format!(
+        "[\"/bin/sh\",\"-c\",{}]",
+        quote(
+            "while [ ! -f producer.done ]; do :; done; printf '{\"stop\":\"usage_limited\"}\\n'; cat >/dev/null"
+        )
+    );
     let record = f.run();
     assert!(record.contains("\"exit\":0"), "{record}");
     assert!(record.contains("\"forced\":null"), "{record}");
@@ -406,9 +441,11 @@ fn inherited_non_cloexec_descriptors_do_not_reach_the_provider() {
     }
     f.script = format!("if [ /dev/fd/{fd} -ef inherited.file ]; then printf leaked; fi; exit 0");
     f.run();
-    assert!(fs::read(f.sandbox.dir.join("events.jsonl"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        fs::read(f.sandbox.dir.join("events.jsonl"))
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn supervisor_signal_becomes_a_staged_stop() {
@@ -488,7 +525,10 @@ fn directory_sync_failure_after_link_does_not_report_a_lost_exit() {
 }
 #[test]
 fn descendant_cpu_activity_advances_progress_without_output() {
-    let f=Fixture::new("lane-child-cpu","printf ready; (while :; do :; done) & work=$!; /bin/sleep 1.2; kill $work; wait $work; exit 0");
+    let f = Fixture::new(
+        "lane-child-cpu",
+        "printf ready; (while :; do :; done) & work=$!; /bin/sleep 1.2; kill $work; wait $work; exit 0",
+    );
     let record = f.run();
     let value = |key: &str| {
         record
@@ -610,7 +650,10 @@ impl Drop for ReleaseNested {
 }
 #[test]
 fn registered_nested_owner_with_custody_is_spared_inside_provider_group() {
-    let f=Fixture::new("lane-nested-held","S2_NESTED=held \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0");
+    let f = Fixture::new(
+        "lane-nested-held",
+        "S2_NESTED=held \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0",
+    );
     let _release = ReleaseNested(f.sandbox.dir.clone());
     let record = f.run();
     let pid = fs::read_to_string(f.sandbox.dir.join("nested.ready")).unwrap_or_else(|e| {
@@ -633,7 +676,10 @@ fn registered_nested_owner_with_custody_is_spared_inside_provider_group() {
 #[test]
 fn registered_owner_with_only_an_unlocked_descriptor_is_not_spared() {
     use std::os::fd::AsRawFd;
-    let f=Fixture::new("lane-nested-unlocked","S2_NESTED=unlocked \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0");
+    let f = Fixture::new(
+        "lane-nested-unlocked",
+        "S2_NESTED=unlocked \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0",
+    );
     fs::create_dir_all(f.sandbox.dir.join("nested")).unwrap();
     let custody = fs::OpenOptions::new()
         .read(true)

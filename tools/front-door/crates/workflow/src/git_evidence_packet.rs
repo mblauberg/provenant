@@ -1,5 +1,5 @@
 //! Streaming packet structure policy. Readers retain their own EOF rejection order.
-use crate::{policy::hashable, PolicyError};
+use crate::{PolicyError, policy::hashable};
 use serde_json::Value;
 
 #[derive(Debug, thiserror::Error)]

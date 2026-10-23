@@ -1,6 +1,6 @@
 //! Terminal evidence and lineage checks for review ladder legs.
-use crate::policy::{hashable, strip};
 use crate::PolicyError;
+use crate::policy::{hashable, strip};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

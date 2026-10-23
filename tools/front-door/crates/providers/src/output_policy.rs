@@ -108,7 +108,12 @@ pub fn variant_fix(text: &str) -> Result<String, OutputError> {
         Regex::new(r#"Variant unavailable for ([^\s:\"]+): ([^\s\"}]+)"#)?.captures(text)
     {
         if let (Some(model), Some(variant)) = (c.get(1), c.get(2)) {
-            return Ok(format!("{} has no `{}` variant; drop --effort or `#{}`, or pass a variant that model supports",model.as_str(),variant.as_str(),variant.as_str()));
+            return Ok(format!(
+                "{} has no `{}` variant; drop --effort or `#{}`, or pass a variant that model supports",
+                model.as_str(),
+                variant.as_str(),
+                variant.as_str()
+            ));
         }
     }
     Ok(truncate(python_strip(text), 400))

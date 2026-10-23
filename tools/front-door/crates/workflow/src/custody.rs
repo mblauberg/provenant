@@ -25,7 +25,7 @@ pub fn contained_regular_path(
             _ => {
                 return Err(OwnedFileError::Refused(format!(
                     "{label} must be a run-relative path"
-                )))
+                )));
             }
         }
     }

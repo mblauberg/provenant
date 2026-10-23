@@ -4,8 +4,8 @@
 //! filesystem facts and run a small, closed set of diagnostic commands. The
 //! command and filesystem traits keep those effects fixture-driven in tests.
 
-use super::{require_inspection_quiescent, LivenessError, Process};
-use crate::bounded::{run_bounded_text, BoundedError, Options};
+use super::{LivenessError, Process, require_inspection_quiescent};
+use crate::bounded::{BoundedError, Options, run_bounded_text};
 use crate::sys::{self, Account};
 use jiff::tz::TimeZone;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

@@ -296,11 +296,13 @@ print(json.dumps(out))
             .collect();
         assert_eq!(serde_json::json!(actual), expected);
         let non_utf8 = PathBuf::from(OsString::from_vec(b"./a\xff".to_vec()));
-        assert!(resolve(&non_utf8)
-            .unwrap()
-            .as_os_str()
-            .as_bytes()
-            .ends_with(b"/a\xff"));
+        assert!(
+            resolve(&non_utf8)
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+                .ends_with(b"/a\xff")
+        );
     }
 }
 

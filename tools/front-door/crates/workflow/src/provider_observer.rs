@@ -168,9 +168,11 @@ mod tests {
         }
         let typed = ContextUsage::from_json(raw.replace("TOKEN", "-0").as_bytes()).unwrap();
         assert_eq!(typed.input_tokens, Some(0));
-        assert!(serde_json::to_string(&typed)
-            .unwrap()
-            .contains("\"input_tokens\":0,"));
+        assert!(
+            serde_json::to_string(&typed)
+                .unwrap()
+                .contains("\"input_tokens\":0,")
+        );
     }
 
     #[test]

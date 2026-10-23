@@ -1,5 +1,5 @@
 //! Skill source catalogues used by managed installation planning.
-use crate::{invalid, io, Result};
+use crate::{Result, invalid, io};
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
@@ -256,10 +256,12 @@ mod tests {
         fs::create_dir_all(source.join("one")).unwrap();
         fs::write(source.join("one/SKILL.md"), "skill").unwrap();
         std::os::unix::fs::symlink(dir.path(), source.join("one/link")).unwrap();
-        assert!(skills(&source, false, true)
-            .unwrap_err()
-            .to_string()
-            .contains("skill source contains a symlink: one/link"));
+        assert!(
+            skills(&source, false, true)
+                .unwrap_err()
+                .to_string()
+                .contains("skill source contains a symlink: one/link")
+        );
     }
 }
 
@@ -281,7 +283,13 @@ mod glob_tests {
         fs::create_dir(&elsewhere).unwrap();
         fs::write(elsewhere.join("SKILL.md"), "link").unwrap();
         std::os::unix::fs::symlink(&elsewhere, custom.join("linked")).unwrap();
-        let Some(old)=crate::oracle::python("scripts/manage_installation.py","import json\nprint(json.dumps([[k,str(v)] for k,v in m._skills(p,validate_content=False).items()]))",&custom)else{return;};
+        let Some(old) = crate::oracle::python(
+            "scripts/manage_installation.py",
+            "import json\nprint(json.dumps([[k,str(v)] for k,v in m._skills(p,validate_content=False).items()]))",
+            &custom,
+        ) else {
+            return;
+        };
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
             serde_json::json!(skills(&custom, false, false).unwrap())

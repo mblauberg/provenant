@@ -2,12 +2,12 @@
 use crate::pending::{self, python_decimal_digit};
 use jiff::Timestamp;
 use provenant_core::py::{
-    python_fromisoformat, python_json_eq, python_repr, python_str, python_strip, python_truth,
-    DateTimeError,
+    DateTimeError, python_fromisoformat, python_json_eq, python_repr, python_str, python_strip,
+    python_truth,
 };
 use provenant_records::{
     checked_json::{self, DecodeError, NumberOutOfRange},
-    python_json::{dumps, DumpsOptions, EncodeError},
+    python_json::{DumpsOptions, EncodeError, dumps},
 };
 use provenant_supervisor::fs::{LocalFs, SafeDir, SafeFile, SafeFs};
 use serde::{Deserialize, Serialize};
@@ -1115,10 +1115,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(renewed.generation, Number::from(2));
-        assert!(!fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            !fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(&fs::read(target).unwrap()).unwrap(),
             old

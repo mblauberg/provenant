@@ -242,14 +242,16 @@ mod tests {
     }
     #[test]
     fn launch_wire_rejects_zero_limits_and_deadlines() {
-        assert!(serde_json::from_str::<CaptureSpec>(
-            r#"{"events":"e","stderr":"s","max_bytes":0}"#
-        )
-        .is_err());
-        assert!(serde_json::from_str::<Timeouts>(
-            r#"{"startup":0,"wall":1,"settle":1,"child_grace":1,"root_flush":1}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<CaptureSpec>(r#"{"events":"e","stderr":"s","max_bytes":0}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<Timeouts>(
+                r#"{"startup":0,"wall":1,"settle":1,"child_grace":1,"root_flush":1}"#
+            )
+            .is_err()
+        );
     }
     #[test]
     fn source_duration_and_batch_failures_match() {

@@ -167,9 +167,11 @@ mod tests {
     }
     #[test]
     fn unknown_major_rejected_before_fields() {
-        assert!(Spec::parse(r#"{"schema":"provenant.lane.launch.v2"}"#)
-            .unwrap_err()
-            .contains("unsupported"));
+        assert!(
+            Spec::parse(r#"{"schema":"provenant.lane.launch.v2"}"#)
+                .unwrap_err()
+                .contains("unsupported")
+        );
     }
     #[test]
     fn capture_paths_cannot_escape() {

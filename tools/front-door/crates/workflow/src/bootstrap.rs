@@ -41,11 +41,7 @@ pub enum BootstrapError {
 }
 impl BootstrapError {
     pub fn exit_code(&self) -> i32 {
-        if matches!(self, Self::Usage(_)) {
-            2
-        } else {
-            1
-        }
+        if matches!(self, Self::Usage(_)) { 2 } else { 1 }
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +99,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, BootstrapError> {
             _ if arg.starts_with('-') => {
                 return Err(BootstrapError::Usage(format!(
                     "unknown option: {arg} (try --help)"
-                )))
+                )));
             }
             _ => positionals.push(arg.clone()),
         }
@@ -174,7 +170,7 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<bool, BootstrapError> 
                 } else {
                     path.into()
                 },
-            })
+            });
         }
     };
     let mut filename = name.to_os_string();
@@ -196,7 +192,7 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<bool, BootstrapError> 
             return Err(BootstrapError::Io {
                 path: temporary,
                 source,
-            })
+            });
         }
     }
     Ok(false)
@@ -212,7 +208,7 @@ pub fn fallback_content(name: &str, domain: &str) -> Result<String, BootstrapErr
                     domain
                 },
                 1,
-            ))
+            ));
         }
         "STATE.md" => include_str!("bootstrap_defaults/STATE.md"),
         "QUEUE.md" => include_str!("bootstrap_defaults/QUEUE.md"),
@@ -350,8 +346,15 @@ mod tests {
                 actual.push(json!(fallback_content(name, domain).unwrap()));
             }
         }
-        for goal in ["", "outside = ignore\n```config-knobs\n A = one=two\n#comment=ignored\nA = final\n = empty\n```\na=outside", " ```config-knobs\nA=no\n```", "```config-knobs \r\nA = yes\rB = also\u{85}C = line\n```", "```config-knobs\nA=1\n```other\nB=2\n```\nC=no\n```config-knobs\nD=4"] {
-            cases.push(json!({"op":"knobs","goal":goal})); actual.push(json!(parse_knobs(goal)));
+        for goal in [
+            "",
+            "outside = ignore\n```config-knobs\n A = one=two\n#comment=ignored\nA = final\n = empty\n```\na=outside",
+            " ```config-knobs\nA=no\n```",
+            "```config-knobs \r\nA = yes\rB = also\u{85}C = line\n```",
+            "```config-knobs\nA=1\n```other\nB=2\n```\nC=no\n```config-knobs\nD=4",
+        ] {
+            cases.push(json!({"op":"knobs","goal":goal}));
+            actual.push(json!(parse_knobs(goal)));
         }
         if let Some(expected) = crate::test_support::oracle("bootstrap", &json!(cases)) {
             assert_eq!(json!(actual), expected);

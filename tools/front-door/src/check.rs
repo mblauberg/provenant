@@ -3,7 +3,7 @@
 //! the stale-checkout advisory.
 
 use crate::exec::REPAIR;
-use crate::resolve::{self, Settings, FABRIC_MCP};
+use crate::resolve::{self, FABRIC_MCP, Settings};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};

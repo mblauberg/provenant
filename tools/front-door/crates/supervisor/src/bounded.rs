@@ -1,9 +1,9 @@
 //! File-backed bounded utility execution. Not the S2 provider lifecycle owner.
 use crate::capture::{
-    read_bounded_output, read_bounded_text, BoundedProcessResult, CaptureError, CapturedOutput,
+    BoundedProcessResult, CaptureError, CapturedOutput, read_bounded_output, read_bounded_text,
 };
 use crate::identity::Signal;
-use crate::sys::{anonymous_spool, OwnedChild};
+use crate::sys::{OwnedChild, anonymous_spool};
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::BorrowedFd;

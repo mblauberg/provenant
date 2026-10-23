@@ -289,17 +289,19 @@ pub fn collect(
 /// Return the Python table body, without the CLI's final newline. Widths count
 /// Unicode codepoints, as str.ljust does, rather than bytes or terminal cells.
 pub fn render(workers: &[Worker]) -> String {
-    let mut rows = vec![[
-        "PID",
-        "ELAPSED",
-        "CPU",
-        "OUTPUT SIZE",
-        "SESSION LOG MTIME",
-        "WORKTREE",
-        "STATUS",
-        "CWD",
-    ]
-    .map(String::from)];
+    let mut rows = vec![
+        [
+            "PID",
+            "ELAPSED",
+            "CPU",
+            "OUTPUT SIZE",
+            "SESSION LOG MTIME",
+            "WORKTREE",
+            "STATUS",
+            "CWD",
+        ]
+        .map(String::from),
+    ];
     for worker in workers {
         rows.push([
             worker.pid.to_string(),
@@ -344,9 +346,9 @@ pub fn render(workers: &[Worker]) -> String {
 pub mod edge;
 pub mod observe;
 pub use observe::{
-    canonical_cwd, log_metadata, output_size, process_cwd, repository_id, session_logs, worker_cwd,
-    worktree_state, CommandOutput, CommandRunner, NativeCensus, ObservationFs, ObserveError,
-    ObservedMetadata, ProcessCensus, SystemCommandRunner, SystemObservationFs,
+    CommandOutput, CommandRunner, NativeCensus, ObservationFs, ObserveError, ObservedMetadata,
+    ProcessCensus, SystemCommandRunner, SystemObservationFs, canonical_cwd, log_metadata,
+    output_size, process_cwd, repository_id, session_logs, worker_cwd, worktree_state,
 };
 
 #[cfg(test)]

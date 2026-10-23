@@ -1,8 +1,7 @@
 //! Harness knob registry and resolution. All paths, environments and layers are explicit.
 use crate::{
-    invalid,
+    Result, invalid,
     ordered::{self, Json},
-    Result,
 };
 use provenant_core::py::{python_json_eq, python_repr, python_strip};
 use serde::{Serialize, Serializer};
@@ -796,7 +795,13 @@ mod tests {
         assert_eq!(resolution.preset, "balanced");
         assert_eq!(resolution.overrides(), serde_json::json!({}));
         assert_eq!(resolution.digest().unwrap(), "44136fa355b3");
-        let Some(output)=crate::oracle::python("skills/_shared/harness_profile.py","import json\nr=m.resolve(m.load_registry(p))\nprint(json.dumps([r.stamp(),list(r.knobs),r.sources]))",&root())else{return;};
+        let Some(output) = crate::oracle::python(
+            "skills/_shared/harness_profile.py",
+            "import json\nr=m.resolve(m.load_registry(p))\nprint(json.dumps([r.stamp(),list(r.knobs),r.sources]))",
+            &root(),
+        ) else {
+            return;
+        };
         assert_eq!(
             serde_json::from_slice::<Value>(&output).unwrap(),
             serde_json::json!([
@@ -819,7 +824,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cases");
         fs::write(&path, serde_json::to_vec(&cases).unwrap()).unwrap();
-        let body=format!("import json\nr=m.load_registry(Path({:?}))\nprint(json.dumps([[x.stamp(),x.sources,x.overrides] for t,k,l in json.loads(p.read_text()) for x in [m.resolve(r,task_class=t,risk_tier=k,layers=l)]]))",root().to_str().unwrap());
+        let body = format!(
+            "import json\nr=m.load_registry(Path({:?}))\nprint(json.dumps([[x.stamp(),x.sources,x.overrides] for t,k,l in json.loads(p.read_text()) for x in [m.resolve(r,task_class=t,risk_tier=k,layers=l)]]))",
+            root().to_str().unwrap()
+        );
         let Some(output) = crate::oracle::python("skills/_shared/harness_profile.py", &body, &path)
         else {
             return;
@@ -866,7 +874,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cases");
         fs::write(&path, serde_json::to_vec(&cases).unwrap()).unwrap();
-        let body=format!("import json\nr=m.load_registry(Path({:?}))\nout=[]\nfor n,v in json.loads(p.read_text()):\n try: out.append(['ok',r.parse(n,v,'env')])\n except m.ProfileError as e: out.append(['error',str(e)])\nprint(json.dumps(out))",root().to_str().unwrap());
+        let body = format!(
+            "import json\nr=m.load_registry(Path({:?}))\nout=[]\nfor n,v in json.loads(p.read_text()):\n try: out.append(['ok',r.parse(n,v,'env')])\n except m.ProfileError as e: out.append(['error',str(e)])\nprint(json.dumps(out))",
+            root().to_str().unwrap()
+        );
         let Some(output) = crate::oracle::python("skills/_shared/harness_profile.py", &body, &path)
         else {
             return;
@@ -890,12 +901,16 @@ mod tests {
             registry.parse("effort.shift", "99999999999999999999999999", "env"),
             Err(crate::Error::ProfileNumberOutOfRange { .. })
         ));
-        assert!(registry
-            .check("effort.shift", &Value::Bool(true), "value")
-            .is_err());
-        assert!(registry
-            .check("effort.shift", &serde_json::json!(1.0), "value")
-            .is_err());
+        assert!(
+            registry
+                .check("effort.shift", &Value::Bool(true), "value")
+                .is_err()
+        );
+        assert!(
+            registry
+                .check("effort.shift", &serde_json::json!(1.0), "value")
+                .is_err()
+        );
     }
     #[test]
     fn malformed_layers_and_registries_refuse_without_panicking() {
@@ -909,9 +924,11 @@ mod tests {
             serde_json::json!({"knobs":{"effort.shift":true}}),
             serde_json::json!({"unknown":null}),
         ] {
-            assert!(registry
-                .check_layer(&serde_json::to_vec(&value).unwrap(), "file", true)
-                .is_err());
+            assert!(
+                registry
+                    .check_layer(&serde_json::to_vec(&value).unwrap(), "file", true)
+                    .is_err()
+            );
         }
         assert!(registry.resolve(None, Some("unknown"), &[]).is_err());
         let mut document: Value =
@@ -920,14 +937,16 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("trade_off");
-        assert!(Registry::from_json(
-            &serde_json::to_vec(&document).unwrap(),
-            registry.tier_order,
-            registry.task_classes
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("trade_off"));
+        assert!(
+            Registry::from_json(
+                &serde_json::to_vec(&document).unwrap(),
+                registry.tier_order,
+                registry.task_classes
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("trade_off")
+        );
     }
     #[test]
     fn profile_paths_use_pinned_instance_and_nearest_git() {
@@ -1198,19 +1217,23 @@ mod editing_tests {
             serde_json::json!({"schema_version":1,"preset":"economy","task_classes":{"legwork":{"preset":"rigorous"}}})
         );
         let before = fs::read(&path).unwrap();
-        assert!(edit_file(&registry, &path, |v| {
-            v["knobs"] = serde_json::json!({"effort.shift":99});
-            Ok(())
-        })
-        .is_err());
+        assert!(
+            edit_file(&registry, &path, |v| {
+                v["knobs"] = serde_json::json!({"effort.shift":99});
+                Ok(())
+            })
+            .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
         fs::write(&path, "[]").unwrap();
         let mut called = false;
-        assert!(edit_file(&registry, &path, |_| {
-            called = true;
-            Ok(())
-        })
-        .is_err());
+        assert!(
+            edit_file(&registry, &path, |_| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+        );
         assert!(!called);
     }
     #[test]
@@ -1218,7 +1241,10 @@ mod editing_tests {
         let registry = Registry::load(&root()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile");
-        let body=format!("r=m.load_registry(Path({:?}))\ndef change(d):\n d['preset']='economy'\n d['task_classes']={{'review':{{'knobs':{{}}}},'legwork':{{'preset':'rigorous','knobs':{{}}}}}}\nm.edit_file(r,p,change)\nprint(p.read_text(),end='')",root().to_str().unwrap());
+        let body = format!(
+            "r=m.load_registry(Path({:?}))\ndef change(d):\n d['preset']='economy'\n d['task_classes']={{'review':{{'knobs':{{}}}},'legwork':{{'preset':'rigorous','knobs':{{}}}}}}\nm.edit_file(r,p,change)\nprint(p.read_text(),end='')",
+            root().to_str().unwrap()
+        );
         let Some(expected) =
             crate::oracle::python("skills/_shared/harness_profile.py", &body, &path)
         else {

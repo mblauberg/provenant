@@ -1,7 +1,7 @@
 //! Fallback routes and live OpenCode listing decisions. Provider execution is an injected edge.
 use crate::{
     casefold::fold,
-    matching::{training_flag, MatchError, ModelCatalog},
+    matching::{MatchError, ModelCatalog, training_flag},
     ordered_json::OrderedValue,
 };
 use serde::{Deserialize, Serialize};
@@ -266,7 +266,18 @@ pub fn resolve_opencode_name(requested: &str, live: &[String]) -> OpencodeResolu
     }
     if !near.is_empty() {
         let names: Vec<_> = near.into_iter().take(12).cloned().collect();
-        return (None,vec![],Some(OpencodeRefusal{status:"model_ambiguous".into(),message:format!("{requested} matches several opencode models: {}; fix: pass the full provider/model id",names.join(", ")),candidates:names}));
+        return (
+            None,
+            vec![],
+            Some(OpencodeRefusal {
+                status: "model_ambiguous".into(),
+                message: format!(
+                    "{requested} matches several opencode models: {}; fix: pass the full provider/model id",
+                    names.join(", ")
+                ),
+                candidates: names,
+            }),
+        );
     }
     let mut closest: Vec<_> = tails
         .iter()
@@ -285,7 +296,17 @@ pub fn resolve_opencode_name(requested: &str, live: &[String]) -> OpencodeResolu
     } else {
         format!(" Closest: {}.", names.join(", "))
     };
-    (None,vec![],Some(OpencodeRefusal{status:"model_not_found".into(),candidates:names,message:format!("{requested} is not an opencode model.{hint} fix: run `opencode models` and pass a full provider/model id")}))
+    (
+        None,
+        vec![],
+        Some(OpencodeRefusal {
+            status: "model_not_found".into(),
+            candidates: names,
+            message: format!(
+                "{requested} is not an opencode model.{hint} fix: run `opencode models` and pass a full provider/model id"
+            ),
+        }),
+    )
 }
 
 // CPython difflib.SequenceMatcher without a junk predicate, including autojunk.

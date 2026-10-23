@@ -1,5 +1,5 @@
 use crate::delivery_run_shape::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -63,9 +63,11 @@ fn receipt_decoder_uses_the_shared_checked_json_integer_boundary() {
     ));
     for token in ["-9223372036854775808", "18446744073709551615"] {
         let run = ReceiptValue::from_json_str(&format!(r#"{{"repair_cycles":{token}}}"#)).unwrap();
-        assert!(!shape_errors(&run)
-            .iter()
-            .any(|error| error == "repair_cycles must be an integer, got float"));
+        assert!(
+            !shape_errors(&run)
+                .iter()
+                .any(|error| error == "repair_cycles must be an integer, got float")
+        );
     }
     let negative_zero =
         ReceiptValue::from_json_str(r#"{"schema_version":-0,"repair_cycles":-0}"#).unwrap();
@@ -74,9 +76,11 @@ fn receipt_decoder_uses_the_shared_checked_json_integer_boundary() {
         errors.first().map(String::as_str),
         Some("delivery receipt must use contract delivery-run schema_version 1")
     );
-    assert!(!errors
-        .iter()
-        .any(|error| error == "repair_cycles must be an integer, got float"));
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error == "repair_cycles must be an integer, got float")
+    );
 }
 
 #[test]

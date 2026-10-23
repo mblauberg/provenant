@@ -296,7 +296,14 @@ mod orchestration_tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
-        let Some(expected):Option<(Vec<std::path::PathBuf>,Vec<std::path::PathBuf>)>=crate::oracle::python("import json,sys; from pathlib import Path; r=Path(json.load(sys.stdin)['root']); print(json.dumps([[str(p) for p in sorted((r/'docs').rglob('*.md'))],[str(p) for p in [*sorted((r/'.github/ISSUE_TEMPLATE').glob('*.yml')),*sorted((r/'skills/setup-repo/templates/ISSUE_TEMPLATE').glob('*.yml'))] if p.name!='config.yml']]))",&json!({"root":dir.path()})) else{return;};
+        let Some(expected): Option<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> =
+            crate::oracle::python(
+                "import json,sys; from pathlib import Path; r=Path(json.load(sys.stdin)['root']); print(json.dumps([[str(p) for p in sorted((r/'docs').rglob('*.md'))],[str(p) for p in [*sorted((r/'.github/ISSUE_TEMPLATE').glob('*.yml')),*sorted((r/'skills/setup-repo/templates/ISSUE_TEMPLATE').glob('*.yml'))] if p.name!='config.yml']]))",
+                &json!({"root":dir.path()}),
+            )
+        else {
+            return;
+        };
         assert_eq!(input_paths(dir.path()), expected);
         struct Fixture;
         impl Checks for Fixture {

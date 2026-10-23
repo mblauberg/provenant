@@ -9,7 +9,7 @@ mod differential;
 pub mod hosts;
 pub mod ingest;
 mod pending;
-pub use pending::{decode_json, Numeric};
+pub use pending::{Numeric, decode_json};
 pub mod report;
 
 pub use pending::{Event, Observation, Usage};

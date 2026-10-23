@@ -305,7 +305,7 @@ pub fn annotate_child_errors(error: Option<&str>, children: &[ChildReport]) -> O
 mod tests {
     use super::*;
     use crate::oracle::CommandOutput;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     fn value() -> Value {
         json!({"run_id":"mcp-parent","task_id":"writer","attempt":1,"run_dir":"/runs/parent"})
     }
@@ -476,7 +476,7 @@ print(json.dumps(rows))
 mod review_regressions {
     use super::*;
     use crate::oracle::CommandOutput;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     #[test]
     fn batch_owner_mode_preserves_execution_custody_decision() {
         assert!(OwnerMode::StandaloneBatchChild.acquire_execution_custody());

@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::py::python_strip;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 pub const MIN_MAJOR: u64 = 2;

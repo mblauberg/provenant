@@ -307,7 +307,7 @@ pub fn shell_split(text: &str) -> Result<Vec<String>, ShellSplitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn python_oracle(body: &str, values: &Value) -> Option<Value> {
         crate::test_support::python_values(body, values)
@@ -600,7 +600,9 @@ print(json.dumps(out))
 /// Errors for a prevalidated Unicode decimal token (for example Python re `\d+`).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum IntegerError {
-    #[error("Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit")]
+    #[error(
+        "Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit"
+    )]
     DigitLimit { digits: usize },
     #[error("integer outside i64/u64 range")]
     NumberOutOfRange,

@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn retained_and_public_plan_contracts_match_python_records() {
-        use serde_json::{json, Value};
+        use serde_json::{Value, json};
         let dir = tempfile::tempdir().unwrap();
         let Some(expected): Option<(Value, Value)> = crate::oracle::python(
             r#"
@@ -505,9 +505,12 @@ print(json.dumps([r,public]))
             vec!["--branch", "x"],
             vec!["--prune-merged"],
         ];
-        let Some(expected): Option<Vec<(String,String,u8)>> = crate::oracle::python(
-            "import json,subprocess,sys; print(json.dumps([(r.stdout,r.stderr,r.returncode) for a in json.load(sys.stdin) for r in [subprocess.run([sys.executable,'scripts/clean.py',*a],capture_output=True,text=True)]]))", &json!(cases)
-        ) else { return; };
+        let Some(expected): Option<Vec<(String, String, u8)>> = crate::oracle::python(
+            "import json,subprocess,sys; print(json.dumps([(r.stdout,r.stderr,r.returncode) for a in json.load(sys.stdin) for r in [subprocess.run([sys.executable,'scripts/clean.py',*a],capture_output=True,text=True)]]))",
+            &json!(cases),
+        ) else {
+            return;
+        };
         for (argv, (stdout, stderr, exit_code)) in cases.iter().zip(expected) {
             let error = args(argv).request("/r".into()).unwrap_err();
             // Usage is an explicit parser-owned input. This tests renderer classification,

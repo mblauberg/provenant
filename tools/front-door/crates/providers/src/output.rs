@@ -1,8 +1,8 @@
 //! Provider stream interpretation, with explicit clock and catalogue seams.
 pub use crate::output_contract::{ObservedModel, ParsedOutput};
 pub use crate::output_policy::{
-    error_class, model_unavailable_fix, quota_window_is_short, reset_time, variant_fix, Classifier,
-    ModelCatalogue, OutputError, OutputEvents,
+    Classifier, ModelCatalogue, OutputError, OutputEvents, error_class, model_unavailable_fix,
+    quota_window_is_short, reset_time, variant_fix,
 };
 use crate::output_policy::{is_match, reset_time_nodes, truncate};
 use crate::{
@@ -54,7 +54,7 @@ impl OutputParser {
                 }
             }
             Err(crate::DecodeError::NumberOutOfRange) => {
-                return Err(crate::DecodeError::NumberOutOfRange.into())
+                return Err(crate::DecodeError::NumberOutOfRange.into());
             }
             Err(_) => {
                 for line in crate::pending::python_splitlines(stdout, true) {
@@ -66,7 +66,7 @@ impl OutputParser {
                             }
                         }
                         Err(crate::DecodeError::NumberOutOfRange) => {
-                            return Err(crate::DecodeError::NumberOutOfRange.into())
+                            return Err(crate::DecodeError::NumberOutOfRange.into());
                         }
                         Err(_) => plain.push(line.to_owned()),
                     }

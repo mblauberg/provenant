@@ -11,7 +11,7 @@ mod tasks;
 pub use diagnostics::*;
 pub use landing::*;
 pub use messages::*;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 pub use sessions::*;
 use std::{

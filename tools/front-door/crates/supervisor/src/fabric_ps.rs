@@ -2,7 +2,7 @@
 //!
 //! The caller supplies the bundled shim's installed absolute path. This library
 //! remains inert; no command ownership or installed path is changed here.
-use crate::bounded::{run_bounded_limited, BoundedError, Options};
+use crate::bounded::{BoundedError, Options, run_bounded_limited};
 use std::ffi::OsString;
 use std::path::Path;
 use thiserror::Error;

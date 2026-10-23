@@ -37,10 +37,12 @@ d=json.load(sys.stdin);print(json.dumps([m._resolve_opencode_name(n,d['live']) f
         return;
     };
     assert_eq!(
-        json!(names
-            .iter()
-            .map(|n| resolve_opencode_name(n, &live))
-            .collect::<Vec<_>>()),
+        json!(
+            names
+                .iter()
+                .map(|n| resolve_opencode_name(n, &live))
+                .collect::<Vec<_>>()
+        ),
         expected
     );
     assert_eq!(
@@ -108,7 +110,12 @@ fn close_match_ratios_match_cpython_including_popular_characters() {
         ("abab".repeat(80), "baba".repeat(80)),
         ("日本語a".into(), "日本b語".into()),
     ];
-    let Some(expected):Option<Vec<f64>>=crate::oracle::python("import difflib,json,sys;print(json.dumps([difflib.SequenceMatcher(None,a,b).ratio() for a,b in json.load(sys.stdin)]))",&json!(cases))else{return;};
+    let Some(expected): Option<Vec<f64>> = crate::oracle::python(
+        "import difflib,json,sys;print(json.dumps([difflib.SequenceMatcher(None,a,b).ratio() for a,b in json.load(sys.stdin)]))",
+        &json!(cases),
+    ) else {
+        return;
+    };
     for ((a, b), expected) in cases.iter().zip(expected) {
         assert_eq!(similarity(a, b), expected);
     }
