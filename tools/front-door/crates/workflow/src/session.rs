@@ -17,7 +17,7 @@ pub const HOST_SESSION_ID_LIMIT: usize = 128;
 pub struct HostSessionId(String);
 #[derive(Debug, Error)]
 #[error(
-    "host session ID must be 1-128 ASCII letters/digits/._-, start alphanumeric and contain no '..'"
+    "host session ID must be 1-128 lowercase ASCII letters/digits/._-, start alphanumeric and contain no '..'"
 )]
 pub struct HostSessionIdError;
 impl HostSessionId {
@@ -28,10 +28,10 @@ impl HostSessionId {
             || !text
                 .bytes()
                 .next()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
+                .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
             || !text
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
         {
             return Err(HostSessionIdError);
         }
@@ -285,7 +285,21 @@ mod tests {
     #[test]
     fn refuses_traversal_and_command_injection_in_host_keys() {
         for id in [
-            "", ".", "..", "a..b", "../x", "a/b", "a\\b", "a\0b", "a b", "x;id", "x'", "-flag", "é",
+            "",
+            ".",
+            "..",
+            "a..b",
+            "../x",
+            "a/b",
+            "a\\b",
+            "a\0b",
+            "a b",
+            "x;id",
+            "x'",
+            "-flag",
+            "é",
+            "ABC",
+            "7C1E4B2A-93D5-4F0E-B6A8-2D4C9E1F5A37",
         ] {
             assert!(HostSessionId::parse(id).is_err(), "{id:?}");
             assert!(
@@ -465,7 +479,7 @@ mod tests {
     fn hook_output_cap_counts_json_escaping_and_keeps_utf8_and_save_command() {
         let (_temp, root, project) = setup();
         let (fixture, event) = FIXTURES[0];
-        let selected = store(&root, project, "abc123");
+        let selected = store(&root, project, "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37");
         for text in [
             "é🦀\n\"\\".repeat(2800),
             "\0".repeat(CHECKPOINT_LIMIT as usize),
@@ -488,7 +502,7 @@ mod tests {
                 .unwrap();
             assert!(context.contains(&text.chars().take(80).collect::<String>()));
             assert!(context.contains("Checkpoint excerpt"));
-            assert!(context.contains("session save abc123 --file"));
+            assert!(context.contains("session save 7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37 --file"));
         }
     }
     #[test]
@@ -540,9 +554,13 @@ mod tests {
         );
         assert_eq!(reader.0, HOOK_INPUT_LIMIT + 1);
         assert_eq!(response.status, CheckpointStatus::InvalidInput);
-        let selected = store(&root, project, "abc123");
+        let selected = store(&root, project, "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37");
         save(&selected, b"x").unwrap();
-        std::fs::write(path(&root, project, "abc123").join("checkpoint.md"), [0xff]).unwrap();
+        std::fs::write(
+            path(&root, project, "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37").join("checkpoint.md"),
+            [0xff],
+        )
+        .unwrap();
         let response = hook_context(
             &root,
             project,
