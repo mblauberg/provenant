@@ -21,9 +21,10 @@ pieces to be written in-house so the dependency set stays lean.
 
 ## Decision
 
-1. **Land continuously.** Port units merge to `main` as small PRs. New crates
-   land inert; each command switches owner behind a selector at a command
-   boundary, then the old owner is deleted. There is no long-lived port branch.
+1. **Land continuously.** Port units merge to `main` as small PRs. Each slice ports a
+   command or subsystem, switches its callers to Rust and deletes the old
+   owner in the same PR; a selector is used only where a slice cannot land
+   atomically (amended for rulebook v6 at the user's direction). There is no long-lived port branch.
 2. **Fabric's TypeScript runtime is in scope.** The end state has no Node
    runtime; `runtime/fabric` is ported with the rest.
 3. **Direct dependencies are limited to this list.** Versions are pinned in
