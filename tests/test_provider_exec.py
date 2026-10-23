@@ -1170,7 +1170,7 @@ def agy_home_fixture(mod, monkeypatch, tmp_path):
 def stage_agy(mod, plan, private_tmp):
     """Stage as execute does, in the attempt tmp opened once without following a link."""
     tmp_fd = mod._open_canonical_dir(private_tmp)
-    return mod.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
+    return mod.agy_home.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
 
 
 def agy_plan(**extra):
@@ -1232,7 +1232,7 @@ def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_
     agy_state = mod.CONFINED_STATE["agy"]
     granted = {entry.removesuffix("*") for entry in (*agy_state["read_write"], *agy_state["write_literal"])}
     # Only state the profile already lets the lane write is ever copied back.
-    assert {f".gemini/antigravity-cli/{name}" for name in mod.AGY_RENAMED_STATE} <= granted
+    assert {f".gemini/antigravity-cli/{name}" for name in mod.agy_home.AGY_RENAMED_STATE} <= granted
     _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
     (root / "jetski_state.pbtxt").chmod(0o644)
     private_tmp = tmp_path / "tmp"
@@ -1251,12 +1251,12 @@ def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_
     (lane_root / "history.jsonl").symlink_to(outside)  # a link is never followed or installed
     os.mkfifo(lane_root / "last_check.timestamp")  # nor a FIFO, which must not block the copy
     (lane_root / "installation_id").write_text("x" * 65, encoding="utf-8")
-    monkeypatch.setattr(mod, "AGY_STATE_COPY_MAX", 64)
+    monkeypatch.setattr(mod.agy_home, "AGY_STATE_COPY_MAX", 64)
     (lane_root / "locked").mkdir()
     (lane_root / "locked/file").write_text("x", encoding="utf-8")
     (lane_root / "locked").chmod(0o500)
 
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     assert (root / "jetski_state.pbtxt").read_text() == "renamed\n"
     assert stat.S_IMODE((root / "jetski_state.pbtxt").stat().st_mode) == 0o644
     assert not (root / "jetski_state.pbtxt").is_symlink()
@@ -1267,7 +1267,7 @@ def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_
     assert sorted(warnings) == ["agy state not copied back: installation_id: larger than 64 bytes",
                                 "agy state not copied back: last_check.timestamp: not a regular file"]
     assert not overlay.exists()  # read-only directories and FIFOs included
-    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.AGY_COPY_BACK_LOCK]
+    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.agy_home.AGY_COPY_BACK_LOCK]
 
 
 def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
@@ -1315,7 +1315,7 @@ def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkey
     attempt.mkdir()
     (attempt / "tmp").symlink_to(victim)
     tmp_fd = mod._open_attempt_tmp(attempt)
-    staged = mod.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
+    staged = mod.agy_home.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
     assert (attempt / "tmp").is_dir() and not (attempt / "tmp").is_symlink()
     assert stat.S_IMODE((attempt / "tmp").stat().st_mode) == 0o700
     assert staged.path.is_dir() and list(victim.iterdir()) == []
@@ -1352,17 +1352,17 @@ def test_agy_home_cleanup_never_follows_a_tmp_or_overlay_swapped_for_a_link(monk
     (attempt / "tmp").rename(attempt / "moved")
     (attempt / "tmp").symlink_to(victim)
 
-    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    assert mod.agy_home.finish_agy_home(plan, tmp_fd, staged) == []
     assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
     assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
     assert list((attempt / "moved").iterdir()) == []
 
     # The same holds for a link planted inside the overlay itself.
-    staged = mod.stage_agy_home(plan, tmp_fd, attempt / "moved")
+    staged = mod.agy_home.stage_agy_home(plan, tmp_fd, attempt / "moved")
     victim_root = _plant_victim_overlay(victim, "planted")
     shutil.rmtree(staged.path / ".gemini")
     (staged.path / ".gemini").symlink_to(victim / "planted/.gemini")
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
     assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
     assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
@@ -1383,7 +1383,7 @@ def test_agy_home_copy_back_never_follows_a_real_state_parent_swapped_for_a_link
     (home / swapped).rename(tmp_path / "moved")
     (home / swapped).symlink_to(elsewhere if swapped == ".gemini" else elsewhere / "antigravity-cli")
 
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
     assert list((elsewhere / "antigravity-cli").iterdir()) == []
     assert list(private_tmp.iterdir()) == []
@@ -1407,7 +1407,7 @@ def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_histo
     with (root / "history.jsonl").open("a", encoding="utf-8") as history:
         history.write('{"other": 1}\n')
 
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
     assert warnings == ["agy state not copied back: " + kept]
     assert (root / "jetski_state.pbtxt").read_text() == "other\n"
@@ -1415,9 +1415,9 @@ def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_histo
     assert (root / "installation_id").read_text() == "lane\n"  # absent at staging and still absent
 
     # A lane that truncated or rewrote history adds nothing.
-    staged = mod.stage_agy_home(plan, tmp_fd, private_tmp)
+    staged = mod.agy_home.stage_agy_home(plan, tmp_fd, private_tmp)
     _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"forged": 1}\n')
-    assert mod.finish_agy_home(plan, tmp_fd, staged) == [
+    assert mod.agy_home.finish_agy_home(plan, tmp_fd, staged) == [
         "agy state not copied back: history.jsonl: shorter than at staging"]
     assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
 
@@ -1441,7 +1441,7 @@ def test_agy_history_copy_back_never_reads_a_sparse_staged_size(monkeypatch, tmp
         return real_pread(fd, size, offset)
 
     monkeypatch.setattr(os, "pread", bounded)
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     monkeypatch.undo()
     assert warnings == ["agy state not copied back: history.jsonl: shorter than at staging"], warnings
     assert (root / "history.jsonl").stat().st_size == 1 << 30
@@ -1464,7 +1464,7 @@ def test_agy_copy_back_refuses_hardlinked_sources_and_history_targets(monkeypatc
     os.link(secret, lane_root / "jetski_state.pbtxt")
     _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
 
-    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     assert sorted(warnings) == ["agy state not copied back: history.jsonl: not a single-link regular file",
                                 "agy state not copied back: jetski_state.pbtxt: not a single-link regular file"]
     assert (root / "jetski_state.pbtxt").read_text() == "original\n"
@@ -1485,8 +1485,8 @@ def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
         _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", name + "\n")
         finishers.append((staged, tmp_fd))
     results = {}
-    second = threading.Thread(target=lambda: results.update(second=mod.finish_agy_home(plan, *reversed(finishers[1]))))
-    real_install = mod._install_state
+    second = threading.Thread(target=lambda: results.update(second=mod.agy_home.finish_agy_home(plan, *reversed(finishers[1]))))
+    real_install = mod.agy_home._install_state
 
     def install_while_the_second_finishes(directory, name, data):
         if not second.is_alive() and "second" not in results:
@@ -1494,8 +1494,8 @@ def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
             second.join(0.5)  # without a lock the second finisher checks and installs here
         return real_install(directory, name, data)
 
-    monkeypatch.setattr(mod, "_install_state", install_while_the_second_finishes)
-    results["first"] = mod.finish_agy_home(plan, *reversed(finishers[0]))
+    monkeypatch.setattr(mod.agy_home, "_install_state", install_while_the_second_finishes)
+    results["first"] = mod.agy_home.finish_agy_home(plan, *reversed(finishers[0]))
     second.join()
     assert results["first"] == []
     kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
@@ -1506,10 +1506,10 @@ def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
     import fcntl
     staged, tmp_fd = stage_agy(mod, plan, tmp_path / "first")
     _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "held\n")
-    monkeypatch.setattr(mod, "AGY_COPY_BACK_WAIT", 0.2)
-    with open(root / mod.AGY_COPY_BACK_LOCK, "rb") as held:
+    monkeypatch.setattr(mod.agy_home, "AGY_COPY_BACK_WAIT", 0.2)
+    with open(root / mod.agy_home.AGY_COPY_BACK_LOCK, "rb") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
-        warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+        warnings = mod.agy_home.finish_agy_home(plan, tmp_fd, staged)
     assert len(warnings) == 1 and "stayed locked" in warnings[0], warnings
     assert (root / "jetski_state.pbtxt").read_text() == "first\n" and not staged.path.exists()
 
@@ -1522,20 +1522,20 @@ def test_agy_staging_creates_an_empty_database_so_sqlite_writes_through_the_link
     private_tmp.mkdir()
     plan = agy_plan()
     staged, tmp_fd = stage_agy(mod, plan, private_tmp)
-    database = staged.path / ".gemini/antigravity-cli" / mod.AGY_DATABASE
-    assert database.readlink() == root / mod.AGY_DATABASE
+    database = staged.path / ".gemini/antigravity-cli" / mod.agy_home.AGY_DATABASE
+    assert database.readlink() == root / mod.agy_home.AGY_DATABASE
     with sqlite3.connect(database) as connection:
         connection.execute("create table t (v)")
         connection.execute("insert into t values (1)")
     connection.close()
-    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
-    with sqlite3.connect(root / mod.AGY_DATABASE) as connection:
+    assert mod.agy_home.finish_agy_home(plan, tmp_fd, staged) == []
+    with sqlite3.connect(root / mod.agy_home.AGY_DATABASE) as connection:
         assert connection.execute("select v from t").fetchall() == [(1,)]
     connection.close()
     # An existing database is left as it is.
-    before = (root / mod.AGY_DATABASE).read_bytes()
-    mod.finish_agy_home(plan, tmp_fd, mod.stage_agy_home(plan, tmp_fd, private_tmp))
-    assert (root / mod.AGY_DATABASE).read_bytes() == before
+    before = (root / mod.agy_home.AGY_DATABASE).read_bytes()
+    mod.agy_home.finish_agy_home(plan, tmp_fd, mod.agy_home.stage_agy_home(plan, tmp_fd, private_tmp))
+    assert (root / mod.agy_home.AGY_DATABASE).read_bytes() == before
 
 
 RETRY_LANE = """
@@ -1566,7 +1566,7 @@ def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypa
     """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
     mod = supervisor()
     dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
-    monkeypatch.setattr(mod, "needs_ps_shim", lambda plan: True)
+    monkeypatch.setattr(mod.agy_home, "needs_ps_shim", lambda plan: True)
     victim = tmp_path / "live-bin"
     victim.mkdir(mode=0o755)
     (victim / "agentapi").write_text("live shim\n", encoding="utf-8")
@@ -2408,33 +2408,34 @@ def test_reconnecting_is_nonfatal_and_quota_discussion_is_not_an_error():
 def test_reset_evidence_uses_provider_time_units():
     from datetime import UTC, datetime
 
-    at = datetime(2026, 9, 23, 1, tzinfo=UTC)
+    at = datetime.now(UTC).replace(hour=1, minute=0, second=0, microsecond=0)
+    claude_reset = at + timedelta(hours=9)
     assert (
         provider_output().parse_output(
             "claude",
             json.dumps(
                 {
                     "type": "rate_limit_event",
-                    "rate_limit_info": {"status": "rejected", "resetsAt": 1790157600},
+                    "rate_limit_info": {"status": "rejected", "resetsAt": int(claude_reset.timestamp())},
                 }
             ),
             "",
             1,
             at=at,
         )["reset_at"]
-        == "2026-09-23T10:00:00Z"
+        == claude_reset.strftime("%Y-%m-%dT%H:%M:%SZ")
     )
     assert (
         provider_output().parse_output(
             "agy", "", "RESOURCE_EXHAUSTED Resets in 167h", 3, at=at
         )["reset_at"]
-        == "2026-09-30T00:00:00Z"
+        == (at + timedelta(hours=167)).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
     assert (
         provider_output().parse_output(
             "codex", "", "Usage limit; try again at 2:00 AM", 1, at=at
         )["reset_at"]
-        == "2026-09-23T02:00:00Z"
+        == at.replace(hour=2).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
 
 
@@ -9032,13 +9033,13 @@ def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_pat
             plan['applied']['confinement'] = 'sandbox-exec'
             # Run the fixture process directly while exercising real home staging and cleanup.
             monkeypatch.setattr(mod, 'confinement_command', lambda plan, command, search_path=None: command)
-            finish = mod.finish_agy_home
+            finish = mod.agy_home.finish_agy_home
 
             def failed_finish(*args):
                 finish(*args)
                 raise RuntimeError('home cleanup failed')
 
-            monkeypatch.setattr(mod, 'finish_agy_home', failed_finish)
+            monkeypatch.setattr(mod.agy_home, 'finish_agy_home', failed_finish)
             with pytest.raises(RuntimeError, match='home cleanup failed'):
                 mod.execute(plan, tmp_path / 'result.md', cancelled=lambda: True)
         else:
@@ -9100,7 +9101,7 @@ def test_dispatch_checks_live_adapter_listing(tmp_path, monkeypatch, model, effo
     state.mkdir()
     (state / "capabilities.json").write_text(json.dumps({"agy": {
         "version": "stub 1.0", "executable": str(adapter.resolve()),
-        "observed_at": "2999-01-01T00:00:00+00:00", "models": ["gemini-old"],
+        "observed_at": datetime.now(UTC).isoformat(), "models": ["gemini-old"],
     }}))
     plan = fixture_plan(tmp_path, "", "agy", requested_model=model)
     plan["model"] = model
