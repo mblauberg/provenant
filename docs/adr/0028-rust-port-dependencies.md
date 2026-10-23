@@ -3,7 +3,7 @@
 **Status:** Accepted 2026-10-23 (user direction in session)
 
 **Amends:** [ADR 0027](0027-rust-front-door.md), decision 1 ("no crate
-dependencies"). Plan and rulebook: [Whole-project Rust port](../specs/rust-port/README.md),
+dependencies"). Plan and rulebook: [Rust rewrite](../specs/rust-port/README.md),
 [PORTING.md](../specs/rust-port/PORTING.md).
 
 ## Context
