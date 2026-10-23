@@ -78,7 +78,7 @@ def handle(payload, *, digest=None):
             return None
         # Bash has no input-file provenance. In a project declaring protected paths,
         # even an innocuous command can indirectly read them: leave every result alone.
-        if utility.provider_exec.protected_paths(cwd) or utility.provider_exec.credential_path(cwd):
+        if utility.provider_exec.provider_confinement.protected_paths(cwd) or utility.provider_exec.provider_confinement.credential_path(cwd):
             return None
         if not checked_command(payload['tool_input']['command'], cwd):
             return None
