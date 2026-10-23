@@ -2,7 +2,7 @@
 
 Rulebook: PORTING.md version 4. Batch 3 source/oracle revision:
 `b527d675d15c50ee51701bb15db6439c95277918`. The assigned Python files remain
-unchanged through merged main `ad64bd688ad6517ae883b43cc6bcde3c700d0796`. Batch 2 oracle:
+unchanged through merged main `da6b4b376bffbfccab22b334b2920540ad765ee7`. Batch 2 oracle:
 `600dec09bcda3b6a86272e391420e89d38777953`; batch 1 oracle:
 `e897b10d58b27a46544969594eed08a5ed64c72c`.
 
