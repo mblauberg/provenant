@@ -12,7 +12,8 @@ The local oracle is CPython 3.14.8; interpreters must be at least 3.12.
 - `scripts/model_route_live.py#unit-02`: fallback generation, OpenCode discovery
   deadline/cache decisions, and bare-name resolution, including ambiguity,
   suggestions and Python SequenceMatcher's autojunk policy. The discovery
-  function receives a synchronous provider-listing callback and an explicit
+  function sends the exact adapter/executable/deadline/listing-only/refresh
+  request to a synchronous provider-listing callback and takes an explicit
   monotonic clock; it does not launch a provider.
 - `scripts/model_route_pools.py#unit-03`: exact human listing rendering, ordered
   routes/synonyms, Unicode padding, hidden/cooling summaries and quota caveats.
@@ -85,3 +86,16 @@ injected discovery edge still needs the process probe owner before use by a CLI.
 
 No new behavior change is intended. J1/J2/J3, independent mutant judges,
 platform conformance and command cut-over remain with the integration owners.
+
+## Verification and review
+
+- `cargo fmt --all`: passed with the pinned toolchain.
+- `cargo clippy -p provenant-routing --all-targets -- -D warnings`: passed.
+- `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-routing`: 49 passed,
+  zero failed/skipped. Only the targeted routing crate suite ran locally.
+- Independent native source review by `codex/gpt-6.1-sol@high`: clean after
+  repairs. Findings repaired a relocated fixture path, stale split-module
+  imports, missing training/default/refresh policy fixtures, and the typed
+  provider request boundary. The fallback oracle now exercises 72 combinations;
+  the deadline oracle compares complete probe requests and failure outcomes.
+- Main was merged into the lane; no rebase. CI remains the PR landing gate.

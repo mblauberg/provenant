@@ -159,18 +159,35 @@ pub fn fallback_candidates(
     Ok(results)
 }
 
+/// Exact request to the process probe owner; no safety chat is requested for discovery.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderListingRequest {
+    pub adapter: String,
+    pub executable: String,
+    pub deadline: f64,
+    pub listing_only: bool,
+    pub refresh: bool,
+}
+
 /// One shared deadline; a short refresh budget never invokes the probe.
 pub fn opencode_live_models<E>(
     refresh: bool,
     deadline: Option<f64>,
     monotonic_now: f64,
-    probe: impl FnOnce(f64, bool) -> Result<Value, E>,
+    probe: impl FnOnce(ProviderListingRequest) -> Result<Value, E>,
 ) -> (Vec<String>, bool) {
     let deadline = deadline.unwrap_or(monotonic_now + crate::live::OPENCODE_DISCOVERY_BUDGET);
     if refresh && deadline - monotonic_now < crate::live::OPENCODE_REFRESH_MIN_REMAINING {
         return (vec![], false);
     }
-    let Ok(record) = probe(deadline, refresh) else {
+    let request = ProviderListingRequest {
+        adapter: "opencode".into(),
+        executable: "opencode".into(),
+        deadline,
+        listing_only: true,
+        refresh,
+    };
+    let Ok(record) = probe(request) else {
         return (vec![], false);
     };
     if !record.is_object()
@@ -232,8 +249,8 @@ pub fn resolve_opencode_name(requested: &str, live: &[String]) -> OpencodeResolu
     } else {
         exact.clone()
     };
-    if near.len() == 1 {
-        let model = near[0].clone();
+    if let [matched] = near.as_slice() {
+        let model = (*matched).clone();
         let how = if exact.is_empty() {
             " (unique prefix match)"
         } else {
