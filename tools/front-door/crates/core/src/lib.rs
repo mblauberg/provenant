@@ -8,5 +8,6 @@ pub mod jsonc;
 pub mod paths;
 mod pending;
 pub mod product_root_resolver;
+pub mod roots;
 #[cfg(test)]
 mod test_support;
