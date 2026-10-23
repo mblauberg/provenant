@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { OWNER_RECORD_NAME, terminateRecordedRun, type RecordedRun } from "../src/run-registry.js";
+import { OWNER_RECORD_NAME, type RecordedRun } from "../src/run-registry.js";
+import { terminateRecordedRun } from "../src/process-identity.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 it("closing a run whose directory was already removed resolves instead of rejecting", async () => {
