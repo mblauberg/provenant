@@ -1196,7 +1196,7 @@ def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
     root = tmp_path / "workspace"
     cwd = root / "sub"
     cwd.mkdir(parents=True)
-    identity = mod.workspace_identity(root, cwd)
+    identity = mod.writer_lease.workspace_identity(root, cwd)
     assert identity["cwd"] == str(cwd)
     assert identity["root"] == str(root)
 
@@ -1208,7 +1208,7 @@ def test_workspace_identity_canonicalizes_fallback_root(tmp_path):
     workspace_link = tmp_path / "workspace-link"
     workspace_link.symlink_to(real_root, target_is_directory=True)
 
-    identity = mod.workspace_identity(workspace_link, workspace_link / "sub")
+    identity = mod.writer_lease.workspace_identity(workspace_link, workspace_link / "sub")
 
     assert identity["root"] == str(real_root.resolve())
     assert identity["cwd"] == str((real_root / "sub").resolve())
@@ -1221,7 +1221,7 @@ def test_workspace_identity_keeps_canonical_caller_root_inside_git_checkout(tmp_
     provider_cwd = workspace / "sub"
     provider_cwd.mkdir(parents=True)
     monkeypatch.setattr(
-        mod.subprocess,
+        mod.writer_lease.subprocess,
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 0,
@@ -1230,7 +1230,7 @@ def test_workspace_identity_keeps_canonical_caller_root_inside_git_checkout(tmp_
         ),
     )
 
-    identity = mod.workspace_identity(workspace, provider_cwd)
+    identity = mod.writer_lease.workspace_identity(workspace, provider_cwd)
 
     assert identity["root"] == str(workspace.resolve())
     assert identity["cwd"] == str(provider_cwd.resolve())
@@ -2890,10 +2890,10 @@ def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path, adapter: 
     worktree = make_worktree(tmp_path)
     module = load_dispatch_module()
 
-    lease = module.acquire_worktree_lease(worktree)
+    lease = module.writer_lease.acquire_worktree_lease(worktree)
     try:
-        with pytest.raises(module.WorktreeLeaseError, match="another writer"):
-            module.acquire_worktree_lease(worktree)
+        with pytest.raises(module.writer_lease.WorktreeLeaseError, match="another writer"):
+            module.writer_lease.acquire_worktree_lease(worktree)
         result = run_writer_dispatch(
             tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree),
             adapter=adapter,
@@ -2901,9 +2901,9 @@ def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path, adapter: 
         assert result.returncode != 0
         assert json.loads(result.stdout)["status"] == "worktree_busy"
     finally:
-        module.release_worktree_lease(lease)
+        module.writer_lease.release_worktree_lease(lease)
 
-    assert module.acquire_worktree_lease(worktree) is not None
+    assert module.writer_lease.acquire_worktree_lease(worktree) is not None
 
 
 def reserve_for_graph(worktree: Path, state: Path, graph_state: str, token: str = "graph-token") -> None:
@@ -2944,12 +2944,12 @@ def test_hand_dispatch_into_a_graph_reserved_worktree_is_refused(tmp_path: Path,
     assert "graph g-0a1b2c node edit" in record["message"]
     assert "provenant graph cancel g-0a1b2c" in record["message"]
     # The refusal comes before the writer lease: nothing holds the worktree afterwards.
-    module.release_worktree_lease(module.acquire_worktree_lease(worktree))
+    module.writer_lease.release_worktree_lease(module.writer_lease.acquire_worktree_lease(worktree))
 
     monkeypatch.setenv("PROVENANT_GRAPH_RESERVATION", "graph-token")
-    assert module.graph_reservation_refusal(worktree) is None, "the graph's own writer passes with its token"
+    assert module.writer_lease.graph_reservation_refusal(worktree) is None, "the graph's own writer passes with its token"
     monkeypatch.setenv("PROVENANT_GRAPH_RESERVATION", "another-token")
-    assert module.graph_reservation_refusal(worktree) is not None
+    assert module.writer_lease.graph_reservation_refusal(worktree) is not None
 
 
 @pytest.mark.parametrize("graph_state", ["done", "cancelled", None])
@@ -2963,7 +2963,7 @@ def test_graph_reservation_of_an_ended_graph_is_stale(tmp_path: Path, monkeypatc
         git_dir = Path(subprocess.run(["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
                                       check=True, capture_output=True, text=True).stdout.strip())
         (git_dir / "provenant-graph-reservation.json").write_text(json.dumps({"graph_id": "g-0a1b2c", "token": "gone"}), encoding="utf-8")
-    assert load_dispatch_module().graph_reservation_refusal(worktree) is None
+    assert load_dispatch_module().writer_lease.graph_reservation_refusal(worktree) is None
 
 
 def test_graph_reservation_refuses_when_the_store_cannot_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2972,7 +2972,7 @@ def test_graph_reservation_refuses_when_the_store_cannot_be_read(tmp_path: Path,
     reserve_for_graph(worktree, state, "running")
     monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(tmp_path / "missing-state"))
     monkeypatch.delenv("PROVENANT_GRAPH_RESERVATION", raising=False)
-    refusal = load_dispatch_module().graph_reservation_refusal(worktree)
+    refusal = load_dispatch_module().writer_lease.graph_reservation_refusal(worktree)
     assert refusal is not None and "cannot confirm" in refusal
 
 
@@ -4085,8 +4085,8 @@ print(json.dumps({'type':'result','result':'DONE'}))
     else:
         assert json.loads(marker.read_text()) == {'operation_id': operation}
     lease_owner = load_dispatch_module()
-    lease = lease_owner.acquire_worktree_lease(worktree)
-    lease_owner.release_worktree_lease(lease)
+    lease = lease_owner.writer_lease.acquire_worktree_lease(worktree)
+    lease_owner.writer_lease.release_worktree_lease(lease)
 
 
 def test_normal_attempt_records_reaped_new_session_child(tmp_path, monkeypatch):
@@ -4204,8 +4204,8 @@ time.sleep(30)
             active = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
             assert active['pgid_started_at']
             assert active['pgid_started_at'] == mod.process_info.start_time(active['pgid'])
-        with pytest.raises(mod.WorktreeLeaseError):
-            mod.acquire_worktree_lease(worktree)
+        with pytest.raises(mod.writer_lease.WorktreeLeaseError):
+            mod.writer_lease.acquire_worktree_lease(worktree)
         if stop == 'SIGTERM':
             process.send_signal(signal.SIGTERM)
         elif stop == 'marker':
@@ -4219,8 +4219,8 @@ time.sleep(30)
         for pid in pids:
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
-        lease = mod.acquire_worktree_lease(worktree)
-        mod.release_worktree_lease(lease)
+        lease = mod.writer_lease.acquire_worktree_lease(worktree)
+        mod.writer_lease.release_worktree_lease(lease)
         receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
         assert receipt['status'] == ('cancelled' if stop == 'marker' else 'failed')
     finally:
@@ -4339,7 +4339,7 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
     mod = load_dispatch_module()
     if edits == 'cap':
-        monkeypatch.setattr(mod, 'STARTUP_WALK_MAX_ENTRIES', 2)
+        monkeypatch.setattr(mod.writer_lease, 'STARTUP_WALK_MAX_ENTRIES', 2)
     args = mod.parser().parse_args(command[2:] + ['--access-mode', 'worktree_write', '--worktree', str(worktree)])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     args.fallback = json.dumps(['claude/sonnet'])
@@ -5204,8 +5204,8 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
             if action == "cancel":
                 (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
             else:
-                with pytest.raises(mod.WorktreeLeaseError):
-                    mod.acquire_worktree_lease(worktree)
+                with pytest.raises(mod.writer_lease.WorktreeLeaseError):
+                    mod.writer_lease.acquire_worktree_lease(worktree)
                 for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
                     stores_before[store] = store.read_bytes()
                 (worktree / "intervening.txt").write_text("another edit")
@@ -6901,8 +6901,8 @@ def test_finished_writer_records_whether_worktree_is_unchanged(tmp_path, monkeyp
 
 def test_worktree_unchanged_is_unknown_when_git_cannot_say(tmp_path):
     mod = load_dispatch_module()
-    assert mod.worktree_unchanged(None, str(tmp_path)) is None
-    assert mod.worktree_unchanged(('old-head', b''), str(tmp_path)) is None
+    assert mod.writer_lease.worktree_unchanged(None, str(tmp_path)) is None
+    assert mod.writer_lease.worktree_unchanged(('old-head', b''), str(tmp_path)) is None
 
 
 def test_dispatch_refuses_escalation_without_retry(tmp_path, monkeypatch, capsys):

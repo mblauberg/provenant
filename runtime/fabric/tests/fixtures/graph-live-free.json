@@ -20,7 +20,7 @@
         "model": "deepseek-free"
       },
       "brief": {
-        "prompt": "Read the function acquire_worktree_lease in skills/orchestrate/scripts/dispatch_run.py in this repository. In at most five bullet points, explain how it keeps a second writer out of a worktree and what a refused writer sees. Cite line numbers."
+        "prompt": "Read the function acquire_worktree_lease in skills/orchestrate/scripts/writer_lease.py in this repository. In at most five bullet points, explain how it keeps a second writer out of a worktree and what a refused writer sees. Cite line numbers."
       }
     },
     {
