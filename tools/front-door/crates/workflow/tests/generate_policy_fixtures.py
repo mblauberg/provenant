@@ -55,5 +55,5 @@ for unit, function_name in [("review_ladder", "check_review_ladder"), ("review_t
             function(**kwargs)
     destination = Path(__file__).parent / "fixtures" / f"{unit}.json"
     destination.parent.mkdir(exist_ok=True)
-    destination.write_text(json.dumps(fixtures, indent=2) + "\n")
+    destination.write_text("[\n" + ",\n".join(json.dumps(case, sort_keys=True) for case in fixtures) + "\n]\n")
     print(f"{unit}: {len(fixtures)} translated cases")

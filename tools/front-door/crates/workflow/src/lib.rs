@@ -4,10 +4,13 @@
 pub mod custody;
 mod pending;
 
-#[cfg(test)]
-mod test_support;
+pub mod bootstrap;
 pub mod portable_workflow;
 pub mod review_ladder;
 pub mod review_terminal;
 pub mod run_gates;
-pub mod bootstrap;
+#[cfg(test)]
+mod test_support;
+
+mod policy;
+pub use policy::PolicyError;

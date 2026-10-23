@@ -17,10 +17,15 @@ unsafe/syscall implementations, and pathname opens cannot substitute for them.
 The private `pending` module holds `OwnedFileError`, which belongs in
 `provenant-confinement`. No fake successful effects are exposed.
 
-## Portable workflow unit 01
+## Portable workflow unit 01: partial
 
-Identity validation, object reads, SHA-256 digest, contract/context validation
-and fallback artifact writes are ported. CLI parsing remains for cut-over.
+Identity validation and SHA-256 digest are ported. Contract/context validation
+and fallback writes are implemented for finite, Unicode-scalar JSON with
+representable integers. The source reader also accepts non-finite numbers,
+lone surrogate escapes and arbitrary integers. Those cases remain blocked on
+the config/records parser API, not approved divergences (RP-1001). The private
+`pending::read_python_object` helper belongs in `provenant-config`.
+CLI parsing remains for cut-over.
 The private `pending::python_json` encoder belongs in `provenant-records`;
 it preserves sorted keys, ASCII escaping, spaces and the final newline at
 this artifact boundary. It is not a general canonical floating-point codec.
@@ -32,10 +37,13 @@ are ported. `tests/generate_policy_fixtures.py` expands the unchanged Python
 policy assertions into retained JSON fixtures; Rust compares the same cases
 with both their expected values and the live Python implementation.
 
-## Review terminal unit 01
+## Review terminal unit 01: partial
 
 Closed worker-result shape checks, verdict precedence, endpoint/provider/model
-lineage, unavailable statuses and certification rules are ported. Typed worker
+lineage, unavailable statuses and certification rules are implemented for
+representable JSON inputs. Arbitrary Python exit integers and lone surrogate
+strings remain parser integration gaps (RP-1001), so this unit is partial.
+Typed worker
 and normalised result records use serde. Policy fixtures translate all 17 pure
 assertions in `tests/test_review_terminal.py`; the registry/YAML drift test
 remains an integration gap. Differential cases also cover every adapter.
@@ -53,3 +61,34 @@ diagnostics, Git query, safe read, replace helper and fenced knob parsing.
 `main` (mission resolution, creation, substitution, environment checks and
 receipt) belongs to later units and is not implemented here. Exact source
 help and fallback text are retained as assets, rather than executable Python.
+
+## Verification and remaining gates
+
+The source policy cases are retained as 71 review-ladder fixtures and 17
+review-terminal fixtures, expanded without pytest or internal-seam tests.
+Rust tests cover every module, including Python differentials for path
+refusals, portable output bytes and failures, review decisions, gate fields,
+bootstrap argument/help/default text and knob parsing. All subprocesses run
+synchronously. No provider runs, clock sleeps, command cut-over or old-source
+deletions are involved.
+
+Only CPython's built-in unhashable-TypeError prose is normalised, to the
+exception type and exact list/dict kind, because Python 3.14 changed that
+wording. Explicit policy diagnostics and artifact bytes remain exact.
+The current interpreter is Python 3.14.3; Rust uses pinned 1.94.1.
+The non-UTF-8 filesystem fixture skips if the filesystem/sandbox refuses its
+name. This headless sandbox refused it; Unicode, hard links, relative symlinks
+and root resolution still ran. Linux/macOS CI must exercise that fixture.
+
+J1 CLI/help/environment, J2 schema/canonical-byte mutants, J3 MCP transcripts,
+platform conformance and the cross-crate adapter catalogue drift check remain
+cut-over/integration gates. None was claimed as run here. The workspace is
+inert and the front door still uses its existing owners.
+
+Final local checks: `cargo fmt --all`,
+`cargo clippy -p provenant-workflow --all-targets -j 2 -- -D warnings`, and
+`cargo test -p provenant-workflow -j 2` passed. The test run had 16 passing
+Rust tests, no failures and no ignored tests, plus zero doctests. Native
+adversarial source review and its repair-delta review found no remaining
+actionable defects within the documented implemented scope. PR CI remains the
+merge gate; this lane does not merge or enable auto-merge.
