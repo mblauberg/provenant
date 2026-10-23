@@ -500,6 +500,7 @@ fn executable_in(path: &Path) -> bool {
     }
 }
 
+pub use crate::render::{render, RenderError};
 
 /// Resolve explicit adapter prefixes before inferring an owner from a bare id.
 pub fn resolve_model(

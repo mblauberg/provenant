@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod casefold;
+mod render;
 
 pub mod catalog;
 pub mod capability;
