@@ -381,3 +381,165 @@ with tempfile.TemporaryDirectory() as directory:
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 }
+
+#[derive(Debug, Error)]
+pub enum ProcessError {
+    #[error("{operation}: {path}")]
+    Io { operation: &'static str, path: std::path::PathBuf, #[source] source: std::io::Error },
+    #[error(transparent)]
+    Parse(#[from] ProcessParseError),
+    #[error("{0}")]
+    Census(String),
+    #[error(transparent)]
+    Bounded(#[from] crate::bounded::BoundedError),
+}
+
+fn read_error(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> ProcessError + '_ {
+    |source| ProcessError::Io { operation: "read process observation", path: path.into(), source }
+}
+
+pub fn linux_read_row(pid: i32, proc_root: &std::path::Path) -> Result<Option<ProcessRow>, ProcessError> {
+    let path = proc_root.join(pid.to_string()).join("stat");
+    linux_process_row(pid, &std::fs::read(&path).map_err(read_error(&path))?).map_err(Into::into)
+}
+
+/// A missing task/children interface requests a full census. A process that
+/// disappears during traversal is simply omitted. Include previously seen
+/// children so a reparented descendant remains observable.
+pub fn linux_tree_snapshot(root_pid: i32, known_pids: &[i32], proc_root: &std::path::Path)
+    -> Result<Option<std::collections::BTreeMap<i32, ProcessRow>>, ProcessError> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let mut queue = VecDeque::from([root_pid]);
+    queue.extend(known_pids);
+    let mut visited = BTreeSet::new();
+    let mut rows = BTreeMap::new();
+    while let Some(pid) = queue.pop_front() {
+        if !visited.insert(pid) { continue; }
+        let row = match linux_read_row(pid, proc_root) {
+            Ok(Some(row)) => row,
+            Ok(None) | Err(ProcessError::Io { .. }) => continue,
+            Err(error) => return Err(error),
+        };
+        rows.insert(pid, row);
+        let task = proc_root.join(pid.to_string()).join("task");
+        let Ok(threads) = std::fs::read_dir(task) else { return Ok(None); };
+        for thread in threads {
+            let Ok(thread) = thread else { return Ok(None); };
+            let Ok(children) = std::fs::read_to_string(thread.path().join("children")) else { return Ok(None); };
+            for child in children.split_whitespace() {
+                queue.push_back(child.parse().map_err(|_| ProcessParseError::Field("child pid"))?);
+            }
+        }
+    }
+    Ok(Some(rows))
+}
+
+pub fn tty_name(device: u32, dev_root: &std::path::Path) -> OsString {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if device == 0 || device == u32::MAX { return "??".into(); }
+    if let Ok(entries) = std::fs::read_dir(dev_root) {
+        for entry in entries.flatten() {
+            if entry.metadata().is_ok_and(|metadata| metadata.file_type().is_char_device() && metadata.rdev() as u32 == device) {
+                return entry.file_name();
+            }
+        }
+    }
+    device.to_string().into()
+}
+
+pub fn linux_boot_time(proc_root: &std::path::Path) -> Result<i64, ProcessError> {
+    let path = proc_root.join("stat");
+    let text = std::fs::read_to_string(&path).map_err(read_error(&path))?;
+    for line in text.lines() {
+        if line.starts_with("btime ") {
+            return line.split_whitespace().nth(1).and_then(|value| value.parse().ok())
+                .ok_or(ProcessParseError::Field("boot time").into());
+        }
+    }
+    Err(ProcessError::Census("Linux boot time unavailable".into()))
+}
+
+#[cfg(target_os = "macos")]
+pub fn darwin_process_row(pid: i32) -> Option<ProcessRow> {
+    let info = crate::sys::process::darwin_bsd(pid)?;
+    Some(ProcessRow { pid, ppid: info.ppid, pgid: info.pgid,
+        started: format!("{}.{:06}", info.start_sec, info.start_usec), command: info.command,
+        zombie: info.status == 5, tty: tty_name(info.device, std::path::Path::new("/dev")).to_string_lossy().into_owned(), status: info.status })
+}
+
+pub fn probe_process_row(pid: i32) -> Option<ProcessRow> {
+    #[cfg(target_os = "macos")]
+    { darwin_process_row(pid) }
+    #[cfg(target_os = "linux")]
+    { linux_read_row(pid, std::path::Path::new("/proc")).ok().flatten() }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    { let _ = pid; None }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture_row(root: &Path, pid: i32, children: &str) {
+        let directory = root.join(pid.to_string());
+        std::fs::create_dir_all(directory.join("task").join(pid.to_string())).unwrap();
+        std::fs::write(directory.join("stat"), format!("{pid} (tool) S 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234")).unwrap();
+        std::fs::write(directory.join("task").join(pid.to_string()).join("children"), children).unwrap();
+    }
+
+    #[test]
+    fn task_children_include_known_reparented_nodes_and_break_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        fixture_row(root.path(), 42, "43 44");
+        fixture_row(root.path(), 43, "42");
+        fixture_row(root.path(), 45, "");
+        let rows = linux_tree_snapshot(42, &[45, 45, 999], root.path()).unwrap().unwrap();
+        assert_eq!(rows.keys().copied().collect::<Vec<_>>(), [42, 43, 45]);
+        std::fs::remove_file(root.path().join("43/task/43/children")).unwrap();
+        assert!(linux_tree_snapshot(42, &[], root.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn boot_time_and_tty_unknowns_preserve_source_errors_and_values() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("stat"), "cpu 1 2 3\nbtime 1704067200\n").unwrap();
+        assert_eq!(linux_boot_time(root.path()).unwrap(), 1704067200);
+        std::fs::write(root.path().join("stat"), "cpu 1 2 3\n").unwrap();
+        assert_eq!(linux_boot_time(root.path()).unwrap_err().to_string(), "Linux boot time unavailable");
+        assert_eq!(tty_name(0, root.path()), "??");
+        assert_eq!(tty_name(u32::MAX, root.path()), "??");
+        assert_eq!(tty_name(12345, root.path()), "12345");
+    }
+
+    #[test]
+    fn canonical_local_dates_match_python_with_explicit_epochs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(&root, r#"
+import json
+from skills.orchestrate.scripts.process_info import _lstart
+print(json.dumps([_lstart(t) for t in [0, 1704067200, 1735689599, -1]]))
+"#) else { return; };
+        let actual: Vec<_> = [0.0, 1704067200.0, 1735689599.0, -1.0].into_iter()
+            .map(|epoch| crate::sys::process::lstart(epoch).unwrap()).collect();
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sdk_facts_layout_and_mach_timebase_are_read_without_global_state() {
+        use crate::sys::process::{darwin_facts_bytes, mach_tick_seconds};
+        let mut raw = vec![0_u8; 648];
+        raw[..8].copy_from_slice(&1704067200_i64.to_ne_bytes());
+        raw[8..16].copy_from_slice(&123456_i64.to_ne_bytes());
+        for (offset, value) in [(40, 42_i32), (420, 501), (560, 2), (564, 3)] {
+            raw[offset..offset+4].copy_from_slice(&value.to_ne_bytes());
+        }
+        let facts = darwin_facts_bytes(42, &raw).unwrap();
+        assert_eq!((facts.pid, facts.ppid, facts.pgid, facts.uid), (42, 2, 3, 501));
+        assert_eq!(facts.start_epoch, 1704067200.123456);
+        assert!(darwin_facts_bytes(43, &raw).is_none());
+        assert!(darwin_facts_bytes(42, &raw[..647]).is_none());
+        assert!(mach_tick_seconds() > 0.0);
+    }
+}

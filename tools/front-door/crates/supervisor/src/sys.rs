@@ -242,3 +242,5 @@ mod tests {
 
 mod child;
 pub(crate) use child::{anonymous_spool, OwnedChild};
+
+pub mod process;
