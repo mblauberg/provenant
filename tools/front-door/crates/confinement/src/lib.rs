@@ -2,3 +2,4 @@
 #![forbid(unsafe_code)]
 
 pub mod agy_home;
+pub mod instruction_quarantine;
