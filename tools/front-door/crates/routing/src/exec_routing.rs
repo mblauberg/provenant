@@ -226,8 +226,11 @@ mod tests {
             r#""\u001c\u001f""#,
         ];
         let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
-            "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\nanswer=[]\nfor wire in json.load(sys.stdin):\n row=[]\n for fn in (m.validate_policy,lambda value:m.parse_candidate(value,'codex')):\n  try: row.append(json.dumps(fn(json.loads(wire)),ensure_ascii=False,separators=(',',':')))\n  except ValueError as error: row.append('error:'+str(error))\n answer.append(row)\nprint(json.dumps(answer))", &serde_json::json!(wires)
-        ) else { return; };
+            "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\nanswer=[]\nfor wire in json.load(sys.stdin):\n row=[]\n for fn in (m.validate_policy,lambda value:m.parse_candidate(value,'codex')):\n  try: row.append(json.dumps(fn(json.loads(wire)),ensure_ascii=False,separators=(',',':')))\n  except ValueError as error: row.append('error:'+str(error))\n answer.append(row)\nprint(json.dumps(answer))",
+            &serde_json::json!(wires),
+        ) else {
+            return;
+        };
         let actual: Vec<Vec<String>> = wires
             .iter()
             .map(|wire| {
@@ -279,11 +282,13 @@ mod tests {
             serde_json::to_string(&super::parse_candidate(&raw, "codex").unwrap()).unwrap(),
             r#"{"model":"x","effort":null,"adapter":"claude"}"#
         );
-        assert!(super::parse_candidate(
-            &crate::ordered_json::OrderedValue::String("\u{1c}\u{1f}".into()),
-            "codex"
-        )
-        .is_err());
+        assert!(
+            super::parse_candidate(
+                &crate::ordered_json::OrderedValue::String("\u{1c}\u{1f}".into()),
+                "codex"
+            )
+            .is_err()
+        );
     }
 
     #[test]

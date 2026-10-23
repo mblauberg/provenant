@@ -5,7 +5,7 @@
 //! `AGENTS_HOME`, then `~/.agents`. A pointer that exists but is bad is an
 //! error, never a fallback.
 
-use crate::exec::{is_executable, REPAIR};
+use crate::exec::{REPAIR, is_executable};
 use crate::json::{self, Value};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -212,7 +212,7 @@ pub fn local_root() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     struct Scratch(PathBuf);
 
@@ -400,8 +400,10 @@ mod tests {
         let s = Scratch::new("relative");
         let mut settings = s.settings();
         settings.product_root = Some("rel/path".into());
-        assert!(err(&settings)
-            .starts_with("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got rel/path;"));
+        assert!(
+            err(&settings)
+                .starts_with("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got rel/path;")
+        );
         settings.product_root = None;
         settings.agents_home = Some("rel".into());
         assert!(err(&settings).starts_with("AGENTS_HOME must be an absolute path"));

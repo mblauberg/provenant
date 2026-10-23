@@ -1,8 +1,8 @@
 use super::*;
 use crate::{display::*, time::*};
-use jiff::{tz::TimeZone, Timestamp};
+use jiff::{Timestamp, tz::TimeZone};
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::{path::Path, process::Command};
 
@@ -888,14 +888,16 @@ fn activity_reads_only_metadata_and_respects_identity_and_local_dates() {
     let next = root.join("codex/sessions/2026/10/24/next.jsonl");
     std::fs::create_dir_all(next.parent().unwrap()).unwrap();
     std::fs::write(&next, []).unwrap();
-    assert!(activity_paths(
-        "codex",
-        &root.join("codex"),
-        local,
-        root,
-        &TimeZone::get("Australia/Brisbane").unwrap()
-    )
-    .contains(&next));
+    assert!(
+        activity_paths(
+            "codex",
+            &root.join("codex"),
+            local,
+            root,
+            &TimeZone::get("Australia/Brisbane").unwrap()
+        )
+        .contains(&next)
+    );
 }
 
 #[test]
@@ -1162,7 +1164,9 @@ fn checked_numbers_preserve_large_integers_and_reject_out_of_range_tokens() {
     ] {
         let n: Number = decode_record(text.as_bytes()).unwrap();
         assert_eq!(serde_json::to_string(&n).unwrap(), text);
-        let wire = format!("{{\"name\":\"w\",\"used_percent\":{text},\"window_minutes\":{text},\"used_amount\":{text},\"limit_amount\":{text}}}");
+        let wire = format!(
+            "{{\"name\":\"w\",\"used_percent\":{text},\"window_minutes\":{text},\"used_amount\":{text},\"limit_amount\":{text}}}"
+        );
         let row: Window = decode_record(wire.as_bytes()).unwrap();
         let value = json!(row);
         for key in [

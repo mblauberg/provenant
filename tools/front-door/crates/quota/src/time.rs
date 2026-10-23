@@ -2,8 +2,8 @@
 pub use crate::pending::from_timestamp;
 use crate::pending::{decimal_digit, python_strip};
 use jiff::{
-    civil::{Date, ISOWeekDate, Time},
     Timestamp,
+    civil::{Date, ISOWeekDate, Time},
 };
 use serde_json::Value;
 
@@ -61,11 +61,7 @@ fn python_iso(text: &str) -> Option<Timestamp> {
     let week = bytes.get(if extended { 5 } else { 4 }) == Some(&b'W');
     let length = if week {
         if extended {
-            if bytes.get(8) == Some(&b'-') {
-                10
-            } else {
-                8
-            }
+            if bytes.get(8) == Some(&b'-') { 10 } else { 8 }
         } else if bytes.get(7).is_some_and(u8::is_ascii_digit) {
             8
         } else {

@@ -151,6 +151,7 @@ jobs:
               - 'tests/**'
               - 'tools/**'
               - '.gitignore'
+              - '_typos.toml'
               - 'ACKNOWLEDGEMENTS.md'
               - 'AGENTS.md'
               - 'CLAUDE.md'
@@ -226,6 +227,7 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - '.github/zizmor.yml'
+              - '.github/actionlint.yaml'
 
   harness-checks:
     name: Python checks
@@ -495,6 +497,8 @@ jobs:
     name: Rust front door
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
     needs: detect-changes
@@ -506,17 +510,17 @@ jobs:
           persist-credentials: false
       # The runner image ships rustup; the toolchain is pinned here and in
       # tools/front-door/rust-toolchain.toml (ADR 0027).
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
-      - name: Cache Rust build artifacts
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: ~/.cache/provenant/cargo-target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tools/front-door/Cargo.lock', 'tools/front-door/rust-toolchain.toml') }}
-      - name: Set persistent Cargo target directory
-        run: echo "CARGO_TARGET_DIR=$HOME/.cache/provenant/cargo-target" >> "$GITHUB_ENV"
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+          workspaces: tools/front-door
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -541,10 +545,27 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Run unit tests
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Install nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Run workspace tests
         working-directory: tools/front-door
-        run: cargo test --workspace --locked
+        run: cargo nextest run --profile ci --workspace --locked
+      - name: Run fault-injection tests
+        working-directory: tools/front-door
+        run: cargo nextest run --profile ci -p provenant --features fault-injection --locked
+      - name: Run documentation tests
+        working-directory: tools/front-door
+        run: cargo test --doc --workspace --locked
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-nextest-junit
+          path: tools/front-door/target/nextest/ci/junit.xml
+          if-no-files-found: warn
       - name: Build release binary
         working-directory: tools/front-door
         run: |
@@ -555,11 +576,41 @@ jobs:
       - name: Run the golden CLI suite
         run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden -q
 
+  rust-dependencies:
+    name: Rust dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install dependency tools
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-deny@0.20.2,cargo-shear@1.14.0
+      - name: Check advisories, licences and dependency allowlist
+        working-directory: tools/front-door
+        run: cargo deny check
+      - name: Check for unused dependencies
+        working-directory: tools/front-door
+        run: cargo shear
+
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
   # time. Share the Rust path filter and exercise the front door's release build.
   rust-macos-release:
     name: Rust macOS release smoke
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 20
     permissions:
       contents: read
@@ -570,8 +621,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
@@ -579,6 +634,49 @@ jobs:
         run: |
           PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
             cargo build --release --locked -p provenant --bin provenant
+
+  generic-checks:
+    name: Spelling, workflows and Markdown links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install spelling checker
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: typos-cli@1.51.1
+      # These tools are not in install-action's supported binary catalogue.
+      # Verify the pinned upstream release archives before executing them.
+      - name: Install actionlint, ShellCheck and lychee
+        env:
+          TOOL_DIR: ${{ runner.temp }}/generic-tools
+        run: |
+          mkdir -p "$TOOL_DIR/bin"
+          cd "$TOOL_DIR"
+          curl --fail --silent --show-error --location --output actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          curl --fail --silent --show-error --location --output shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz' | sha256sum --check
+          tar -xJf shellcheck.tar.xz --strip-components=1 -C bin shellcheck-v0.11.0/shellcheck
+          curl --fail --silent --show-error --location --output lychee.tar.gz \
+            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz
+          echo '1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a  lychee.tar.gz' | sha256sum --check
+          tar -xzf lychee.tar.gz --strip-components=1 -C bin lychee-x86_64-unknown-linux-gnu/lychee
+          echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
+      - name: Check spelling
+        run: git ls-files | typos --file-list - --force-exclude
+      - name: Check workflows and their shell blocks
+        run: actionlint
+      - name: Check local Markdown links and fragments
+        run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
 
   zizmor:
     name: Workflow security lint
@@ -621,7 +719,9 @@ jobs:
       - split-root
       - rust
       - rust-macos-release
+      - rust-dependencies
       - zizmor
+      - generic-checks
     if: always()
     steps:
       - name: Fail unless every needed job succeeded or was skipped by filter

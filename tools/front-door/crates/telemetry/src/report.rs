@@ -1,7 +1,7 @@
 //! Route outcome reducers and text tables. Full ledger report selection is a later slice.
 use crate::{
-    costs::{self, Prices},
     Numeric, Result, Usage,
+    costs::{self, Prices},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

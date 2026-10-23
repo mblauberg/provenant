@@ -278,7 +278,7 @@ mod tests {
 #[cfg(test)]
 mod advisory_tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     #[test]
     fn cooldown_scope_and_lexical_identity_merge_match_python() {
         let catalog = json!({"adapters":{"codex":{"models":[{"id":"gpt-6-sol","names":["sol"]}]}}});

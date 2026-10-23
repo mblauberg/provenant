@@ -333,7 +333,19 @@ impl Store {
         let mut agents = self.agent_ids(&who.project)?;
         agents.sort_by_cached_key(|a| a.encode_utf16().collect::<Vec<_>>());
         let teams = self.db.prepare("SELECT DISTINCT team_id FROM team_members WHERE project = ? AND agent_id != ? ORDER BY team_id")?.query_map(params![who.project, who.agent_id], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(format!("unbound recipient \"{to}\"; fix: pass to:<seat> from these valid recipients: labels/seats: {}; teams: {}; all", if agents.is_empty() { "none".into() } else { agents.join(", ") }, if teams.is_empty() { "none".into() } else { teams.join(", ") }))
+        Ok(format!(
+            "unbound recipient \"{to}\"; fix: pass to:<seat> from these valid recipients: labels/seats: {}; teams: {}; all",
+            if agents.is_empty() {
+                "none".into()
+            } else {
+                agents.join(", ")
+            },
+            if teams.is_empty() {
+                "none".into()
+            } else {
+                teams.join(", ")
+            }
+        ))
     }
     fn resolve_recipients(
         &self,

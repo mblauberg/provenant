@@ -8,7 +8,7 @@ description: "Use for software docs, specs, READMEs, commits, PRs, runbooks, err
 Write clear, brief, accurate and useful engineering prose in Australian English.
 Cut first. Add only what serves the reader's job and belongs in this document.
 
-This skill is a specialization of the `natural-writing` hub: it owns
+This skill is a specialisation of the `natural-writing` hub: it owns
 codebase/README/commit/PR artefact types and links to the hub for the
 Australian English default, the anti-AI taxonomy and the condense pass. See
 `references/process.md`, `references/style-standard.md` and

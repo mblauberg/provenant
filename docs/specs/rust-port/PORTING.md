@@ -132,7 +132,9 @@ A new crate, feature expansion or material transitive addition needs a rule
 change here with a reason. Changes so far: `rusqlite` also serves run's
 registry store, so admission and operation insertion stay atomic in one
 database; `toml_edit` enables its `serde` feature (with `serde_spanned` and
-`toml_datetime`) so config is a typed model under R4. When parallel PRs conflict on `Cargo.lock`, take
+`toml_datetime`) so config is a typed model under R4. A workspace policy test checks every
+member's direct dependencies against this list, with `tempfile` in
+dev-dependencies only. When parallel PRs conflict on `Cargo.lock`, take
 `main`'s lockfile and run `cargo metadata --format-version 1 >/dev/null` in
 `tools/front-door`.
 

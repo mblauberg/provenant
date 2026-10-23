@@ -1,0 +1,140 @@
+# ADR 0028: licences, advisories, sources and the approved transitive set.
+# tests/workspace_policy.rs separately enforces the direct dependency list.
+[graph]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+[licenses]
+allow = [
+  "MIT",          # Project licence and the ADR 0028 default.
+  "Apache-2.0",   # The other ADR 0028 default; used across the dependency tree.
+]
+
+exceptions = [{ crate = "unicode-ident", allow = ["Unicode-3.0"] }]
+
+[bans]
+multiple-versions = "warn"
+# Include workspace members as well as registry crates. This is an allowlist,
+# not a wildcard for the transitive dependencies of an approved direct crate.
+allow = [
+  "aho-corasick",
+  "anstyle",
+  "bitflags",
+  "block-buffer",
+  "cc",
+  "cfg-if",
+  "clap",
+  "clap_builder",
+  "clap_derive",
+  "clap_lex",
+  "const-oid",
+  "cpufeatures",
+  "crypto-common",
+  "digest",
+  "equivalent",
+  "errno",
+  "fallible-iterator",
+  "fallible-streaming-iterator",
+  "fastrand",
+  "find-msvc-tools",
+  "foldhash",
+  "getrandom",
+  "hashbrown",
+  "hashlink",
+  "heck",
+  "hybrid-array",
+  "indexmap",
+  "itoa",
+  "jiff",
+  "jiff-core",
+  "jiff-static",
+  "jiff-tzdb",
+  "jiff-tzdb-platform",
+  "libc",
+  "libsqlite3-sys",
+  "linux-raw-sys",
+  "log",
+  "memchr",
+  "once_cell",
+  "pkg-config",
+  "portable-atomic",
+  "portable-atomic-util",
+  "proc-macro2",
+  "provenant",
+  "provenant-cli",
+  "provenant-config",
+  "provenant-confinement",
+  "provenant-core",
+  "provenant-fabric-mcp",
+  "provenant-fabric-runtime",
+  "provenant-fabric-store",
+  "provenant-providers",
+  "provenant-quota",
+  "provenant-records",
+  "provenant-routing",
+  "provenant-run",
+  "provenant-supervisor",
+  "provenant-telemetry",
+  "provenant-workflow",
+  "quote",
+  "regex",
+  "regex-automata",
+  "regex-syntax",
+  "rusqlite",
+  "rustix",
+  "rustversion",
+  "serde",
+  "serde_core",
+  "serde_derive",
+  "serde_json",
+  "serde_spanned",
+  "sha2",
+  "shlex",
+  "smallvec",
+  "syn",
+  "tempfile",
+  "thiserror",
+  "thiserror-impl",
+  "toml_datetime",
+  "toml_edit",
+  "toml_parser",
+  "toml_writer",
+  "typenum",
+  "unicode-ident",
+  "vcpkg",
+  "winnow",
+  "zmij",
+]
+
+[bans.build]
+# Only crates in the current lockfile that actually contain build scripts.
+# libsqlite3-sys builds bundled SQLite; the others probe compiler/platform
+# capabilities or generate bindings/tables/macros on the supported targets.
+allow-build-scripts = [
+  { name = "getrandom" },
+  { name = "libc" },
+  { name = "libsqlite3-sys" },
+  { name = "portable-atomic" },
+  { name = "portable-atomic-util" },
+  { name = "proc-macro2" },
+  { name = "quote" },
+  { name = "rustix" },
+  { name = "rustversion" },
+  { name = "serde" },
+  { name = "serde_core" },
+  { name = "serde_json" },
+  { name = "thiserror" },
+  { name = "zmij" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

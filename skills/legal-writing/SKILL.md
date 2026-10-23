@@ -10,7 +10,7 @@ Stricter project and forum instructions override it. This is drafting
 assistance, not legal advice: verify current law, forms and procedure against
 official sources and retain qualified or human review for filing-facing work.
 
-This skill is a specialization of the `natural-writing` hub. The hub owns the
+This skill is a specialisation of the `natural-writing` hub. The hub owns the
 Australian English default, the anti-AI taxonomy and the condense pass; this
 skill owns jurisdiction, forum, instrument and filing-facing rules. The Legal
 Function Test is this skill's own claim-classification scheme and does not map

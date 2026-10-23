@@ -5,8 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 const FETCH_MAX_AGE: u64 = 3 * 86400;
-const TRUSTED_PATH: &str =
-    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const TRUSTED_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 // These queries print a few lines, so their piped stdout cannot fill before exit.
 fn output_with_timeout(mut command: Command) -> Option<Output> {
     let mut child = command.spawn().ok()?;

@@ -1,0 +1,16 @@
+[profile.ci]
+retries = 2
+flaky-result = "fail"
+leak-timeout = { period = "500ms", result = "fail" }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[test-groups]
+serial-sqlite = { max-threads = 1 }
+
+# These suites own SQLite stores or launch process/custody fixtures. Keep
+# them serial within a test run; independent pure-data suites remain parallel.
+[[profile.ci.overrides]]
+filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & (binary(front_door) | binary(lane_run)))'
+test-group = "serial-sqlite"
