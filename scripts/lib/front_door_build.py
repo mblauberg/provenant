@@ -173,8 +173,7 @@ def select(
             cargo_available = shutil.which("cargo") is not None or (Path.home() / ".cargo/bin/cargo").is_file()
         if not cargo_available:
             raise FrontDoorError("cargo is not on PATH (looked in ~/.cargo/bin too)")
-        target_dir = Path(os.environ.get("CARGO_TARGET_DIR", build_dir))
-        binary = build(crate, target_dir, digest)
+        binary = build(crate, build_dir, digest)
         smoke(binary)
         return "rust", binary, "built"
     except FrontDoorError as exc:

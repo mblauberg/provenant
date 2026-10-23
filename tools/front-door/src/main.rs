@@ -112,7 +112,7 @@ fn route(args: &[OsString], seat: bool) -> Route {
         return usage();
     };
     let mut rest = rest.to_vec();
-    if matches!(command, "lanes" | "events") {
+    if matches!(command, "lanes" | "events" | "graph") {
         rest.insert(0, first.clone());
         command = "fabric";
     }

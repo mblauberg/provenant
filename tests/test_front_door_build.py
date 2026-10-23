@@ -141,7 +141,7 @@ def test_auto_without_cargo_falls_back_with_the_reason(tmp_path):
     kind, source, note = build.select(tmp_path, "auto", tmp_path / "b", cargo_available=False)
 
     assert kind == "python" and source.name == "provenant.template"
-    assert note == "cargo is not on PATH"
+    assert note == "cargo is not on PATH (looked in ~/.cargo/bin too)"
 
 
 def test_build_stamps_the_digest_and_selects_the_binary(tmp_path, monkeypatch):
@@ -260,3 +260,15 @@ def test_command_line_prints_only_the_answer_on_stdout(tmp_path):
         capture_output=True, text=True, check=False,
     )
     assert missing.returncode == 3 and missing.stdout == ""
+
+
+def test_explicit_build_directory_beats_cargo_target_environment(tmp_path, monkeypatch):
+    make_crate(tmp_path)
+    fake_cargo(tmp_path / "fake")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'fake'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "ambient"))
+
+    _, binary, _ = build.select(tmp_path, "rust", tmp_path / "explicit")
+
+    assert binary == tmp_path / "explicit/release/provenant"
+    assert not (tmp_path / "ambient").exists()

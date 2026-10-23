@@ -1,22 +1,30 @@
 //! Best-effort warning when the selected product checkout is behind origin.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::SystemTime;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 const FETCH_MAX_AGE: u64 = 3 * 86400;
 const TRUSTED_PATH: &str =
     "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-const GIT_REDIRECTS: [&str; 8] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-];
+// These queries print a few lines, so their piped stdout cannot fill before exit.
+fn output_with_timeout(mut command: Command) -> Option<Output> {
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
 
 fn git(root: &Path, args: &[&str]) -> Option<Vec<String>> {
     let mut command = Command::new("git");
@@ -28,14 +36,12 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<String>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     command
+        .env_clear()
         .env("PATH", TRUSTED_PATH)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0");
-    for name in GIT_REDIRECTS {
-        command.env_remove(name);
-    }
-    let output = command.output().ok()?;
+    let output = output_with_timeout(command)?;
     if !output.status.success() {
         return None;
     }
@@ -126,5 +132,19 @@ pub fn warn(root: &Path) {
     }
     for line in warning_lines(root) {
         eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_query_is_killed_and_reaped() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec /bin/sleep 10"]);
+        let start = Instant::now();
+        assert!(output_with_timeout(command).is_none());
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 }
