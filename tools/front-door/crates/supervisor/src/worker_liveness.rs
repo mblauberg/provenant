@@ -341,5 +341,14 @@ pub fn render(workers: &[Worker]) -> String {
         .join("\n")
 }
 
+pub mod observe;
+pub use observe::{
+    canonical_cwd, log_metadata, output_size, process_cwd, repository_id, session_logs, worker_cwd,
+    worktree_state, CommandOutput, CommandRunner, NativeCensus, ObservationFs, ObserveError,
+    ObservedMetadata, ProcessCensus, SystemCommandRunner, SystemObservationFs,
+};
+
+#[cfg(test)]
+mod observe_tests;
 #[cfg(test)]
 mod tests;
