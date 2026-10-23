@@ -259,7 +259,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -299,7 +299,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -336,7 +336,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -367,7 +367,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -398,7 +398,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked orchestration dependencies
@@ -439,7 +439,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -528,7 +528,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies

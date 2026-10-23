@@ -551,7 +551,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     )
     options = setup_uv.get("with")
     assert isinstance(options, dict)
-    assert options.get("python-version") == "3.12"
+    assert options.get("python-version") == "3.14"
     assert options.get("enable-cache") is True
     assert options.get("cache-dependency-glob") == "uv.lock"
 
@@ -634,7 +634,7 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
         step for step in fabric_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
     )
     assert setup_uv.get("with") == {
-        "python-version": "3.12",
+        "python-version": "3.14",
         "enable-cache": True,
         "cache-dependency-glob": "uv.lock",
     }
