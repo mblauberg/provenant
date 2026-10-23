@@ -58,3 +58,31 @@ fn components(path: &Path) -> VecDeque<OsString> {
         .collect()
 }
 
+// port: belongs in provenant-supervisor
+/// Metadata captured without following a link. `allocated` is st_blocks * 512.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EntryInfo {
+    pub device: u64,
+    pub inode: u64,
+    pub links: u64,
+    pub allocated: u64,
+    pub directory: bool,
+    pub symlink: bool,
+}
+
+// port: belongs in provenant-supervisor
+/// Descriptor-relative operations. Handles own their descriptor and close on drop.
+/// Implementations must not follow links in open_child; verified opens must also
+/// compare before/after device and inode and require the anchor device.
+pub(crate) trait StorageFs {
+    type Dir;
+    type Entries: Iterator<Item = io::Result<OsString>>;
+    fn open_anchor(&self, path: &Path) -> io::Result<Self::Dir>;
+    fn info(&self, dir: &Self::Dir) -> io::Result<EntryInfo>;
+    fn stat(&self, parent: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<EntryInfo>;
+    fn open_child(&self, parent: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<Self::Dir>;
+    fn entries(&self, dir: &Self::Dir) -> io::Result<Self::Entries>;
+    fn make_writable(&self, dir: &Self::Dir) -> io::Result<()>;
+    fn unlink(&self, parent: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<()>;
+    fn rmdir(&self, parent: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<()>;
+}
