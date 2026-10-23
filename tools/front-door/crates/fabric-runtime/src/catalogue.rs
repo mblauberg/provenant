@@ -271,7 +271,7 @@ pub fn live_models(
     let mut omitted = 0;
     let mut omitted_models = 0;
     for (line, count) in lines {
-        if used + length(&line) + 1 <= OUTPUT_BUDGET {
+        if used + length(&line) < OUTPUT_BUDGET {
             used += length(&line) + 1;
             kept.push(line);
         } else {

@@ -38,45 +38,13 @@ mod tests {
 
     #[test]
     fn node_differential_matches_source_alias_policy() {
-        use std::process::Command;
-
-        let node = std::env::var_os("PROVENANT_PORT_NODE").unwrap_or_else(|| "node".into());
         let script = r#"import { canonicalSuccessStatus, isSuccessStatus } from './src/success-status.ts';
 const values = JSON.parse(process.argv.at(-1));
 console.log(JSON.stringify(values.map(value => [canonicalSuccessStatus(value), isSuccessStatus(value)])));"#;
         let fixtures = json!(["succeeded", "ok", "failed", null, 0, false, {}, []]);
-        let output = Command::new(node)
-            .args([
-                "--experimental-strip-types",
-                "--input-type=module",
-                "-e",
-                script,
-                "--",
-            ])
-            .arg(fixtures.to_string())
-            .current_dir(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../../runtime/fabric"
-            ))
-            .output();
-        let Ok(output) = output else {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!("PROVENANT_PORT_NODE is required but unavailable");
-            }
-            eprintln!("skip: Node differential interpreter unavailable");
+        let Some(actual) = crate::test_support::node(script, &[fixtures.to_string()]) else {
             return;
         };
-        if !output.status.success() {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!(
-                    "Node differential failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            eprintln!("skip: Node does not support source type stripping");
-            return;
-        }
-        let actual: Value = serde_json::from_slice(&output.stdout).unwrap();
         let expected: Vec<_> = fixtures
             .as_array()
             .unwrap()

@@ -255,15 +255,12 @@ mod tests {
 
     #[test]
     fn python_differential_covers_policy_defaults_and_exclusion_warnings() {
-        use std::process::Command;
-
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("allowed")).unwrap();
         write_policy(
             root.path(),
             r#"{"instruction_changes":"deny","secret_scan_exclude":["allowed","../outside",null],"tools":{"default_branch":NaN,"extra":1,"lint":{"areas":["api"],"x":2}}}"#,
         );
-        let python = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
         let source = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../../skills/orchestrate/scripts/fabric_policy.py"
@@ -277,28 +274,12 @@ instruction = module.instruction_changes(root)
 excluded = module.secret_scan_exclude(root)
 tools = module.tools_policy(root)
 print(json.dumps({'instruction': instruction, 'excluded': [[str(p) for p in excluded[0]], excluded[1]], 'tools': tools}))"#;
-        let result = Command::new(python)
-            .args(["-I", "-c", script, source, root.path().to_str().unwrap()])
-            .env_clear()
-            .output();
-        let Ok(result) = result else {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!("PROVENANT_PORT_PYTHON is required but unavailable");
-            }
-            eprintln!("skip: Python differential interpreter unavailable");
+        let Some(actual) = crate::test_support::python(
+            script,
+            &[source.into(), root.path().to_str().unwrap().into()],
+        ) else {
             return;
         };
-        if !result.status.success() {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!(
-                    "Python differential failed: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
-            eprintln!("skip: Python policy module could not be loaded");
-            return;
-        }
-        let actual: Value = serde_json::from_slice(&result.stdout).unwrap();
         let (paths, path_warnings) = secret_scan_exclude(root.path());
         let expected = serde_json::json!({
             "instruction": instruction_changes(root.path()),

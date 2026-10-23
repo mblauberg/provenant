@@ -123,11 +123,13 @@ mod tests {
             "🦀.json",
         ];
         let args = serde_json::to_string(&names).unwrap();
-        let result=match std::process::Command::new("node").args(["-e", "process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).map(n=>/\\.json$|^result\\.md$|^\\d{8}-\\d{4}-/u.test(require('path').basename(n)))))",&args]).output() {
-            Ok(result)=>result,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return,Err(error)=>panic!("{error}")
+        let Some(expected) = crate::test_support::node(
+            r#"import {basename} from 'node:path'; console.log(JSON.stringify(JSON.parse(process.argv[1]).map(n=>/\.json$|^result\.md$|^\d{8}-\d{4}-/u.test(basename(n)))))"#,
+            &[args],
+        ) else {
+            return;
         };
-        assert!(result.status.success());
-        let expected: Vec<bool> = serde_json::from_slice(&result.stdout).unwrap();
+        let expected: Vec<bool> = serde_json::from_value(expected).unwrap();
         assert_eq!(
             names.map(|n| relevant(Some(Path::new(n)))).as_slice(),
             expected

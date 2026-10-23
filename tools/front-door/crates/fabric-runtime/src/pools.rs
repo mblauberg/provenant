@@ -65,8 +65,7 @@ pub fn rotate_override_from_knobs(knobs: Option<&[String]>) -> Option<bool> {
     let mode = knobs?
         .iter()
         .filter_map(|item| item.split_once('='))
-        .filter(|(name, _)| *name == "routing.pool_mode")
-        .next_back()?
+        .rfind(|(name, _)| *name == "routing.pool_mode")?
         .1;
     match mode {
         "rotate" => Some(true),

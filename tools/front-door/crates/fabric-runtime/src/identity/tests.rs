@@ -344,34 +344,11 @@ fn differential_against_typescript_identity_when_interpreter_is_available() {
         paths.push(lexical.join("link/../x"));
     }
     let script="const m=await import(requireUrl(process.argv[1])); function requireUrl(p){return new URL('file://'+p).href}; const env={AGENT_FABRIC_SEAT:'fixture',AGENT_FABRIC_LABEL:'worker'}; process.stdout.write(JSON.stringify(process.argv.slice(2).map(p=>({identity:m.identify(env,p),run:m.runRoot(p,env),project:m.projectRoot(p,env)}))))";
-    let output = match Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--input-type=module",
-            "-e",
-            script,
-        ])
-        .arg(source)
-        .args(&paths)
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!("skipped TS differential: node unavailable");
-            return;
-        }
-        Err(error) => panic!("{error}"),
-    };
-    if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("bad option") {
-        eprintln!("skipped TS differential: node lacks TypeScript transform support");
+    let mut args = vec![source.to_string_lossy().into_owned()];
+    args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
+    let Some(expected) = crate::test_support::node(script, &args) else {
         return;
-    }
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    };
     let env = Environment::from([
         ("AGENT_FABRIC_SEAT".into(), "fixture".into()),
         ("AGENT_FABRIC_LABEL".into(), "worker".into()),

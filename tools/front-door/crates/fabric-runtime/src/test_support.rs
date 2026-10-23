@@ -2,6 +2,7 @@
 use serde_json::Value;
 use std::{
     fs,
+    io::Read,
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -42,11 +43,22 @@ fn output(command: &mut Command) -> Option<Vec<u8>> {
     assert!(
         status.success(),
         "oracle failed: {}",
-        fs::read_to_string(stderr).unwrap()
+        String::from_utf8_lossy(&read_limited(&stderr))
     );
-    let bytes = fs::read(stdout).unwrap();
+    let bytes = read_limited(&stdout);
     assert!(bytes.len() <= 1_048_576, "oracle output exceeded limit");
     Some(bytes)
+}
+
+fn read_limited(path: &Path) -> Vec<u8> {
+    let mut bytes = vec![];
+    fs::File::open(path)
+        .unwrap()
+        .take(1_048_577)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(bytes.len() <= 1_048_576, "oracle output exceeded limit");
+    bytes
 }
 
 fn interpreter(kind: &str, default: &str, minimum: u64) -> Option<std::ffi::OsString> {

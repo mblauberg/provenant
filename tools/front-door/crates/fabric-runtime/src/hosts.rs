@@ -221,7 +221,8 @@ mod incomplete_rewrite_tests {
     use super::*;
     #[test]
     fn incomplete_non_object_rewrite_is_explicit_and_leaves_input_intact() {
-        for rewrite in [json!("🦀")] {
+        {
+            let rewrite = json!("🦀");
             let mut input = Map::from_iter([("prompt".into(), json!("retained"))]);
             let before = input.clone();
             assert_eq!(
