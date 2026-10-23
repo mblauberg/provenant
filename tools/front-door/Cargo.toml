@@ -94,7 +94,6 @@ license.workspace = true
 fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
-provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }

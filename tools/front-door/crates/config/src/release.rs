@@ -204,12 +204,17 @@ pub fn package_release(
     let names = inventory(source, fs)?;
     let mut files = BTreeMap::new();
     let mut release_files = Vec::new();
+    let mut total = 0u64;
     for relative in names {
         let path = source.join(&relative);
         let current = snapshot(&path, fs)?.ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
         };
+        total = total
+            .checked_add(bytes.len() as u64)
+            .filter(|total| *total <= RELEASE_LIMIT)
+            .ok_or(InstallError::Manifest("release byte bound"))?;
         let mode = source_mode(&relative, mode)?;
         release_files.push(ReleaseFile {
             path: path_wire(&relative)?,
@@ -225,14 +230,7 @@ pub fn package_release(
             "release assets differ from build inventory",
         ));
     }
-    let total = release_files
-        .iter()
-        .try_fold(0u64, |n, file| n.checked_add(file.bytes))
-        .ok_or(InstallError::Manifest("release byte bound"))?;
-    if release_files.len() > ENTRY_LIMIT
-        || total > RELEASE_LIMIT
-        || release_files.iter().any(|file| file.bytes > FILE_LIMIT)
-        || expected.target.is_empty()
+    if expected.target.is_empty()
         || expected.target.len() > 256
         || expected.toolchain.is_empty()
         || expected.toolchain.len() > 256
@@ -277,7 +275,7 @@ pub fn package_release(
     }
 
     check_binary_identity(&candidate, smoke, cancel)?;
-    normalize_staged_modes(source, &candidate.files, fs)?;
+    normalise_staged_modes(source, &candidate.files, fs)?;
     crate::managed::durable(directory(source, false, fs)?.publish(
         OsStr::new("release.json"),
         &bytes,
@@ -287,7 +285,7 @@ pub fn package_release(
     Release::read(source, &expected.target, fs)
 }
 
-fn normalize_staged_modes(
+fn normalise_staged_modes(
     source: &Path,
     files: &BTreeMap<PathBuf, (Vec<u8>, u64)>,
     fs: &dyn SafeFs,

@@ -289,9 +289,10 @@ impl Snapshots {
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
-                if entry
-                    .harness
-                    .is_some_and(|harness| selected.contains(&harness))
+                if entry.selector == "binary"
+                    || entry
+                        .harness
+                        .is_some_and(|harness| selected.contains(&harness))
                 {
                     paths.insert(entry.path.to_path_buf()?);
                 }
@@ -532,9 +533,9 @@ pub fn plan_install(
         }
     }
 
-    // A selected harness drops links that the new release no longer offers.
-    // Exact old links become Remove actions; edited links are left in place and
-    // relinquished as unmanaged state. Missing links are already settled.
+    // Selected harnesses and the stable binary drop old owned paths that are
+    // no longer desired. Exact old links become Remove actions; edited links
+    // are relinquished as unmanaged state. Missing links are already settled.
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
             if entries.iter().any(|current| current.path == entry.path)
@@ -544,12 +545,14 @@ pub fn plan_install(
             {
                 continue;
             }
-            let Some(harness) = entry.harness else {
-                continue;
-            };
-            if !selected.contains(&harness) {
-                entries.push(entry.clone());
-                continue;
+            if entry.selector != "binary" {
+                let Some(harness) = entry.harness else {
+                    continue;
+                };
+                if !selected.contains(&harness) {
+                    entries.push(entry.clone());
+                    continue;
+                }
             }
             let path = entry.path.to_path_buf()?;
             let current = snapshots

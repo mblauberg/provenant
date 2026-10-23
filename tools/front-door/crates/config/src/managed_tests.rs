@@ -1253,6 +1253,65 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
 }
 
 #[test]
+fn bin_dir_upgrade_removes_only_the_unchanged_previous_shim() {
+    for changed in [false, true] {
+        let mut f = Fixture::new();
+        let release_a = f.release_variant("a", &["common"]);
+        let release_b = f.release_variant("b", &["common"]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        install(
+            &f.plan_for(release_a),
+            &context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
+        let old_binary = f.targets.bin_dir.join("provenant");
+        if changed {
+            fs::remove_file(&old_binary).unwrap();
+            symlink("/personal/provenant", &old_binary).unwrap();
+        }
+        f.targets.bin_dir = f.home.join("new-bin");
+        let plan = f.plan_for(release_b.clone());
+        assert_eq!(
+            plan.actions().iter().any(|action| {
+                action.path == AbsolutePath::new(&old_binary).unwrap()
+                    && action.disposition == Disposition::Remove
+            }),
+            !changed
+        );
+        install(
+            &plan,
+            &context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
+        if changed {
+            assert_eq!(
+                fs::read_link(&old_binary).unwrap(),
+                PathBuf::from("/personal/provenant")
+            );
+        } else {
+            assert!(fs::symlink_metadata(&old_binary).is_err());
+        }
+        assert!(f.targets.bin_dir.join("provenant").is_file());
+        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
+        assert!(
+            receipt
+                .entries
+                .iter()
+                .all(|entry| entry.path != AbsolutePath::new(&old_binary).unwrap())
+        );
+        assert!(f.plan_for(release_b).actions().is_empty());
+    }
+}
+
+#[test]
 fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     let mut f = Fixture::new();
     let custom = f.home.join("custom");
