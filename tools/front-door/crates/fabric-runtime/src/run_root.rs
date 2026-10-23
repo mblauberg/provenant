@@ -257,8 +257,9 @@ mod tests {
     fn real_path_keeps_a_dangling_symlink_lexical_path() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
-        let link = temp.path().join("dangling");
-        symlink(temp.path().join("missing-target"), &link).unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let link = dir.join("dangling");
+        symlink(dir.join("missing-target"), &link).unwrap();
         assert_eq!(real_path(&link).unwrap(), link);
     }
 
