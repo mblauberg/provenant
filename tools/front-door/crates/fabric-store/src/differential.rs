@@ -654,7 +654,9 @@ fn sqlite_contention_rolls_back_and_restores_timeout_differential() {
         },
         &ids,
     );
-    assert!(claim.as_ref().is_err_and(is_sqlite_contention));
+    assert!(claim
+        .as_ref()
+        .is_err_and(|error| is_sqlite_contention(error)));
     capture(&mut out, claim);
     capture(
         &mut out,

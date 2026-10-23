@@ -163,8 +163,21 @@ fn recipient_list(values: &[String]) -> String {
     }
 }
 
-pub fn is_sqlite_contention(error: &Error) -> bool {
-    matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.extended_code, 5 | 6))
+pub fn is_sqlite_contention(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        let sqlite = match error.downcast_ref::<Error>() {
+            Some(Error::Sqlite(sqlite)) => Some(sqlite),
+            _ => error.downcast_ref::<rusqlite::Error>(),
+        };
+        if matches!(sqlite, Some(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.extended_code, 5 | 6))
+        {
+            return true;
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
+    }
 }
 
 pub use pending::{IdSource, Identity};

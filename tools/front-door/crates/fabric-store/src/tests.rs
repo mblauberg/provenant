@@ -440,6 +440,11 @@ fn only_plain_busy_and_locked_are_retryable() {
             None,
         ));
         assert_eq!(is_sqlite_contention(&error), expected);
+        #[derive(Debug, thiserror::Error)]
+        #[error("outer context")]
+        struct Context(#[source] Box<dyn std::error::Error>);
+        let wrapped = Context(Box::new(Context(Box::new(error))));
+        assert_eq!(is_sqlite_contention(&wrapped), expected);
     }
 }
 
