@@ -20,6 +20,61 @@ const UNAVAILABLE: &[&str] = &[
     "unavailable",
 ];
 
+/// Adapter lineage policy mirrors the source registry. Adding an adapter is a
+/// data row; adapters with fixed model and provider lineage set those fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdapterLineage {
+    pub adapter: &'static str,
+    pub endpoint_provider: &'static str,
+    pub fixed_provider_family: Option<&'static str>,
+    pub fixed_model_family: Option<&'static str>,
+}
+
+pub const ADAPTER_LINEAGES: &[AdapterLineage] = &[
+    AdapterLineage {
+        adapter: "claude",
+        endpoint_provider: "anthropic",
+        fixed_provider_family: Some("anthropic"),
+        fixed_model_family: Some("anthropic"),
+    },
+    AdapterLineage {
+        adapter: "codex",
+        endpoint_provider: "openai",
+        fixed_provider_family: Some("openai"),
+        fixed_model_family: Some("openai"),
+    },
+    AdapterLineage {
+        adapter: "cursor",
+        endpoint_provider: "cursor",
+        fixed_provider_family: None,
+        fixed_model_family: None,
+    },
+    AdapterLineage {
+        adapter: "agy",
+        endpoint_provider: "agy",
+        fixed_provider_family: None,
+        fixed_model_family: None,
+    },
+    AdapterLineage {
+        adapter: "kiro",
+        endpoint_provider: "aws",
+        fixed_provider_family: None,
+        fixed_model_family: None,
+    },
+    AdapterLineage {
+        adapter: "copilot",
+        endpoint_provider: "github",
+        fixed_provider_family: None,
+        fixed_model_family: None,
+    },
+    AdapterLineage {
+        adapter: "opencode",
+        endpoint_provider: "opencode",
+        fixed_provider_family: None,
+        fixed_model_family: None,
+    },
+];
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerReviewResult {
@@ -160,24 +215,22 @@ fn lineage_reason(
     if tool.is_empty() || tool != adapter {
         return "tool/adapter identity mismatch";
     }
-    let expected_endpoint = match adapter {
-        "claude" => "anthropic",
-        "codex" => "openai",
-        "cursor" => "cursor",
-        "agy" => "agy",
-        "kiro" => "aws",
-        "copilot" => "github",
-        "opencode" => "opencode",
-        _ => return "endpoint/provider identity mismatch",
+    let Some(identity) = ADAPTER_LINEAGES
+        .iter()
+        .find(|entry| entry.adapter == adapter)
+    else {
+        return "endpoint/provider identity mismatch";
     };
-    if endpoint != expected_endpoint {
+    if endpoint != identity.endpoint_provider {
         return "endpoint/provider identity mismatch";
     }
-    if ["claude", "codex"].contains(&adapter) {
-        if provider != expected_endpoint {
+    if let Some(expected_provider) = identity.fixed_provider_family {
+        if provider != expected_provider {
             return "endpoint/provider identity mismatch";
         }
-        if family != expected_endpoint {
+    }
+    if let Some(expected_model_family) = identity.fixed_model_family {
+        if family != expected_model_family {
             return "endpoint/provider/model identity mismatch";
         }
     }
@@ -362,7 +415,11 @@ mod tests {
         for fixture in fixtures.as_array().unwrap() {
             assert_eq!(run(&fixture["input"]), fixture["expected"]);
         }
-        if let Some(expected) = crate::test_support::oracle("review_terminal", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle_script(
+            "oracle_portable.py",
+            "review_terminal",
+            &json!(cases),
+        ) {
             assert_eq!(expected, json!(cases.iter().map(run).collect::<Vec<_>>()));
         }
     }
@@ -395,6 +452,16 @@ mod tests {
             c["dispatch"][key] = value;
             cases.push(c);
         }
+        // Python performs set membership on read_only_guarantee only after
+        // dispatch and lineage checks pass; failed dispatches short-circuit it.
+        let mut c = base.clone();
+        c["dispatch"]["exit"] = json!(7);
+        c["dispatch"]["read_only_guarantee"] = json!([]);
+        cases.push(c);
+        let mut c = base.clone();
+        c["terminal"] = json!({});
+        c["dispatch"]["read_only_guarantee"] = json!({});
+        cases.push(c);
         for status in UNAVAILABLE {
             let mut c = base.clone();
             c["dispatch"]["status"] = json!(status);
