@@ -91,17 +91,15 @@ def test_fabric_help_subcommands():
     assert comparison_fields(events)["help"]["subcommands"] == []
 
 
-def test_manifest_pins_only_the_sqlite_major(monkeypatch, tmp_path):
+def test_manifest_pins_only_the_python_minor(monkeypatch, tmp_path):
     import run
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"python": "3.12", "sqlite": "3.50.4"}))
+    manifest.write_text(json.dumps({"python": "3.14"}))
     monkeypatch.setattr(run, "MANIFEST", manifest)
-    monkeypatch.setattr(run.sys, "version_info", type("Version", (), {"major": 3, "minor": 12}))
-    monkeypatch.setattr(run.sqlite3, "sqlite_version", "3.50.9")
-    run.check_manifest()
-    monkeypatch.setattr(run.sqlite3, "sqlite_version", "3.53.0")
-    run.check_manifest()
+    monkeypatch.setattr(run.sys, "version_info", type("Version", (), {"major": 3, "minor": 14}))
     monkeypatch.setattr(run.sqlite3, "sqlite_version", "4.0.0")
+    run.check_manifest()
+    monkeypatch.setattr(run.sys, "version_info", type("Version", (), {"major": 3, "minor": 13}))
     with pytest.raises(ValueError, match="runtime mismatch"):
         run.check_manifest()
 
