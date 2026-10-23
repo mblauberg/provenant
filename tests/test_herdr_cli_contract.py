@@ -1,11 +1,12 @@
-from pathlib import Path
 import io
 import stat
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 import pytest
+
 from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]

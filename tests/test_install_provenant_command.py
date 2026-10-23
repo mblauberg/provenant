@@ -1,11 +1,11 @@
 import errno
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "install-provenant-command.py"

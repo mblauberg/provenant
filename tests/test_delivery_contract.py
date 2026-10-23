@@ -1,15 +1,15 @@
 import copy
 import hashlib
 import json
-from pathlib import Path
-from tests.support.modules import load_script
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"

@@ -4,14 +4,15 @@ import importlib
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
-from tests.support.modules import load_script
 
 import pytest
+
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "tests/fixtures/fabric-context"

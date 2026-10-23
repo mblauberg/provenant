@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "clean.py"
 HOOK = SCRIPT.parent / "hooks" / "post-merge"

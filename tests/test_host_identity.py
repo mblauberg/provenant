@@ -1,12 +1,12 @@
 """One local host id for fabric hosts, telemetry, quota and cooldowns."""
-from pathlib import Path
 import json
 import socket
 import sys
-from tests.support.modules import load_script
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 

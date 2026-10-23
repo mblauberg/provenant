@@ -1,8 +1,8 @@
 import json
 import os
 import re
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from tests.support.git import git
 
@@ -54,8 +54,10 @@ def test_linked_worktree_shares_run_root(tmp_path):
 
 
 def test_orphan_reaping_uses_shared_root_and_leaves_live_receipts(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
 
     old = tmp_path / ".agent-run/runs/20260920-0000-dispatch-orphan-abcdef"
     old.mkdir(parents=True)
@@ -99,8 +101,10 @@ def test_shared_layout_vectors_and_symlinked_cwd(tmp_path, monkeypatch):
 
 
 def test_orphan_reaping_does_not_close_a_live_unindexed_provider(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
 
     run = tmp_path / ".agent-run/runs/20260920-0000-dispatch-live-abcdef"
     run.mkdir(parents=True)
@@ -128,8 +132,10 @@ def test_nested_non_git_cwd_accepts_explicit_workspace_run(tmp_path):
 
 
 def test_stale_batch_with_provider_record_still_checks_every_attempt(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
     run = tmp_path / '.agent-run/runs/stale-batch'
     run.mkdir(parents=True)
     receipt = run / 'RUN_RECEIPT.json'

@@ -1,8 +1,8 @@
 from pathlib import Path
-from tests.support.modules import load_script
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 

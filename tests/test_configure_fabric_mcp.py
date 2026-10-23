@@ -1,16 +1,15 @@
-import json
 import io
+import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
-import sys
 import tomllib
+from pathlib import Path
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure-fabric-mcp.py"

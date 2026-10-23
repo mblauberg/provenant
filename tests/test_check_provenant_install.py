@@ -1,12 +1,12 @@
-import os
 import json
-from tests.support.modules import load_script
-from pathlib import Path
+import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check-provenant-install.py"

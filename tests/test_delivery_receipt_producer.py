@@ -16,9 +16,10 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from tests.support.modules import load_script
 
 import pytest
+
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py"

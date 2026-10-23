@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-import shlex
 import os
-from pathlib import Path
+import shlex
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
+
 from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]

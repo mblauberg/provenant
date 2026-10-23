@@ -1,10 +1,10 @@
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-import hashlib
-from tests.support.modules import load_script
 
 import pytest
 
+from tests.support.modules import load_script
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "session" / "scripts" / "context_audit.py"
 context_audit = load_script(SCRIPT, "context_audit", register=True)

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
-from tests.support.modules import load_script
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts/provenant-profile"

@@ -7,10 +7,10 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from tests.support.modules import load_script
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
