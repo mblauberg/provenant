@@ -635,7 +635,7 @@ removes it, so no `hosts add` command is needed.
 |---|---|---|
 | `hosts.local_host` | `hosts.json` | name matching `[a-z0-9-]+`; default from the host identity owner |
 | `hosts.peers.<name>.ssh_destination` | `hosts.json` | string, required |
-| `hosts.peers.<name>.peer_command` | `hosts.json` | optional string; defaults to `Repos/provenant/scripts/fabric-hosts peer` from the remote home; override for other checkout locations |
+| `hosts.peers.<name>.peer_command` | `hosts.json` | string; default `.local/bin/provenant peer` |
 | `hosts.peers.<name>.connect_timeout` | `hosts.json` | seconds, 1 to 60, default 5 |
 | `hosts.peers.<name>.response_deadline` | `hosts.json` | seconds, 1 to 120, default 15 |
 | `hosts.peers.<name>.allow_content_reads` | `hosts.json` | bool, default false; lets this host read that peer's session context and state text on demand |
@@ -656,10 +656,8 @@ are not mirrored in this facade.
 
 ## Host-agnostic configuration
 
-The host registry is the existing `hosts.json`, with the additive
-`allow_content_reads`. The parser rewrite removes the implicit
-`.local/bin/provenant peer` default: each configured peer must supply its
-direct owner command until the Rust Fabric subtree lands. No host name appears in code; names exist
+The host registry is the existing `hosts.json`, unchanged in shape except for
+the additive `allow_content_reads`. No host name appears in code; names exist
 only in this file and in test fixtures.
 
 Zero peers, or no file at all, behaves the same:
@@ -674,9 +672,9 @@ Two peers (names are examples):
   "schema_version": 1,
   "local_host": "laptop",
   "peers": {
-    "workshop": {"ssh_destination": "workshop.tailnet", "peer_command": "/absolute/product/scripts/fabric-hosts peer", "connect_timeout": 5,
+    "workshop": {"ssh_destination": "workshop.tailnet", "connect_timeout": 5,
                  "response_deadline": 15, "allow_content_reads": true},
-    "studio": {"ssh_destination": "studio", "peer_command": "/absolute/product/scripts/fabric-hosts peer"}
+    "studio": {"ssh_destination": "studio"}
   },
   "projects": {"Repos/provenant": {"default_host": "workshop"}}
 }

@@ -145,13 +145,10 @@ fn main() -> ExitCode {
         .map(|()| 0)
         .map_err(Into::into)
     } else {
-        match args.first() {
-            Some(name) => name
-                .to_str()
-                .ok_or_else(|| "fixture scenario must be UTF-8".into())
-                .and_then(scenario),
-            None => suite().map(|()| 0),
-        }
+        args[0]
+            .to_str()
+            .ok_or_else(|| "fixture scenario must be UTF-8".into())
+            .and_then(scenario)
     };
     match result {
         Ok(code) => ExitCode::from(code),

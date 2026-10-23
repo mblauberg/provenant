@@ -24,6 +24,5 @@ The CLI parser now recognises the frozen grammar in [cli.md](../specs/rust-port/
 `help --json` is its structured catalogue; help and version need no roots.
 `root --json` adds state/project/build identity to the human asset-root path.
 An unbound owner returns `OWNER_UNAVAILABLE`, status `unavailable`, exit 4.
-The parser replaces forwarding; live Python callers invoke their owner scripts
-directly until those owners land. No-argument invocation prints usage, even
-when a legacy Fabric seat variable is set.
+No route forwards to another owner. A bare `provenant` prints usage and exits
+2, whatever the environment.

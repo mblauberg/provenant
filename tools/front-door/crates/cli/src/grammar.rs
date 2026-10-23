@@ -16,6 +16,8 @@ pub(crate) struct RawInvocation {
 pub struct Invocation {
     pub globals: Globals,
     pub command: Command,
+    /// Space-separated subcommand path, such as `quota tick`.
+    pub leaf: String,
 }
 #[derive(Debug, Default)]
 pub struct Globals {
@@ -147,20 +149,15 @@ pub enum Switch {
 #[derive(Debug, Args)]
 pub struct Access {
     #[arg(long, value_enum, default_value = "read-only")]
-    pub mode: Option<Mode>,
+    pub mode: Mode,
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     #[arg(long)]
     pub read_root: Vec<PathBuf>,
     #[arg(long, value_enum, default_value = "off")]
-    pub network: Option<Switch>,
+    pub network: Switch,
     #[arg(long)]
     pub capability: Vec<String>,
-}
-impl Access {
-    pub fn mode(&self) -> Mode {
-        self.mode.unwrap_or(Mode::ReadOnly)
-    }
 }
 #[derive(Debug, Args)]
 #[group(id = "dispatch_input", required = true, multiple = false)]
@@ -187,23 +184,13 @@ pub struct Dispatch {
     #[command(flatten)]
     pub access: Access,
     #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
-    pub provider_timeout: Option<u64>,
+    pub provider_timeout: u64,
     #[arg(long, default_value = "4", requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=8))]
-    pub concurrency: Option<u64>,
+    pub concurrency: u64,
     #[arg(long)]
     pub host: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,
-}
-impl Dispatch {
-    pub fn provider_timeout(&self) -> u64 {
-        self.provider_timeout
-            .unwrap_or(if self.access.mode() == Mode::WorktreeWrite {
-                10800
-            } else {
-                3600
-            })
-    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -266,7 +253,7 @@ pub struct Lanes {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,
     #[arg(long, default_value = "any", requires = "wait", value_enum)]
-    pub condition: Option<Condition>,
+    pub condition: Condition,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Part {
@@ -281,7 +268,7 @@ pub struct Output {
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
     #[arg(long, default_value = "0", conflicts_with = "tail")]
-    pub offset: Option<u64>,
+    pub offset: u64,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=500))]
     pub tail: Option<u64>,
     #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]

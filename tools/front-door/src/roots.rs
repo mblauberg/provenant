@@ -44,7 +44,11 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir()?,
     };
-    let path = fs::canonicalize(path)?;
+    // A selected path that does not resolve is the caller's fault.
+    let path = fs::canonicalize(path).map_err(|error| match selected {
+        Some(_) => RootError::Checkout,
+        None => error.into(),
+    })?;
     if !path.is_dir() {
         return Err(RootError::Checkout);
     }

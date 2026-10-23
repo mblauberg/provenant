@@ -1,11 +1,7 @@
 # Fabric hosts
 
-During the Rust rewrite, the Python owner commands below run from the product
-checkout. CLI forwarding is retired. Fabric CLI/MCP mounts and run bindings
-remain unavailable until their owner slices land.
-
 Status: current
-Applies to: `scripts/fabric-hosts hosts`, `scripts/fabric-hosts peer`, lane commands and Fabric MCP
+Applies to: `provenant hosts`, `provenant peer`, lane commands and Fabric MCP
 
 Host diagnostics work over the user's OpenSSH configuration. Each host keeps
 its own instance state and provider sign-ins. The [accepted
@@ -32,7 +28,7 @@ and work claims follow in slice 5.
      "peers": {
        "workshop": {
          "ssh_destination": "workshop",
-         "peer_command": "/absolute/product/scripts/fabric-hosts peer",
+         "peer_command": ".local/bin/provenant peer",
          "connect_timeout": 5,
          "response_deadline": 15
        }
@@ -59,9 +55,9 @@ and work claims follow in slice 5.
    duplicate keys, non-finite numbers (including exponent overflow) and invalid
    versions are refused. Both timeouts must be positive and at most 86,400
    seconds; connect timeout is an integer.
-   `peer_command` defaults to `Repos/provenant/scripts/fabric-hosts peer`, relative to the remote home directory. Set it to the direct owner executable followed by `peer` for other checkout locations. Both timeouts are optional.
+   `peer_command` and both timeouts are optional with the defaults above.
    A custom peer command must name one executable followed by `peer`, with
-   no shell expansion or parent traversal. An explicit executable may be absolute or relative
+   no shell expansion or parent traversal. The default executable is relative
    to the remote user's home and needs no login shell.
 
 ## Restrict the SSH key
@@ -72,7 +68,7 @@ and work claims follow in slice 5.
    shim path and public key:
 
    ```text
-   command="/absolute/product/scripts/fabric-hosts peer",restrict ssh-ed25519 <public-key> user
+   command=".local/bin/provenant peer",restrict ssh-ed25519 <public-key> user
    ```
 
    `restrict` disables forwarding, PTYs and user startup commands. The peer
@@ -83,7 +79,7 @@ and work claims follow in slice 5.
 
    ```sh
    printf '%s\n' '{"protocol_version":1,"verb":"hello","params":{}}' |
-     ssh -o BatchMode=yes -o ConnectTimeout=5 workshop /absolute/product/scripts/fabric-hosts peer
+     ssh -o BatchMode=yes -o ConnectTimeout=5 workshop .local/bin/provenant peer
    ```
 
    Expect one JSON response with `ok: true`, protocol version, host name and
@@ -96,9 +92,9 @@ and work claims follow in slice 5.
 ## Diagnose
 
 ```sh
-scripts/fabric-hosts hosts list
-scripts/fabric-hosts hosts doctor
-scripts/fabric-hosts hosts doctor --json workshop
+provenant hosts list
+provenant hosts doctor
+provenant hosts doctor --json workshop
 ```
 
 Each doctor row reports reachability, protocol version, revision, Python version
@@ -142,7 +138,7 @@ does not change the host operation or require a Claude session. For example:
 {"action":"doctor","hosts":["workshop"]}
 ```
 
-This invokes the same host client as `scripts/fabric-hosts hosts doctor --json workshop`.
+This invokes the same host client as `provenant hosts doctor --json workshop`.
 The peer hello must identify the configured host, and a successful doctor
 response must identify that host and the requested project path. Invalid
 identity, version or diagnostic fields produce `bad_response`.
@@ -180,10 +176,18 @@ Host command selectors are host names, optionally written `host@host`.
 
 ## Place and control a lane
 
-The Fabric placement/control command in this procedure is unavailable until
-the Rust owner subtree lands. Do not substitute a legacy router invocation.
+```sh
+provenant fabric dispatch --host workshop --prompt-file brief.md --adapter codex
+provenant fabric lanes --json
+provenant fabric status task-id@workshop
+provenant fabric lanes --wait --all --timeout 120 task-id@workshop
+provenant fabric cancel task-id@workshop --operation-id stop-review-1
+provenant fabric output task-id@workshop --max-bytes 20000
+provenant fabric dispatch --resume run-id@workshop --prompt-file follow-up.md
+provenant fabric dispatch --handoff run-id@workshop --adapter claude --prompt-file handoff.md
+```
 
-`skills/orchestrate/scripts/dispatch_run.py` also accepts `--host` and `--operation-id` alongside its
+`provenant dispatch` also accepts `--host` and `--operation-id` alongside its
 existing owner arguments. Without `--host`, the per-project default applies.
 An unreachable default host falls back locally only before a mutation is
 sent; the attempt records `placement_fallback` and a warning. Explicit host
@@ -277,26 +281,31 @@ available for verification and fetch.
    name, and commit the base the writer should start from:
 
    ```sh
-   scripts/worktree create --new-branch feat/example
+   provenant worktree create --new-branch feat/example
    ```
 
 3. Dispatch the writer:
 
-   This step is unavailable until the Rust Fabric owner subtree lands.
-   Do not substitute a legacy router invocation.
+   ```sh
+   provenant fabric dispatch --host workshop --mode worktree_write \
+     --worktree .worktrees/feat-example --prompt-file brief.md \
+     --adapter codex --id example-task
+   ```
 
    The reply names the operation ID. Pass `--operation-id` only to retry the
    same request.
 4. Wait for it to finish:
 
-   This step is unavailable until the Rust Fabric owner subtree lands.
-   Do not substitute a legacy router invocation.
+   ```sh
+   provenant fabric lanes --wait --all example-task@workshop
+   ```
 
 5. Fetch the verified result. Fetch accepts the qualified operation, run or
    task ID; a batch requires one writer task at a time.
 
-   This step is unavailable until the Rust Fabric owner subtree lands.
-   Do not substitute a legacy router invocation.
+   ```sh
+   provenant fabric fetch example-task@workshop
+   ```
 
 6. Land it. Fetch imports the head into
    `refs/provenant/hosts/<host>/<result>/result` and never moves a branch. Its
@@ -431,7 +440,7 @@ git -C ~/Repos/project update-ref -d refs/provenant/hosts/<host>/<id>/<base|resu
 ```
 
 Run both on each host. On the peer, remove the writer worktree with
-`scripts/worktree remove feat-example` and its branch with
+`provenant worktree remove feat-example` and its branch with
 `git branch -D feat/example` once nothing will resume it. Frozen inputs and
 result bundles live under `<instance-root>/.agent-fabric/code/`; delete an
 operation's directory there once it is fetched and no retry is pending.

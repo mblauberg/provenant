@@ -1,18 +1,12 @@
-# Landing lease during the Rust rewrite
+# Landing lease
 
-Status: awaiting Fabric owner binding
+Fabric owns the landing lease: its semantics, store and command grammar are in
+the [Fabric design](../specs/rust-port/design/fabric.md). The root
+`provenant lease` synonym and its exit-code contract are gone, and no CLI route
+forwards to another owner.
 
-The parser rewrite removes the `provenant lease` alias and its old exit-code
-contract. There is no CLI forwarding route. Fabric's typed owner must supply
-its lease subtree and shared store before repository scripts can acquire,
-verify, push or release a lease through the rewritten binary.
-
-Do not treat empty output or an unavailable owner as an acquired lease. A
-repository landing tool that requires Fabric must refuse to land until its
-owner binding is available. An existing MCP connection can use its own
-`fabric_landing_lease` contract only after verifying the connection identity;
-the rewritten binary does not yet create such a transport.
-
-The [Fabric design](../specs/rust-port/design/fabric.md) owns lease semantics
-and the later command grammar. This parser PR does not merge or push a shared
-branch; it opens an implementation PR for review.
+Never treat empty output or an owner-unavailable result (exit 4) as an acquired
+lease. A landing tool that needs the lease refuses to land without one. Over
+MCP, use `fabric_landing_lease` only after verifying the connection's identity,
+as [Fabric connection identity](../../skills/orchestrate/references/fabric-identity.md)
+describes.

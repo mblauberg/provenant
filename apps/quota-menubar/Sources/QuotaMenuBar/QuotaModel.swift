@@ -261,7 +261,7 @@ enum Power {
     }
 }
 
-/// Runs the Python quota owner off the main thread. The app never reads credentials itself.
+/// Runs `provenant quota` off the main thread. The app never reads credentials itself.
 enum CLI {
     struct Failure: Error { let message: String }
     enum Outcome { case report(QuotaReport), failure(Failure), unsupported }
@@ -299,14 +299,14 @@ enum CLI {
             return fail(nil, "not found", "provenant was not found on the login shell's PATH or at ~/.local/bin/provenant. "
                         + "Set PROVENANT_BIN to its path.")
         }
-        let name = launcher.url.path
+        let name = launcher.custom ? "PROVENANT_BIN (\(launcher.url.path))" : "provenant"
         let run: Output
-        do { run = try exec(launcher.url, Array(arguments.dropFirst()), path: launcher.path, limit: 60) } catch {
+        do { run = try exec(launcher.url, arguments, path: launcher.path, limit: 60) } catch {
             return fail(nil, "launch", "Could not start \(name): \(error.localizedDescription)")
         }
         let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
-        if run.timedOut { return fail(launcher, "timeout", "quota owner timed out after 60 seconds.") }
-        if run.signalled { return fail(launcher, "signal \(run.status)", "quota owner was killed by signal \(run.status).") }
+        if run.timedOut { return fail(launcher, "timeout", "provenant quota timed out after 60 seconds.") }
+        if run.signalled { return fail(launcher, "signal \(run.status)", "provenant quota was killed by signal \(run.status).") }
         if run.status == 127 {   // the launcher or its interpreter is gone: re-resolve next time
             let hint = launcher.custom ? "" : " Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
             return fail(nil, "status 127", "\(name) exited with status 127: \(detail).\(hint)")

@@ -639,9 +639,9 @@ owner slices. The explicit transport and new registrations land at cut-over.
 | 4 | `tests/test_check_provenant_install.py` | 358 |
 | 3 | `tests/test_install_harness.py` (deleted) | 2,177 |
 
-Planning baseline Python total: **11,727 lines removed**. PR #1386 deletes
-the remaining MCP configurer and tests, **1,966 lines**, with state-owner
-acceptance and no live callers. These deletions belong to the CLI parser
+Planning baseline Python total: **12,705 lines removed**, of which the state
+slices remove **10,739**. PR #1386 deletes the remaining MCP configurer and its
+tests, **1,966 lines**, with state-owner acceptance and no live callers. These deletions belong to the CLI parser
 change and must not be counted again in a later state slice. Shell entrypoints removed in the
 corresponding slices: `scripts/provenant-profile` **5**, `scripts/install-skills`
 **87**, `scripts/install-harness` **702**; shell total **794**. The removed

@@ -231,10 +231,10 @@ def graph_reservation_refusal(worktree: Path) -> str | None:
             connection.close()
     except sqlite3.Error:
         return (f"worktree is reserved by graph {graph} node {node} and the Fabric store cannot confirm it ended;"
-                f" fix: run runtime/fabric/bin/fabric graph status {graph}")
+                f" fix: run provenant graph status {graph}")
     if row is None or row[0] != "running":
         return None
-    return f"worktree is reserved by graph {graph} node {node}; fix: wait for it, or run runtime/fabric/bin/fabric graph cancel {graph}"
+    return f"worktree is reserved by graph {graph} node {node}; fix: wait for it, or run provenant graph cancel {graph}"
 
 def release_worktree_lease(handle) -> None:
     if handle is None:

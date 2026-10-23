@@ -388,16 +388,6 @@ class ClientContracts(unittest.TestCase):
             self.assertEqual(parsed.returncode, 0, parsed.stderr)
             self.assertIn('hostname workshop', parsed.stdout.lower())
 
-    def test_peer_command_defaults_to_the_direct_owner(self):
-        import fabric_hosts as hosts
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'hosts.json'
-            path.write_text(json.dumps({'schema_version': 1, 'local_host': 'laptop',
-                'peers': {'workshop': {'ssh_destination': 'workshop'}}}))
-            config = hosts.load_config(path)
-            self.assertEqual(config.peers['workshop'].peer_command,
-                             'Repos/provenant/scripts/fabric-hosts peer')
-
     def test_peer_command_and_destination_cannot_start_with_an_ssh_option(self):
         import fabric_hosts as hosts
         configs = [

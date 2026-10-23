@@ -87,6 +87,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         Ok(value) => Invocation {
             globals,
             command: value.command,
+            leaf: std::iter::successors(matches.subcommand(), |(_, sub)| sub.subcommand())
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+                .join(" "),
         },
         Err(error) => {
             return ParseOutcome::Invalid {
@@ -129,6 +133,9 @@ fn clap_error(error: clap::Error) -> CliError {
         .next()
         .unwrap_or(&text)
         .split("\nFor more information")
+        .next()
+        .unwrap_or(&text)
+        .split("\n  [subcommands:")
         .next()
         .unwrap_or(&text)
         .trim();
@@ -297,12 +304,12 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         Command::Dispatch(dispatch) => {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
-            if (access.mode() == Mode::WorktreeWrite) != access.worktree.is_some() {
+            if (access.mode == Mode::WorktreeWrite) != access.worktree.is_some() {
                 return invalid(
                     "--worktree is required with, and only valid for, --mode worktree-write",
                 );
             }
-            if access.mode() == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
+            if access.mode == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
                 return invalid("writers cannot use fallback models");
             }
             if access.read_root.len() > 32 || access.capability.len() > 16 {
@@ -558,8 +565,8 @@ mod tests {
         let Command::Dispatch(request) = inv.command else {
             panic!("dispatch")
         };
-        assert_eq!(request.provider_timeout(), 3600);
-        assert_eq!(request.concurrency, Some(4));
+        assert_eq!(request.provider_timeout, 3600);
+        assert_eq!(request.concurrency, 4);
         let mut words = base.to_vec();
         words.extend(["--mode", "worktree-write"]);
         invalid(&words);
@@ -568,7 +575,7 @@ mod tests {
         let Command::Dispatch(request) = inv.command else {
             panic!("dispatch")
         };
-        assert_eq!(request.provider_timeout(), 10800);
+        assert_eq!(request.provider_timeout, 10800);
         words.extend(["--fallback", "claude/id"]);
         invalid(&words);
         let mut words = base.to_vec();

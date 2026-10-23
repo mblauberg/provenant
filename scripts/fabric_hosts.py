@@ -128,7 +128,7 @@ def host_name(value, code='invalid_identifier'):
 @dataclass(frozen=True)
 class PeerConfig:
     ssh_destination: str
-    peer_command: str = 'Repos/provenant/scripts/fabric-hosts peer'
+    peer_command: str = '.local/bin/provenant peer'
     connect_timeout: int = 5
     response_deadline: float = 15
 

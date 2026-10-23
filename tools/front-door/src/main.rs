@@ -85,13 +85,14 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
 fn run(inv: provenant_cli::Invocation) -> u8 {
     let globals = &inv.globals;
     if let Err(error) = roots::validate_globals(globals) {
-        return fail(
-            "parse",
-            Outcome::Invalid,
-            "INVALID",
-            &error.to_string(),
-            globals,
-        );
+        // A bad selected root is a usage fault; the environment is not.
+        let (status, code) = match error {
+            roots::RootError::Checkout | roots::RootError::State(_) => {
+                (Outcome::Invalid, "INVALID")
+            }
+            _ => (Outcome::Error, "ROOT"),
+        };
+        return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match inv.command {
         Command::Root => {
