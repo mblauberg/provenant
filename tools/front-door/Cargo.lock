@@ -442,13 +442,11 @@ dependencies = [
 name = "provenant-config"
 version = "0.1.0"
 dependencies = [
- "clap",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
  "toml_edit",

@@ -72,8 +72,8 @@ fn decode_native_bytes(encoded: &str) -> Result<PathBuf, PathWireError> {
         return Err(PathWireError::InvalidHex);
     }
     let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    let mut pairs = encoded.as_bytes().chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    for pair in pairs {
         let Some(high) = pair.first().and_then(|byte| hex_nibble(*byte)) else {
             return Err(PathWireError::InvalidHex);
         };
@@ -82,7 +82,7 @@ fn decode_native_bytes(encoded: &str) -> Result<PathBuf, PathWireError> {
         };
         bytes.push((high << 4) | low);
     }
-    if !pairs.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(PathWireError::InvalidHex);
     }
     #[cfg(unix)]

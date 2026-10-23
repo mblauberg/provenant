@@ -1,0 +1,7 @@
+concurrency_cap = 4
+context_cap_tokens = 200000
+pool_selection = "weighted_rotation"
+effort = "default"
+additional_reviews = 0
+cross_family = "prefer"
+rereview_scope = "delta"

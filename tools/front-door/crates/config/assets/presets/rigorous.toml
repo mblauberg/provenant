@@ -1,0 +1,5 @@
+pool_selection = "highest_weight"
+effort = "raise_except_mechanical_and_bulk"
+additional_reviews = 1
+cross_family = "require"
+rereview_scope = "full"

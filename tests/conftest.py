@@ -127,7 +127,7 @@ def _checkout_under_test_is_product_root(monkeypatch):
 def _isolated_route_state(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path_factory.mktemp("cooldowns") / "cooldowns.json"))
     monkeypatch.setenv("AGENT_FABRIC_ROUTE_HEALTH_PATH", str(tmp_path_factory.mktemp("route-health") / "route-health.json"))
-    # A developer's own profile (`provenant profile use`) must not steer routing tests.
+    # A developer's legacy profile must not steer routing tests.
     monkeypatch.setenv("PROVENANT_PROFILE_ROOT", str(tmp_path_factory.mktemp("profile-root")))
     for key in [k for k in os.environ if k.startswith(("PROVENANT_KNOB_", "PROVENANT_PROFILE"))
                 and k != "PROVENANT_PROFILE_ROOT"]:

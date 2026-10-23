@@ -41,7 +41,7 @@ def install_product(front_door: Path, root: Path) -> None:
     binary.parent.mkdir()
     shutil.copy2(front_door, binary)
     binary.chmod(0o755)
-    owner = scripts / "provenant-profile"
+    owner = scripts / "provenant-quota"
     owner.write_text("#!/bin/sh\nexit 0\n")
     owner.chmod(0o755)
     (scripts / "check-harness").write_text("#!/bin/sh\nexit 0\n")

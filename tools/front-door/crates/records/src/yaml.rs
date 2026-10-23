@@ -596,7 +596,7 @@ impl<'a> Parser<'a> {
                         YamlErrorKind::InvalidSyntax,
                         span.line,
                         span.column + position,
-                    ))
+                    ));
                 }
             }
         }
@@ -693,7 +693,7 @@ impl<'a> Parser<'a> {
             let text = if blank {
                 ""
             } else {
-                let trim = content_indent.map_or(line.indent, |value| value);
+                let trim = content_indent.unwrap_or(line.indent);
                 line.raw.get(trim..).map_or("", |value| value)
             };
             let more_indented = !blank && text.starts_with(' ');
@@ -882,7 +882,7 @@ fn parse_double_quoted(text: &str, span: Span) -> Result<(String, usize), YamlEr
                             YamlErrorKind::UnsupportedEscape,
                             span.line,
                             span.column + position,
-                        ))
+                        ));
                     }
                 };
                 output.push(decoded);
@@ -927,7 +927,7 @@ fn parse_hex_escape(
                     YamlErrorKind::UnsupportedEscape,
                     span.line,
                     span.column + *position,
-                ))
+                ));
             }
         };
         value = value.saturating_mul(16).saturating_add(nibble);

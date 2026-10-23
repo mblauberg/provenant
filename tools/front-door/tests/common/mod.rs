@@ -52,7 +52,6 @@ pub const OWNERS: &[&str] = &[
     "scripts/fabric-hosts",
     "scripts/provenant-telemetry",
     "scripts/provenant-quota",
-    "scripts/provenant-profile",
     "skills/orchestrate/scripts/capabilities.py",
     "skills/orchestrate/scripts/dispatch_run.py",
     "skills/orchestrate/scripts/batch_run.py",

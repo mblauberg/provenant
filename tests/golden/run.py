@@ -112,10 +112,6 @@ VERBS: dict[str, list[tuple[str, list[str]]]] = {
         ('help', ['quota', '--help']),
         ('help', ['quota', '--bad-golden-flag']),
     ],
-    "profile": [
-        ('help', ['profile', '--help']),
-        ('help', ['profile', 'invalid-action']),
-    ],
     "digest": [
         ('help', ['digest', '--help']),
         ('machine', ['digest', 'missing.txt', 'question']),

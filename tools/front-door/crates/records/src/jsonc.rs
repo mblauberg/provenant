@@ -236,10 +236,10 @@ fn mark_trailing_commas(tokens: &mut [JsoncToken], projection: &mut [u8]) {
         if is_comment(kind) {
             continue;
         }
-        if let Some(comma_index) = candidate.take() {
-            if ends_value(kind) {
-                trailing.push(comma_index);
-            }
+        if let Some(comma_index) = candidate.take()
+            && ends_value(kind)
+        {
+            trailing.push(comma_index);
         }
         if kind == JsoncTokenKind::Comma
             && next_kind.is_some_and(|next| {
@@ -319,7 +319,7 @@ fn location(source: &[u8], offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jsonc, JsoncDocument, JsoncTokenKind};
+    use super::{JsoncDocument, JsoncTokenKind, decode_jsonc};
     use crate::json::{DecodeError, Limits};
     use serde::Deserialize;
     use std::io::Cursor;

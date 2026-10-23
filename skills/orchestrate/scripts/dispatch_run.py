@@ -2458,7 +2458,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--require-session", help="continue exactly this provider session; never relaunch a new one")
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--knob", dest="knobs", action="append", default=[], metavar="NAME=VALUE",
-                      help="harness-profile override for this dispatch; repeatable (provenant profile list)")
+                      help="legacy harness-profile override for this dispatch; repeatable")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--capabilities", type=provider_exec.parse_capabilities_argument)

@@ -64,8 +64,7 @@ reconciliation run.
    even with budget left; pass each failed gate as a repeatable
    `repair --failing CHECK_ID`.
    Every gate still passes before merge. Return
-   evidence to user or `scope` on drift. `review.rereview_scope` and the other
-   `review.*` knobs in `provenant profile show --resolved` adjust this step.
+   evidence to user or `scope` on drift.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
