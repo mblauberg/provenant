@@ -79,6 +79,13 @@ if(scenario==='work-path-json') {
     {run_id:1e21,attempt:1},{run_id:1e-7,attempt:1},{run_id:1e20,attempt:1},
     {run_id:true,attempt:['3']},{run_id:1e-6,attempt:1}];
   for (const row of rows) {capture(()=>laneTaskId(row));capture(()=>store.acknowledgeTerminal(b,row,1));}
+  store.announce(a);store.announce(b);
+  for (const path of ['5','5.0','0','0.0','2147483647','2147483647.0','2147483648','2147483648.0','-2147483649','-2147483649.0','5.5','9007199254740992','9.00719925474099e+15']) {
+    capture(()=>store.send(a,'bob','numeric directory',{kind:'run_terminal',outputPath:path}));
+  }
+  for (const value of [5,5.0,-0.0,2147483647,2147483648,-2147483649,5.5,9007199254740992]) {
+    capture(()=>store.acknowledgeTerminal(b,{run_id:'r',attempt:1,run_dir:value},1));
+  }
   const lanes=[{runId:'r',taskId:'t',attempt:3},{runId:'r',taskId:'t',attempt:2.5},{runId:'zero',taskId:'t',attempt:0}];
   capture(()=>store.unseenLanes(b,lanes));capture(()=>store.markLanesSeen(b,lanes));
   capture(()=>store.unseenLanes(b,lanes));

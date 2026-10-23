@@ -1754,3 +1754,23 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   both omitted limits. The duplicate typed `acknowledge_terminal` was deleted;
   all callers use `acknowledge_terminal_row`, whose differential covers nullish
   attempt fallback and ECMAScript String/Number coercion.
+
+## RP-FS3-009: numeric legacy directory binding (library, verified parity)
+
+- PR #1332 repair 3 investigated the proposed int32 binding defect against the
+  pinned better-sqlite3 **13.0.3**. Its
+  [binding source](https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/src/util/data.cpp)
+  sends every JavaScript Number to `sqlite3_bind_double`, including integral
+  values inside and outside i32. BigInt uses `sqlite3_bind_int64` with a
+  lossless signed-i64 check; out-of-range BigInt is refused.
+- The installed Node probe confirms `5` binds REAL and casts to TEXT `5.0`;
+  `5n` binds INTEGER and casts to `5`. Consequently numeric `run_dir: 5`
+  leaves output path `5` unread and reads `5.0` in both implementations.
+  Changing integral JSON numbers to INTEGER would introduce a Rust bug for
+  this pinned oracle, so the REAL binding is retained.
+- The required legacy-row Node differential now covers these exact read flags,
+  negative zero, i32 max and both outside-i32 neighbours, fractional values and
+  a number beyond the safe-integer boundary, comparing every database row.
+  BigInt has no JSON representation in `TerminalRow`; accepting a runtime
+  BigInt requires a separate typed boundary, not treating JSON integers as
+  BigInts. No BigInt compatibility claim is made for that JSON API.

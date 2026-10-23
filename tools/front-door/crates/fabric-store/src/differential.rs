@@ -1274,6 +1274,7 @@ fn legacy_terminal_rows_preserve_missing_null_coercion_and_binding_errors() {
     )
     .unwrap();
     let mut out = Vec::new();
+    let ids = FixtureIds::default();
     for text in [
         r#"{}"#,
         r#"{"run_id":null,"task_id":"","attempt_count":"2"}"#,
@@ -1298,6 +1299,60 @@ fn legacy_terminal_rows_preserve_missing_null_coercion_and_binding_errors() {
         capture(&mut out, lane_task_id(&row));
         capture(&mut out, store.acknowledge_terminal_row(&b(), &row, 1));
     }
+    store.announce(&a()).unwrap();
+    store.announce(&b()).unwrap();
+    for path in [
+        "5",
+        "5.0",
+        "0",
+        "0.0",
+        "2147483647",
+        "2147483647.0",
+        "2147483648",
+        "2147483648.0",
+        "-2147483649",
+        "-2147483649.0",
+        "5.5",
+        "9007199254740992",
+        "9.00719925474099e+15",
+    ] {
+        capture(
+            &mut out,
+            store.send(
+                &a(),
+                "bob",
+                "numeric directory",
+                SendOptions {
+                    kind: Some("run_terminal"),
+                    output_path: Some(path),
+                    ..Default::default()
+                },
+                RecipientContext::default(),
+                &ids,
+            ),
+        );
+    }
+    for value in [
+        "5",
+        "5.0",
+        "-0.0",
+        "2147483647",
+        "2147483648",
+        "-2147483649",
+        "5.5",
+        "9007199254740992",
+    ] {
+        let row = TerminalRow::from_json(&format!(
+            r#"{{"run_id":"r","attempt":1,"run_dir":{value}}}"#
+        ))
+        .unwrap();
+        capture(&mut out, store.acknowledge_terminal_row(&b(), &row, 1));
+    }
+    let numeric_reads: Vec<(String, bool)> = store.db.prepare("SELECT output_path, read_at IS NOT NULL FROM messages JOIN deliveries USING(message_id) WHERE output_path IN ('5','5.0') ORDER BY output_path").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+    assert_eq!(
+        numeric_reads,
+        vec![("5".into(), false), ("5.0".into(), true)]
+    );
     let lanes = vec![
         LaneAttempt {
             run_id: "r".into(),
@@ -1332,7 +1387,7 @@ fn legacy_terminal_rows_preserve_missing_null_coercion_and_binding_errors() {
                 ..Default::default()
             },
             RecipientContext::default(),
-            &FixtureIds::default(),
+            &ids,
         ),
     );
     compare("legacy-rows", snapshot(&store, out));
