@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::casefold::is_printable;
+
 const AFFINITIES: [(&str, &str, &str); 3] = [
     ("family_affinity", "model_family", "unknown_family"),
     ("model_affinity", "model", "unknown_model"),
@@ -321,10 +323,17 @@ fn python_string(value: &Value) -> String {
         Value::Bool(false) => "False".into(),
         Value::Number(number) => {
             let rendered = number.to_string();
-            if number.is_f64() {
-                if let Some((mantissa, exponent)) = rendered.split_once('e') {
-                    if let Ok(value) = exponent.parse::<i32>() {
-                        return format!("{mantissa}e{value:+03}").replace("e+", "e+");
+            if let Some(value) = number.as_f64().filter(|value| {
+                number.is_f64() && *value != 0.0 && (value.abs() < 1e-4 || value.abs() >= 1e16)
+            }) {
+                let shortest = format!("{value:?}");
+                if let Some((mantissa, exponent)) = shortest.split_once('e') {
+                    if let Ok(exponent) = exponent.parse::<i32>() {
+                        return format!(
+                            "{mantissa}e{}{:02}",
+                            if exponent < 0 { '-' } else { '+' },
+                            exponent.unsigned_abs()
+                        );
                     }
                 }
             }
@@ -365,12 +374,19 @@ fn python_repr(value: &Value) -> String {
                     '\n' => result.push_str("\\n"),
                     '\r' => result.push_str("\\r"),
                     '\t' => result.push_str("\\t"),
-                    value if value.is_control() && u32::from(value) <= 0xff => {
-                        result.push_str(&format!("\\x{:02x}", u32::from(value)));
-                    }
                     value if value == quote => {
                         result.push('\\');
                         result.push(value);
+                    }
+                    value if !is_printable(value) => {
+                        let codepoint = u32::from(value);
+                        if codepoint <= 0xff {
+                            result.push_str(&format!("\\x{codepoint:02x}"));
+                        } else if codepoint <= 0xffff {
+                            result.push_str(&format!("\\u{codepoint:04x}"));
+                        } else {
+                            result.push_str(&format!("\\U{codepoint:08x}"));
+                        }
                     }
                     value => result.push(value),
                 }
@@ -595,8 +611,23 @@ mod tests {
         let ignored =
             configuration_ignored(&json!({"spreading":{"policy":["\u{0}"]}}), "work", "worker");
         assert_eq!(ignored[0]["value"], "['\\x00']");
+        let ignored = configuration_ignored(
+            &json!({"spreading":{"policy":["\u{a0}"]}}),
+            "work",
+            "worker",
+        );
+        assert_eq!(ignored[0]["value"], "['\\xa0']");
+        let ignored = configuration_ignored(
+            &json!({"spreading":{"policy":["\u{200d}"]}}),
+            "work",
+            "worker",
+        );
+        assert_eq!(ignored[0]["value"], "['\\u200d']");
         let ignored =
             configuration_ignored(&json!({"spreading":{"policy":1e-7}}), "work", "worker");
         assert_eq!(ignored[0]["value"], "1e-07");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":1e-5}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "1e-05");
     }
 }
