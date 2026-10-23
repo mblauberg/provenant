@@ -26,3 +26,23 @@ new behaviour becomes the contract. No lane can approve its own exception.
 Existing front-door exceptions D1–D3 are already recorded in
 [ADR 0027](../../adr/0027-rust-front-door.md#intentional-divergences-from-the-python-front-door).
 They form the current baseline; they are not newly discovered port mismatches.
+
+### RP-RUN-1 — lease compatibility limits (open)
+
+- Unit: `skills/orchestrate/scripts/lease.py#unit-01`; rulebook v2 with
+  the v3/PR #1294 inert-crate gate override from the lane brief.
+- Class: `library`. Oracle: `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Reproducer: supply a generation outside signed 64-bit range, a non-string
+  historical holder field, or a Python-only `datetime.fromisoformat` spelling.
+  Python's dynamic values and unbounded integers exceed this first typed API;
+  Rust refuses unsupported fields/timestamps/generations explicitly.
+- The pending reader also bounds lease and handoff inputs at 1 MiB; the
+  Python lease reader has no bound. Oversized lease input returns an I/O
+  error; oversized handoff input cannot authorise takeover.
+- Evidence: crate policy tests and a fixed-clock Python differential cover
+  acquisition, contention, renewal refusal, transfer, release, record bytes,
+  Unicode escaping and private publication permissions. They do not cover
+  the compatibility limits above.
+- Disposition: open; partial unit, inert only. These limits are not approved
+  boundary changes and must be reconciled before cut-over. CLI argparse and
+  exact parser/I/O diagnostics remain with the future CLI owner/J1.
