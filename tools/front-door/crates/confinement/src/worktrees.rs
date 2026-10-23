@@ -3,10 +3,10 @@
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
-use crate::status::parse_porcelain_v2_z;
+use crate::status::{parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
-    GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRead, UtilityRuntime,
-    execute_git_mutation, run_utility,
+    GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
+    run_utility,
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
@@ -492,7 +492,7 @@ fn run_git(
 ) -> Result<ExecOutcome, WorktreeError> {
     run_utility(
         context.executor,
-        UtilityRead::Git(read),
+        read,
         repo,
         context.utility,
         context.utility_budget,
@@ -615,7 +615,7 @@ fn identity_for(
     WorktreeIdentity {
         schema_version: WORKTREE_IDENTITY_SCHEMA,
         active: true,
-        project_id: context.binding.project,
+        project_id: context.binding.project_id(),
         root_device: root_identity.device,
         root_inode: root_identity.inode,
         path_digest: path_digest(path),
@@ -663,7 +663,6 @@ fn writer_state(
     let name = state_dir_name(path);
     let directory = match context.project_state.open_verified_directory(&name) {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return WorkerState::Unknown,
         Err(_) => return WorkerState::Unknown,
     };
     let bytes = match read_bounded(directory.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD) {
@@ -676,7 +675,7 @@ fn writer_state(
     };
     if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
         || !identity.active
-        || identity.project_id != context.binding.project
+        || identity.project_id != context.binding.project_id()
         || identity.root_device != root_identity.device
         || identity.root_inode != root_identity.inode
         || identity.path_digest != path_digest(path)
@@ -709,28 +708,6 @@ fn writer_state(
     }
 }
 
-fn worktree_dirty(
-    context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    cancel: &CancelToken,
-) -> Result<WorktreeCondition, WorktreeError> {
-    let repo = if canonicalize(&entry.path)? == canonicalize(context.repo.root_path())? {
-        context.repo
-    } else {
-        return worktree_dirty_linked(context, entry, cancel);
-    };
-    worktree_dirty_at(context, repo, cancel)
-}
-
-fn worktree_dirty_linked(
-    context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    cancel: &CancelToken,
-) -> Result<WorktreeCondition, WorktreeError> {
-    let verified = verify_worktree(context.repo, &entry.path)?;
-    worktree_dirty_at(context, verified.repo(), cancel)
-}
-
 fn worktree_dirty_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
@@ -745,7 +722,13 @@ fn worktree_dirty_at(
     if exit_code(&index)? != 0 {
         return Ok(WorktreeCondition::Unknown);
     }
-    if index_contains_gitlink(&index.stdout.bytes)? {
+    let mut has_gitlink = false;
+    for entry in
+        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
+    {
+        has_gitlink |= entry.map_err(|_| WorktreeError::InvalidOutput)?.mode == 0o160000;
+    }
+    if has_gitlink {
         return Ok(WorktreeCondition::Unknown);
     }
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
@@ -759,41 +742,6 @@ fn worktree_dirty_at(
     } else {
         WorktreeCondition::Dirty
     })
-}
-
-fn index_contains_gitlink(raw: &[u8]) -> Result<bool, WorktreeError> {
-    if !raw.is_empty() && !raw.ends_with(&[0]) {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    let mut has_gitlink = false;
-    for record in raw
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        let separator = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(WorktreeError::InvalidOutput)?;
-        let metadata = record
-            .get(..separator)
-            .ok_or(WorktreeError::InvalidOutput)?;
-        let path = record
-            .get(separator + 1..)
-            .ok_or(WorktreeError::InvalidOutput)?;
-        if path.is_empty() {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        let fields = metadata.split(|byte| *byte == b' ').collect::<Vec<_>>();
-        if fields.len() != 3
-            || !matches!(fields[0], b"100644" | b"100755" | b"120000" | b"160000")
-            || !matches!(fields[2], b"0" | b"1" | b"2" | b"3")
-        {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        parse_oid(fields[1])?;
-        has_gitlink |= fields[0] == b"160000";
-    }
-    Ok(has_gitlink)
 }
 
 struct LockedWorktree {
@@ -825,7 +773,7 @@ fn read_worktree_identity(
         serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
     if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
         || (require_active && !identity.active)
-        || identity.project_id != context.binding.project
+        || identity.project_id != context.binding.project_id()
         || identity.root_device != verified.identity().device
         || identity.root_inode != verified.identity().inode
         || identity.path_digest != path_digest(&canonical)
@@ -975,9 +923,6 @@ pub fn create(
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
-    if request.base.is_some() && request.base.as_ref().is_some_and(|base| base.is_empty()) {
-        return Err(WorktreeError::InvalidRequest);
-    }
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     let entries = read_worktrees(context, cancel)?;
@@ -1062,7 +1007,7 @@ pub fn create(
                 serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
             if prior.schema_version != WORKTREE_IDENTITY_SCHEMA
                 || prior.active
-                || prior.project_id != context.binding.project
+                || prior.project_id != context.binding.project_id()
                 || prior.path_digest != path_digest(&target)
                 || prior.branch != branch.as_str()
             {
@@ -1117,7 +1062,7 @@ pub fn create(
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
     let verified = verify_worktree(context.repo, &entry.path)?;
-    if worktree_dirty(context, entry, cancel)? != WorktreeCondition::Clean {
+    if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
     let (state, _writer) = match prior_state {
@@ -1164,9 +1109,6 @@ fn pin_revision(
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
-    if let Ok(oid) = GitOid::parse(revision) {
-        return Ok(oid);
-    }
     let revision = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
     let outcome = run_git(
         context,
@@ -1242,10 +1184,7 @@ fn checked_out_elsewhere(
     Ok(false)
 }
 
-fn tombstone_identity(
-    _context: &WorktreeContext<'_>,
-    locked: &LockedWorktree,
-) -> Result<(), WorktreeError> {
+fn tombstone_identity(locked: &LockedWorktree) -> Result<(), WorktreeError> {
     let mut identity = locked.identity.clone();
     identity.active = false;
     write_identity(locked.state.as_ref(), &identity, PublishMode::Replace)
@@ -1277,7 +1216,7 @@ fn remove_tree(
     {
         return Err(WorktreeError::IdentityChanged);
     }
-    match worktree_dirty(context, current, cancel)? {
+    match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
         WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
@@ -1291,7 +1230,7 @@ fn remove_tree(
         cancel,
     )?;
     context.repo.revalidate()?;
-    tombstone_identity(context, &locked)?;
+    tombstone_identity(&locked)?;
     let info = WorktreeInfo {
         path: canonical,
         branch: Some(branch.as_str().to_owned()),
@@ -1423,8 +1362,8 @@ fn remove_merged_candidate(
         retain(outcome, branch, RetainReason::CheckedOut);
         return Ok(());
     }
-    let current = match resolve_ref(context, branch.clone(), cancel) {
-        Ok(current) if current == tip => current,
+    match resolve_ref(context, branch.clone(), cancel) {
+        Ok(current) if current == tip => {}
         Ok(_) | Err(WorktreeError::NotFound) => {
             retain(outcome, branch, RetainReason::Changed);
             return Ok(());
@@ -1434,7 +1373,6 @@ fn remove_merged_candidate(
             return Ok(());
         }
     };
-    let _ = current;
     context.repo.revalidate()?;
     let deleted = execute_git_mutation(
         context.executor,
@@ -1562,7 +1500,10 @@ mod tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    use crate::test_support::{Fixture, run_fixture_git};
+    use crate::test_support::{
+        Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter, fixture_env,
+        run_fixture_git,
+    };
     use crate::utility::{GitMutation, execute_git_mutation};
     use provenant_core::Clock;
     use provenant_supervisor::clock::SystemClock;
@@ -1596,14 +1537,21 @@ mod lifecycle_tests {
     impl<'a> TestContext<'a> {
         fn new(fixture: &'a Fixture) -> Result<Self, Box<dyn Error>> {
             let fs = LocalFs;
-            let binding = ProjectBinding {
-                project: ProjectId::from_bytes([7; 16]),
-                canonical_common_dir: fixture.repo.common_git_dir().to_path_buf(),
-            };
+            let binding_state = fixture._temp.path().join("bindings");
+            fs::create_dir(&binding_state)?;
+            let mut inputs =
+                provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
+            inputs.state_dir = Some(binding_state);
+            let roots = inputs.resolve(&fs)?;
+            let binding = provenant_config::bind_project(
+                &roots,
+                provenant_config::ProjectLocation::new(fixture.repo.common_git_dir())?,
+                &fs,
+            )?;
             let state_root = fixture._temp.path().join("worktrees");
             fs::create_dir(&state_root)?;
             fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700))?;
-            let state_path = state_root.join(binding.project.to_string());
+            let state_path = state_root.join(binding.project_id().to_string());
             fs::create_dir(&state_path)?;
             fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
             let project_state = fs.open_anchor(&state_path)?;
@@ -1644,35 +1592,7 @@ mod lifecycle_tests {
         path: &Path,
         args: &[&str],
     ) -> Result<(), Box<dyn Error>> {
-        let env = vec![
-            ("HOME".into(), fixture.home.as_os_str().to_owned()),
-            ("TMPDIR".into(), fixture._temp.path().as_os_str().to_owned()),
-            (
-                "PROVENANT_STATE_DIR".into(),
-                fixture._temp.path().join("state").into_os_string(),
-            ),
-            (
-                "XDG_CONFIG_HOME".into(),
-                fixture._temp.path().join("config").into_os_string(),
-            ),
-            (
-                "CLAUDE_CONFIG_DIR".into(),
-                fixture._temp.path().join("claude").into_os_string(),
-            ),
-            (
-                "CODEX_HOME".into(),
-                fixture._temp.path().join("codex").into_os_string(),
-            ),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_COUNT".into(), "0".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-            ("GIT_PAGER".into(), "cat".into()),
-            ("PAGER".into(), "cat".into()),
-            ("LANG".into(), "C".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
+        let env = fixture_env(&fixture.home, fixture._temp.path());
         let path = path.to_str().ok_or("non-UTF8 worktree path")?;
         let mut git_args = vec!["-C", path];
         git_args.extend_from_slice(args);
@@ -1682,91 +1602,6 @@ mod lifecycle_tests {
             &fixture.root,
             &env,
             &git_args,
-        )?;
-        Ok(())
-    }
-
-    fn add_gitlink(
-        fixture: &Fixture,
-        worktree: &Path,
-        marker: &Path,
-    ) -> Result<(), Box<dyn Error>> {
-        let sub = worktree.join("sub");
-        fs::create_dir(&sub)?;
-        let sub_path = sub.to_str().ok_or("non-UTF8 nested repo path")?;
-        let env = vec![
-            ("HOME".into(), fixture.home.as_os_str().to_owned()),
-            ("TMPDIR".into(), fixture._temp.path().as_os_str().to_owned()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-            ("LANG".into(), "C".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &env,
-            &["-C", sub_path, "init", "--quiet"],
-        )?;
-        for (key, value) in [
-            ("user.name", "Nested"),
-            ("user.email", "nested@example.invalid"),
-        ] {
-            run_fixture_git(
-                &fixture.executor,
-                &fixture.git,
-                &fixture.root,
-                &env,
-                &["-C", sub_path, "config", key, value],
-            )?;
-        }
-        fs::write(sub.join("tracked.txt"), "baseline\n")?;
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &env,
-            &["-C", sub_path, "add", "tracked.txt"],
-        )?;
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &env,
-            &["-C", sub_path, "commit", "-m", "nested fixture"],
-        )?;
-        let filter = format!("touch {}; cat", marker.display());
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &env,
-            &[
-                "-C",
-                sub_path,
-                "config",
-                "filter.poison.clean",
-                filter.as_str(),
-            ],
-        )?;
-        fs::write(sub.join(".gitattributes"), "tracked.txt filter=poison\n")?;
-        fs::write(sub.join("tracked.txt"), "changed\n")?;
-        let nested_head = run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &env,
-            &["-C", sub_path, "rev-parse", "HEAD"],
-        )?;
-        let nested_oid = parse_oid(trim_ascii(&nested_head.stdout.bytes))?;
-        let cacheinfo = format!("160000,{nested_oid},sub");
-        run_in_worktree(
-            fixture,
-            worktree,
-            &["update-index", "--add", "--cacheinfo", cacheinfo.as_str()],
         )?;
         Ok(())
     }
@@ -1827,7 +1662,8 @@ mod lifecycle_tests {
     fn worktree_operations_require_the_repo_project_binding() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let mut test_context = TestContext::new(&fixture)?;
-        test_context.binding.canonical_common_dir = fixture.root.clone();
+        let other_fixture = Fixture::new()?;
+        test_context.binding = TestContext::new(&other_fixture)?.binding;
         assert!(matches!(
             list(&test_context.context(), &cancel()),
             Err(WorktreeError::Repository(RepoError::InvalidRegistration))
@@ -1923,6 +1759,29 @@ mod lifecycle_tests {
         assert!(
             read_branch_tips(&context, &cancellation)?
                 .contains_key(&GitRefName::branch("feature/existing")?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_oid_must_name_an_existing_commit() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        assert!(matches!(
+            pin_revision(
+                &test_context.context(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &cancel()
+            ),
+            Err(WorktreeError::NotFound)
+        ));
+        assert_eq!(
+            pin_revision(
+                &test_context.context(),
+                &fixture.head()?.to_string(),
+                &cancel()
+            )?,
+            fixture.head()?
         );
         Ok(())
     }
@@ -2185,7 +2044,8 @@ mod lifecycle_tests {
             &cancellation,
         )?;
         let direct_marker = fixture._temp.path().join("direct-filter-ran");
-        add_gitlink(&fixture, &direct.path, &direct_marker)?;
+        let direct_poison = add_poisoned_gitlink(&fixture, &direct.path, "sub", &direct_marker)?;
+        assert_raw_git_runs_poison_filter(&fixture, &direct_poison)?;
 
         let merged = create(
             &context,
@@ -2206,15 +2066,28 @@ mod lifecycle_tests {
             "merge feature",
         ])?;
         let merged_marker = fixture._temp.path().join("merged-filter-ran");
-        add_gitlink(&fixture, &merged.path, &merged_marker)?;
+        let merged_poison = add_poisoned_gitlink(&fixture, &merged.path, "sub", &merged_marker)?;
+        assert_raw_git_runs_poison_filter(&fixture, &merged_poison)?;
 
+        direct_poison.arm()?;
+        merged_poison.arm()?;
         let listed = list(&context, &cancellation)?;
+        assert!(
+            !direct_marker.exists(),
+            "worktree listing ran a nested clean filter"
+        );
+        assert!(
+            !merged_marker.exists(),
+            "worktree listing ran a nested clean filter"
+        );
         for branch in ["feature/direct-gitlink", "feature/merged-gitlink"] {
             assert!(listed.iter().any(|entry| {
                 entry.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
                     && entry.dirty == WorktreeCondition::Unknown
             }));
         }
+        direct_poison.arm()?;
+        merged_poison.arm()?;
         assert!(matches!(
             remove(
                 &context,
@@ -2223,6 +2096,12 @@ mod lifecycle_tests {
             ),
             Err(WorktreeError::UnknownWriter)
         ));
+        assert!(
+            !direct_marker.exists(),
+            "worktree removal ran a nested clean filter"
+        );
+        direct_poison.arm()?;
+        merged_poison.arm()?;
         let pruned = remove(
             &context,
             WorktreeRemove::Merged {
@@ -2235,6 +2114,10 @@ mod lifecycle_tests {
         assert!(pruned.pruned_refs.is_empty());
         assert_eq!(pruned.retained.len(), 1);
         assert_eq!(pruned.retained[0].reason, RetainReason::UnknownWriter);
+        assert!(
+            !merged_marker.exists(),
+            "worktree pruning ran a nested clean filter"
+        );
         assert!(direct.path.join("sub/.git").exists());
         assert!(merged.path.join("sub/.git").exists());
         assert!(!direct_marker.exists());

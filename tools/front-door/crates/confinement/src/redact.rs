@@ -158,8 +158,15 @@ const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
 ];
 const MAX_MARKER_LENGTH: usize = 11;
 
+struct ActiveToken {
+    marker: &'static [u8],
+    kind: TokenKind,
+    body: Vec<u8>,
+    emitted: bool,
+}
+
 struct TokenScanner {
-    active: Option<(TokenKind, bool)>,
+    active: Option<ActiveToken>,
     tail: Vec<u8>,
     last_byte: Option<u8>,
     url_authority: Option<Vec<u8>>,
@@ -223,19 +230,32 @@ impl TokenScanner {
                 continue;
             }
 
-            if let Some((kind, emitted)) = self.active {
+            if let Some(kind) = self.active.as_ref().map(|active| active.kind) {
                 let byte = input[index];
                 if token_byte(kind, byte) {
-                    if !emitted {
+                    let mut became_secret = false;
+                    if let Some(active) = self.active.as_mut()
+                        && !active.emitted
+                    {
+                        active.body.push(byte);
+                        if active.body.len() >= minimum_token_length(kind) {
+                            active.body.clear();
+                            active.emitted = true;
+                            became_secret = true;
+                        }
+                    }
+                    if became_secret {
+                        if matches!(kind, TokenKind::Bearer) {
+                            output.extend_from_slice(b"Bearer ");
+                        }
                         output.extend_from_slice(REDACTED);
                         self.matched = true;
                     }
-                    self.active = Some((kind, true));
                     self.last_byte = Some(byte);
                     index += 1;
                     continue;
                 }
-                self.active = None;
+                self.finish_active(output);
                 continue;
             }
 
@@ -259,19 +279,13 @@ impl TokenScanner {
             let at_word_boundary = preceding.is_none_or(|byte| !word_byte(byte));
             if at_word_boundary {
                 if let Some((marker, kind)) = token_marker_at(&input[index..]) {
-                    match kind {
-                        TokenKind::Bearer => {
-                            output.extend_from_slice(marker);
-                            self.last_byte = marker.last().copied();
-                            self.active = Some((kind, false));
-                        }
-                        TokenKind::Generic | TokenKind::AwsAccessKey => {
-                            output.extend_from_slice(REDACTED);
-                            self.last_byte = marker.last().copied();
-                            self.active = Some((kind, true));
-                            self.matched = true;
-                        }
-                    }
+                    self.last_byte = marker.last().copied();
+                    self.active = Some(ActiveToken {
+                        marker,
+                        kind,
+                        body: Vec::with_capacity(minimum_token_length(kind)),
+                        emitted: false,
+                    });
                     index += marker.len();
                     continue;
                 }
@@ -286,18 +300,43 @@ impl TokenScanner {
             self.last_byte = Some(byte);
             index += 1;
         }
+        if eof {
+            self.finish_active(output);
+        }
         Ok(())
+    }
+
+    fn finish_active(&mut self, output: &mut Vec<u8>) {
+        if let Some(active) = self.active.take()
+            && !active.emitted
+        {
+            output.extend_from_slice(active.marker);
+            output.extend_from_slice(&active.body);
+        }
     }
 
     fn finish_authority(&mut self, authority: Vec<u8>, output: &mut Vec<u8>) {
         if let Some(userinfo_end) = authority.iter().rposition(|byte| *byte == b'@') {
-            output.extend_from_slice(REDACTED);
-            output.extend_from_slice(&authority[userinfo_end..]);
-            self.matched = true;
+            let userinfo = &authority[..userinfo_end];
+            let has_password = userinfo.contains(&b':');
+            if has_password {
+                output.extend_from_slice(REDACTED);
+                output.extend_from_slice(&authority[userinfo_end..]);
+                self.matched = true;
+            } else {
+                output.extend_from_slice(&authority);
+            }
         } else {
             output.extend_from_slice(&authority);
         }
         self.last_byte = authority.last().copied().or(self.last_byte);
+    }
+}
+
+fn minimum_token_length(kind: TokenKind) -> usize {
+    match kind {
+        TokenKind::Bearer | TokenKind::Generic => 20,
+        TokenKind::AwsAccessKey => 16,
     }
 }
 
@@ -311,27 +350,15 @@ fn token_byte(kind: TokenKind, byte: u8) -> bool {
 }
 
 fn token_marker_at(bytes: &[u8]) -> Option<(&'static [u8], TokenKind)> {
-    TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
-        bytes
-            .get(..marker.len())
-            .filter(|candidate| {
-                candidate
-                    .iter()
-                    .zip(marker.iter())
-                    .all(|(left, right)| left.eq_ignore_ascii_case(right))
-            })
-            .map(|_| (*marker, *kind))
-    })
+    TOKEN_MARKERS
+        .iter()
+        .find_map(|(marker, kind)| bytes.starts_with(marker).then_some((*marker, *kind)))
 }
 
 fn token_marker_prefix(bytes: &[u8]) -> bool {
-    TOKEN_MARKERS.iter().any(|(marker, _)| {
-        bytes.len() < marker.len()
-            && marker[..bytes.len()]
-                .iter()
-                .zip(bytes.iter())
-                .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
+    TOKEN_MARKERS
+        .iter()
+        .any(|(marker, _)| bytes.len() < marker.len() && marker.starts_with(bytes))
 }
 
 fn word_byte(byte: u8) -> bool {
@@ -517,7 +544,10 @@ mod tests {
     #[test]
     fn token_markers_split_across_chunks_redact_only_at_word_boundaries() {
         let mut redactor = Redactor::new([]).expect("empty secret set");
-        let output = joined(&mut redactor, &[b"xsk-embedded sk", b"-secret-value"]);
+        let output = joined(
+            &mut redactor,
+            &[b"xsk-embedded sk", b"-abcdefghijklmnopqrst"],
+        );
         assert_eq!(output, b"xsk-embedded [REDACTED]");
     }
 
@@ -527,8 +557,8 @@ mod tests {
         let output = joined(
             &mut redactor,
             &[
-                b"Bearer ",
-                b"abc.def_123\nfetch https:",
+                b"Bearer abc.def_123",
+                b"456789XYZ\nfetch https:",
                 b"//alice:password@example.invalid/path",
             ],
         );
@@ -539,6 +569,45 @@ mod tests {
                 .any(|window| window == b"alice:password@example.invalid")
         );
         assert!(output.ends_with(b"/path"));
+    }
+
+    #[test]
+    fn short_or_case_mismatched_tokens_and_passwordless_userinfo_are_preserved() {
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        let expected = b"bearer values | Bearer values | Bearer abcdefghijklmnopqrs | sk- | sk-abcdefghijklmnopqrs | SK-abcdefghijklmnopqrstuvwxyz | GHP_abcdefghijklmnopqrst | GHO_abcdefghijklmnopqrst | GHU_abcdefghijklmnopqrst | GHS_abcdefghijklmnopqrst | GHR_abcdefghijklmnopqrst | GitHub_pat_abcdefghijklmnopqrst | AKIA123456789012345 | Akia1234567890123456 | ssh://git@host | https://user@example.invalid/path";
+        let output = joined(
+            &mut redactor,
+            &[
+                b"bearer values | Bearer values | Bearer abcdefghijklmnopqrs | sk",
+                b"- | sk-abcdefghijklmnopqrs | SK-abcdefghijklmnopqrstuvwxyz | GHP_abcdefghijklmnopqrst | GHO_abcdefghijklmnopqrst | GHU_abcdefghijklmnopqrst | GHS_abcdefghijklmnopqrst | GHR_abcdefghijklmnopqrst | GitHub_pat_abcdefghijklmnopqrst | AKIA123456789012345 | Akia1234567890123456 | ssh://git@host | https://user@example.invalid/path",
+            ],
+        );
+        assert_eq!(output, expected);
+        assert!(!redactor.has_redaction());
+    }
+
+    #[test]
+    fn empty_password_component_in_url_userinfo_is_redacted() {
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        let output = joined(&mut redactor, &[b"https://user:@example.invalid/path"]);
+        assert_eq!(output, b"https://[REDACTED]@example.invalid/path");
+        assert!(redactor.has_redaction());
+    }
+
+    #[test]
+    fn token_markers_redact_at_minimum_body_lengths_across_chunks() {
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        let output = joined(
+            &mut redactor,
+            &[
+                b"Bearer abcdefghij",
+                b"klmnopqrst\nsk-abcdefghijkl",
+                b"mnopqrst AKIA01234567",
+                b"89ABCDEF!",
+            ],
+        );
+        assert_eq!(output, b"Bearer [REDACTED]\n[REDACTED] [REDACTED]!");
+        assert!(redactor.has_redaction());
     }
 
     #[test]

@@ -87,11 +87,7 @@ impl OutputCustody {
         }
         let (installed_bytes, installed) =
             read_regular(destination_parent, destination_name, limit)?;
-        if installed_bytes != bytes
-            || CanonicalV1::file_digest(&installed_bytes) != digest
-            || installed.device != parent.device
-            || installed.links != 1
-        {
+        if installed_bytes != bytes || installed.device != parent.device || installed.links != 1 {
             return Err(OutputCustodyError::IdentityMismatch);
         }
         Ok(InstalledOutput {

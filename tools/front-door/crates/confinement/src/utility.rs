@@ -92,11 +92,11 @@ pub enum UtilityError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UtilityBudget {
-    pub timeout: Duration,
-    pub terminate_grace: Duration,
-    pub reap_timeout: Duration,
-    pub stdout_limit: usize,
-    pub stderr_limit: usize,
+    timeout: Duration,
+    terminate_grace: Duration,
+    reap_timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
 }
 
 impl UtilityBudget {
@@ -129,16 +129,6 @@ impl UtilityBudget {
             stdout_limit,
             stderr_limit,
         })
-    }
-
-    fn validate(self) -> Result<Self, UtilityError> {
-        Self::new(
-            self.timeout,
-            self.terminate_grace,
-            self.reap_timeout,
-            self.stdout_limit,
-            self.stderr_limit,
-        )
     }
 
     pub fn bounded(timeout: Duration) -> Result<Self, UtilityError> {
@@ -210,11 +200,6 @@ pub enum GitRead {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UtilityRead {
-    Git(GitRead),
-}
-
 /// A closed mutation set. It is crate-private: callers receive only the
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,10 +250,10 @@ impl UtilityRuntime {
         if cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
         }
-        let budget = budget.validate()?;
         self.revalidate()?;
         VerifiedRepo::open(self.fs.clone(), path, |repo| {
             verify_repo_binding(self, repo)?;
+            reject_info_attributes(repo)?;
             verify_local_git_configuration(executor, repo, self, budget, cancel)?;
             let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
             let object_format = match attribute_source.len() {
@@ -432,16 +417,35 @@ impl PrivateHome {
 
 pub fn run_utility(
     executor: &dyn Executor,
-    operation: UtilityRead,
+    operation: GitRead,
     repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    execute_git(
+        executor,
+        repo,
+        runtime,
+        budget,
+        cancel,
+        |attribute_source| Ok((git_args(operation, repo, attribute_source)?, None)),
+    )
+}
+
+/// Keep the authority checks, attribute source and bounded execution identical
+/// for reads and the separately typed custody mutations.
+fn execute_git(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
+) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
         return Err(UtilityError::Cancelled);
     }
-    let budget = budget.validate()?;
     runtime.home.verify(runtime.fs.as_ref())?;
     repo.revalidate()?;
     verify_repo_binding(runtime, repo)?;
@@ -451,18 +455,22 @@ pub fn run_utility(
         .ok_or(UtilityError::UnprobedRepository)?
         .attribute_source
         .as_str();
-    let UtilityRead::Git(read) = operation;
-    let program = &runtime.git;
-    let args = git_args(read, repo, attribute_source)?;
+    let (args, stdin) = command(attribute_source)?;
     let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(program.path.as_os_str().to_owned());
+    argv.push(runtime.git.path.as_os_str().to_owned());
     argv.extend(args);
     let mut env = environment(runtime, repo);
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    program.verify(runtime.fs.as_ref())?;
-    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
-    let outcome = executor.execute(options)?;
-    validate_outcome(outcome)
+    runtime.git.verify(runtime.fs.as_ref())?;
+    let options = exec_options(
+        &argv,
+        repo.root_path(),
+        budget,
+        &env,
+        stdin.as_deref(),
+        Some(cancel),
+    );
+    validate_outcome(executor.execute(options)?)
 }
 
 pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
@@ -778,37 +786,18 @@ pub(crate) fn execute_git_mutation(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
-    if cancel.is_cancelled() {
-        return Err(UtilityError::Cancelled);
-    }
-    let budget = budget.validate()?;
-    runtime.home.verify(runtime.fs.as_ref())?;
-    repo.revalidate()?;
-    verify_repo_binding(runtime, repo)?;
-    reject_info_attributes(repo)?;
-    let attribute_source = repo
-        .probe_data()
-        .ok_or(UtilityError::UnprobedRepository)?
-        .attribute_source
-        .as_str();
-    let (args, stdin) = mutation_args(mutation)?;
-    let mut argv = Vec::with_capacity(args.len() + 2);
-    argv.push(runtime.git.path.as_os_str().to_owned());
-    argv.push(format!("--attr-source={attribute_source}").into());
-    argv.extend(args);
-    let mut env = environment(runtime, repo);
-    env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    runtime.git.verify(runtime.fs.as_ref())?;
-    let options = exec_options(
-        &argv,
-        repo.root_path(),
+    execute_git(
+        executor,
+        repo,
+        runtime,
         budget,
-        &env,
-        stdin.as_deref(),
-        Some(cancel),
-    );
-    let outcome = executor.execute(options)?;
-    validate_outcome(outcome)
+        cancel,
+        |attribute_source| {
+            let (mut args, stdin) = mutation_args(mutation)?;
+            args.insert(0, format!("--attr-source={attribute_source}").into());
+            Ok((args, stdin))
+        },
+    )
 }
 
 /// Inspect only Git config key names, without following include directives or
@@ -822,25 +811,9 @@ fn verify_local_git_configuration(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<(), UtilityError> {
-    runtime.git.verify(runtime.fs.as_ref())?;
-    let mut argv = vec![
-        runtime.git.path.as_os_str().to_owned(),
-        OsString::from("--git-dir"),
-        repo.private_git_dir().as_os_str().to_owned(),
-        OsString::from("--work-tree"),
-        repo.root_path().as_os_str().to_owned(),
-    ];
-    argv.extend(GIT_COMMON.iter().map(OsString::from));
-    argv.extend([
-        OsString::from("config"),
-        OsString::from("--no-includes"),
-        OsString::from("--name-only"),
-        OsString::from("--null"),
-        OsString::from("--list"),
-    ]);
-    let env = environment(runtime, repo);
-    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
-    let outcome = validate_outcome(executor.execute(options)?)?;
+    let command =
+        ["config", "--no-includes", "--name-only", "--null", "--list"].map(OsString::from);
+    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &command)?;
     if outcome.termination != Termination::Exit(0)
         || (!outcome.stdout.bytes.is_empty() && !outcome.stdout.bytes.ends_with(&[0]))
     {
@@ -1021,7 +994,7 @@ fn validate_absolute_mutation_path(path: &Path) -> Result<PathBuf, UtilityError>
 pub(crate) mod tests {
     use super::*;
     use crate::repo::verify_worktree;
-    use crate::test_support::{Fixture, run_fixture_git};
+    use crate::test_support::{Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter};
     use std::error::Error;
     use std::fs;
     use std::time::Duration;
@@ -1031,7 +1004,7 @@ pub(crate) mod tests {
         let fixture = Fixture::new()?;
         let status = run_utility(
             &fixture.executor,
-            UtilityRead::Git(GitRead::Status),
+            GitRead::Status,
             &fixture.repo,
             &fixture.runtime,
             fixture.budget()?,
@@ -1057,7 +1030,7 @@ pub(crate) mod tests {
         assert!(
             run_utility(
                 &fixture.executor,
-                UtilityRead::Git(GitRead::Status),
+                GitRead::Status,
                 &fixture.repo,
                 &fixture.runtime,
                 tiny_capture,
@@ -1068,140 +1041,79 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    fn embedded_gitlink_filters_do_not_run_during_status_diff_or_evidence_reads()
-    -> Result<(), Box<dyn Error>> {
-        use crate::git_evidence::Git;
-        use crate::repo::RepoPath;
-        use std::fs;
-
+    fn poisoned_read_fixture()
+    -> Result<(Fixture, crate::test_support::PoisonedNestedRepo), Box<dyn Error>> {
         let fixture = Fixture::new()?;
-        let safe_file = fixture.root.join("safe.txt");
-        fs::write(&safe_file, "safe\n")?;
+        fs::write(fixture.root.join("safe.txt"), "safe\n")?;
         fs::write(
             fixture.root.join(".gitmodules"),
             "[submodule \"sub\"]\n\tpath = sub\n\turl = https://example.invalid/sub\n",
         )?;
         fixture.run(&["add", "--", ".gitmodules", "safe.txt"])?;
         fixture.run(&["commit", "-m", "outer fixtures"])?;
-        let outer_head = fixture.head()?;
-
-        let sub = fixture.root.join("sub");
-        fs::create_dir(&sub)?;
-        let nested_env = vec![
-            ("HOME".into(), fixture.home.as_os_str().to_owned()),
-            ("TMPDIR".into(), fixture._temp.path().as_os_str().to_owned()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-            ("LANG".into(), "C".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        let sub_path = sub.to_str().ok_or("non-UTF8 nested repo path")?;
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &nested_env,
-            &["-C", sub_path, "init", "--quiet"],
-        )?;
-        for (key, value) in [
-            ("user.name", "Nested"),
-            ("user.email", "nested@example.invalid"),
-        ] {
-            run_fixture_git(
-                &fixture.executor,
-                &fixture.git,
-                &fixture.root,
-                &nested_env,
-                &["-C", sub_path, "config", key, value],
-            )?;
-        }
-        fs::write(sub.join("tracked.txt"), "baseline\n")?;
-        fs::write(sub.join(".gitattributes"), "")?;
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &nested_env,
-            &["-C", sub_path, "add", "--", ".gitattributes", "tracked.txt"],
-        )?;
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &nested_env,
-            &["-C", sub_path, "commit", "-m", "nested fixture"],
-        )?;
-        let nested_head = run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &nested_env,
-            &["-C", sub_path, "rev-parse", "HEAD"],
-        )?;
-        let nested_oid = std::str::from_utf8(&nested_head.stdout.bytes)?.trim();
         let marker = fixture._temp.path().join("nested-filter-ran");
-        let filter = format!("touch {}; cat", marker.display());
-        run_fixture_git(
-            &fixture.executor,
-            &fixture.git,
-            &fixture.root,
-            &nested_env,
-            &[
-                "-C",
-                sub_path,
-                "config",
-                "filter.poison.clean",
-                filter.as_str(),
-            ],
-        )?;
-        fs::write(sub.join(".gitattributes"), "tracked.txt filter=poison\n")?;
-        fs::write(sub.join("tracked.txt"), "changed\n")?;
-        let cacheinfo = format!("160000,{nested_oid},sub");
-        fixture.run(&["update-index", "--add", "--cacheinfo", cacheinfo.as_str()])?;
+        let nested = add_poisoned_gitlink(&fixture, &fixture.root, "sub", &marker)?;
+        fixture.run(&["commit", "-m", "embedded gitlink"])?;
+        assert_raw_git_runs_poison_filter(&fixture, &nested)?;
+        nested.arm()?;
+        Ok((fixture, nested))
+    }
 
-        let status = run_utility(
+    fn assert_nested_read_safe(operation: GitRead) -> Result<(), Box<dyn Error>> {
+        let (fixture, nested) = poisoned_read_fixture()?;
+        let output = run_utility(
             &fixture.executor,
-            UtilityRead::Git(GitRead::Status),
+            operation,
             &fixture.repo,
             &fixture.runtime,
             fixture.budget()?,
             &CancelToken::new(),
         )?;
-        assert_eq!(status.termination, Termination::Exit(0));
-        assert!(!marker.exists());
-        for operation in [
-            GitRead::DiffIndex {
-                paths: vec![RepoPath::new("sub")?],
-            },
-            GitRead::DiffWorktree {
-                paths: vec![RepoPath::new("sub")?],
-            },
-        ] {
-            let output = run_utility(
-                &fixture.executor,
-                UtilityRead::Git(operation),
-                &fixture.repo,
-                &fixture.runtime,
-                fixture.budget()?,
-                &CancelToken::new(),
-            )?;
-            assert_eq!(output.termination, Termination::Exit(0));
-            assert!(!marker.exists());
-        }
-        let selected = RepoPath::new("safe.txt")?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(
+            !nested.marker.exists(),
+            "utility read ran a nested clean filter"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_gitlink_status_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
+        assert_nested_read_safe(GitRead::Status)?;
+        assert_nested_read_safe(GitRead::StatusIncludingIgnored)
+    }
+
+    #[test]
+    fn embedded_gitlink_diff_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
+        use crate::repo::RepoPath;
+        assert_nested_read_safe(GitRead::DiffIndex {
+            paths: vec![RepoPath::new("sub")?],
+        })?;
+        assert_nested_read_safe(GitRead::DiffWorktree {
+            paths: vec![RepoPath::new("sub")?],
+        })
+    }
+
+    #[test]
+    fn embedded_gitlink_evidence_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
+        use crate::git_evidence::Git;
+        use crate::repo::RepoPath;
+        let (fixture, nested) = poisoned_read_fixture()?;
+        let head = fixture.head()?;
+        let token = CancelToken::new();
         let evidence = Git::new(
             &fixture.executor,
             &fixture.repo,
             &fixture.runtime,
             fixture.budget()?,
-            &CancelToken::new(),
+            &token,
         )
-        .evidence(outer_head, std::slice::from_ref(&selected))?;
-        assert_eq!(evidence.head, outer_head);
-        assert!(!marker.exists());
+        .evidence(head, &[RepoPath::new("safe.txt")?])?;
+        assert_eq!(evidence.head, head);
+        assert!(
+            !nested.marker.exists(),
+            "evidence read ran a nested clean filter"
+        );
         Ok(())
     }
 
@@ -1235,7 +1147,7 @@ pub(crate) mod tests {
 
         let result = run_utility(
             &fixture.executor,
-            UtilityRead::Git(GitRead::Status),
+            GitRead::Status,
             &fixture.repo,
             &fixture.runtime,
             fixture.budget()?,
@@ -1276,7 +1188,7 @@ pub(crate) mod tests {
         assert!(matches!(
             run_utility(
                 &fixture.executor,
-                UtilityRead::Git(GitRead::Status),
+                GitRead::Status,
                 &fixture.repo,
                 &fixture.runtime,
                 fixture.budget()?,
@@ -1297,7 +1209,7 @@ pub(crate) mod tests {
 
         let result = run_utility(
             &fixture.executor,
-            UtilityRead::Git(GitRead::Status),
+            GitRead::Status,
             &fixture.repo,
             &fixture.runtime,
             fixture.budget()?,
@@ -1337,7 +1249,7 @@ pub(crate) mod tests {
         );
         let status = run_utility(
             &fixture.executor,
-            UtilityRead::Git(GitRead::Status),
+            GitRead::Status,
             worktree.repo(),
             &fixture.runtime,
             fixture.budget()?,

@@ -122,6 +122,63 @@ pub fn parse_porcelain_v2_z(raw: &[u8]) -> Result<Vec<StatusPath>, StatusError> 
     Ok(paths)
 }
 
+/// One borrowed `ls-files --stage -z` record. Parsing is incremental and has
+/// no disclosure-file count limit; callers bound only what they retain.
+pub(crate) struct IndexEntry<'a> {
+    pub(crate) path: &'a [u8],
+    pub(crate) mode: u32,
+    pub(crate) stage: u8,
+}
+
+pub(crate) fn parse_index_entries(
+    raw: &[u8],
+) -> Result<impl Iterator<Item = Result<IndexEntry<'_>, StatusError>>, StatusError> {
+    if !raw.is_empty() && !raw.ends_with(&[0]) {
+        return Err(StatusError::Unterminated);
+    }
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            if record.len() > 64 * 1024 {
+                return Err(StatusError::Malformed);
+            }
+            let separator = record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or(StatusError::Malformed)?;
+            let (metadata, path) = record.split_at(separator);
+            let path = &path[1..];
+            if path.is_empty() {
+                return Err(StatusError::Malformed);
+            }
+            let mut fields = metadata.split(|byte| *byte == b' ');
+            let mode = match fields.next() {
+                Some(b"100644") => 0o100644,
+                Some(b"100755") => 0o100755,
+                Some(b"120000") => 0o120000,
+                Some(b"160000") => 0o160000,
+                _ => return Err(StatusError::Malformed),
+            };
+            let oid = fields.next().ok_or(StatusError::Malformed)?;
+            provenant_core::GitOid::parse(
+                std::str::from_utf8(oid).map_err(|_| StatusError::Malformed)?,
+            )
+            .map_err(|_| StatusError::Malformed)?;
+            let stage = match fields.next() {
+                Some(b"0") => 0,
+                Some(b"1") => 1,
+                Some(b"2") => 2,
+                Some(b"3") => 3,
+                _ => return Err(StatusError::Malformed),
+            };
+            if fields.next().is_some() {
+                return Err(StatusError::Malformed);
+            }
+            Ok(IndexEntry { path, mode, stage })
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{StatusError, StatusKind, parse_porcelain_v2_z};

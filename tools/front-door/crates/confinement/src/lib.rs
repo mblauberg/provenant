@@ -19,4 +19,4 @@ pub use output_custody::OutputCustody;
 pub use permissions::ConfinementBackend;
 pub use redact::Redactor;
 pub use repo::{VerifiedRepo, VerifiedWorktree, verify_worktree};
-pub use utility::{UtilityBudget, UtilityRead, UtilityRuntime, run_utility};
+pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_utility};

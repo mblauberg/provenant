@@ -237,28 +237,18 @@ pub struct AuthenticationProfile {
 
 /// Provider policy is declarative data. There are no provider-name branches in
 /// the compiler; only the selected authentication mechanism is included.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderProfileSpec {
     /// Exact provider/runtime executables observed in this profile's recording.
-    #[serde(default)]
     pub process_executables: Vec<PathGrant>,
     /// Forking is broad process authority and is enabled only by recorded data.
-    #[serde(default)]
     pub allow_process_fork: bool,
-    #[serde(default)]
     pub runtime_reads: Vec<PathGrant>,
-    #[serde(default)]
     pub authentication: Vec<AuthenticationProfile>,
-    #[serde(default)]
     pub continuation_reads: Vec<PathGrant>,
-    #[serde(default)]
     pub provider_api: Vec<NetworkEndpoint>,
-    #[serde(default)]
     pub network: Vec<NetworkGrant>,
-    #[serde(default)]
     pub capabilities: Vec<CapabilityGrant>,
-    #[serde(default)]
     pub native_controls: Vec<String>,
 }
 
@@ -333,16 +323,19 @@ impl WorktreeWriteGrants {
         }
     }
 
-    fn digest(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v1\0");
-        for grant in std::iter::once(&self.worktree)
+    fn iter(&self) -> impl Iterator<Item = &PathGrant> {
+        std::iter::once(&self.worktree)
             .chain([&self.private_git_dir, &self.common_git_dir])
             .chain(self.index.iter())
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
-        {
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"provenant-worktree-git-grants-v1\0");
+        for grant in self.iter() {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
             digest.update(bytes);
@@ -356,37 +349,25 @@ impl WorktreeWriteGrants {
 
     fn validate(&self) -> Result<(), PermissionError> {
         self.worktree.validate()?;
-        for grant in std::iter::once(&self.private_git_dir)
-            .chain([&self.common_git_dir])
-            .chain(self.index.iter())
-            .chain(self.head.iter())
-            .chain(std::iter::once(&self.objects))
-            .chain(self.selected_ref.iter())
-        {
+        for grant in self.iter().skip(1) {
             validate_noncredential_grant(grant)?;
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
     pub mode: AccessMode,
     pub scratch: PathGrant,
-    #[serde(default)]
     pub read_roots: Vec<PathGrant>,
     /// Readable control files that remain immutable during the attempt.
-    #[serde(default)]
     pub protected_roots: Vec<PathGrant>,
     /// Sensitive roots that must not be read or written by the provider.
-    #[serde(default)]
     pub secret_roots: Vec<PathGrant>,
     pub selected_authentication: Option<String>,
     pub include_continuation: bool,
-    #[serde(default)]
     pub network: Vec<NetworkGrant>,
-    #[serde(default)]
     pub capabilities: Vec<Capability>,
     pub nested_confinement: bool,
 }
@@ -528,20 +509,7 @@ impl Anchors<'_> {
                 anchor.verify(self.safe_fs)
             }
             PathScope::Exact => {
-                let parent = grant.path.parent().ok_or(PermissionError::InvalidPath)?;
-                let name = grant.path.file_name().ok_or(PermissionError::InvalidPath)?;
-                let anchor = self
-                    .directories
-                    .iter()
-                    .find(|anchor| anchor.path == parent)
-                    .ok_or(PermissionError::AnchorMismatch)?;
-                anchor.verify(self.safe_fs)?;
-                match anchor.directory.metadata_at(name, false) {
-                    Ok(metadata) if metadata.kind == FileKind::Regular => {}
-                    Ok(_) => return Err(PermissionError::AnchorMismatch),
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(PermissionError::Filesystem(error)),
-                }
+                self.exact_grant_metadata(&grant.path)?;
                 Ok(())
             }
         }
@@ -551,8 +519,26 @@ impl Anchors<'_> {
         if grant.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath);
         }
-        let parent = grant.path.parent().ok_or(PermissionError::InvalidPath)?;
-        let name = grant.path.file_name().ok_or(PermissionError::InvalidPath)?;
+        match self.exact_grant_metadata(&grant.path)? {
+            Some(_) => Ok(()),
+            None => Err(PermissionError::AnchorMismatch),
+        }
+    }
+
+    fn verify_single_link_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
+        if grant.scope != PathScope::Exact {
+            return Err(PermissionError::InvalidPath);
+        }
+        match self.exact_grant_metadata(&grant.path)? {
+            Some(metadata) if metadata.links == 1 => Ok(()),
+            Some(_) => Err(PermissionError::AnchorMismatch),
+            None => Ok(()),
+        }
+    }
+
+    fn exact_grant_metadata(&self, path: &Path) -> Result<Option<Metadata>, PermissionError> {
+        let parent = path.parent().ok_or(PermissionError::InvalidPath)?;
+        let name = path.file_name().ok_or(PermissionError::InvalidPath)?;
         let anchor = self
             .directories
             .iter()
@@ -560,29 +546,9 @@ impl Anchors<'_> {
             .ok_or(PermissionError::AnchorMismatch)?;
         anchor.verify(self.safe_fs)?;
         match anchor.directory.metadata_at(name, false) {
-            Ok(metadata) if metadata.kind == FileKind::Regular => Ok(()),
+            Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(metadata)),
             Ok(_) => Err(PermissionError::AnchorMismatch),
-            Err(error) if error.is_not_found() => Err(PermissionError::AnchorMismatch),
-            Err(error) => Err(PermissionError::Filesystem(error)),
-        }
-    }
-
-    fn verify_single_link_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
-        self.verify_grant_held(grant)?;
-        if grant.scope != PathScope::Exact {
-            return Err(PermissionError::InvalidPath);
-        }
-        let parent = grant.path.parent().ok_or(PermissionError::InvalidPath)?;
-        let name = grant.path.file_name().ok_or(PermissionError::InvalidPath)?;
-        let anchor = self
-            .directories
-            .iter()
-            .find(|anchor| anchor.path == parent)
-            .ok_or(PermissionError::AnchorMismatch)?;
-        match anchor.directory.metadata_at(name, false) {
-            Ok(metadata) if metadata.kind == FileKind::Regular && metadata.links == 1 => Ok(()),
-            Ok(_) => Err(PermissionError::AnchorMismatch),
-            Err(error) if error.is_not_found() => Ok(()),
+            Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(PermissionError::Filesystem(error)),
         }
     }
@@ -698,6 +664,25 @@ fn describe_sandbox_probe(phase: &str, outcome: &ExecOutcome) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn probe_exec_options<'a>(
+    argv: &'a [OsString],
+    context: &'a BackendContext<'_>,
+) -> ExecOptions<'a> {
+    let mut options = ExecOptions::new(argv, Path::new("/"), PROBE_TIMEOUT);
+    options.env = Some(context.env);
+    options.cancel = Some(context.cancel);
+    options.stdout = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
+    options.stderr = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
+    options.terminate_grace = CLEANUP_TIMEOUT;
+    options.reap_timeout = CLEANUP_TIMEOUT;
+    options
+}
+
+#[cfg(target_os = "macos")]
 fn probe_sandbox_with_diagnostic(
     context: &BackendContext<'_>,
 ) -> Result<(Availability, Option<String>), PermissionError> {
@@ -739,17 +724,7 @@ fn probe_sandbox_with_diagnostic(
         OsString::from(probe_profile.as_str()),
         OsString::from("/usr/bin/true"),
     ];
-    let mut options = ExecOptions::new(&argv, Path::new("/"), PROBE_TIMEOUT);
-    options.env = Some(context.env);
-    options.cancel = Some(context.cancel);
-    options.stdout = StreamPolicy::Capture {
-        limit: PROBE_CAPTURE_LIMIT,
-    };
-    options.stderr = StreamPolicy::Capture {
-        limit: PROBE_CAPTURE_LIMIT,
-    };
-    options.terminate_grace = CLEANUP_TIMEOUT;
-    options.reap_timeout = CLEANUP_TIMEOUT;
+    let options = probe_exec_options(&argv, context);
     match context.executor.execute(options) {
         Ok(outcome) if successful_probe(&outcome) => (),
         Err(provenant_supervisor::exec::ExecError::Cancelled) => {
@@ -776,17 +751,7 @@ fn probe_sandbox_with_diagnostic(
         OsString::from("/bin/cat"),
         OsString::from("/etc/passwd"),
     ];
-    let mut denied_options = ExecOptions::new(&denied_argv, Path::new("/"), PROBE_TIMEOUT);
-    denied_options.env = Some(context.env);
-    denied_options.cancel = Some(context.cancel);
-    denied_options.stdout = StreamPolicy::Capture {
-        limit: PROBE_CAPTURE_LIMIT,
-    };
-    denied_options.stderr = StreamPolicy::Capture {
-        limit: PROBE_CAPTURE_LIMIT,
-    };
-    denied_options.terminate_grace = CLEANUP_TIMEOUT;
-    denied_options.reap_timeout = CLEANUP_TIMEOUT;
+    let denied_options = probe_exec_options(&denied_argv, context);
     match context.executor.execute(denied_options) {
         Ok(outcome) if denied_probe(&outcome) => Ok((
             Availability::Available {
@@ -1185,14 +1150,7 @@ fn render_profile(
                 push_network_endpoint(&mut source, endpoint)?;
             }
             NetworkGrant::UnixSocket { root } => {
-                let path = sbpl_path(&root.path)?;
-                let filter = match root.scope {
-                    PathScope::Exact => "path-literal",
-                    PathScope::Subtree => "subpath",
-                };
-                source.push_str(&format!(
-                    "(allow network-outbound (remote unix-socket ({filter} \"{path}\")))\n"
-                ));
+                push_unix_socket_rule(&mut source, root)?;
             }
         }
     }
@@ -1213,14 +1171,7 @@ fn render_profile(
             ));
         }
         for root in &grant.unix_socket_roots {
-            let path = sbpl_path(&root.path)?;
-            let filter = match root.scope {
-                PathScope::Exact => "path-literal",
-                PathScope::Subtree => "subpath",
-            };
-            source.push_str(&format!(
-                "(allow network-outbound (remote unix-socket ({filter} \"{path}\")))\n"
-            ));
+            push_unix_socket_rule(&mut source, root)?;
         }
     }
 
@@ -1247,6 +1198,19 @@ fn render_profile(
         return Err(PermissionError::ProfileTooLarge);
     }
     Ok(source.into_bytes())
+}
+
+#[cfg(target_os = "macos")]
+fn push_unix_socket_rule(source: &mut String, grant: &PathGrant) -> Result<(), PermissionError> {
+    let path = sbpl_path(&grant.path)?;
+    let filter = match grant.scope {
+        PathScope::Exact => "path-literal",
+        PathScope::Subtree => "subpath",
+    };
+    source.push_str(&format!(
+        "(allow network-outbound (remote unix-socket ({filter} \"{path}\")))\n"
+    ));
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1293,19 +1257,11 @@ fn verify_worktree_authority(
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     verify_selected_head(verified, selected_ref.short_name())?;
-    for grant in std::iter::once(&grants.worktree)
-        .chain([&grants.private_git_dir, &grants.common_git_dir])
-        .chain(std::iter::once(&grants.objects))
-    {
-        anchors.verify_grant_held(grant)?;
-    }
-    for grant in grants
-        .index
-        .iter()
-        .chain(grants.head.iter())
-        .chain(grants.selected_ref.iter())
-    {
-        anchors.verify_single_link_grant(grant)?;
+    for grant in grants.iter() {
+        match grant.scope {
+            PathScope::Subtree => anchors.verify_grant_held(grant)?,
+            PathScope::Exact => anchors.verify_single_link_grant(grant)?,
+        }
     }
     Ok(grants)
 }
@@ -1784,17 +1740,7 @@ mod tests {
 
     #[test]
     fn provider_profile_without_a_declared_executable_is_refused() {
-        let spec = ProviderProfileSpec {
-            process_executables: Vec::new(),
-            allow_process_fork: false,
-            runtime_reads: Vec::new(),
-            authentication: Vec::new(),
-            continuation_reads: Vec::new(),
-            provider_api: Vec::new(),
-            network: Vec::new(),
-            capabilities: Vec::new(),
-            native_controls: Vec::new(),
-        };
+        let spec = ProviderProfileSpec::default();
         assert!(matches!(
             validate_profile_spec(&spec),
             Err(PermissionError::ProcessPolicyMissing)
@@ -2060,14 +2006,7 @@ mod tests {
                         scope: PathScope::Exact,
                     })
                     .collect(),
-                allow_process_fork: false,
-                runtime_reads: Vec::new(),
-                authentication: Vec::new(),
-                continuation_reads: Vec::new(),
-                provider_api: Vec::new(),
-                network: Vec::new(),
-                capabilities: Vec::new(),
-                native_controls: Vec::new(),
+                ..ProviderProfileSpec::default()
             },
             observations: [
                 (FixtureOperation::DeclaredRead, FixtureOutcome::Allowed),
@@ -2278,13 +2217,7 @@ mod tests {
         let mut spec = ProviderProfileSpec {
             process_executables: vec![executable],
             allow_process_fork: true,
-            runtime_reads: Vec::new(),
-            authentication: Vec::new(),
-            continuation_reads: Vec::new(),
-            provider_api: Vec::new(),
-            network: Vec::new(),
-            capabilities: Vec::new(),
-            native_controls: Vec::new(),
+            ..ProviderProfileSpec::default()
         };
         let profile = ProviderProfile {
             spec: spec.clone(),

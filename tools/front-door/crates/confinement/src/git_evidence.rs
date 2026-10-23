@@ -1,9 +1,7 @@
 //! Pinned, bounded Git evidence obtained only through confinement's closed utility API.
 use crate::repo::{RepoPath, VerifiedRepo};
-use crate::status::{StatusError, StatusKind, parse_porcelain_v2_z};
-use crate::utility::{
-    GitRead, UtilityBudget, UtilityError, UtilityRead, UtilityRuntime, run_utility,
-};
+use crate::status::{StatusError, StatusKind, parse_index_entries, parse_porcelain_v2_z};
+use crate::utility::{GitRead, UtilityBudget, UtilityError, UtilityRuntime, run_utility};
 use provenant_core::CancelToken;
 use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
@@ -107,18 +105,6 @@ impl<'a> Git<'a> {
             cancel,
         }
     }
-
-    pub fn evidence(
-        &self,
-        base: GitOid,
-        selected: &[RepoPath],
-    ) -> Result<GitEvidence, GitEvidenceError> {
-        self.collect_git_evidence(base, selected)
-    }
-
-    pub fn verify_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
-        self.verify_expected_tip(expected)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -142,7 +128,7 @@ impl<'a> Git<'a> {
     /// Collect pinned HEAD/base diffs, the raw NUL status stream, and selected file
     /// fingerprints. Any timeout, truncation, index race, HEAD movement, unsafe
     /// path, or content drift refuses to certify complete evidence.
-    fn collect_git_evidence(
+    pub fn evidence(
         &self,
         base: GitOid,
         selected: &[RepoPath],
@@ -270,7 +256,7 @@ impl<'a> Git<'a> {
         Ok(())
     }
 
-    fn verify_expected_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
+    pub fn verify_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
         self.repo
             .revalidate()
             .map_err(|_| GitEvidenceError::RepositoryChanged)?;
@@ -301,7 +287,7 @@ impl<'a> Git<'a> {
     pub(crate) fn read(&self, read: GitRead) -> Result<ExecOutcome, GitEvidenceError> {
         let output = run_utility(
             self.executor,
-            UtilityRead::Git(read),
+            read,
             self.repo,
             self.runtime,
             self.budget,
@@ -318,32 +304,17 @@ impl<'a> Git<'a> {
 }
 
 fn index_has_stage_zero_regular(raw: &[u8], paths: &[RepoPath]) -> Result<bool, GitEvidenceError> {
-    if !raw.is_empty() && !raw.ends_with(&[0]) {
-        return Err(GitEvidenceError::Incomplete);
-    }
     let wanted = paths
         .iter()
         .map(|path| path.as_os_str().as_bytes())
         .collect::<Vec<_>>();
     let mut found = vec![false; wanted.len()];
-    for entry in raw
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-    {
-        let (metadata, path) = split_tab(entry).ok_or(GitEvidenceError::Incomplete)?;
-        let fields = metadata.split(|byte| *byte == b' ').collect::<Vec<_>>();
-        if fields.len() != 3 || path.is_empty() {
-            return Err(GitEvidenceError::Incomplete);
-        }
-        let mode = fields.first().ok_or(GitEvidenceError::Incomplete)?;
-        let oid = std::str::from_utf8(fields.get(1).ok_or(GitEvidenceError::Incomplete)?)
-            .map_err(|_| GitEvidenceError::Incomplete)?;
-        GitOid::parse(oid).map_err(|_| GitEvidenceError::Incomplete)?;
-        let stage = fields.get(2).ok_or(GitEvidenceError::Incomplete)?;
-        let Some(position) = wanted.iter().position(|candidate| *candidate == path) else {
+    for entry in parse_index_entries(raw)? {
+        let entry = entry?;
+        let Some(position) = wanted.iter().position(|candidate| *candidate == entry.path) else {
             continue;
         };
-        if *stage != b"0" || (*mode != b"100644" && *mode != b"100755") {
+        if entry.stage != 0 || !matches!(entry.mode, 0o100644 | 0o100755) {
             return Ok(false);
         }
         let Some(slot) = found.get_mut(position) else {
@@ -500,14 +471,6 @@ impl<'a> Deref for HeldDir<'a> {
             Self::Owned(directory) => directory.as_ref(),
         }
     }
-}
-
-fn split_tab(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-    let separator = bytes.iter().position(|byte| *byte == b'\t')?;
-    Some((
-        bytes.get(..separator)?,
-        bytes.get(separator.saturating_add(1)..)?,
-    ))
 }
 
 pub(crate) fn read_index_fingerprint(

@@ -110,10 +110,6 @@ pub fn scan_disclosure(
             .protected_roots
             .iter()
             .any(|protected| candidate.overlaps(protected))
-            || request
-                .protected_roots
-                .iter()
-                .any(|protected| prompt.overlaps(protected))
         {
             return Err(DisclosureError::ProtectedOverlap);
         }
@@ -179,17 +175,43 @@ struct Scanner {
     digest: Sha256,
 }
 
+enum OpenedGrant {
+    Directory(Box<dyn SafeDir>),
+    ExactFile {
+        parent: Box<dyn SafeDir>,
+        name: OsString,
+    },
+}
+
+fn open_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<OpenedGrant, DisclosureError> {
+    match grant.scope {
+        PathScope::Subtree => safe_fs
+            .open_anchor(&grant.path)
+            .map(OpenedGrant::Directory)
+            .map_err(DisclosureError::Filesystem),
+        PathScope::Exact => {
+            let parent = grant.path.parent().ok_or(DisclosureError::InvalidPath)?;
+            let name = grant
+                .path
+                .file_name()
+                .ok_or(DisclosureError::InvalidPath)?
+                .to_owned();
+            let parent = safe_fs
+                .open_anchor(parent)
+                .map_err(DisclosureError::Filesystem)?;
+            Ok(OpenedGrant::ExactFile { parent, name })
+        }
+    }
+}
+
 impl Scanner {
     fn scan_root(
         &mut self,
         safe_fs: &dyn SafeFs,
         grant: &PathGrant,
     ) -> Result<(), DisclosureError> {
-        match grant.scope {
-            PathScope::Subtree => {
-                let directory = safe_fs
-                    .open_anchor(&grant.path)
-                    .map_err(DisclosureError::Filesystem)?;
+        match open_grant(safe_fs, grant)? {
+            OpenedGrant::Directory(directory) => {
                 if directory
                     .metadata()
                     .map_err(DisclosureError::Filesystem)?
@@ -251,16 +273,11 @@ impl Scanner {
                     stack.extend(child_directories.into_iter().rev());
                 }
             }
-            PathScope::Exact => {
-                let parent = grant.path.parent().ok_or(DisclosureError::InvalidPath)?;
-                let leaf = grant.path.file_name().ok_or(DisclosureError::InvalidPath)?;
-                let directory = safe_fs
-                    .open_anchor(parent)
+            OpenedGrant::ExactFile { parent, name } => {
+                let metadata = parent
+                    .metadata_at(&name, false)
                     .map_err(DisclosureError::Filesystem)?;
-                let metadata = directory
-                    .metadata_at(leaf, false)
-                    .map_err(DisclosureError::Filesystem)?;
-                self.scan_file(directory.as_ref(), leaf, &grant.path, metadata)?;
+                self.scan_file(parent.as_ref(), &name, &grant.path, metadata)?;
             }
         }
         Ok(())
@@ -358,24 +375,16 @@ impl Scanner {
 }
 
 fn verify_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<(), DisclosureError> {
-    match grant.scope {
-        PathScope::Subtree => {
-            let directory = safe_fs
-                .open_anchor(&grant.path)
-                .map_err(DisclosureError::Filesystem)?;
+    match open_grant(safe_fs, grant)? {
+        OpenedGrant::Directory(directory) => {
             let metadata = directory.metadata().map_err(DisclosureError::Filesystem)?;
             if metadata.kind != FileKind::Directory {
                 return Err(DisclosureError::UnsafeEntry);
             }
         }
-        PathScope::Exact => {
-            let parent = grant.path.parent().ok_or(DisclosureError::InvalidPath)?;
-            let name = grant.path.file_name().ok_or(DisclosureError::InvalidPath)?;
-            let directory = safe_fs
-                .open_anchor(parent)
-                .map_err(DisclosureError::Filesystem)?;
-            let metadata = directory
-                .metadata_at(name, false)
+        OpenedGrant::ExactFile { parent, name } => {
+            let metadata = parent
+                .metadata_at(&name, false)
                 .map_err(DisclosureError::Filesystem)?;
             if metadata.kind != FileKind::Regular || metadata.links != 1 {
                 return Err(DisclosureError::UnsafeEntry);
@@ -400,6 +409,35 @@ mod tests {
     use provenant_supervisor::fs::LocalFs;
     use std::fs;
     use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    struct DisclosureFixture {
+        _temp: TempDir,
+        work: PathBuf,
+        prompt: PathBuf,
+        cwd: PathGrant,
+    }
+
+    impl DisclosureFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
+            let work = temp.path().join("work");
+            fs::create_dir(&work).expect("work directory");
+            let prompt = temp.path().join("prompt.txt");
+            fs::write(&prompt, b"prompt").expect("prompt file");
+            let prompt = provenant_supervisor::fs::canonicalize(&prompt).expect("canonical prompt");
+            let cwd = PathGrant {
+                path: provenant_supervisor::fs::canonicalize(&work).expect("canonical work"),
+                scope: PathScope::Subtree,
+            };
+            Self {
+                _temp: temp,
+                work,
+                prompt,
+                cwd,
+            }
+        }
+    }
 
     fn request<'a>(
         prompt: &'a Path,
@@ -419,128 +457,88 @@ mod tests {
 
     #[test]
     fn protected_overlap_refuses_after_canonical_path_binding() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
-        let protected_path = temporary_root.join("AGENTS.md");
+        let fixture = DisclosureFixture::new();
+        let protected_path = fixture.work.join("AGENTS.md");
         fs::write(&protected_path, b"instructions").expect("instruction file");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt").expect("prompt file");
-        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
-            .expect("canonical temporary root");
-        let cwd = PathGrant {
-            path: root,
-            scope: PathScope::Subtree,
-        };
+        let prompt_path = &fixture.prompt;
+        let cwd = &fixture.cwd;
         let protected = [PathGrant {
             path: provenant_supervisor::fs::canonicalize(&protected_path)
                 .expect("canonical protected file"),
             scope: PathScope::Exact,
         }];
-        let result = scan_disclosure(
-            &LocalFs,
-            &request(
-                &provenant_supervisor::fs::canonicalize(&prompt_path)
-                    .expect("canonical prompt file"),
-                &cwd,
-                &[],
-                &protected,
-                &[],
-            ),
-        );
+        let result = scan_disclosure(&LocalFs, &request(prompt_path, cwd, &[], &protected, &[]));
         assert!(matches!(result, Err(DisclosureError::ProtectedOverlap)));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn noncanonical_grant_is_refused_before_overlap_checks() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt").expect("prompt file");
-        let canonical_prompt =
-            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
+        let fixture = DisclosureFixture::new();
+        let canonical_prompt = &fixture.prompt;
         let cwd = PathGrant {
-            path: temporary_root,
+            path: fixture.work.clone(),
             scope: PathScope::Subtree,
         };
         assert_ne!(
             cwd.path,
             provenant_supervisor::fs::canonicalize(&cwd.path).expect("canonical work root")
         );
-        let result = scan_disclosure(&LocalFs, &request(&canonical_prompt, &cwd, &[], &[], &[]));
+        let result = scan_disclosure(&LocalFs, &request(canonical_prompt, &cwd, &[], &[], &[]));
         assert!(matches!(result, Err(DisclosureError::InvalidPath)));
     }
 
     #[test]
     fn bounded_scan_refuses_secret_patterns_without_returning_content() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
-        fs::write(temporary_root.join("notes.txt"), b"private token-abc-123").expect("file write");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt").expect("prompt file");
-        let prompt_path =
-            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
-        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
-            .expect("canonical temporary root");
-        let cwd = PathGrant {
-            path: root,
-            scope: PathScope::Subtree,
-        };
+        let fixture = DisclosureFixture::new();
+        fs::write(fixture.work.join("notes.txt"), b"private token-abc-123").expect("file write");
         let result = scan_disclosure(
             &LocalFs,
-            &request(&prompt_path, &cwd, &[], &[], &[b"token-abc-123".to_vec()]),
+            &request(
+                &fixture.prompt,
+                &fixture.cwd,
+                &[],
+                &[],
+                &[b"token-abc-123".to_vec()],
+            ),
         );
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }
 
     #[test]
     fn nonempty_secret_set_allows_files_with_ordinary_urls() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
+        let fixture = DisclosureFixture::new();
         fs::write(
-            temporary_root.join("notes.txt"),
-            b"read https://example.invalid/docs for details",
+            fixture.work.join("notes.txt"),
+            b"bearer values; Bearer values; bare sk-; Akia1234567890123456; read ssh://git@host and https://example.invalid/docs",
         )
         .expect("file write");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt").expect("prompt file");
-        let prompt_path =
-            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
-        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
-            .expect("canonical temporary root");
-        let cwd = PathGrant {
-            path: root,
-            scope: PathScope::Subtree,
-        };
         let result = scan_disclosure(
             &LocalFs,
-            &request(&prompt_path, &cwd, &[], &[], &[b"secret-123".to_vec()]),
+            &request(
+                &fixture.prompt,
+                &fixture.cwd,
+                &[],
+                &[],
+                &[b"secret-123".to_vec()],
+            ),
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn prompt_outside_read_roots_is_scanned_for_known_secrets() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt contains secret-123").expect("prompt file");
-        let prompt_path =
-            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
-        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
-            .expect("canonical temporary root");
-        let cwd = PathGrant {
-            path: root,
-            scope: PathScope::Subtree,
-        };
+        let fixture = DisclosureFixture::new();
+        fs::write(&fixture.prompt, b"prompt contains secret-123").expect("prompt file");
         let result = scan_disclosure(
             &LocalFs,
-            &request(&prompt_path, &cwd, &[], &[], &[b"secret-123".to_vec()]),
+            &request(
+                &fixture.prompt,
+                &fixture.cwd,
+                &[],
+                &[],
+                &[b"secret-123".to_vec()],
+            ),
         );
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }
@@ -565,23 +563,14 @@ mod tests {
 
     #[test]
     fn oversized_sparse_file_refuses_before_reading_its_contents() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
-        let temporary_root = temp.path().join("work");
-        fs::create_dir(&temporary_root).expect("work directory");
-        let file = fs::File::create(temporary_root.join("large.bin")).expect("file create");
+        let fixture = DisclosureFixture::new();
+        let file = fs::File::create(fixture.work.join("large.bin")).expect("file create");
         file.set_len(MAX_DISCLOSURE_BYTES + 1)
             .expect("sparse file size");
-        let prompt_path = temp.path().join("prompt.txt");
-        fs::write(&prompt_path, b"prompt").expect("prompt file");
-        let prompt_path =
-            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
-        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
-            .expect("canonical temporary root");
-        let cwd = PathGrant {
-            path: root,
-            scope: PathScope::Subtree,
-        };
-        let result = scan_disclosure(&LocalFs, &request(&prompt_path, &cwd, &[], &[], &[]));
+        let result = scan_disclosure(
+            &LocalFs,
+            &request(&fixture.prompt, &fixture.cwd, &[], &[], &[]),
+        );
         assert!(matches!(result, Err(DisclosureError::BudgetExceeded)));
     }
 }
