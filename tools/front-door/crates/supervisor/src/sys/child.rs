@@ -51,6 +51,7 @@ pub(crate) fn configure_command(
     // return errno through that pipe and std reaps the failed child.
     unsafe {
         command.pre_exec(move || {
+            reset_signals()?;
             if new_session && libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -258,4 +259,38 @@ fn descriptor_number(name: &[u8]) -> Option<i32> {
         }
         number.checked_mul(10)?.checked_add(i32::from(byte - b'0'))
     })
+}
+
+/// Reset inherited dispositions and the calling child's signal mask before exec.
+fn reset_signals() -> io::Result<()> {
+    // SAFETY: invoked only after fork. Stack signal records are live, exclusive,
+    // fully initialised before use; sigaction/procmask retain no pointer. Only
+    // async-signal-safe calls run, with no parent/global mutation or allocation.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        if libc::sigemptyset(&mut action.sa_mask) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        #[cfg(target_os = "linux")]
+        let maximum = 64;
+        #[cfg(target_os = "macos")]
+        let maximum = 31;
+        for signal in 1..=maximum {
+            if signal == libc::SIGKILL || signal == libc::SIGSTOP {
+                continue;
+            }
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) < 0 {
+                let error = io::Error::last_os_error();
+                // Linux reserves libc's internal realtime signals 32 and 33.
+                if error.raw_os_error() != Some(libc::EINVAL) {
+                    return Err(error);
+                }
+            }
+        }
+        if libc::sigprocmask(libc::SIG_SETMASK, &action.sa_mask, std::ptr::null_mut()) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }

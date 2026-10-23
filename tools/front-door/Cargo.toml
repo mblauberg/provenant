@@ -53,6 +53,8 @@ license.workspace = true
 fault-injection = []
 
 [dependencies]
+jiff.workspace = true
+provenant-core.workspace = true
 libc.workspace = true
 provenant-supervisor = { workspace = true }
 

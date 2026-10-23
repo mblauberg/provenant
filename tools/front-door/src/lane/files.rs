@@ -27,17 +27,41 @@ pub fn array(items: impl IntoIterator<Item = String>) -> String {
 pub fn nullable(s: Option<&str>) -> String {
     s.map(quote).unwrap_or_else(|| "null".into())
 }
-pub fn timestamp() -> String {
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    timestamp_epoch(time.as_secs() as i64, time.subsec_millis())
+pub fn timestamp() -> Result<String, provenant_core::TimeError> {
+    use provenant_core::Clock;
+    provenant_supervisor::clock::SystemClock::new()
+        .wall_now()
+        .map(|time| time.to_string())
 }
-pub fn timestamp_epoch(sec: i64, millis: u32) -> String {
-    provenant_supervisor::sys::lane_files::timestamp_epoch(sec, millis)
+pub fn timestamp_epoch(sec: i64, millis: u32) -> Option<String> {
+    let nanos = i32::try_from(millis.checked_mul(1_000_000)?).ok()?;
+    jiff::Timestamp::new(sec, nanos)
+        .ok()
+        .map(|time| time.to_string())
 }
-pub fn canonical_start(epoch: u64) -> String {
-    provenant_supervisor::sys::lane_files::canonical_start(epoch)
+/// Temporary S2 display contract for matching registered legacy owners.
+/// The provider custody rewrite removes this string field with its importer.
+pub fn canonical_start(epoch: u64) -> Option<String> {
+    let seconds = i64::try_from(epoch).ok()?;
+    let local = jiff::Timestamp::from_second(seconds)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::system());
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = usize::try_from(local.weekday().to_sunday_zero_offset()).ok()?;
+    let month = usize::try_from(local.month().checked_sub(1)?).ok()?;
+    Some(format!(
+        "{} {} {:2} {:02}:{:02}:{:02} {}",
+        DAYS.get(day)?,
+        MONTHS.get(month)?,
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+        local.year()
+    ))
 }
 static TEMP: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug)]

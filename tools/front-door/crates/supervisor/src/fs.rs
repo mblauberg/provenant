@@ -7,12 +7,14 @@
 //! with write access to a held directory can replace entries between syscalls.
 //! No check-then-unlink or conditional-rename atomicity is promised.
 use crate::sys::{errno, fs as os};
+use provenant_core::{CancelToken, Clock, WaitBudget};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -45,15 +47,48 @@ pub enum FsError {
     RaceRefused { name: OsString },
     #[error("entry is not a regular file: {name:?}")]
     NotRegular { name: OsString },
-    #[error("flock timed out for {path:?} after {timeout:?}")]
-    LockTimeout {
-        path: PathBuf,
-        timeout: std::time::Duration,
-    },
+    #[error("lock acquisition timed out for {path:?} after {timeout:?}")]
+    LockTimeout { path: PathBuf, timeout: Duration },
+    #[error("lock acquisition was cancelled for {path:?}")]
+    Cancelled { path: PathBuf },
+    #[error("owner lock refused for {name:?}: {reason:?}")]
+    LockRefused { name: OsString, reason: LockRefusal },
+    #[error("lock deadline could not be represented for {path:?}")]
+    LockDeadlineOverflow { path: PathBuf },
     #[error("file exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
 }
 pub type Result<T> = std::result::Result<T, FsError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockRefusal {
+    AnchorOwner,
+    AnchorPermissions,
+    FileOwner,
+    FilePermissions,
+    LinkCount,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+/// Successful publication status. An unconfirmed directory sync means the
+/// new entry is already visible and must not be retried as an absent write.
+#[derive(Debug)]
+pub enum Publication {
+    Durable,
+    VisibleDurabilityUnconfirmed { sync_error: FsError },
+}
+
+/// Owning, non-cloneable flock lease. Closing the last owner releases the lock;
+/// the API intentionally has no explicit unlock or descriptor duplication.
+#[derive(Debug)]
+pub struct LockGuard {
+    _file: File,
+}
 
 impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
@@ -280,6 +315,66 @@ impl Directory {
             &self.path.join(name),
         )
     }
+    /// Open and validate a stable owner lock, then acquire it with bounded
+    /// nonblocking polling. The supplied clock interprets the WaitBudget's
+    /// process-local monotonic coordinate; its current sample is taken once.
+    pub fn lock(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<LockGuard> {
+        let name = component(name)?;
+        let path = self.path.join(name);
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled { path });
+        }
+        let remaining = budget.remaining(clock.mono_now());
+        let timeout = Duration::from_micros(remaining.as_micros());
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
+        let owner_uid = os::effective_uid();
+        let directory_metadata = self.metadata()?;
+        verify_lock_directory(name, directory_metadata, owner_uid)?;
+        let before = match self.metadata_at(name, false) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error),
+        };
+        let file = os::open_lock(&self.file, name).map_err(error("open owner lock", &path))?;
+        let opened = file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat owner lock", &path))?;
+        let after = self.metadata_at(name, false)?;
+        verify_owner_lock_metadata(name, before, opened, after, self.device, owner_uid)?;
+
+        loop {
+            match os::try_flock(&file, mode) {
+                Ok(()) => {
+                    if cancel.is_cancelled() {
+                        return Err(FsError::Cancelled { path });
+                    }
+                    return Ok(LockGuard { _file: file });
+                }
+                Err(source)
+                    if source.kind() == io::ErrorKind::WouldBlock
+                        || source.raw_os_error() == Some(errno::EINTR) => {}
+                Err(source) => return Err(error("flock", &path)(source)),
+            }
+            if cancel.is_cancelled() {
+                return Err(FsError::Cancelled { path });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(FsError::LockTimeout { path, timeout });
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
+    }
     /// Exclusive create, mode 0600 subject to umask, O_NOFOLLOW | O_CLOEXEC.
     pub fn create_new(&self, name: &OsStr) -> Result<FileHandle> {
         let name = component(name)?;
@@ -383,7 +478,17 @@ impl Directory {
         prefix: &str,
         bytes: &[u8],
         mode: PublishMode,
-    ) -> Result<()> {
+    ) -> Result<Publication> {
+        self.atomic_write_with_sync(name, prefix, bytes, mode, || self.sync())
+    }
+    fn atomic_write_with_sync(
+        &self,
+        name: &OsStr,
+        prefix: &str,
+        bytes: &[u8],
+        mode: PublishMode,
+        sync_directory: impl FnOnce() -> Result<()>,
+    ) -> Result<Publication> {
         component(name)?;
         component(OsStr::new(prefix))?;
         for _ in 0..128 {
@@ -402,7 +507,7 @@ impl Directory {
                 PublishMode::NoReplace => self.rename_noreplace(&temporary, self, name),
                 PublishMode::Replace => self.replace(&temporary, self, name),
             });
-            return self.finish_publication(&temporary, result);
+            return self.finish_publication(&temporary, result, sync_directory);
         }
         Err(error("reserve staging file", &self.path.join(name))(
             io::Error::from_raw_os_error(errno::EEXIST),
@@ -411,7 +516,15 @@ impl Directory {
     /// Atomically replace an entry with a staged symlink and fsync the directory.
     /// Target bytes are stored verbatim; this operation does not follow them.
     /// The same trusted-directory and post-rename durability rules apply.
-    pub fn replace_link(&self, name: &OsStr, target: &Path) -> Result<()> {
+    pub fn replace_link(&self, name: &OsStr, target: &Path) -> Result<Publication> {
+        self.replace_link_with_sync(name, target, || self.sync())
+    }
+    fn replace_link_with_sync(
+        &self,
+        name: &OsStr,
+        target: &Path,
+        sync_directory: impl FnOnce() -> Result<()>,
+    ) -> Result<Publication> {
         component(name)?;
         for _ in 0..128 {
             let temporary = staging_name(".workflow.")?;
@@ -420,24 +533,107 @@ impl Directory {
                 Err(error) if error.is_exists() => continue,
                 Err(error) => return Err(error),
             }
-            return self.finish_publication(&temporary, self.replace(&temporary, self, name));
+            return self.finish_publication(
+                &temporary,
+                self.replace(&temporary, self, name),
+                sync_directory,
+            );
         }
         Err(error("reserve staging link", &self.path.join(name))(
             io::Error::from_raw_os_error(errno::EEXIST),
         ))
     }
-    fn finish_publication(&self, temporary: &OsStr, result: Result<()>) -> Result<()> {
+    fn finish_publication(
+        &self,
+        temporary: &OsStr,
+        result: Result<()>,
+        sync_directory: impl FnOnce() -> Result<()>,
+    ) -> Result<Publication> {
         if let Err(error) = result {
             let _ = self.unlink(temporary);
             return Err(error);
         }
         // A successful rename already consumed temporary. Never unlink its name
         // after publication: a subsequent creator could now own that entry.
-        self.sync()
+        match sync_directory() {
+            Ok(()) => Ok(Publication::Durable),
+            Err(sync_error) => Ok(Publication::VisibleDurabilityUnconfirmed { sync_error }),
+        }
     }
     pub fn read_bounded(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>> {
         self.open_read(name)?.read_bounded(limit)
     }
+}
+
+fn verify_lock_directory(name: &OsStr, directory: Metadata, owner_uid: u32) -> Result<()> {
+    if directory.kind != FileKind::Directory {
+        return Err(FsError::RaceRefused { name: name.into() });
+    }
+    if directory.uid != owner_uid {
+        return Err(FsError::LockRefused {
+            name: name.into(),
+            reason: LockRefusal::AnchorOwner,
+        });
+    }
+    if directory.mode & 0o022 != 0 {
+        return Err(FsError::LockRefused {
+            name: name.into(),
+            reason: LockRefusal::AnchorPermissions,
+        });
+    }
+    Ok(())
+}
+
+fn verify_owner_lock_metadata(
+    name: &OsStr,
+    before: Option<Metadata>,
+    opened: Metadata,
+    after: Metadata,
+    anchor_device: u64,
+    owner_uid: u32,
+) -> Result<()> {
+    if opened.device != anchor_device
+        || after.device != anchor_device
+        || before.is_some_and(|metadata| metadata.device != anchor_device)
+    {
+        return Err(FsError::CrossDevice { path: name.into() });
+    }
+    if opened.kind != FileKind::Regular
+        || after.kind != FileKind::Regular
+        || before.is_some_and(|metadata| metadata.kind != FileKind::Regular)
+    {
+        return Err(FsError::NotRegular { name: name.into() });
+    }
+    if !opened.same_identity(&after)
+        || before.is_some_and(|metadata| !metadata.same_identity(&opened))
+    {
+        return Err(FsError::RaceRefused { name: name.into() });
+    }
+    if opened.links != 1 || after.links != 1 || before.is_some_and(|metadata| metadata.links != 1) {
+        return Err(FsError::LockRefused {
+            name: name.into(),
+            reason: LockRefusal::LinkCount,
+        });
+    }
+    if opened.uid != owner_uid
+        || after.uid != owner_uid
+        || before.is_some_and(|metadata| metadata.uid != owner_uid)
+    {
+        return Err(FsError::LockRefused {
+            name: name.into(),
+            reason: LockRefusal::FileOwner,
+        });
+    }
+    if opened.mode & 0o022 != 0
+        || after.mode & 0o022 != 0
+        || before.is_some_and(|metadata| metadata.mode & 0o022 != 0)
+    {
+        return Err(FsError::LockRefused {
+            name: name.into(),
+            reason: LockRefusal::FilePermissions,
+        });
+    }
+    Ok(())
 }
 
 /// Pure refusal policy over stat/open/stat observations. This grants no handle
@@ -537,17 +733,6 @@ impl FileHandle {
             return Err(FsError::TooLarge { limit });
         }
         Ok(bytes)
-    }
-    /// Nonblocking lock acquisition; callers own their bounded retry/deadline.
-    pub fn try_lock(&self) -> Result<bool> {
-        match self.file.try_lock() {
-            Ok(()) => Ok(true),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
-            Err(std::fs::TryLockError::Error(e)) => Err(error("lock file", &self.path)(e)),
-        }
-    }
-    pub fn unlock(&self) -> Result<()> {
-        self.file.unlock().map_err(error("unlock file", &self.path))
     }
 }
 impl Read for FileHandle {

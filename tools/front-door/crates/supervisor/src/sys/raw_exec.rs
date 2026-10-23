@@ -1,4 +1,5 @@
 //! Direct-child utility custody; all descriptor flags and signals stay here.
+use super::reaper::Permit;
 use crate::exec::Termination;
 use crate::identity::Signal;
 use std::ffi::OsString;
@@ -7,10 +8,10 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{Duration, Instant};
 
-pub(crate) struct RawChild {
-    child: Child,
+pub struct OwnedPid {
+    child: Option<Child>,
+    permit: Option<Permit>,
     reaped: bool,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: Option<ChildStdout>,
@@ -27,8 +28,9 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     }
     Ok(())
 }
-impl RawChild {
+impl OwnedPid {
     pub(crate) fn spawn(
+        permit: Permit,
         argv: &[OsString],
         env: Option<&[(OsString, OsString)]>,
         cwd: &Path,
@@ -60,15 +62,18 @@ impl RawChild {
         super::child::configure_command(&mut command, &[], env, false)?;
         let child = command.spawn()?;
         let mut result = Self {
-            child,
+            child: Some(child),
+            permit: Some(permit),
             reaped: false,
             stdin: None,
             stdout: None,
             stderr: None,
         };
-        result.stdin = result.child.stdin.take();
-        result.stdout = result.child.stdout.take();
-        result.stderr = result.child.stderr.take();
+        if let Some(child) = result.child.as_mut() {
+            result.stdin = child.stdin.take();
+            result.stdout = child.stdout.take();
+            result.stderr = child.stderr.take();
+        }
         if let Some(pipe) = &result.stdin {
             nonblocking(pipe)?;
         }
@@ -81,20 +86,32 @@ impl RawChild {
         Ok(result)
     }
     pub(crate) fn observe(&mut self) -> io::Result<Option<Termination>> {
-        self.child.try_wait().map(|status| {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        child.try_wait().map(|status| {
             status.map(|status| {
                 self.reaped = true;
                 match status.code() {
-                    Some(code) => Termination::Exit(code),
-                    None => Termination::Signal(status.signal().unwrap_or(0)),
+                    Some(code) => Termination::Exit(i64::from(code)),
+                    None => Termination::Signal(i64::from(status.signal().unwrap_or(0))),
                 }
             })
         })
     }
-    pub(crate) fn signal(&mut self, signal: Signal) -> io::Result<()> {
+    pub(crate) fn signal(&mut self, signal: Signal) -> io::Result<bool> {
         if self.reaped {
-            return Ok(());
+            return Ok(false);
         }
+        // Re-observe immediately before delivery: an observed exit wins.
+        if self.observe()?.is_some() {
+            return Ok(false);
+        }
+        let child = self
+            .child
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let sig = match signal {
             Signal::Terminate => libc::SIGTERM,
             Signal::Kill => libc::SIGKILL,
@@ -102,12 +119,12 @@ impl RawChild {
         // SAFETY: this unreaped direct child reserves its PID. No other handle
         // can wait it through this API; concurrent OS death leaves a zombie,
         // never a recycled PID. kill borrows no memory, errno is thread-local.
-        if unsafe { libc::kill(self.child.id() as i32, sig) } == 0 {
-            return Ok(());
+        if unsafe { libc::kill(child.id() as i32, sig) } == 0 {
+            return Ok(true);
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
+            Ok(false)
         } else {
             Err(error)
         }
@@ -150,16 +167,11 @@ impl RawChild {
         Ok(result > 0)
     }
 }
-impl Drop for RawChild {
+impl Drop for OwnedPid {
     fn drop(&mut self) {
-        if !self.reaped {
-            let _ = self.signal(Signal::Kill);
-            let deadline = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < deadline {
-                if self.observe().ok().flatten().is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
+        if let (Some(child), Some(permit)) = (self.child.take(), self.permit.take()) {
+            if !self.reaped {
+                permit.transfer(child);
             }
         }
     }

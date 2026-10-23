@@ -123,7 +123,13 @@ pub fn run(args: &[OsString]) -> u8 {
     );
     let mut out = Capture::new(attempt.create(&spec.events), spec.cap);
     let mut err = Capture::new(attempt.create(&spec.stderr), spec.cap);
-    let started = files::timestamp();
+    let started = match files::timestamp() {
+        Ok(started) => started,
+        Err(error) => {
+            eprintln!("provenant lane: system clock: {error}");
+            return 75;
+        }
+    };
     let mut record = ExitRecord {
         pid: None,
         started: started.clone(),
@@ -196,7 +202,7 @@ pub fn run(args: &[OsString]) -> u8 {
                 let pid = format!("{}\n", group.pid);
                 io.result("pgid", attempt.atomic("pgid", pid.as_bytes(), false));
                 let canonical =
-                    platform::process(group.pid).map(|r| files::canonical_start(r.epoch));
+                    platform::process(group.pid).and_then(|r| files::canonical_start(r.epoch));
                 let start = format!(
                     "{{\"pid\":{},\"pgid\":{},\"started_at\":{}}}",
                     group.pid,
@@ -276,14 +282,18 @@ pub fn run(args: &[OsString]) -> u8 {
                                 out.write(bytes);
                                 out_lines.write(bytes, "out", &mut observer);
                                 events.push(Event::Stdout);
-                                last_event_at = Some(files::timestamp());
+                                if let Ok(stamp) = files::timestamp() {
+                                    last_event_at = Some(stamp);
+                                }
                             } else {
                                 err.write(bytes);
                                 err_lines.write(bytes, "err", &mut observer);
                             }
                             last_output = Instant::now();
                             last_progress = last_output;
-                            record.progress = files::timestamp();
+                            if let Ok(stamp) = files::timestamp() {
+                                record.progress = stamp;
+                            }
                             last_output_at = Some(record.progress.clone());
                             next_watch = add_deadline(last_output, spec.silence);
                         }
@@ -353,7 +363,7 @@ pub fn run(args: &[OsString]) -> u8 {
                                     let alive = !group.observed_exit();
                                     let w=format!(concat!("{{\"schema\":\"fabric.watchdog.v1\",\"checked_at\":{},\"pid\":{},\"process_alive\":{},",
                                         "\"silent_seconds\":{},\"last_event_at\":{},\"last_output_at\":{},\"last_worktree_write_at\":{},\"worktree_scan_complete\":{}}}\n"),
-                                        files::quote(&files::timestamp()),group.pid,alive,last_output.elapsed().as_secs_f64(),
+                                        files::quote(&files::timestamp().unwrap_or_else(|_| record.progress.clone())),group.pid,alive,last_output.elapsed().as_secs_f64(),
                                         files::nullable(last_event_at.as_deref()),files::nullable(last_output_at.as_deref()),files::nullable(workspace.as_ref().and_then(|w|w.latest.as_deref())),workspace.as_ref().is_some_and(|w|w.scan_complete()));
                                     io.result(
                                         "watchdog",
@@ -370,7 +380,9 @@ pub fn run(args: &[OsString]) -> u8 {
                         let new_cpu = group.cpu_stamp();
                         if changed || (!cpu.is_empty() && !new_cpu.is_empty() && cpu != new_cpu) {
                             last_progress = current;
-                            record.progress = files::timestamp();
+                            if let Ok(stamp) = files::timestamp() {
+                                record.progress = stamp;
+                            }
                         }
                         cpu = new_cpu;
                         let live=format!("{{\"schema\":\"provenant.lane.supervisor.v1\",\"pid\":{},\"pgid\":{},\"started_at\":{},\"last_progress_at\":{},\"run_token\":{},\"descendants\":{},\"descendants_truncated\":{}}}\n",group.pid,group.pid,files::quote(&started),files::quote(&record.progress),files::quote(&spec.token),group.census_json(),group.census_omitted());
@@ -461,7 +473,7 @@ pub fn run(args: &[OsString]) -> u8 {
     record.out = out.json();
     record.err = err.json();
     record.io = io;
-    record.ended = files::timestamp();
+    record.ended = files::timestamp().unwrap_or_else(|_| record.progress.clone());
     let encoded = record.encode();
     let lane = Lane::<Exited> {
         files: attempt,

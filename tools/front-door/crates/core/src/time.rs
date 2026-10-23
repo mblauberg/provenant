@@ -200,7 +200,7 @@ impl WaitBudget {
 
 /// Sampled by the edge; state machines receive values, never ambient time.
 pub trait Clock {
-    fn wall_now(&self) -> WallTime;
+    fn wall_now(&self) -> Result<WallTime, TimeError>;
     fn mono_now(&self) -> MonoTime;
 }
 /// Explicit, locally-owned clock for deterministic simulations and tests.
@@ -225,8 +225,8 @@ impl TestClock {
     }
 }
 impl Clock for TestClock {
-    fn wall_now(&self) -> WallTime {
-        self.wall
+    fn wall_now(&self) -> Result<WallTime, TimeError> {
+        Ok(self.wall)
     }
     fn mono_now(&self) -> MonoTime {
         self.mono
@@ -305,7 +305,7 @@ mod tests {
         let start = UtcMicros::from_micros(0).unwrap();
         let mut clock = TestClock::new(start, MonoTime::from_micros(u64::MAX));
         assert!(clock.advance(DurationMicros::from_micros(1)).is_err());
-        assert_eq!(clock.wall_now(), start);
+        assert_eq!(clock.wall_now().unwrap(), start);
         let mut clock = TestClock::new(start, MonoTime::from_micros(0));
         let wait = WaitBudget::mcp(clock.mono_now(), 1).unwrap();
         clock

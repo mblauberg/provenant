@@ -1,14 +1,13 @@
 //! Object-safe filesystem seam. Handles retain confinement authority; adapters
 //! translate metadata records, never descriptors or held paths.
 use super::*;
+use provenant_core::{CancelToken, Clock, WaitBudget};
 
 pub trait SafeFile: Read + Write + Seek + Send + Sync {
     fn metadata(&self) -> io::Result<Metadata>;
     /// Retains the shared offset, like dup (not a reopen).
     fn duplicate(&self) -> io::Result<Box<dyn SafeFile>>;
     fn sync(&self) -> io::Result<()>;
-    fn try_lock(&self) -> io::Result<bool>;
-    fn unlock(&self) -> io::Result<()>;
 }
 
 /// Names are exactly one normal component. Implementations must use held
@@ -25,6 +24,14 @@ pub trait SafeDir: Send + Sync {
     fn mkdir(&self, name: &OsStr, mode: u32) -> io::Result<()>;
     fn entries(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>>;
     fn make_writable(&self) -> io::Result<()>;
+    fn lock(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> io::Result<LockGuard>;
     fn unlink(&self, name: &OsStr) -> io::Result<()>;
     fn rmdir(&self, name: &OsStr) -> io::Result<()>;
     fn replace(&self, source: &OsStr, destination: &OsStr) -> io::Result<()>;
@@ -38,8 +45,8 @@ pub trait SafeDir: Send + Sync {
         prefix: &str,
         bytes: &[u8],
         mode: PublishMode,
-    ) -> io::Result<()>;
-    fn replace_link(&self, name: &OsStr, target: &Path) -> io::Result<()>;
+    ) -> io::Result<Publication>;
+    fn replace_link(&self, name: &OsStr, target: &Path) -> io::Result<Publication>;
 }
 
 /// Initial trusted-path access and entropy are injectable too, so consumer
@@ -78,12 +85,6 @@ impl SafeFile for FileHandle {
     fn sync(&self) -> io::Result<()> {
         FileHandle::sync(self).map_err(Into::into)
     }
-    fn try_lock(&self) -> io::Result<bool> {
-        FileHandle::try_lock(self).map_err(Into::into)
-    }
-    fn unlock(&self) -> io::Result<()> {
-        FileHandle::unlock(self).map_err(Into::into)
-    }
 }
 impl SafeDir for Directory {
     fn metadata(&self) -> io::Result<Metadata> {
@@ -113,6 +114,16 @@ impl SafeDir for Directory {
     fn make_writable(&self) -> io::Result<()> {
         Directory::make_writable(self).map_err(Into::into)
     }
+    fn lock(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> io::Result<LockGuard> {
+        Directory::lock(self, name, mode, budget, cancel, clock).map_err(Into::into)
+    }
     fn unlink(&self, name: &OsStr) -> io::Result<()> {
         Directory::unlink(self, name).map_err(Into::into)
     }
@@ -140,10 +151,10 @@ impl SafeDir for Directory {
         prefix: &str,
         bytes: &[u8],
         mode: PublishMode,
-    ) -> io::Result<()> {
+    ) -> io::Result<Publication> {
         Directory::atomic_write(self, name, prefix, bytes, mode).map_err(Into::into)
     }
-    fn replace_link(&self, name: &OsStr, target: &Path) -> io::Result<()> {
+    fn replace_link(&self, name: &OsStr, target: &Path) -> io::Result<Publication> {
         Directory::replace_link(self, name, target).map_err(Into::into)
     }
 }

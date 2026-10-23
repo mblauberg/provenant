@@ -113,10 +113,12 @@ impl Progress {
             }
             self.known.insert(path.clone(), signature);
             self.seen.insert(path);
-            let stamp =
-                files::timestamp_epoch(meta.mtime(), (meta.mtime_nsec() / 1_000_000) as u32);
-            if self.latest.as_ref().is_none_or(|s| s < &stamp) {
-                self.latest = Some(stamp);
+            if let Some(stamp) =
+                files::timestamp_epoch(meta.mtime(), (meta.mtime_nsec() / 1_000_000) as u32)
+            {
+                if self.latest.as_ref().is_none_or(|s| s < &stamp) {
+                    self.latest = Some(stamp);
+                }
             }
         }
         if self.stack.is_empty() {

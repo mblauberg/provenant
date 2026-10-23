@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-clap = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 jiff = { workspace = true }
@@ -17,4 +16,14 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-supervisor = { path = ".", features = ["fixture"] }
 tempfile = { workspace = true }
+
+[features]
+fixture = []
+
+[[test]]
+name = "process"
+path = "tests/process.rs"
+harness = false
+required-features = ["fixture"]

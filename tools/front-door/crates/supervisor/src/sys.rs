@@ -3,8 +3,6 @@
 //! Linux and macOS share these libc interfaces. Account lookup uses the
 //! reentrant calls so the wrapper is safe even after transport threads start.
 
-use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -28,53 +26,6 @@ pub fn is_executable(path: &Path) -> bool {
     // access borrows it, mutates no Rust memory, and returns -1 on failure.
     // No shared libc storage is exposed and concurrent calls are independent.
     unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
-}
-
-/// Strict execve: ENOEXEC is returned without Command::exec's shell fallback.
-/// The caller supplies argv[0], the full environment, and edge error rendering.
-pub fn execve_strict(
-    program: &Path,
-    argv: &[OsString],
-    env: &BTreeMap<OsString, OsString>,
-) -> Result<Infallible, SysError> {
-    let failure = |source| SysError {
-        operation: "execve",
-        path: Some(program.into()),
-        source,
-    };
-    let c_string = |bytes: &[u8]| {
-        CString::new(bytes).map_err(|_| failure(io::Error::from_raw_os_error(libc::EINVAL)))
-    };
-    let path = c_string(program.as_os_str().as_bytes())?;
-    let argv = argv
-        .iter()
-        .map(|arg| c_string(arg.as_bytes()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let envp = env
-        .iter()
-        .map(|(name, value)| {
-            let mut bytes = name.as_bytes().to_vec();
-            bytes.push(b'=');
-            bytes.extend_from_slice(value.as_bytes());
-            c_string(&bytes)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let argv_ptrs = argv
-        .iter()
-        .map(|arg| arg.as_ptr())
-        .chain([std::ptr::null()])
-        .collect::<Vec<_>>();
-    let env_ptrs = envp
-        .iter()
-        .map(|entry| entry.as_ptr())
-        .chain([std::ptr::null()])
-        .collect::<Vec<_>>();
-    // SAFETY: all strings and the two null-terminated pointer arrays remain
-    // owned and live until execve returns or replaces this process. The call
-    // takes no Rust ownership; it either atomically replaces all threads or
-    // returns -1 with thread-local errno. No environment globals are mutated.
-    unsafe { libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()) };
-    Err(failure(io::Error::last_os_error()))
 }
 
 pub enum Account<'a> {
@@ -193,22 +144,6 @@ mod tests {
         assert!(is_executable(&dir.path().join("link")));
         assert!(!is_executable(&dir.path().join("gone")));
         assert!(!is_executable(Path::new(OsStr::from_bytes(b"bad\0path"))));
-        let error = execve_strict(&file, &[file.as_os_str().into()], &BTreeMap::new()).unwrap_err();
-        assert_eq!(error.source.raw_os_error(), Some(libc::ENOEXEC));
-    }
-
-    #[test]
-    fn exec_rejects_nuls_in_every_input() {
-        let bad = OsString::from_vec(b"bad\0arg".to_vec());
-        let file = Path::new("/no/such/file");
-        for (argv, env) in [
-            (vec![bad.clone()], BTreeMap::new()),
-            (vec![], BTreeMap::from([(bad.clone(), "value".into())])),
-            (vec![], BTreeMap::from([("key".into(), bad)])),
-        ] {
-            let error = execve_strict(file, &argv, &env).unwrap_err();
-            assert_eq!(error.source.raw_os_error(), Some(libc::EINVAL));
-        }
     }
 
     #[test]
@@ -223,27 +158,6 @@ mod tests {
             account(Account::Named(OsStr::new("provenant_missing_user_zz"))).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn exec_fixture() {
-        if std::env::var_os("PROVENANT_SUPERVISOR_EXEC_FIXTURE").is_none() {
-            return;
-        }
-        let env = BTreeMap::from([("KEPT".into(), "λ two words".into())]);
-        let args = ["/bin/sh".into(), "-c".into(), "test \"$KEPT\" = 'λ two words' && test -z \"$PROVENANT_SUPERVISOR_EXEC_FIXTURE\" && exit 37".into()];
-        let error = execve_strict(Path::new("/bin/sh"), &args, &env).unwrap_err();
-        panic!("exec failed: {error}");
-    }
-
-    #[test]
-    fn successful_exec_replaces_the_process_with_the_exact_environment() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "sys::tests::exec_fixture", "--nocapture"])
-            .env("PROVENANT_SUPERVISOR_EXEC_FIXTURE", "1")
-            .status()
-            .unwrap();
-        assert_eq!(status.code(), Some(37));
     }
 }
 
@@ -261,4 +175,36 @@ pub mod errno {
         EACCES, EEXIST, EINTR, EINVAL, EISDIR, ELOOP, ENOENT, ENOEXEC, ENOSYS, ENOTDIR, ENOTSUP,
         EOPNOTSUPP, EPERM, EXDEV,
     };
+}
+
+pub(crate) mod reaper;
+
+/// Replace the current process with a selected owner. Argument parsing remains
+/// at the binary edge; no shell fallback or Python delegation is introduced.
+pub fn replace_process(
+    program: &Path,
+    args: &[OsString],
+    env: &[(OsString, OsString)],
+) -> io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)));
+    if let Err(error) = child::configure_command(&mut command, &[], Some(env), false) {
+        return error;
+    }
+    command.exec()
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_ignore_term() -> io::Result<()> {
+    // SAFETY: the dedicated fixture changes only its own disposition; SIG_IGN
+    // is a valid platform handler constant, no resource or pointer transfers,
+    // and failure reports thread-local errno. Never used in a shared host.
+    if unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

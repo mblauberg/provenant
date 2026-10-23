@@ -82,13 +82,14 @@ fn registered_owner(row: &Row, attempt: &Path) -> bool {
         let Some(owner) = document(&dir.join("dispatch-owner.json")) else {
             continue;
         };
+        let expected_owner_start = files::canonical_start(row.epoch);
         if integer(&owner, "schema_version") != Some(1)
             || !matches!(text(&owner, "kind"), Some("dispatch" | "batch"))
             || integer(&owner, "owner_pid") != Some(row.id.pid as i64)
             || text(&owner, "run_token").is_none()
             || text(&owner, "run_token") != text(&child, "run_token")
             || text(&owner, "run_dir").map(Path::new) != Some(dir.as_path())
-            || text(&owner, "owner_started_at") != Some(files::canonical_start(row.epoch).as_str())
+            || text(&owner, "owner_started_at") != expected_owner_start.as_deref()
         {
             continue;
         }
