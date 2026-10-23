@@ -6,6 +6,7 @@ pub mod command;
 
 pub mod front_door;
 pub mod instance;
+pub mod managed_skills;
 pub mod manifest;
 mod pending;
 mod python_unicode;
