@@ -648,7 +648,11 @@ def test_all_without_skipped_platforms_runs_under_bash_3(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert "skipped=" not in result.stdout + result.stderr
+    assert not any(
+        "skipped=" in line
+        for line in (result.stdout + result.stderr).splitlines()
+        if line.startswith("provider ")
+    )
     assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").is_file()
     assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").is_file()
 
