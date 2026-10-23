@@ -94,3 +94,17 @@ def test_changed_typescript_test_covers_module_fixture(tmp_path):
         encoding="utf-8",
     )
     assert module._context_changed(path, 1, {3})
+
+
+def test_finds_date_in_referenced_helper_used_by_changed_window_test(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'def fixed_stamp():\n'
+        '    return "2026-10-23T12:00:00Z"\n'
+        'def test_window():\n'
+        '    assert datetime.now() > parse(fixed_stamp())\n',
+        encoding="utf-8",
+    )
+    assert module.scan_file(path) == [(2, "2026-10-23T12:00:00Z")]
+    assert module._context_changed(path, 2, {4})

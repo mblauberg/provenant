@@ -38,7 +38,16 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
     tree = ast.parse(source, filename=str(path))
     findings: list[tuple[int, str]] = []
     functions = list(_functions(tree))
-    module_has_window = any(WINDOW.search(ast.get_source_segment(source, function) or "") for function in functions)
+    window_functions = {
+        function.name for function in functions
+        if WINDOW.search(ast.get_source_segment(source, function) or "")
+    }
+    referenced_helpers = {
+        node.id
+        for function in functions if function.name in window_functions
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name)
+    }
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
@@ -51,9 +60,9 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         containing = [function for function in functions if function.lineno <= node.lineno <= (function.end_lineno or function.lineno)]
         if containing:
             function = min(containing, key=lambda item: (item.end_lineno or item.lineno) - item.lineno)
-            has_window = bool(WINDOW.search(ast.get_source_segment(source, function) or ""))
+            has_window = function.name in window_functions or function.name in referenced_helpers
         else:
-            has_window = module_has_window
+            has_window = bool(window_functions)
         line = lines[node.lineno - 1]
         if has_window and "timebomb: allow" not in line:
             findings.append((node.lineno, node.value))
@@ -113,6 +122,23 @@ def _context_changed(path: Path, line: int, added_lines: set[int]) -> bool:
         if not spans:
             return bool(added_lines)
         start, end = min(spans, key=lambda span: span[1] - span[0])
+        helper = next(
+            (node for node in ast.walk(ast.parse(source))
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.lineno == start and (node.end_lineno or node.lineno) == end),
+            None,
+        )
+        if helper is not None:
+            changed_functions = [
+                node for node in ast.walk(ast.parse(source))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and any(node.lineno <= added <= (node.end_lineno or node.lineno) for added in added_lines)
+            ]
+            if any(
+                isinstance(node, ast.Name) and node.id == helper.name
+                for function in changed_functions for node in ast.walk(function)
+            ):
+                return True
     else:
         lines = source.splitlines()
         starts = [index for index, text in enumerate(lines, 1) if re.search(r"\b(?:it|test)\s*(?:\.each\([^\n]*\)\s*)?\(", text)]
