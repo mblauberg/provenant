@@ -39,9 +39,15 @@ fn open_at(directory: i32, path: &OsStr, flags: i32, mode: u32) -> io::Result<Fi
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 pub(crate) fn open_anchor(path: &Path) -> io::Result<File> {
+    // Trailing / asks the kernel to follow a symlink as a directory even with
+    // O_NOFOLLOW. Remove separators first while preserving the root path.
+    let mut bytes = path.as_os_str().as_bytes();
+    while bytes.len() > 1 && bytes.last() == Some(&b'/') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
     open_at(
         libc::AT_FDCWD,
-        path.as_os_str(),
+        OsStr::from_bytes(bytes),
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         0,
     )
@@ -202,15 +208,53 @@ pub(crate) fn entropy() -> io::Result<[u8; 12]> {
     status(unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) })?;
     Ok(bytes)
 }
-struct Stream(*mut libc::DIR);
-impl Drop for Stream {
+pub(crate) struct Entries {
+    stream: *mut libc::DIR,
+    finished: bool,
+}
+impl Drop for Entries {
     fn drop(&mut self) {
-        // SAFETY: fdopendir transferred unique ownership to this stream. All
-        // readdir borrows ended; closedir frees it and closes its fd once.
-        unsafe { libc::closedir(self.0) };
+        // SAFETY: fdopendir transferred unique ownership to this iterator.
+        // Each readdir borrow ends before next()/Drop; no stream is shared.
+        // closedir frees the stream and closes its owned descriptor once.
+        unsafe { libc::closedir(self.stream) };
     }
 }
-pub(crate) fn entries(dir: &File) -> io::Result<Vec<OsString>> {
+impl Iterator for Entries {
+    type Item = io::Result<OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            // SAFETY: &mut self gives exclusive access to the owned stream.
+            // readdir returns null at EOF/error, distinguished with this
+            // thread's errno. d_name is NUL-terminated and copied before the
+            // next call; no libc-owned memory or pointers escape.
+            unsafe {
+                #[cfg(target_os = "macos")]
+                let errno = libc::__error();
+                #[cfg(target_os = "linux")]
+                let errno = libc::__errno_location();
+                *errno = 0;
+                let entry = libc::readdir(self.stream);
+                if entry.is_null() {
+                    self.finished = true;
+                    return if *errno == 0 {
+                        None
+                    } else {
+                        Some(Err(io::Error::last_os_error()))
+                    };
+                }
+                let name = CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
+                if name != b"." && name != b".." {
+                    return Some(Ok(OsString::from_vec(name.to_vec())));
+                }
+            }
+        }
+    }
+}
+pub(crate) fn entries(dir: &File) -> io::Result<Entries> {
     // openat(.) gives an independent offset; dup would share enumeration state.
     let fresh = open_at(
         dir.as_raw_fd(),
@@ -219,38 +263,16 @@ pub(crate) fn entries(dir: &File) -> io::Result<Vec<OsString>> {
         0,
     )?;
     // SAFETY: fresh owns a live directory fd; fdopendir transfers ownership only
-    // on success. No pointer is shared with another thread.
+    // on success. No pointer is shared with another iterator or thread.
     let stream = unsafe { libc::fdopendir(fresh.as_raw_fd()) };
     if stream.is_null() {
         return Err(io::Error::last_os_error());
     }
     std::mem::forget(fresh); // closedir owns its descriptor now.
-    let stream = Stream(stream);
-    let mut names = Vec::new();
-    loop {
-        // SAFETY: the stream is exclusively owned here. readdir returns null
-        // at EOF or error, distinguished by clearing this thread's errno first.
-        // A returned d_name is NUL-terminated and copied before the next call.
-        unsafe {
-            #[cfg(target_os = "macos")]
-            let errno = libc::__error();
-            #[cfg(target_os = "linux")]
-            let errno = libc::__errno_location();
-            *errno = 0;
-            let entry = libc::readdir(stream.0);
-            if entry.is_null() {
-                return if *errno == 0 {
-                    Ok(names)
-                } else {
-                    Err(io::Error::last_os_error())
-                };
-            }
-            let name = CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
-            if name != b"." && name != b".." {
-                names.push(OsString::from_vec(name.to_vec()));
-            }
-        }
-    }
+    Ok(Entries {
+        stream,
+        finished: false,
+    })
 }
 
 #[cfg(test)]

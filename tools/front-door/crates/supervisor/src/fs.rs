@@ -166,13 +166,7 @@ impl Directory {
         let child = self.open_directory(name)?;
         let opened = child.metadata()?;
         let after = self.metadata_at(name, false)?;
-        if before.kind != FileKind::Directory
-            || !before.same_identity(&opened)
-            || !opened.same_identity(&after)
-            || opened.device != self.device
-        {
-            return Err(FsError::RaceRefused { name: name.into() });
-        }
+        verify_directory_identity(name, before, opened, after, self.device)?;
         Ok(child)
     }
     pub fn open_read(&self, name: &OsStr) -> Result<FileHandle> {
@@ -263,11 +257,45 @@ impl Directory {
             .map_err(error("fchmod directory", Path::new("<directory>")))
     }
     /// A fresh descriptor stream on each call, independent of prior enumeration.
-    pub fn entries(&self) -> Result<Vec<OsString>> {
-        os::entries(&self.file).map_err(error("readdir", Path::new("<directory>")))
+    pub fn entries(&self) -> Result<Entries> {
+        os::entries(&self.file)
+            .map(Entries)
+            .map_err(error("opendir", Path::new("<directory>")))
     }
     pub fn read_bounded(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>> {
         self.open_read(name)?.read_bounded(limit)
+    }
+}
+
+/// Pure refusal policy over stat/open/stat observations. This grants no handle
+/// authority: the OS adapter must retain the opened descriptor through use.
+pub fn verify_directory_identity(
+    name: &OsStr,
+    before: Metadata,
+    opened: Metadata,
+    after: Metadata,
+    anchor_device: u64,
+) -> Result<()> {
+    if before.kind != FileKind::Directory
+        || opened.kind != FileKind::Directory
+        || after.kind != FileKind::Directory
+        || !before.same_identity(&opened)
+        || !opened.same_identity(&after)
+        || opened.device != anchor_device
+    {
+        return Err(FsError::RaceRefused { name: name.into() });
+    }
+    Ok(())
+}
+
+/// Lazy, owning directory stream. Each item retains the original OS error;
+/// it directly satisfies StorageFs's Iterator<Item = io::Result<OsString>>.
+/// Dropping the anchor does not close this stream's independent descriptor.
+pub struct Entries(os::Entries);
+impl Iterator for Entries {
+    type Item = io::Result<OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
     }
 }
 

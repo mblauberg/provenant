@@ -3,6 +3,10 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::sync::{Arc, Barrier};
 
+fn names(dir: &Directory) -> Vec<OsString> {
+    dir.entries().unwrap().collect::<io::Result<_>>().unwrap()
+}
+
 #[test]
 fn opens_a_directory_anchor() {
     let temp = tempfile::tempdir().unwrap();
@@ -48,7 +52,7 @@ fn refuses_every_non_normal_component_before_effects() {
             Err(FsError::InvalidComponent { .. })
         ));
     }
-    assert!(dir.entries().unwrap().is_empty());
+    assert!(names(&dir).is_empty());
 }
 #[test]
 fn creates_reads_syncs_duplicates_and_preserves_non_utf8_names() {
@@ -76,8 +80,8 @@ fn creates_reads_syncs_duplicates_and_preserves_non_utf8_names() {
     assert_eq!(byte, [b'a']);
     dup.read_exact(&mut byte).unwrap();
     assert_eq!(byte, [b'b']);
-    assert_eq!(dir.entries().unwrap(), std::slice::from_ref(&name));
-    assert_eq!(dir.entries().unwrap(), std::slice::from_ref(&name));
+    assert_eq!(names(&dir), std::slice::from_ref(&name));
+    assert_eq!(names(&dir), std::slice::from_ref(&name));
     assert!(dir.create_new(&name).is_err());
     dir.unlink(&name).unwrap();
     assert_eq!(read.read_bounded(10).unwrap(), b"cdef");
@@ -160,7 +164,7 @@ fn competing_noreplace_publishers_have_exactly_one_winner() {
     );
     let content = dir.read_bounded(OsStr::new("published"), 10).unwrap();
     assert!(content == b"first" || content == b"second");
-    assert_eq!(dir.entries().unwrap().len(), 2);
+    assert_eq!(names(&dir).len(), 2);
 }
 #[test]
 fn exchange_replace_and_cross_directory_operations_are_atomic_primitives() {
@@ -241,17 +245,17 @@ fn non_utf8_names_reach_the_os_without_replacement() {
     match baseline {
         Ok(file) => {
             drop(file);
-            assert_eq!(dir.entries().unwrap(), std::slice::from_ref(&name));
+            assert_eq!(names(&dir), std::slice::from_ref(&name));
             dir.open_read(&name).unwrap();
             dir.unlink(&name).unwrap();
             dir.create_new(&name).unwrap();
-            assert_eq!(dir.entries().unwrap(), [name]);
+            assert_eq!(names(&dir), [name]);
         }
         Err(e) => {
             // macOS sandbox/filesystem may reject invalid UTF-8 path bytes.
             let actual = dir.create_new(&name).unwrap_err();
             assert_eq!(actual.raw_os_error(), e.raw_os_error());
-            assert!(dir.entries().unwrap().is_empty());
+            assert!(names(&dir).is_empty());
         }
     }
 }
@@ -265,4 +269,76 @@ fn independent_open_file_descriptions_contend_for_a_nonblocking_lock() {
     assert!(!second.try_lock().unwrap());
     first.unlock().unwrap();
     assert!(second.try_lock().unwrap());
+}
+
+#[test]
+fn enumeration_owns_its_stream_and_is_independent_of_anchor_lifetime() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    for name in ["first", "second"] {
+        dir.create_new(OsStr::new(name)).unwrap();
+    }
+    let mut entries = dir.entries().unwrap();
+    // Consume one entry, then independently enumerate both through a fresh stream.
+    let first = entries.next().unwrap().unwrap();
+    assert_eq!(names(&dir).len(), 2);
+    drop(dir);
+    let second = entries.next().unwrap().unwrap();
+    assert_ne!(first, second);
+    assert!(entries.next().is_none());
+    assert!(entries.next().is_none());
+}
+
+#[test]
+fn trailing_separators_do_not_bypass_anchor_final_symlink_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(path.join("target")).unwrap();
+    symlink("target", path.join("link")).unwrap();
+    let mut link = path.join("link").into_os_string();
+    link.push("///");
+    assert!(Directory::open_anchor(Path::new(&link)).is_err());
+    let mut target = path.join("target").into_os_string();
+    target.push("///");
+    assert!(Directory::open_anchor(Path::new(&target)).is_ok());
+    assert!(Directory::root(true).is_ok());
+}
+
+#[test]
+fn identity_observations_refuse_replacement_on_either_side_of_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.mkdir(OsStr::new("before"), 0o700).unwrap();
+    dir.mkdir(OsStr::new("replacement"), 0o700).unwrap();
+    let before = dir.metadata_at(OsStr::new("before"), false).unwrap();
+    let replacement = dir.metadata_at(OsStr::new("replacement"), false).unwrap();
+    let name = OsStr::new("entry");
+    assert!(verify_directory_identity(name, before, before, before, before.device).is_ok());
+    // Explicit observations pin races without scheduler timing or private hooks.
+    for (opened, after) in [
+        (replacement, replacement),
+        (before, replacement),
+        (replacement, before),
+    ] {
+        assert!(matches!(
+            verify_directory_identity(name, before, opened, after, before.device),
+            Err(FsError::RaceRefused { .. })
+        ));
+    }
+    assert!(matches!(
+        verify_directory_identity(name, before, before, before, before.device.wrapping_add(1)),
+        Err(FsError::RaceRefused { .. })
+    ));
+}
+#[test]
+fn verified_open_refuses_the_platform_device_mount() {
+    let root = Directory::root(true).unwrap();
+    let parent = root.metadata().unwrap();
+    let device = root.metadata_at(OsStr::new("dev"), false).unwrap();
+    // /dev is an independent device mount on both supported CI/host platforms.
+    assert_ne!(parent.device, device.device);
+    assert!(matches!(
+        root.open_verified_directory(OsStr::new("dev")),
+        Err(FsError::RaceRefused { .. })
+    ));
 }
