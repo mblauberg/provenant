@@ -117,6 +117,62 @@ pub fn render(status: &Status, strict: bool, advisories: &[String]) -> CommandOu
     out
 }
 
+/// Byte boundary used by the executable edge. Unix Python stdout/stderr use
+/// surrogateescape for filesystem paths, so a path is never formatted via
+/// `Path::display()` at this boundary.
+pub fn render_bytes(status: &Status, strict: bool, advisories: &[String]) -> crate::CommandBytes {
+    use std::os::unix::ffi::OsStrExt;
+    let text = render(status, strict, advisories);
+    let mut result = crate::CommandBytes::from(text);
+    match status {
+        Status::Installed { command, .. } => {
+            let suffix = result
+                .stdout
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(result.stdout.len(), |i| i + 1);
+            let mut stdout = b"provenant installed stub=ok path=".to_vec();
+            stdout.extend_from_slice(command.as_os_str().as_bytes());
+            stdout.push(b'\n');
+            stdout.extend_from_slice(&result.stdout[suffix..]);
+            result.stdout = stdout;
+        }
+        Status::Failed(error) => {
+            let path_and_text = match error {
+                Failure::InvalidPointer(path) => Some((
+                    b"product-root pointer is invalid or stale at ".as_slice(),
+                    path,
+                    b"".as_slice(),
+                )),
+                Failure::Unmanaged(path) => Some((
+                    b"".as_slice(),
+                    path,
+                    b" must be a regular managed copy; re-run install-harness".as_slice(),
+                )),
+                Failure::NotExecutable(path) => Some((
+                    b"".as_slice(),
+                    path,
+                    b" is not executable; re-run install-harness".as_slice(),
+                )),
+                _ => None,
+            };
+            if let Some((prefix, path, suffix)) = path_and_text {
+                result.stderr = advisories
+                    .iter()
+                    .flat_map(|s| s.bytes().chain([b'\n']))
+                    .collect();
+                result.stderr.extend_from_slice(b"FAIL: ");
+                result.stderr.extend_from_slice(prefix);
+                result.stderr.extend_from_slice(path.as_os_str().as_bytes());
+                result.stderr.extend_from_slice(suffix);
+                result.stderr.push(b'\n');
+            }
+        }
+        Status::NotOwned => {}
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +389,43 @@ x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
                 .unwrap()
                 .strict
         );
+    }
+    #[test]
+    fn filesystem_paths_preserve_python_surrogateescape_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/bad\xff\nname".to_vec()));
+        for (mode, status) in [
+            (
+                "pointer",
+                Status::Failed(Failure::InvalidPointer(path.clone())),
+            ),
+            (
+                "unmanaged",
+                Status::Failed(Failure::Unmanaged(path.clone())),
+            ),
+            (
+                "executable",
+                Status::Failed(Failure::NotExecutable(path.clone())),
+            ),
+            (
+                "installed",
+                Status::Installed {
+                    command: path.clone(),
+                    providers: [ProviderStatus::default(); 6],
+                    routing: Ok(vec![]),
+                },
+            ),
+        ] {
+            let Some(expected): Option<Vec<u8>> = crate::oracle::python(
+                "import os,json,sys; x=json.load(sys.stdin); p=os.fsdecode(bytes(x['path'])); messages={'pointer':f'FAIL: product-root pointer is invalid or stale at {p}\\n','unmanaged':f'FAIL: {p} must be a regular managed copy; re-run install-harness\\n','executable':f'FAIL: {p} is not executable; re-run install-harness\\n','installed':f'provenant installed stub=ok path={p}\\n'}; print(json.dumps(list(messages[x['mode']].encode('utf-8','surrogateescape'))))",
+                &serde_json::json!({"path": b"/tmp/bad\xff\nname".to_vec(), "mode":mode}),
+            ) else { return; };
+            let output = render_bytes(&status, false, &[]);
+            if mode == "installed" {
+                assert!(output.stdout.starts_with(&expected));
+            } else {
+                assert_eq!(output.stderr, expected);
+            }
+        }
     }
 }
