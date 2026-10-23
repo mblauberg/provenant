@@ -209,11 +209,11 @@ fn session_database_differential() {
     let mut out = Vec::new();
     capture(
         &mut out,
-        store.claim_session_turn(&a, "Review", None, SessionTurnKind::Start, 123, "fixture-1"),
+        store.claim_session_turn_with_id(&a, "Review", None, SessionTurnKind::Start, 123, "fixture-1"),
     );
     capture(
         &mut out,
-        store.claim_session_turn(&b, "Review", None, SessionTurnKind::Start, 124, "fixture-2"),
+        store.claim_session_turn_with_id(&b, "Review", None, SessionTurnKind::Start, 124, "fixture-2"),
     );
     let turn = SessionLaunch {
         run_id: "r".into(),
@@ -251,7 +251,7 @@ fn session_database_differential() {
     );
     capture(
         &mut out,
-        store.claim_session_turn(
+        store.claim_session_turn_with_id(
             &b,
             "Review",
             Some("old-claim"),
@@ -262,7 +262,7 @@ fn session_database_differential() {
     );
     capture(
         &mut out,
-        store.claim_session_turn(
+        store.claim_session_turn_with_id(
             &b,
             "Review",
             Some("fixture-1"),
@@ -281,7 +281,7 @@ fn session_database_differential() {
     capture(&mut out, store.forget_session(&a, "Review"));
     capture(
         &mut out,
-        store.claim_session_turn(
+        store.claim_session_turn_with_id(
             &a,
             "NeverLaunched",
             None,
@@ -297,7 +297,7 @@ fn session_database_differential() {
     capture(&mut out, store.sessions("p"));
     capture(
         &mut out,
-        store.claim_session_turn(
+        store.claim_session_turn_with_id(
             &a,
             "Missing",
             Some("stale"),
@@ -829,4 +829,22 @@ fn work_claim_fencing_paths_errors_and_rollback_differential() {
     capture(&mut out,store.work_claims("p",2000));
     compare("work",snapshot(&store,out));
     store.close().unwrap();other.close().unwrap();
+}
+
+#[test]
+fn entropy_defaults_and_failure_order_differential() {
+    let dir=tempfile::tempdir().unwrap();
+    let store=Store::open(&dir.path().join("db"),5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids=FixtureIds::default();let mut out=Vec::new();
+    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
+    capture(&mut out,store.send(&a(),"bob","empty task",SendOptions {task_id:Some(""),..Default::default()},RecipientContext::default(),&ids));
+    capture(&mut out,store.send(&a(),"bob","empty output",SendOptions {output_path:Some(""),..Default::default()},RecipientContext::default(),&ids));
+    capture(&mut out,store.send(&a(),"missing","failed recipient",SendOptions::default(),RecipientContext::default(),&ids));
+    capture(&mut out,store.claim_session_turn(&a(),"name",None,SessionTurnKind::Start,123,&ids));
+    capture(&mut out,store.claim_session_turn(&a(),"name",None,SessionTurnKind::Start,124,&ids));
+    capture(&mut out,store.create_task(&a(),"generated",CreateTaskOptions::default(),&ids));
+    capture(&mut out,store.create_task(&a(),"empty",CreateTaskOptions {task_id:Some(""),..Default::default()},&ids));
+    capture(&mut out,store.send(&a(),"bob","generated",SendOptions::default(),RecipientContext::default(),&ids));
+    capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
+    compare("ids",snapshot(&store,out));
 }

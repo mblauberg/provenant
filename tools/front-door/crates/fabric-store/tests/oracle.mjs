@@ -29,7 +29,18 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if (scenario === 'work') {
+if (scenario === 'ids') {
+  store.announce(a); store.announce(b);
+  capture(() => store.send(a,'bob','empty task',{taskId:''}));
+  capture(() => store.send(a,'bob','empty output',{outputPath:''}));
+  capture(() => store.send(a,'missing','failed recipient'));
+  capture(() => store.claimSessionTurn(a,'name',null,'start',123));
+  capture(() => store.claimSessionTurn(a,'name',null,'start',124));
+  capture(() => store.createTask(a,'generated'));
+  capture(() => store.createTask(a,'empty',{taskId:''}));
+  capture(() => store.send(a,'bob','generated'));
+  capture(() => store.inbox(b));
+} else if (scenario === 'work') {
   store.announce(a); store.announce(b); store.announce({...a,project:'z'});
   capture(() => store.agents('p')); capture(() => store.projects());
   capture(() => store.acquireWork(a,'s',{issue:' #869 ',paths:['Runtime\\Fabric/','runtime/fabric']},1,1000));

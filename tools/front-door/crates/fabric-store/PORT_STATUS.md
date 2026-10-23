@@ -15,12 +15,11 @@ there was no batch-1 status or implementation on main.
   implemented with generation fencing, rollback and checked JSON from records.
   Remaining: safe recursive parent creation in `Store::open`, awaiting the
   supervisor API, and `laneTaskId` (covered with unit-03's dynamic row boundary).
-- `runtime/fabric/src/store.ts#unit-02`: **partial**. Landing reads, acquire,
-  verify, renewal, push hold, release, bounded polling and named-session
-  policy are implemented. Message send/inbox policy is implemented with explicit recipient context and
-  atomic expiring claims.
-  Native UUID defaults await the supervisor entropy API. IDs and clocks are
-  explicit inputs in the inert library.
+- `runtime/fabric/src/store.ts#unit-02`: **ported**. Landing leases, bounded
+  waits, push cleanup, named sessions, send and inbox policy are implemented.
+  UUID generation is an injected `IdSource`, consumed at the source's system
+  boundary, including failed sends and session conflicts. Native entropy stays
+  with the supervisor; no unsafe implementation is copied into the store.
 - `runtime/fabric/src/store.ts#unit-03`: **partial**. Inbox claim completion,
   digest grouping, acknowledgements, observation cursors, teams, cooperative
   tasks and activity are implemented. Legacy dynamic terminal-row coercion

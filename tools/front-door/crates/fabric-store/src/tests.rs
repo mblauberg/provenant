@@ -38,11 +38,11 @@ fn sessions_fence_active_turns_and_keep_last_clean_pointer() {
         provider: "codex".into(),
     };
     assert!(matches!(
-        store.claim_session_turn(&who, "Review", None, SessionTurnKind::Start, 123, "claim-a"),
+        store.claim_session_turn_with_id(&who, "Review", None, SessionTurnKind::Start, 123, "claim-a"),
         Ok(SessionClaim::Claim { .. })
     ));
     assert!(matches!(
-        store.claim_session_turn(&who, "Review", None, SessionTurnKind::Start, 124, "claim-b"),
+        store.claim_session_turn_with_id(&who, "Review", None, SessionTurnKind::Start, 124, "claim-b"),
         Ok(SessionClaim::Conflict { .. })
     ));
     store
@@ -78,7 +78,7 @@ fn sessions_fence_active_turns_and_keep_last_clean_pointer() {
         .settle_session_turn(&who, "Review", "claim-a", "ok", Some(&pointer))
         .unwrap();
     store
-        .claim_session_turn(
+        .claim_session_turn_with_id(
             &who,
             "Review",
             Some("claim-a"),
