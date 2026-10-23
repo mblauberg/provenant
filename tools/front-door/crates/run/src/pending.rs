@@ -1,10 +1,8 @@
-use serde::{Deserialize, Serialize};
-pub(crate) use provenant_core::py::{python_repr, python_truth as json_truthy};
-// Temporary safe OS helpers until the supervisor exposes these contracts.
+//! Temporary safe OS helpers until the supervisor exposes these contracts.
 #[path = "python_unicode.rs"]
 mod python_unicode;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 
 // port: belongs in provenant-supervisor
@@ -114,79 +112,35 @@ pub(crate) fn python_isdigit(text: &str) -> bool {
 }
 
 // port: belongs in provenant-core
+// Unicode 16.0 decimal-zero code points, generated from Python's unicodedata.
+const DECIMAL_ZEROES: &[u32] = &[
+    0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+    0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+    0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
+    0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0,
+    0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+    0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8,
+    0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
+
+// Match Python int()'s Unicode Nd digit conversion. Superscript digits, for
+// example, satisfy str.isdigit() but are not valid integer-string digits.
+// port: belongs in provenant-core
+pub(crate) fn python_decimal_digit(character: char) -> Option<u8> {
+    let codepoint = u32::from(character);
+    DECIMAL_ZEROES.iter().find_map(|zero| {
+        if codepoint >= *zero && codepoint < *zero + 10 {
+            Some((codepoint - *zero) as u8)
+        } else {
+            None
+        }
+    })
+}
+
+// port: belongs in provenant-core
 pub(crate) fn epoch_seconds(time: std::time::SystemTime) -> f64 {
     match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_secs_f64(),
         Err(error) => -error.duration().as_secs_f64(),
     }
 }
-
-// port: belongs in provenant-supervisor
-pub(crate) fn publish_lease(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::create_dir_all(parent(path))?;
-    // create_new gives independent calls distinct temporary files without global state.
-    for serial in 0..1024 {
-        let mut name = std::ffi::OsString::from(".");
-        name.push(
-            path.file_name()
-                .ok_or_else(|| io::Error::other("missing lease filename"))?,
-        );
-        name.push(format!(".{}.{serial}", std::process::id()));
-        let temp = parent(path).join(name);
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let result = (|| {
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp, path)
-        })();
-        let cleanup = fs::remove_file(&temp);
-        return match (result, cleanup) {
-            (Err(e), _) => Err(e),
-            (Ok(()), Err(e)) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "lease temporary files exhausted",
-    ))
-}
-
-// port: belongs in provenant-records
-pub(crate) fn ascii_json(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        if c.is_ascii() {
-            out.push(c);
-        } else {
-            for unit in c.encode_utf16(&mut [0; 2]) {
-                out.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    out
-}
-
-// port: belongs in provenant-records
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Lease {
-    pub schema_version: u8,
-    pub status: String,
-    pub holder: String,
-    pub previous_holder: String,
-    pub generation: i64,
-    pub updated_at: String,
-    pub expires_at: String,
-    pub handoff_evidence: String,
-}
-
