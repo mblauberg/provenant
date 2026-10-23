@@ -812,7 +812,7 @@ impl ProviderGroup {
             if self.child.is_none() || wait_exit(self.pid, true)?.is_none() {
                 return Ok(false);
             }
-            return linux_quiescent_children(self.pid);
+            linux_quiescent_children(self.pid)
         }
         #[cfg(not(target_os = "linux"))]
         {
