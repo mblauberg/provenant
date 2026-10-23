@@ -4,8 +4,8 @@
 mod pending;
 pub use pending::*;
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub const SCHEMA: &str = "provenant.quota.v1";
 pub const REPORT_SCHEMA: &str = "provenant.quota.report.v1";
@@ -21,20 +21,34 @@ pub struct Account {
     pub provider: String,
     pub label: String,
     pub identity_dir: PathBuf,
-    #[serde(default)] pub active: bool,
+    #[serde(default)]
+    pub active: bool,
     pub plan: Option<String>,
     pub priority: Option<i64>,
-    #[serde(default)] pub options: std::collections::BTreeMap<String, serde_json::Value>,
-    #[serde(default)] pub signed_out: bool,
+    #[serde(default)]
+    pub options: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub signed_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ErrorKind { RateLimited, Network, Auth, Missing, Other }
+pub enum ErrorKind {
+    RateLimited,
+    Network,
+    Auth,
+    Missing,
+    Other,
+}
 impl ErrorKind {
     pub fn from_name(name: &str) -> Self {
-        match name { "rate_limited" => Self::RateLimited, "network" => Self::Network,
-            "auth" => Self::Auth, "missing" => Self::Missing, _ => Self::Other }
+        match name {
+            "rate_limited" => Self::RateLimited,
+            "network" => Self::Network,
+            "auth" => Self::Auth,
+            "missing" => Self::Missing,
+            _ => Self::Other,
+        }
     }
 }
 
@@ -50,8 +64,13 @@ pub struct Unavailable {
 }
 impl Unavailable {
     pub fn new(message: impl Into<String>, kind: &str) -> Self {
-        Self { message: message.into(), kind: ErrorKind::from_name(kind), retry_after: None,
-            status: None, retry_at: None }
+        Self {
+            message: message.into(),
+            kind: ErrorKind::from_name(kind),
+            retry_after: None,
+            status: None,
+            retry_at: None,
+        }
     }
 }
 
@@ -65,7 +84,12 @@ pub trait QuotaPolicy {
     fn allowance_spent(&self, snapshot: &Snapshot, worst: Option<&DisplayWindow>) -> bool;
     fn credit_draw(&self, snapshot: &Snapshot, spent: bool) -> Option<UsageCredit>;
     fn burn_rate(&self, snapshot: &Snapshot, credit: &UsageCredit) -> Option<f64>;
-    fn credit_advice(&self, windows: &[DisplayWindow], banked: Option<&BankedCredits>, now: jiff::Timestamp) -> CreditAdvice;
+    fn credit_advice(
+        &self,
+        windows: &[DisplayWindow],
+        banked: Option<&BankedCredits>,
+        now: jiff::Timestamp,
+    ) -> CreditAdvice;
     fn normalise_usage_credits(&self, credits: &[UsageCredit]) -> Vec<UsageCredit>;
     fn normalise_resets(&self, resets: Option<&Resets>) -> Option<Resets>;
     fn window_pool(&self, provider: &str, name: &str) -> Option<String>;
@@ -85,7 +109,8 @@ mod tests {
     }
     #[test]
     fn account_defaults_are_per_value() {
-        let value = serde_json::json!({"provider":"example", "label":"work", "identity_dir":"/fixture"});
+        let value =
+            serde_json::json!({"provider":"example", "label":"work", "identity_dir":"/fixture"});
         let mut a: Account = serde_json::from_value(value.clone()).unwrap();
         let b: Account = serde_json::from_value(value).unwrap();
         a.options.insert("quota".into(), serde_json::json!({}));
@@ -93,15 +118,19 @@ mod tests {
     }
 }
 
-pub mod time;
 pub mod display;
+pub mod time;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuotaError {
-    #[error("invalid quota record")] Record(#[source] serde_json::Error),
-    #[error("quota timestamp is out of range")] TimeRange,
-    #[error("invalid quota timestamp")] InvalidTimestamp,
-    #[error("could not write quota report")] Write(#[source] std::io::Error),
+    #[error("invalid quota record")]
+    Record(#[source] serde_json::Error),
+    #[error("quota timestamp is out of range")]
+    TimeRange,
+    #[error("invalid quota timestamp")]
+    InvalidTimestamp,
+    #[error("could not write quota report")]
+    Write(#[source] std::io::Error),
 }
 
 #[cfg(test)]

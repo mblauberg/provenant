@@ -15,9 +15,9 @@ import quota_schedule as schedule
 
 request = json.load(sys.stdin)
 context = request.get('context', {})
-quota.setting = lambda key, default=None: context.get('settings', {}).get(key, default)
+quota.setting = lambda key, default=None: (context.get('settings') or {}).get(key, default)
 quota.setting_map = lambda key: quota.setting(key) if isinstance(quota.setting(key), dict) else {}
-quota.configured = lambda: context.get('entries', {})
+quota.configured = lambda: context.get('entries') or {}
 quota.telemetry_host = lambda: context.get('host', 'fixture-host')
 quota.enabled = lambda: context.get('enabled', True)
 quota.registered = lambda: sorted(context.get('providers', ['agy', 'claude', 'codex', 'cursor', 'opencode']))
@@ -26,7 +26,17 @@ quota.local_activity = lambda: context.get('activity', {})
 now = schedule.parse_time(request.get('now'))
 args = request.get('args', [])
 operation = request['operation']
-if operation == 'pace':
+if operation == 'schema':
+    try:
+        import jsonschema
+    except ImportError:
+        result = {'available': False}
+    else:
+        schema = json.loads((ROOT / 'schemas/quota-snapshot.schema.json').read_text())
+        judge = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
+        result = {'available': True, 'valid': judge.is_valid(request['value']),
+                  'mutant_rejected': not judge.is_valid(request['mutant'])}
+elif operation == 'pace':
     result = quota.pace(args[0], now)
 elif operation == 'binding':
     rows = args[0]
@@ -60,7 +70,7 @@ elif operation == 'time':
     result = [schedule.iso(schedule.parse_time(v)) for v in args]
 elif operation == 'backoff':
     config, _ = schedule.resolve(request['provider'], None, context.get('settings'))
-    result = schedule.backoff_seconds(*args, config, request.get('seed', ''))
+    result = repr(schedule.backoff_seconds(*args, config, request.get('seed', '')))
 else:
     result = getattr(quota, operation)(*args)
 json.dump(result, sys.stdout)
