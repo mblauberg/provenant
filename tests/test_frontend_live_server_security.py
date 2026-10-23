@@ -1,25 +1,26 @@
-import base64
 import http.client
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 import pytest
 
 from ui_ux_live_test_support import (
-    ROOT,
     RESUME,
+    ROOT,
+    SCRIPTS,
     SERVER,
     SERVER_WRAPPER,
-    SCRIPTS,
     STATUS,
     TOKEN,
+    LiveServer,
+    available_port,
+    http_request,
+    run_node,
+    run_node_eval,
     write_live_config,
 )
 
@@ -33,82 +34,13 @@ def _pin_ui_evidence_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENTS_HOME", raising=False)
 
 
-def _available_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-class LiveServer:
-    def __init__(self, project: Path, *, env: dict[str, str] | None = None):
-        self.project = project
-        self.port = _available_port()
-        self.process: subprocess.Popen[str] | None = None
-        self.token = ""
-        self.agent_token = ""
-        self.env = env
-        if self.env is None:
-            self.env = dict(os.environ)
-            self.env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
-            self.env.pop("AGENTS_HOME", None)
-
-    def __enter__(self):
-        self.process = subprocess.Popen(
-            ["node", str(SERVER), f"--port={self.port}"],
-            cwd=self.project,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=self.env,
-        )
-        info_path = self.project / ".impeccable" / "live" / "server.json"
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                stdout, stderr = self.process.communicate()
-                raise AssertionError(f"live server exited early\nstdout={stdout}\nstderr={stderr}")
-            try:
-                info = json.loads(info_path.read_text())
-                self.token = info["token"]
-                self.agent_token = json.loads(
-                    Path(info["agentStatePath"]).read_text()
-                )["agentToken"]
-                if info["port"] == self.port:
-                    return self
-            except (FileNotFoundError, json.JSONDecodeError, KeyError):
-                pass
-            time.sleep(0.05)
-        self.close()
-        raise AssertionError("timed out waiting for live server")
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def close(self) -> None:
-        if not self.process or self.process.poll() is not None:
-            return
-        try:
-            _request(f"{self.base_url}/stop?token={quote(self.token)}")
-        except (HTTPError, URLError, ConnectionError):
-            pass
-        try:
-            self.process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            self.process.terminate()
-            self.process.wait(timeout=3)
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        self.close()
-
-
 @pytest.mark.parametrize("body", [b"null", b"[]", b'"text"'])
 @pytest.mark.parametrize("endpoint", ["events", "poll"])
 def test_live_server_rejects_non_object_json_without_crashing(
     tmp_path: Path, endpoint: str, body: bytes,
 ) -> None:
     with LiveServer(tmp_path) as server:
-        status, _, response = _request(
+        status, _, response = http_request(
             f"{server.base_url}/{endpoint}",
             method="POST",
             body=body,
@@ -116,7 +48,7 @@ def test_live_server_rejects_non_object_json_without_crashing(
         )
         assert status == 400
         assert "error" in json.loads(response)
-        assert _request(f"{server.base_url}/health")[0] == 200
+        assert http_request(f"{server.base_url}/health")[0] == 200
 
 
 @pytest.mark.parametrize("port", ["0", "65536"])
@@ -172,42 +104,26 @@ def test_concurrent_background_launchers_only_claim_their_own_child(
             (tmp_path / ".impeccable" / "live" / "server.json").read_text()
         )
         assert private["pid"] == public["pid"]
-        status, _, body = _request(
+        status, _, body = http_request(
             f"http://127.0.0.1:{private['port']}/status?token={quote(private['token'])}"
         )
         assert status == 200
         assert json.loads(body)["pid"] == public["pid"]
     finally:
-        subprocess.run(
-            ["node", str(SERVER), "stop", "--keep-inject"],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        run_node(SERVER, "stop", "--keep-inject", cwd=tmp_path, timeout=5)
         for launcher in launchers:
             if launcher.poll() is None:
                 launcher.terminate()
                 launcher.wait(timeout=3)
 
 
-def _request(
-    url: str,
-    *,
-    origin: str | None = None,
-    method: str = "GET",
-    body: bytes | None = None,
-    extra_headers: dict[str, str] | None = None,
-):
-    headers = {"Origin": origin} if origin else {}
-    headers.update(extra_headers or {})
-    request = Request(url, headers=headers, method=method, data=body)
-    try:
-        with urlopen(request, timeout=3) as response:
-            return response.status, response.headers, response.read().decode("utf-8")
-    except HTTPError as error:
-        return error.code, error.headers, error.read().decode("utf-8")
+def _post_json(url: str, payload: object):
+    return http_request(
+        url,
+        method="POST",
+        body=json.dumps(payload).encode(),
+        extra_headers={"Content-Type": "application/json"},
+    )
 
 
 def _read_sse_messages(
@@ -238,14 +154,14 @@ def test_live_script_requires_token_and_never_echoes_it_to_cross_origin_callers(
     tmp_path: Path,
 ) -> None:
     with LiveServer(tmp_path) as server:
-        status, headers, body = _request(
+        status, headers, body = http_request(
             f"{server.base_url}/live.js", origin="https://attacker.example"
         )
         assert status == 401
         assert server.token not in body
         assert headers.get("Access-Control-Allow-Origin") is None
 
-        status, headers, body = _request(
+        status, headers, body = http_request(
             f"{server.base_url}/live.js?token={quote(server.token)}",
             origin="https://attacker.example",
         )
@@ -255,7 +171,7 @@ def test_live_script_requires_token_and_never_echoes_it_to_cross_origin_callers(
         assert "document.currentScript.src" in body
         assert "searchParams.get('token')" in body
 
-        status, headers, _ = _request(
+        status, headers, _ = http_request(
             f"{server.base_url}/events",
             origin="http://localhost:5173",
             method="OPTIONS",
@@ -271,7 +187,7 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
     root = tmp_path / "workspace"
     root.mkdir()
     with LiveServer(root) as server:
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=first",
             method="POST",
             body=b"first",
@@ -287,7 +203,7 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
         outside.write_bytes(b"outside")
         os.link(outside, session_dir / "hard-link.png")
 
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=hard-link",
             method="POST",
             body=b"replacement",
@@ -309,13 +225,8 @@ def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path)
             "count": 1,
             "element": {"outerHTML": "<main>safe</main>"},
         }
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
-        status, _, body = _request(
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
+        status, _, body = http_request(
             f"{server.base_url}/status?token={quote(server.token)}"
         )
 
@@ -324,13 +235,7 @@ def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path)
         assert payload["pid"] == server.process.pid
         assert payload["port"] == server.port
 
-        cli = subprocess.run(
-            ["node", str(STATUS)],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        cli = run_node(STATUS, cwd=tmp_path)
         assert cli.returncode == 0, cli.stderr
         cli_payload = json.loads(cli.stdout)
         assert cli_payload["liveServer"]["pid"] == server.process.pid
@@ -365,7 +270,7 @@ def test_live_server_does_not_replay_a_project_preseeded_journal(
 
     with LiveServer(tmp_path) as server:
         status = json.loads(
-            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+            http_request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
 
         assert status["pendingEvents"] == []
@@ -414,13 +319,7 @@ def test_live_resume_reports_only_inert_advisory_session_metadata(
 ) -> None:
     prompt_text = _write_untrusted_pending_journal(tmp_path)
 
-    result = subprocess.run(
-        ["node", str(RESUME), "--id", "deadbeef"],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node(RESUME, "--id", "deadbeef", cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert prompt_text not in result.stdout
@@ -444,13 +343,7 @@ def test_live_status_labels_retained_journals_untrusted_without_requeue_advice(
 ) -> None:
     prompt_text = _write_untrusted_pending_journal(tmp_path)
 
-    result = subprocess.run(
-        ["node", str(STATUS)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node(STATUS, cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert prompt_text not in result.stdout
@@ -497,13 +390,7 @@ def test_live_status_sanitises_a_spoofed_loopback_status_response(
         "await module.statusCli();"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert sentinel not in result.stdout
@@ -534,35 +421,24 @@ def _write_invalid_advisory_session_files(project: Path) -> None:
     (sessions / "deadbeef.jsonl").write_text("{not-json}\n")
 
 
-def test_live_status_skips_unsafe_and_malformed_advisory_session_files(
-    tmp_path: Path,
+@pytest.mark.parametrize("reader", ["status-cli", "server-status"])
+def test_status_skips_unsafe_and_malformed_advisory_session_files(
+    tmp_path: Path, reader: str,
 ) -> None:
     _write_invalid_advisory_session_files(tmp_path)
 
-    result = subprocess.run(
-        ["node", str(STATUS)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["activeSessions"] == []
-
-
-def test_server_status_skips_unsafe_and_malformed_advisory_session_files(
-    tmp_path: Path,
-) -> None:
-    _write_invalid_advisory_session_files(tmp_path)
-
-    with LiveServer(tmp_path) as server:
-        status, _, body = _request(
-            f"{server.base_url}/status?token={quote(server.token)}"
-        )
-
-    assert status == 200
-    assert json.loads(body)["activeSessions"] == []
+    if reader == "status-cli":
+        result = run_node(STATUS, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+    else:
+        with LiveServer(tmp_path) as server:
+            status, _, body = http_request(
+                f"{server.base_url}/status?token={quote(server.token)}"
+            )
+        assert status == 200
+        payload = json.loads(body)
+    assert payload["activeSessions"] == []
 
 
 @pytest.mark.parametrize("change_unconfigured_source", [False, True])
@@ -578,12 +454,7 @@ def test_live_server_does_not_replay_pending_events_after_a_crash(
     first.__enter__()
     try:
         event = {"token": first.token, "type": "discard", "id": "deadbeef"}
-        assert _request(
-            f"{first.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{first.base_url}/events", event)[0] == 200
         assert first.process is not None
         first.process.kill()
         first.process.wait(timeout=3)
@@ -591,7 +462,7 @@ def test_live_server_does_not_replay_pending_events_after_a_crash(
             component.write_text("export const Card = () => <article>changed</article>;\n")
 
         with LiveServer(tmp_path) as recovered:
-            status, _, body = _request(
+            status, _, body = http_request(
                 f"{recovered.base_url}/poll?token={quote(recovered.agent_token)}"
                 "&timeout=1&leaseMs=1000"
             )
@@ -604,7 +475,7 @@ def test_live_server_does_not_replay_pending_events_after_a_crash(
 def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) -> None:
     event_id = "deadbeef"
     with LiveServer(tmp_path) as server:
-        status, _, uploaded = _request(
+        status, _, uploaded = http_request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId={event_id}",
             method="POST",
             body=b"\x89PNG\r\n\x1a\nprivate",
@@ -621,15 +492,10 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
             "element": {"outerHTML": "<main>safe</main>"},
             "screenshotPath": screenshot_path,
         }
-        status, _, body = _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+        status, _, body = _post_json(f"{server.base_url}/events", event)
         assert status == 200, body
 
-        status, _, polled = _request(
+        status, _, polled = http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
         )
         assert status == 200
@@ -659,16 +525,11 @@ def test_live_generate_rejects_unbound_browser_supplied_screenshot_path(
             "element": {"outerHTML": "<main>safe</main>"},
             "screenshotPath": str(outside),
         }
-        status, _, body = _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+        status, _, body = _post_json(f"{server.base_url}/events", event)
 
         assert status == 400
         assert "not bound" in json.loads(body)["error"]
-        status, _, polled = _request(
+        status, _, polled = http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1&leaseMs=1000"
         )
         assert status == 200
@@ -686,12 +547,7 @@ def test_browser_credential_cannot_complete_work_and_error_does_not_starve_queue
             "id": event_id,
             "variantId": "1",
         }
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
 
         def reply(
             token: str,
@@ -699,19 +555,14 @@ def test_browser_credential_cannot_complete_work_and_error_does_not_starve_queue
             lease_token: str | None = None,
             reply_id: str = event_id,
         ) -> tuple[int, object, str]:
-            return _request(
-                f"{server.base_url}/poll",
-                method="POST",
-                body=json.dumps(
+            return _post_json(f"{server.base_url}/poll", 
                     {
                         "token": token,
                         "leaseToken": lease_token,
                         "id": reply_id,
                         "type": event_type,
                     }
-                ).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )
+                )
 
         assert reply(server.token, "complete")[0] == 401
         assert reply(server.agent_token, "complete")[0] == 409
@@ -720,21 +571,16 @@ def test_browser_credential_cannot_complete_work_and_error_does_not_starve_queue
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=1000"
         )
-        first_lease = json.loads(_request(poll_url)[2])
+        first_lease = json.loads(http_request(poll_url)[2])
         assert first_lease["id"] == event_id
         assert reply(server.agent_token, "erorr")[0] == 400
         assert reply(server.agent_token, "done", first_lease["leaseToken"])[0] == 409
         assert reply(server.agent_token, "error", first_lease["leaseToken"])[0] == 200
         next_id = "cafebabe"
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(
+        assert _post_json(f"{server.base_url}/events", 
                 {"token": server.token, "type": "discard", "id": next_id}
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
-        second_lease = json.loads(_request(poll_url)[2])
+            )[0] == 200
+        second_lease = json.loads(http_request(poll_url)[2])
         assert second_lease["id"] == next_id
         assert second_lease["leaseToken"] != first_lease["leaseToken"]
         assert reply(server.agent_token, "complete", first_lease["leaseToken"])[0] == 409
@@ -746,7 +592,7 @@ def test_browser_credential_cannot_complete_work_and_error_does_not_starve_queue
         )[0] == 200
 
         status = json.loads(
-            _request(
+            http_request(
                 f"{server.base_url}/status?token={quote(server.token)}"
             )[2]
         )
@@ -765,14 +611,9 @@ def test_live_server_replays_terminal_outcome_after_browser_reconnect(
         event = {"token": server.token, "type": browser_event, "id": event_id}
         if browser_event == "accept":
             event["variantId"] = "1"
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
         leased = json.loads(
-            _request(
+            http_request(
                 f"{server.base_url}/poll?token={quote(server.agent_token)}"
                 "&timeout=1000&leaseMs=1000"
             )[2]
@@ -782,19 +623,14 @@ def test_live_server_replays_terminal_outcome_after_browser_reconnect(
         assert initial[0]["type"] == "connected"
         assert watermark is not None
 
-        status, _, body = _request(
-            f"{server.base_url}/poll",
-            method="POST",
-            body=json.dumps(
+        status, _, body = _post_json(f"{server.base_url}/poll", 
                 {
                     "token": server.agent_token,
                     "leaseToken": leased["leaseToken"],
                     "id": event_id,
                     "type": agent_reply,
                 }
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+            )
         assert status == 200, body
 
         reconnected, _ = _read_sse_messages(
@@ -815,28 +651,18 @@ def test_live_server_signals_when_terminal_replay_history_has_expired(
         )
         for value in range(129):
             event_id = f"{value:08x}"
-            assert _request(
-                f"{server.base_url}/events",
-                method="POST",
-                body=json.dumps(
+            assert _post_json(f"{server.base_url}/events", 
                     {"token": server.token, "type": "discard", "id": event_id}
-                ).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )[0] == 200
-            lease = json.loads(_request(poll_url)[2])
-            assert _request(
-                f"{server.base_url}/poll",
-                method="POST",
-                body=json.dumps(
+                )[0] == 200
+            lease = json.loads(http_request(poll_url)[2])
+            assert _post_json(f"{server.base_url}/poll", 
                     {
                         "token": server.agent_token,
                         "leaseToken": lease["leaseToken"],
                         "id": event_id,
                         "type": "discarded",
                     }
-                ).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )[0] == 200
+                )[0] == 200
 
         messages, watermark = _read_sse_messages(server, 130, last_event_id="0")
 
@@ -852,19 +678,14 @@ def test_expired_lease_cannot_override_a_competing_worker_lease(
 ) -> None:
     event_id = "deadbeef"
     with LiveServer(tmp_path) as server:
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(
+        assert _post_json(f"{server.base_url}/events", 
                 {"token": server.token, "type": "discard", "id": event_id}
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+            )[0] == 200
         poll_url = (
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=25"
         )
-        first_lease = json.loads(_request(poll_url)[2])
+        first_lease = json.loads(http_request(poll_url)[2])
         assert first_lease["id"] == event_id
         assert first_lease["leaseToken"]
 
@@ -873,24 +694,19 @@ def test_expired_lease_cannot_override_a_competing_worker_lease(
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=10000"
         )
-        second_lease = json.loads(_request(second_lease_url)[2])
+        second_lease = json.loads(http_request(second_lease_url)[2])
         assert second_lease["id"] == event_id
         assert second_lease["leaseToken"] != first_lease["leaseToken"]
 
         def acknowledge(lease_token: str) -> tuple[int, object, str]:
-            return _request(
-                f"{server.base_url}/poll",
-                method="POST",
-                body=json.dumps(
+            return _post_json(f"{server.base_url}/poll", 
                     {
                         "token": server.agent_token,
                         "leaseToken": lease_token,
                         "id": event_id,
                         "type": "discarded",
                     }
-                ).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )
+                )
 
         stale = acknowledge(first_lease["leaseToken"])
         assert stale[0] == 409
@@ -908,17 +724,12 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
             "id": event_id,
             "variantId": "1",
         }
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
         poll_url = (
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=5000"
         )
-        lease = json.loads(_request(poll_url)[2])
+        lease = json.loads(http_request(poll_url)[2])
         assert lease["id"] == event_id
 
         sessions = tmp_path / ".impeccable" / "live" / "sessions"
@@ -928,19 +739,14 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
         sessions.rename(moved)
         sessions.symlink_to(outside, target_is_directory=True)
         try:
-            rejected = _request(
-                f"{server.base_url}/poll",
-                method="POST",
-                body=json.dumps(
+            rejected = _post_json(f"{server.base_url}/poll", 
                     {
                         "token": server.agent_token,
                         "leaseToken": lease["leaseToken"],
                         "id": event_id,
                         "type": "complete",
                     }
-                ).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )
+                )
             assert rejected[0] == 500
             assert json.loads(rejected[2])["error"] == "session_store_append_failed"
             assert not list(outside.iterdir())
@@ -949,22 +755,17 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
             moved.rename(sessions)
 
         status = json.loads(
-            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+            http_request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
         assert status["pendingEvents"][0]["id"] == event_id
-        completed = _request(
-            f"{server.base_url}/poll",
-            method="POST",
-            body=json.dumps(
+        completed = _post_json(f"{server.base_url}/poll", 
                 {
                     "token": server.agent_token,
                     "leaseToken": lease["leaseToken"],
                     "id": event_id,
                     "type": "complete",
                 }
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+            )
         assert completed[0] == 200, completed[2]
 
 
@@ -983,22 +784,14 @@ def test_carbonized_accept_can_finish_through_the_live_server(
             "id": event_id,
             "variantId": "1",
         }
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
         poll_url = (
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=1000"
         )
-        lease = json.loads(_request(poll_url)[2])
+        lease = json.loads(http_request(poll_url)[2])
         assert lease["id"] == event_id
-        acknowledged = _request(
-            f"{server.base_url}/poll",
-            method="POST",
-            body=json.dumps(
+        acknowledged = _post_json(f"{server.base_url}/poll", 
                 {
                     "token": server.agent_token,
                     "leaseToken": lease["leaseToken"],
@@ -1006,28 +799,20 @@ def test_carbonized_accept_can_finish_through_the_live_server(
                     "type": "agent_done",
                     "data": {"carbonize": True},
                 }
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+            )
         assert acknowledged[0] == 200, acknowledged[2]
         status = json.loads(
-            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+            http_request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
         assert status["pendingEvents"] == []
         assert status["activeSessions"][0]["phase"] == "carbonize_required"
 
-        completed = subprocess.run(
-            [
-                "node",
-                str(SCRIPTS / "live-complete.mjs"),
-                "--id",
-                event_id,
-                *completion_args,
-            ],
+        completed = run_node(
+            SCRIPTS / "live-complete.mjs",
+            "--id",
+            event_id,
+            *completion_args,
             cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
         )
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout)["phase"] == expected_phase
@@ -1035,7 +820,7 @@ def test_carbonized_accept_can_finish_through_the_live_server(
         terminal = next(message for message in messages if message["type"] in {"complete", "error"})
         assert terminal["data"]["cleanup"] is True
         status = json.loads(
-            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+            http_request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
         assert status["pendingEvents"] == []
         if expected_phase == "completed":
@@ -1048,28 +833,19 @@ def test_retried_browser_event_is_acknowledged_without_requeueing(tmp_path: Path
     event = {"type": "discard", "id": "deadbeef"}
     with LiveServer(tmp_path) as server:
         event["token"] = server.token
-        assert _request(
-            f"{server.base_url}/events", method="POST", body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
-        lease = json.loads(_request(
+        assert _post_json(f"{server.base_url}/events", event)[0] == 200
+        lease = json.loads(http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
         )[2])
-        assert _request(
-            f"{server.base_url}/poll", method="POST",
-            body=json.dumps({
+        assert _post_json(f"{server.base_url}/poll", {
                 "token": server.agent_token, "leaseToken": lease["leaseToken"],
                 "id": event["id"], "type": "discarded",
-            }).encode(), extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+            })[0] == 200
 
-        retried = _request(
-            f"{server.base_url}/events", method="POST", body=json.dumps(event).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+        retried = _post_json(f"{server.base_url}/events", event)
         assert retried[0] == 200
         assert json.loads(retried[2])["duplicate"] is True
-        status = json.loads(_request(
+        status = json.loads(http_request(
             f"{server.base_url}/status?token={quote(server.token)}"
         )[2])
         assert status["pendingEvents"] == []
@@ -1085,25 +861,14 @@ def test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent
         "const store=createLiveSessionStore({cwd:process.argv[1]});"
         f"store.appendEvent({{type:'agent_done',id:{json.dumps(event_id)},carbonize:true}});"
     )
-    prepared = subprocess.run(
-        ["node", "--input-type=module", "-e", setup, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    prepared = run_node_eval(setup, tmp_path)
     assert prepared.returncode == 0, prepared.stderr
     live_dir = tmp_path / ".impeccable" / "live"
     (live_dir / "server.json").write_text(
         json.dumps({"pid": 2_147_483_647, "port": 8400, "token": TOKEN})
     )
 
-    completed = subprocess.run(
-        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", event_id],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = run_node(SCRIPTS / "live-complete.mjs", "--id", event_id, cwd=tmp_path)
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
@@ -1133,26 +898,15 @@ def test_offline_completion_requires_an_existing_phase_compatible_journal(
             "const store=createLiveSessionStore({cwd:process.argv[1]});"
             f"store.appendEvent({json.dumps(setup_event)});"
         )
-        prepared = subprocess.run(
-            ["node", "--input-type=module", "-e", setup, str(tmp_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        prepared = run_node_eval(setup, tmp_path)
         assert prepared.returncode == 0, prepared.stderr
 
-    completed = subprocess.run(
-        [
-            "node",
-            str(SCRIPTS / "live-complete.mjs"),
-            "--id",
-            "deadbeef",
-            *completion_args,
-        ],
+    completed = run_node(
+        SCRIPTS / "live-complete.mjs",
+        "--id",
+        "deadbeef",
+        *completion_args,
         cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
     )
 
     assert completed.returncode != 0
@@ -1170,24 +924,13 @@ def test_offline_completion_rejects_a_malformed_carbonize_journal(tmp_path: Path
         "const store=createLiveSessionStore({cwd:process.argv[1]});"
         f"store.appendEvent({{type:'agent_done',id:{json.dumps(event_id)},carbonize:true}});"
     )
-    prepared = subprocess.run(
-        ["node", "--input-type=module", "-e", setup, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    prepared = run_node_eval(setup, tmp_path)
     assert prepared.returncode == 0, prepared.stderr
     journal = tmp_path / ".impeccable" / "live" / "sessions" / f"{event_id}.jsonl"
     journal.write_text(journal.read_text() + "{malformed\n")
     before = journal.read_text()
 
-    completed = subprocess.run(
-        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", event_id],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = run_node(SCRIPTS / "live-complete.mjs", "--id", event_id, cwd=tmp_path)
 
     assert completed.returncode != 0
     assert json.loads(completed.stderr)["error"] == "live_completion_rejected"
@@ -1202,27 +945,16 @@ def test_offline_discard_cleanup_can_record_an_agent_error(tmp_path: Path) -> No
         "const store=createLiveSessionStore({cwd:process.argv[1]});"
         f"store.appendEvent({{type:'discard',id:{json.dumps(event_id)}}});"
     )
-    prepared = subprocess.run(
-        ["node", "--input-type=module", "-e", setup, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    prepared = run_node_eval(setup, tmp_path)
     assert prepared.returncode == 0, prepared.stderr
 
-    completed = subprocess.run(
-        [
-            "node",
-            str(SCRIPTS / "live-complete.mjs"),
-            "--id",
-            event_id,
-            "--error",
-            "discard cleanup failed",
-        ],
+    completed = run_node(
+        SCRIPTS / "live-complete.mjs",
+        "--id",
+        event_id,
+        "--error",
+        "discard cleanup failed",
         cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -1248,13 +980,7 @@ def test_live_complete_rejects_a_missing_agent_state_at_an_unsafe_path(
         )
     )
 
-    completed = subprocess.run(
-        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", "deadbeef"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = run_node(SCRIPTS / "live-complete.mjs", "--id", "deadbeef", cwd=root)
 
     assert completed.returncode != 0
     assert json.loads(completed.stderr)["error"] == "live_completion_rejected"
@@ -1270,12 +996,7 @@ def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -
         "screenshotPath:'/tmp/transient.png'});"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
     journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
@@ -1297,12 +1018,7 @@ def test_delayed_checkpoint_cannot_regress_a_carbonize_required_session(
         "process.stdout.write(JSON.stringify(result));"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
     snapshot = json.loads(result.stdout)
@@ -1323,12 +1039,7 @@ def test_session_store_recovery_never_restores_a_transient_screenshot_path(
         "process.stdout.write(JSON.stringify(recovered));"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
     recovered = json.loads(result.stdout)
@@ -1355,16 +1066,11 @@ def test_live_poll_rejects_malformed_timeout_and_lease_values(
     tmp_path: Path, query: str
 ) -> None:
     with LiveServer(tmp_path) as server:
-        status, _, body = _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(
+        status, _, body = _post_json(f"{server.base_url}/events", 
                 {"token": server.token, "type": "discard", "id": "deadbeef"}
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+            )
         assert status == 200, body
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&{query}"
         )
 
@@ -1376,20 +1082,15 @@ def test_default_lease_covers_the_normal_ten_minute_agent_poll_window(
     tmp_path: Path,
 ) -> None:
     with LiveServer(tmp_path) as server:
-        assert _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(
+        assert _post_json(f"{server.base_url}/events", 
                 {"token": server.token, "type": "discard", "id": "deadbeef"}
-            ).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+            )[0] == 200
         before_poll_ms = int(time.time() * 1000)
-        assert _request(
+        assert http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000"
         )[0] == 200
         status = json.loads(
-            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+            http_request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
 
         assert status["pendingEvents"][0]["leaseUntil"] >= before_poll_ms + 590_000
@@ -1407,7 +1108,7 @@ def test_design_sidecar_endpoint_rejects_a_symlink_instead_of_serving_it(
     sidecar.symlink_to(outside)
 
     with LiveServer(root) as server:
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/design-system.json?token={quote(server.token)}"
         )
 
@@ -1426,7 +1127,7 @@ def test_design_markdown_endpoint_rejects_a_project_symlink(tmp_path: Path) -> N
     (project / "DESIGN.md").symlink_to(secret)
 
     with LiveServer(project) as server:
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/design-system/raw?token={quote(server.token)}"
         )
 
@@ -1446,10 +1147,10 @@ def test_design_endpoints_allow_an_explicit_external_context_root(tmp_path: Path
     env = {**os.environ, "IMPECCABLE_CONTEXT_DIR": str(context)}
 
     with LiveServer(project, env=env) as server:
-        raw_status, _, raw = _request(
+        raw_status, _, raw = http_request(
             f"{server.base_url}/design-system/raw?token={quote(server.token)}"
         )
-        json_status, _, body = _request(
+        json_status, _, body = http_request(
             f"{server.base_url}/design-system.json?token={quote(server.token)}"
         )
 
@@ -1481,14 +1182,7 @@ def test_live_server_rejects_a_preexisting_symlinked_state_root(
         live.mkdir(parents=True)
         (live / "sessions").symlink_to(outside, target_is_directory=True)
 
-    result = subprocess.run(
-        ["node", str(SERVER), f"--port={_available_port()}"],
-        cwd=project,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    result = run_node(SERVER, f"--port={available_port()}", cwd=project, timeout=5)
 
     assert result.returncode != 0
     assert "live_state_root_invalid" in result.stderr
@@ -1506,14 +1200,7 @@ def test_live_server_stop_does_not_follow_a_symlinked_state_root(tmp_path: Path)
     record.write_text(json.dumps({"pid": 2_147_483_647, "port": 65534, "token": "safe"}))
     (project / ".impeccable").symlink_to(outside, target_is_directory=True)
 
-    result = subprocess.run(
-        ["node", str(SERVER), "stop", "--keep-inject"],
-        cwd=project,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    result = run_node(SERVER, "stop", "--keep-inject", cwd=project, timeout=5)
 
     assert result.returncode != 0
     assert "live_state_root_invalid" in result.stderr
@@ -1542,12 +1229,7 @@ def test_live_session_store_rejects_linked_state_files(
         "store.appendEvent({id:'security-test',type:'generate'});"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(project)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, project)
 
     assert result.returncode != 0
     assert outside.read_text() == "outside-safe"
@@ -1571,19 +1253,7 @@ def test_live_session_store_rejects_a_post_construction_parent_swap(
         "catch(error){process.stdout.write(error.code);process.exit(7)}"
     )
 
-    result = subprocess.run(
-        [
-            "node",
-            "--input-type=module",
-            "-e",
-            script,
-            str(project),
-            str(outside),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, project, outside)
 
     assert result.returncode == 7
     assert result.stdout == "live_state_root_invalid"
@@ -1610,12 +1280,7 @@ def test_live_session_store_ignores_a_symlinked_legacy_parent(
         "process.stdout.write(JSON.stringify(store.listActiveSessions()));"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(project)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, project)
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == []
@@ -1645,12 +1310,7 @@ def test_live_session_store_rejects_a_post_construction_legacy_parent_swap(
         "catch(error){process.stdout.write(error.code);process.exit(7)}"
     )
 
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(project), str(outside)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, project, outside)
 
     assert result.returncode == 7
     assert result.stdout == "live_state_root_invalid"
@@ -1664,12 +1324,12 @@ def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
     )
     screenshot_path = SCRIPTS / "modern-screenshot.umd.js"
     with LiveServer(tmp_path) as server:
-        status, headers, detector = _request(f"{server.base_url}/detect.js")
+        status, headers, detector = http_request(f"{server.base_url}/detect.js")
         assert status == 200
         assert headers.get_content_type() == "application/javascript"
         assert detector == detector_path.read_text()
 
-        status, headers, screenshot = _request(
+        status, headers, screenshot = http_request(
             f"{server.base_url}/modern-screenshot.js"
         )
         assert status == 200
@@ -1677,12 +1337,7 @@ def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
         assert screenshot == screenshot_path.read_text()
 
     for asset in (detector_path, screenshot_path):
-        checked = subprocess.run(
-            ["node", "--check", str(asset)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        checked = run_node("--check", asset)
         assert checked.returncode == 0, checked.stderr
 
 
@@ -1696,12 +1351,10 @@ def test_live_wrapper_fails_before_creating_private_state_when_runtime_is_missin
     env.pop("AGENTS_HOME", None)
     env["TMPDIR"] = str(runtime_tmp)
 
-    result = subprocess.run(
-        ["node", str(SERVER_WRAPPER), f"--port={_available_port()}"],
+    result = run_node(
+        SERVER_WRAPPER,
+        f"--port={available_port()}",
         cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=5,
         env=env,
     )
@@ -1733,7 +1386,7 @@ def test_source_endpoint_rejects_ancestor_sibling_prefix_and_symlink_escape(
 
     with LiveServer(root) as server:
         def source(path_value: str):
-            return _request(
+            return http_request(
                 f"{server.base_url}/source?token={quote(server.token)}&path={quote(path_value, safe='')}"
             )
 
@@ -1754,7 +1407,7 @@ def test_authenticated_null_origin_is_supported_without_unauthenticated_cors(
     _write_config(tmp_path, ["index.html"])
 
     with LiveServer(tmp_path) as server:
-        status, headers, body = _request(
+        status, headers, body = http_request(
             f"{server.base_url}/source?token={quote(server.token)}&path=index.html",
             origin="null",
         )
@@ -1763,7 +1416,7 @@ def test_authenticated_null_origin_is_supported_without_unauthenticated_cors(
         assert headers.get("Access-Control-Allow-Origin") == "null"
         assert headers.get("Access-Control-Allow-Origin") != "*"
 
-        status, headers, body = _request(
+        status, headers, body = http_request(
             f"{server.base_url}/source?token=wrong&path=index.html",
             origin="null",
         )
@@ -1777,7 +1430,7 @@ def test_json_post_endpoints_reject_declared_and_streamed_oversize_bodies(
 ) -> None:
     with LiveServer(tmp_path) as server:
         oversized = b'{"padding":"' + (b'x' * (300 * 1024)) + b'"}'
-        status, _, body = _request(
+        status, _, body = http_request(
             f"{server.base_url}/events",
             method="POST",
             body=oversized,
@@ -1804,7 +1457,7 @@ def test_json_post_endpoints_reject_declared_and_streamed_oversize_bodies(
             connection.close()
 
         # Draining a rejected body must leave the server usable.
-        status, _, body = _request(f"{server.base_url}/health")
+        status, _, body = http_request(f"{server.base_url}/health")
         assert status == 200
         assert json.loads(body)["status"] == "ok"
 
@@ -1828,25 +1481,15 @@ def test_live_server_bounds_queued_work_and_active_sessions(
             }
             if event_type == "checkpoint":
                 event["revision"] = 0
-            assert _request(
-                f"{server.base_url}/events",
-                method="POST",
-                body=json.dumps(event).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )[0] == 200
+            assert _post_json(f"{server.base_url}/events", event)[0] == 200
 
         overflow = {"token": server.token, "type": event_type, "id": "ffffffff"}
         if event_type == "checkpoint":
             overflow["revision"] = 0
-        status, _, body = _request(
-            f"{server.base_url}/events",
-            method="POST",
-            body=json.dumps(overflow).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )
+        status, _, body = _post_json(f"{server.base_url}/events", overflow)
         assert status == 429
         assert json.loads(body)["error"] == expected_error
-        assert _request(f"{server.base_url}/health")[0] == 200
+        assert http_request(f"{server.base_url}/health")[0] == 200
 
 
 def test_live_server_bounds_sse_clients(tmp_path: Path) -> None:
@@ -1862,7 +1505,7 @@ def test_live_server_bounds_sse_clients(tmp_path: Path) -> None:
                 connections.append(connection)
                 responses.append(response)
 
-            status, _, body = _request(
+            status, _, body = http_request(
                 f"{server.base_url}/events?token={quote(server.token)}"
             )
             assert status == 429
@@ -1913,7 +1556,7 @@ def test_annotation_capacity_is_reclaimed_after_agent_acknowledgement(
         screenshot_path = None
         for index in range(64):
             current_id = f"{index:08x}"
-            status, _, body = _request(
+            status, _, body = http_request(
                 f"{server.base_url}/annotation?token={quote(server.token)}&eventId={current_id}",
                 method="POST",
                 body=b"\x89PNG\r\n\x1a\n",
@@ -1931,22 +1574,17 @@ def test_annotation_capacity_is_reclaimed_after_agent_acknowledgement(
                 "element": {"outerHTML": "<main>safe</main>"},
                 "screenshotPath": json.loads(body)["path"],
             }
-            assert _request(
-                f"{server.base_url}/events",
-                method="POST",
-                body=json.dumps(event).encode(),
-                extra_headers={"Content-Type": "application/json"},
-            )[0] == 200
+            assert _post_json(f"{server.base_url}/events", event)[0] == 200
 
         assert screenshot_path
-        assert _request(
+        assert http_request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=overflow",
             method="POST",
             body=b"\x89PNG\r\n\x1a\n",
             extra_headers={"Content-Type": "image/png"},
         )[0] == 507
 
-        _, _, body = _request(
+        _, _, body = http_request(
             f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
         )
         leased = json.loads(body)
@@ -1956,14 +1594,9 @@ def test_annotation_capacity_is_reclaimed_after_agent_acknowledgement(
             "id": event_id,
             "leaseToken": leased["leaseToken"],
         }
-        assert _request(
-            f"{server.base_url}/poll",
-            method="POST",
-            body=json.dumps(reply).encode(),
-            extra_headers={"Content-Type": "application/json"},
-        )[0] == 200
+        assert _post_json(f"{server.base_url}/poll", reply)[0] == 200
         assert not Path(screenshot_path).exists()
-        assert _request(
+        assert http_request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=reused-slot",
             method="POST",
             body=b"\x89PNG\r\n\x1a\n",
@@ -1985,33 +1618,20 @@ def test_session_journal_has_a_bounded_capacity(tmp_path: Path) -> None:
         "}"
         "process.stdout.write(JSON.stringify({code}));"
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(tmp_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_node_eval(script, tmp_path)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["code"] == "live_session_limit"
     journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
     assert 2 * 1024 * 1024 < journal.stat().st_size <= int(2.5 * 1024 * 1024)
 
-    terminal = subprocess.run(
-        [
-            "node",
-            "--input-type=module",
-            "-e",
-            f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+    terminal = run_node_eval(
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
             "const store=createLiveSessionStore({cwd:process.argv[1]});"
             "store.appendEvent({type:'accept',id:'deadbeef',variantId:'1'});"
             "store.appendEvent({type:'agent_done',id:'deadbeef',carbonize:true});"
             "const result=store.appendEvent({type:'complete',id:'deadbeef'});"
             "process.stdout.write(JSON.stringify(result));",
-            str(tmp_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+        tmp_path,
     )
     assert terminal.returncode == 0, terminal.stderr
     assert json.loads(terminal.stdout)["phase"] == "completed"
@@ -2033,6 +1653,6 @@ def test_live_context_signal_matches_loader_variants(
         (tmp_path / context_name).write_text("# Product context\n")
 
     with LiveServer(tmp_path) as server:
-        status, _, body = _request(f"{server.base_url}/health")
+        status, _, body = http_request(f"{server.base_url}/health")
         assert status == 200
         assert json.loads(body)["hasProjectContext"] is expected
