@@ -2,7 +2,7 @@
 
 Author route: `codex/gpt-6.1-sol@high`. Rulebook: `PORTING.md` version 4.
 Source/oracle revision: `1884954ef414e60cc6b160c636fe1add9f7784dd`;
-merged main: `b527d675d15c50ee51701bb15db6439c95277918`. Assigned Python sources
+merged main: `8bf118d933ed835add47e22c9c562beaf6747efc`. Assigned Python sources
 are unchanged between those revisions. No command owner switches and no Python
 or TypeScript source is removed. This is an inert, partial library delivery.
 
