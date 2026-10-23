@@ -55,7 +55,7 @@ pub enum FsError {
     LockRefused { name: OsString, reason: LockRefusal },
     #[error("lock deadline could not be represented for {path:?}")]
     LockDeadlineOverflow { path: PathBuf },
-    #[error("stable lock names must end in .lock: {name:?}")]
+    #[error("stable lock names must be lock or end in .lock: {name:?}")]
     InvalidLockName { name: OsString },
     #[error("stable lock entry cannot be mutated: {name:?}")]
     ReservedLockName { name: OsString },
@@ -187,6 +187,12 @@ fn component(name: &OsStr) -> Result<&OsStr> {
 }
 
 fn is_lock_name(name: &OsStr) -> bool {
+    if name
+        .to_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("lock"))
+    {
+        return true;
+    }
     // Case-insensitive filesystems also accept case and Unicode spellings of
     // an existing leaf. Inspect just the extension so non-UTF-8 prefixes retain
     // their native bytes (e.g. Kelvin sign canonically aliases ASCII K).
@@ -350,7 +356,7 @@ impl Directory {
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
         let name = component(name)?;
-        if !name.as_bytes().ends_with(b".lock") {
+        if name != "lock" && !name.as_bytes().ends_with(b".lock") {
             return Err(FsError::InvalidLockName { name: name.into() });
         }
         let path = self.path.join(name);
@@ -468,6 +474,36 @@ impl Directory {
                 source: source_error,
             },
         )
+    }
+    pub fn read_link(&self, name: &OsStr) -> Result<PathBuf> {
+        component(name)?;
+        os::read_link(&self.file, name).map_err(error("readlinkat", &self.path.join(name)))
+    }
+    /// Stage exact bytes and permissions before publication; the destination is
+    /// never opened or chmod'd. All effects use the held directory capability.
+    pub fn publish(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        permissions: u32,
+        mode: PublishMode,
+    ) -> Result<Publication> {
+        mutable_component(name)?;
+        let temporary = temporary_name()?;
+        let result = (|| {
+            let mut file = self.create_new(&temporary)?;
+            file.write_all(bytes)
+                .map_err(error("write staging file", &self.path.join(&temporary)))?;
+            file.file
+                .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(permissions))
+                .map_err(error("fchmod staging file", &self.path.join(&temporary)))?;
+            file.sync()?;
+            match mode {
+                PublishMode::Replace => self.replace(&temporary, self, name),
+                PublishMode::NoReplace => self.rename_noreplace(&temporary, self, name),
+            }
+        })();
+        self.finish_publication(&temporary, result, || self.sync())
     }
     pub fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
         let name = mutable_component(name)?;

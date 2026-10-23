@@ -7,7 +7,9 @@
 
 mod domains;
 mod loader;
+mod managed;
 mod presets;
+mod release;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(test)]
@@ -137,3 +139,11 @@ pub struct ConfigCheck {
     pub count: usize,
     pub truncated: bool,
 }
+
+pub use managed::{
+    Action, Disposition, HarnessTarget, InstallContext, InstallError, InstallFinding,
+    InstallOutcome, InstallPlan, InstallReporter, ReleaseSmoke, Snapshots, Targets, check_install,
+    install, plan_install, uninstall,
+};
+pub use provenant_records::Harness;
+pub use release::{Release, package_release};

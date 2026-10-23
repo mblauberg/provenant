@@ -5,9 +5,11 @@ mod artifact_ref;
 mod attempt_fact;
 mod canonical;
 mod finding;
+mod install;
 mod json;
 mod jsonc;
 mod path_wire;
+mod source;
 mod yaml;
 
 pub use artifact_ref::ArtifactRef;
@@ -20,9 +22,14 @@ pub use finding::Finding;
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError};
+pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use yaml::{
     Span as YamlSpan, SpannedYaml, YamlError, YamlErrorKind, YamlValue, parse_frontmatter,
     parse_sidecar,
 };
 
 pub mod workflow;
+
+pub use install::{
+    AbsolutePath, Harness, InstallReceipt, OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest,
+};

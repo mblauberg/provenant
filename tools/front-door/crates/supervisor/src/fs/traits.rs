@@ -40,6 +40,14 @@ pub trait SafeDir: Send + Sync {
     fn replace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn symlink(&self, target: &Path, name: &OsStr) -> Result<()>;
+    fn read_link(&self, name: &OsStr) -> Result<PathBuf>;
+    fn publish(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        permissions: u32,
+        mode: PublishMode,
+    ) -> Result<Publication>;
     fn sync(&self) -> Result<()>;
     fn atomic_write(
         &self,
@@ -89,6 +97,19 @@ impl SafeFile for FileHandle {
     }
 }
 impl SafeDir for Directory {
+    fn read_link(&self, name: &OsStr) -> Result<PathBuf> {
+        Directory::read_link(self, name)
+    }
+    fn publish(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        permissions: u32,
+        mode: PublishMode,
+    ) -> Result<Publication> {
+        Directory::publish(self, name, bytes, permissions, mode)
+    }
+
     fn metadata(&self) -> Result<Metadata> {
         Directory::metadata(self)
     }
