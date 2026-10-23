@@ -283,12 +283,15 @@ pub fn normalise_dispatch_review(
 /// Decode a review case at its JSON boundary, refusing oversized integer
 /// tokens before serde_json can represent them as floating-point numbers.
 pub fn normalise_dispatch_review_json(input: &[u8]) -> Result<NormalisedReview, PolicyError> {
-    let value = provenant_records::checked_json::from_slice(input).map_err(|error| match error {
-        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => PolicyError::NumberOutOfRange,
-        provenant_records::checked_json::DecodeError::Json(error) => {
-            PolicyError::InvalidJson(error.to_string())
-        }
-    })?;
+    let value =
+        provenant_records::checked_json::from_slice(input).map_err(|error| match error {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+                PolicyError::NumberOutOfRange
+            }
+            provenant_records::checked_json::DecodeError::Json(error) => {
+                PolicyError::InvalidJson(error.to_string())
+            }
+        })?;
     let object = value
         .as_object()
         .ok_or_else(|| PolicyError::InvalidJson("expected an object".into()))?;

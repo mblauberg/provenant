@@ -92,8 +92,7 @@ pub struct ContextUsage {
 impl ContextUsage {
     /// Untrusted wire records enter through the checked integer boundary.
     pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
-        provenant_records::checked_json::from_slice(raw)?;
-        Ok(serde_json::from_slice(raw)?)
+        crate::pending::checked_ordered_decode(raw)
     }
 }
 
@@ -152,7 +151,9 @@ pub struct ObserverSummaryFields {
 }
 
 impl ObserverSummary {
-    pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> { Self::decode(raw) }
+    pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
+        Self::decode(raw)
+    }
 }
 
 #[cfg(test)]
@@ -165,12 +166,20 @@ mod tests {
         for token in ["-1", "1.5", "true"] {
             assert!(serde_json::from_str::<ContextUsage>(&raw.replace("TOKEN", token)).is_err());
         }
+        let typed = ContextUsage::from_json(raw.replace("TOKEN", "-0").as_bytes()).unwrap();
+        assert_eq!(typed.input_tokens, Some(0));
+        assert!(serde_json::to_string(&typed)
+            .unwrap()
+            .contains("\"input_tokens\":0,"));
     }
 
     #[test]
     fn context_integer_overflow_is_typed_before_serde_can_round() {
         let raw = br#"{"input_tokens":1180591620717411303424}"#;
-        assert!(matches!(ContextUsage::from_json(raw), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+        assert!(matches!(
+            ContextUsage::from_json(raw),
+            Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))
+        ));
     }
 
     #[test]
@@ -183,7 +192,8 @@ mod tests {
         }
         cases.push(json!({"plan":{"adapter":"claude","model":"fixture"},"lines":[{"type":"system","subtype":"init","session_id":"session-1","model":"fixture"},{"type":"assistant","message":{"model":"answered","content":[{"type":"text","text":"DONE"}],"usage":{"input_tokens":4,"output_tokens":2}}},{"type":"result","result":"DONE","is_error":false}]}));
         cases.push(json!({"plan":{"adapter":"codex","model":"fixture"},"lines":[{"type":"turn.completed","usage":{"input_tokens":9007199254740993_u64,"output_tokens":2,"cached_input_tokens":0}}]}));
-        if let Some(expected) = crate::test_support::oracle("observer_contract_wire", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle("observer_contract_wire", &json!(cases))
+        {
             for raw in expected.as_array().unwrap() {
                 let wire = raw["wire"].as_str().unwrap();
                 let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
@@ -192,14 +202,14 @@ mod tests {
         }
         for raw in [json!({"terminal":true}), json!({"stop":"usage_limited"})] {
             let typed: ObserverReply = serde_json::from_value(raw.clone()).unwrap();
-            assert_eq!(serde_json::to_value(typed).unwrap(), raw);
+            assert_eq!(
+                serde_json::to_string(&typed).unwrap(),
+                serde_json::to_string(&raw).unwrap()
+            );
         }
-        for raw in [
-            json!({"s":"out","line":"a"}),
-            json!({"s":"err","line":"b\n"}),
-        ] {
-            let typed: ObserverLine = serde_json::from_value(raw.clone()).unwrap();
-            assert_eq!(serde_json::to_value(typed).unwrap(), raw);
+        for wire in [r#"{"s":"out","line":"a"}"#, r#"{"s":"err","line":"b\n"}"#] {
+            let typed: ObserverLine = serde_json::from_str(wire).unwrap();
+            assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
         }
     }
     #[test]
@@ -241,9 +251,15 @@ mod tests {
                 let wire = raw["wire"].as_str().unwrap();
                 let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
                 assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
-                if i < 2 { assert!(typed.live_failure.is_some()); }
-                if i == 2 { assert!(typed.retry_failure.is_some()); }
-                if i == 4 || i == 5 { assert!(typed.retry_failure.is_none()); }
+                if i < 2 {
+                    assert!(typed.live_failure.is_some());
+                }
+                if i == 2 {
+                    assert!(typed.retry_failure.is_some());
+                }
+                if i == 4 || i == 5 {
+                    assert!(typed.retry_failure.is_none());
+                }
             }
         }
         // The source retains 2**70 exactly; R4 deliberately refuses it.
@@ -252,7 +268,10 @@ mod tests {
         if let Some(outputs) = crate::test_support::oracle("observer_contract_wire", &cases) {
             let wire = outputs[0]["wire"].as_str().unwrap();
             assert!(wire.contains("1180591620717411303424"));
-            assert!(matches!(ObserverSummary::from_json(wire.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+            assert!(matches!(
+                ObserverSummary::from_json(wire.as_bytes()),
+                Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))
+            ));
         }
     }
     #[test]

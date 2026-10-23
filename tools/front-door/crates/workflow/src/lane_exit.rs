@@ -1,6 +1,6 @@
 //! Exit-cycle contracts. This module grants no process or filesystem authority.
-use serde::{Deserialize, Serialize};
 use crate::pending::{OrderedMap, OrderedValue as Value};
+use serde::{Deserialize, Serialize};
 
 /// A source member can be absent or present with null. Option alone loses this
 /// distinction when a record is decoded and retained again.
@@ -134,33 +134,54 @@ impl ExitRecord {
     }
 
     pub fn receipt_fields(&self) -> Result<ReceiptFields, ExitError> {
-        fn python_truth(value: &Value) -> bool { value.truthy() }
+        fn python_truth(value: &Value) -> bool {
+            value.truthy()
+        }
         fn value(member: &Member<Value>) -> Value {
-            match member { Member::Absent => Value::Null, Member::Present(v) => v.clone() }
+            match member {
+                Member::Absent => Value::Null,
+                Member::Present(v) => v.clone(),
+            }
         }
         fn process(member: &Member<Option<ProcessInteger>>) -> Option<ProcessInteger> {
-            match member { Member::Absent => None, Member::Present(v) => v.clone() }
+            match member {
+                Member::Absent => None,
+                Member::Present(v) => v.clone(),
+            }
         }
         fn iterable(member: &Member<Value>) -> Result<Vec<Value>, ExitError> {
             match member {
                 Member::Absent => Ok(vec![]),
                 Member::Present(Value::Array(v)) => Ok(v.clone()),
-                Member::Present(Value::String(v)) => Ok(v.chars().map(|c| Value::String(c.to_string())).collect()),
-                Member::Present(Value::Object(v)) => Ok(v.entries().map(|(k, _)| Value::String(k.to_owned())).collect()),
+                Member::Present(Value::String(v)) => {
+                    Ok(v.chars().map(|c| Value::String(c.to_string())).collect())
+                }
+                Member::Present(Value::Object(v)) => Ok(v
+                    .entries()
+                    .map(|(k, _)| Value::String(k.to_owned()))
+                    .collect()),
                 _ => Err(ExitError::InvalidCollection),
             }
         }
-        if self.schema != "provenant.lane.exit.v1" { return Err(ExitError::Schema); }
+        if self.schema != "provenant.lane.exit.v1" {
+            return Err(ExitError::Schema);
+        }
         let forced = value(&self.forced);
-        if forced.as_str() == Some("stalled") { return Err(ExitError::Silence); }
+        if forced.as_str() == Some("stalled") {
+            return Err(ExitError::Silence);
+        }
         let exit = match process(&self.signal) {
             Some(ProcessInteger::Signed(i64::MIN)) => Some(ProcessInteger::Unsigned(1 << 63)),
             Some(ProcessInteger::Signed(n)) if n != 0 => Some(ProcessInteger::Signed(-n)),
-            Some(ProcessInteger::Unsigned(n)) if n != 0 => Some(ProcessInteger::Signed(i64::try_from(-(i128::from(n))).map_err(|_| ExitError::NumberOutOfRange)?)),
+            Some(ProcessInteger::Unsigned(n)) if n != 0 => Some(ProcessInteger::Signed(
+                i64::try_from(-(i128::from(n))).map_err(|_| ExitError::NumberOutOfRange)?,
+            )),
             _ => process(&self.exit),
         };
         let spared = value(&self.spared);
-        let spared = if !python_truth(&spared) { Value::Number(0.into()) } else {
+        let spared = if !python_truth(&spared) {
+            Value::Number(0.into())
+        } else {
             match spared {
                 Value::Bool(_) => spared,
                 Value::Number(ref n) if !n.is_f64() => spared,
@@ -175,13 +196,37 @@ impl ExitRecord {
         let reaped = value(&self.reaped);
         let capture = value(&self.capture);
         Ok(ReceiptFields {
-            pid: process(&self.pid), pgid: process(&self.pgid), exit,
-            forced: match forced.as_str() { Some("wall_timeout") => Value::String("timed_out".into()), Some("supervisor_signal") => Value::String("interrupted".into()), _ => forced },
+            pid: process(&self.pid),
+            pgid: process(&self.pgid),
+            exit,
+            forced: match forced.as_str() {
+                Some("wall_timeout") => Value::String("timed_out".into()),
+                Some("supervisor_signal") => Value::String("interrupted".into()),
+                _ => forced,
+            },
             terminal_event_seen: python_truth(&value(&self.terminal_event_seen)),
-            reaped: if python_truth(&reaped) { reaped } else { Value::Array(vec![]) }, spared,
-            capture: if python_truth(&capture) { capture } else { Value::Object(OrderedMap::default()) },
-            warnings: warnings.iter().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.python_json())).collect(),
-            started_at: value(&self.started_at), ended_at: value(&self.ended_at), last_progress_at: value(&self.last_progress_at),
+            reaped: if python_truth(&reaped) {
+                reaped
+            } else {
+                Value::Array(vec![])
+            },
+            spared,
+            capture: if python_truth(&capture) {
+                capture
+            } else {
+                Value::Object(OrderedMap::default())
+            },
+            warnings: warnings
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.python_json())
+                })
+                .collect(),
+            started_at: value(&self.started_at),
+            ended_at: value(&self.ended_at),
+            last_progress_at: value(&self.last_progress_at),
         })
     }
 }
@@ -199,10 +244,16 @@ mod tests {
             {"schema":"provenant.lane.exit.v1","reaped":[{"pid":124,"start_time":"123","command":"child"}],"spared":[],"observer_lost":false,"observer_dropped":2,"reaped_truncated":1},
             {"schema":"provenant.lane.exit.v1"}
         ]);
-        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|raw| {
-            let typed = ExitRecord::from_json(serde_json::to_string(raw).unwrap().as_bytes()).unwrap();
-            serde_json::to_string(&typed.receipt_fields().unwrap()).unwrap()
-        }).collect();
+        let actual: Vec<_> = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let typed =
+                    ExitRecord::from_json(serde_json::to_string(raw).unwrap().as_bytes()).unwrap();
+                serde_json::to_string(&typed.receipt_fields().unwrap()).unwrap()
+            })
+            .collect();
         if let Some(expected) = crate::test_support::oracle("lane_exit_contract", &cases) {
             assert_eq!(json!(actual), expected);
         }
@@ -219,15 +270,29 @@ mod tests {
             {"raw":r#"{"schema":"provenant.lane.exit.v1","pid":true}"#},
             {"raw":r#"{"schema":"provenant.lane.exit.v1","pid":1.0}"#}
         ]);
-        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|case| {
-            assert!(ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).is_err());
-            json!({"error":"lane exit process fields must be integers"})
-        }).collect();
-        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) { assert_eq!(json!(actual), expected); }
+        let actual: Vec<_> = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| {
+                assert!(ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).is_err());
+                json!({"error":"lane exit process fields must be integers"})
+            })
+            .collect();
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) {
+            assert_eq!(json!(actual), expected);
+        }
         let raw = r#"{"schema":"provenant.lane.exit.v1","pid":1180591620717411303424}"#;
-        assert!(matches!(ExitRecord::from_json(raw.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
-        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &json!([{"raw":raw}])) {
-            assert!(expected[0]["wire"].as_str().unwrap().contains("1180591620717411303424"));
+        assert!(matches!(
+            ExitRecord::from_json(raw.as_bytes()),
+            Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))
+        ));
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &json!([{"raw":raw}]))
+        {
+            assert!(expected[0]["wire"]
+                .as_str()
+                .unwrap()
+                .contains("1180591620717411303424"));
         }
     }
     #[test]
@@ -235,17 +300,29 @@ mod tests {
         let cases = json!([
             {"raw":r#"{"schema":"provenant.lane.exit.v1","census_warnings":{"z":0,"a":0},"io_errors":[{"z":1,"a":2}]}"#},
             {"raw":r#"{"schema":"provenant.lane.exit.v1","reaped":[{"pid":124,"start_time":"123","command":"child"}],"capture":{"z":1,"a":2}}"#},
-            {"raw":r#"{"schema":"provenant.lane.exit.v1","signal":-9223372036854775808}"#}
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","signal":-9223372036854775808}"#},
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","pid":-0,"capture":{"z":-0,"a":0.0}}"#}
         ]);
-        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|case| {
-            let record = ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).unwrap();
-            json!({"wire":serde_json::to_string(&record.receipt_fields().unwrap()).unwrap()})
-        }).collect();
-        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) { assert_eq!(json!(actual), expected); }
+        let actual: Vec<_> = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| {
+                let record =
+                    ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).unwrap();
+                json!({"wire":serde_json::to_string(&record.receipt_fields().unwrap()).unwrap()})
+            })
+            .collect();
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) {
+            assert_eq!(json!(actual), expected);
+        }
     }
     #[test]
     fn exit_process_fields_refuse_bool_and_float() {
-        for raw in [r#"{"schema":"provenant.lane.exit.v1","pid":true}"#, r#"{"schema":"provenant.lane.exit.v1","pid":1.0}"#] {
+        for raw in [
+            r#"{"schema":"provenant.lane.exit.v1","pid":true}"#,
+            r#"{"schema":"provenant.lane.exit.v1","pid":1.0}"#,
+        ] {
             assert!(ExitRecord::from_json(raw.as_bytes()).is_err());
         }
     }

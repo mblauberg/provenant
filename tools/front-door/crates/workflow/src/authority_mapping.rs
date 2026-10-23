@@ -790,12 +790,15 @@ pub fn map_delivery_authority(authority: &Value) -> Result<MappedAuthority, Auth
 /// Decode a raw JSON object with the crate's Python integer range guard, then
 /// normalise it as a Delivery Authority V2 value.
 pub fn map_delivery_authority_json(bytes: &[u8]) -> Result<MappedAuthority, AuthorityMappingError> {
-    let value = provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
-        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
-            AuthorityMappingError::NumberOutOfRange
-        }
-        provenant_records::checked_json::DecodeError::Json(error) => AuthorityMappingError::Json(error),
-    })?;
+    let value =
+        provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+                AuthorityMappingError::NumberOutOfRange
+            }
+            provenant_records::checked_json::DecodeError::Json(error) => {
+                AuthorityMappingError::Json(error)
+            }
+        })?;
     map_delivery_authority(&value)
 }
 

@@ -1,6 +1,5 @@
 //! Temporary shared types and Python compatibility helpers awaiting their owners.
 
-
 // port: belongs in provenant-core
 // Unicode decimal digits, as accepted by Python re \d and int.
 #[allow(dead_code)]
@@ -228,13 +227,16 @@ pub(crate) fn read_python_object(
         path: path.into(),
         source,
     })?;
-    let value: Value = provenant_records::checked_json::from_slice(&bytes).map_err(|error| match error {
-        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => PortableError::NumberOutOfRange { path: path.into() },
-        provenant_records::checked_json::DecodeError::Json(source) => PortableError::Json {
-            path: path.into(),
-            source,
-        },
-    })?;
+    let value: Value =
+        provenant_records::checked_json::from_slice(&bytes).map_err(|error| match error {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+                PortableError::NumberOutOfRange { path: path.into() }
+            }
+            provenant_records::checked_json::DecodeError::Json(source) => PortableError::Json {
+                path: path.into(),
+                source,
+            },
+        })?;
     value.as_object().cloned().ok_or_else(|| {
         PortableError::Invalid(format!("{} must contain one JSON object", path.display()))
     })
@@ -376,15 +378,18 @@ pub struct OrderedRecord<T> {
 }
 impl<T> std::ops::Deref for OrderedRecord<T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.fields }
+    fn deref(&self) -> &T {
+        &self.fields
+    }
 }
 impl<T> std::ops::DerefMut for OrderedRecord<T> {
-    fn deref_mut(&mut self) -> &mut T { &mut self.fields }
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.fields
+    }
 }
 impl<T: serde::de::DeserializeOwned> OrderedRecord<T> {
     pub fn decode(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
-        provenant_records::checked_json::from_slice(raw)?;
-        Ok(serde_json::from_slice(raw)?)
+        checked_ordered_decode(raw)
     }
 }
 impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for OrderedRecord<T> {
@@ -411,13 +416,16 @@ impl<T: serde::Serialize> serde::Serialize for OrderedRecord<T> {
                     values.0.extend(rest);
                 }
                 (OrderedValue::Array(values), OrderedValue::Array(template)) => {
-                    for (value, old) in values.iter_mut().zip(template) { ordered(value, old); }
+                    for (value, old) in values.iter_mut().zip(template) {
+                        ordered(value, old);
+                    }
                 }
                 _ => {}
             }
         }
         let raw = serde_json::to_vec(&self.fields).map_err(serde::ser::Error::custom)?;
-        let mut value: OrderedValue = serde_json::from_slice(&raw).map_err(serde::ser::Error::custom)?;
+        let mut value: OrderedValue =
+            serde_json::from_slice(&raw).map_err(serde::ser::Error::custom)?;
         ordered(&mut value, &self.template);
         value.serialize(serializer)
     }
@@ -426,40 +434,114 @@ impl<T: serde::Serialize> serde::Serialize for OrderedRecord<T> {
 // port: belongs in provenant-records
 /// Object wire encoding for an insertion-ordered vector of environment pairs.
 pub(crate) mod ordered_pairs {
-    pub fn serialize<S: serde::Serializer>(pairs: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: serde::Serializer>(
+        pairs: &[(String, String)],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(pairs.len()))?;
-        for (key, value) in pairs { map.serialize_entry(key, value)?; }
+        for (key, value) in pairs {
+            map.serialize_entry(key, value)?;
+        }
         map.end()
     }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, String)>, D::Error> {
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<(String, String)>, D::Error> {
         use serde::Deserialize;
         super::OrderedMap::<String>::deserialize(deserializer).map(|map| map.0)
     }
 }
 
 impl<T> Default for OrderedMap<T> {
-    fn default() -> Self { Self(Vec::new()) }
+    fn default() -> Self {
+        Self(Vec::new())
+    }
 }
 impl OrderedValue {
     pub fn as_str(&self) -> Option<&str> {
-        match self { Self::String(value) => Some(value), _ => None }
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
     }
     pub fn truthy(&self) -> bool {
         match self {
-            Self::Null => false, Self::Bool(b) => *b,
-            Self::Number(n) => provenant_core::py::python_truth(&serde_json::Value::Number(n.clone())),
-            Self::String(s) => !s.is_empty(), Self::Array(a) => !a.is_empty(), Self::Object(o) => !o.0.is_empty(),
+            Self::Null => false,
+            Self::Bool(b) => *b,
+            Self::Number(n) => {
+                provenant_core::py::python_truth(&serde_json::Value::Number(n.clone()))
+            }
+            Self::String(s) => !s.is_empty(),
+            Self::Array(a) => !a.is_empty(),
+            Self::Object(o) => !o.0.is_empty(),
         }
     }
     /// Python json.dumps defaults, retaining dict order and float spelling.
     pub fn python_json(&self) -> String {
         match self {
-            Self::Array(values) => format!("[{}]", values.iter().map(Self::python_json).collect::<Vec<_>>().join(", ")),
-            Self::Object(values) => format!("{{{}}}", values.entries().map(|(key, value)| format!("{}: {}", python_json(&serde_json::Value::String(key.into())), value.python_json())).collect::<Vec<_>>().join(", ")),
-            Self::Number(n) if n.is_f64() => provenant_core::py::python_str(&serde_json::Value::Number(n.clone())),
+            Self::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::python_json)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Object(values) => format!(
+                "{{{}}}",
+                values
+                    .entries()
+                    .map(|(key, value)| format!(
+                        "{}: {}",
+                        python_json(&serde_json::Value::String(key.into())),
+                        value.python_json()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Number(n) if n.is_f64() => {
+                provenant_core::py::python_str(&serde_json::Value::Number(n.clone()))
+            }
             Self::String(s) => python_json(&serde_json::Value::String(s.clone())),
-            Self::Number(n) => n.to_string(), Self::Bool(b) => b.to_string(), Self::Null => "null".into(),
+            Self::Number(n) => n.to_string(),
+            Self::Bool(b) => b.to_string(),
+            Self::Null => "null".into(),
         }
     }
+}
+
+// port: belongs in provenant-records
+/// Apply the shared codec's integer normalisation without sorting objects.
+pub(crate) fn checked_ordered_decode<T: serde::de::DeserializeOwned>(
+    raw: &[u8],
+) -> Result<T, provenant_records::checked_json::DecodeError> {
+    fn normalise(value: &mut OrderedValue, checked: &serde_json::Value) {
+        match value {
+            OrderedValue::Number(number) => {
+                if let Some(checked) = checked.as_number() {
+                    *number = checked.clone();
+                }
+            }
+            OrderedValue::Object(object) => {
+                for (key, value) in object.entries_mut() {
+                    if let Some(checked) = checked.get(key) {
+                        normalise(value, checked);
+                    }
+                }
+            }
+            OrderedValue::Array(array) => {
+                if let Some(checked) = checked.as_array() {
+                    for (value, checked) in array.iter_mut().zip(checked) {
+                        normalise(value, checked);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let checked = provenant_records::checked_json::from_slice(raw)?;
+    let mut value: OrderedValue = serde_json::from_slice(raw)?;
+    normalise(&mut value, &checked);
+    Ok(serde_json::from_slice(&serde_json::to_vec(&value)?)?)
 }

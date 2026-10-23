@@ -45,8 +45,12 @@ pub trait PanelReducer: Send + Sync {
     fn reduce(&self, output: &Value) -> Result<Value, String>;
 }
 impl<F> PanelReducer for F
-where F: Fn(&Value) -> Result<Value, String> + Send + Sync {
-    fn reduce(&self, output: &Value) -> Result<Value, String> { self(output) }
+where
+    F: Fn(&Value) -> Result<Value, String> + Send + Sync,
+{
+    fn reduce(&self, output: &Value) -> Result<Value, String> {
+        self(output)
+    }
 }
 type Reducer = Arc<dyn PanelReducer>;
 
@@ -98,11 +102,16 @@ impl PanelRegistry {
     }
 
     pub fn with_reducer<F>(self, name: impl Into<String>, reducer: F) -> Self
-    where F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static {
+    where
+        F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static,
+    {
         self.with_reducer_impl(name, reducer)
     }
-    pub fn with_reducer_impl<R: PanelReducer + 'static>(mut self, name: impl Into<String>, reducer: R) -> Self {
-
+    pub fn with_reducer_impl<R: PanelReducer + 'static>(
+        mut self,
+        name: impl Into<String>,
+        reducer: R,
+    ) -> Self {
         self.reducers.insert(name.into(), Arc::new(reducer));
         self
     }
@@ -616,13 +625,27 @@ mod tests {
     #[test]
     fn oversized_minimum_is_a_typed_boundary_refusal_and_python_accepts_it() {
         let raw = r#"{"preset":"breadth","membership":[],"distribution":"split","reduction":"union","degradation":{"minimum_members":1000000000000000000000000000000}}"#;
-        assert!(matches!(PanelSpec::from_json(raw.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
-        if let Some(outputs) = crate::test_support::oracle("review_panel", &json!([{"op":"raw_shortfall","raw":raw}])) {
+        assert!(matches!(
+            PanelSpec::from_json(raw.as_bytes()),
+            Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))
+        ));
+        if let Some(outputs) =
+            crate::test_support::oracle("review_panel", &json!([{"op":"raw_shortfall","raw":raw}]))
+        {
             assert!(outputs[0]["errors"].as_array().unwrap().is_empty());
-            assert!(outputs[0]["wire"].as_str().unwrap().contains("1000000000000000000000000000000"));
+            assert!(outputs[0]["wire"]
+                .as_str()
+                .unwrap()
+                .contains("1000000000000000000000000000000"));
         }
         let spec = json!({"degradation":{"minimum_members":u64::MAX}});
-        assert_eq!(panel_shortfall(spec.as_object().unwrap(), &json!([])).unwrap().unwrap().minimum_members, u64::MAX);
+        assert_eq!(
+            panel_shortfall(spec.as_object().unwrap(), &json!([]))
+                .unwrap()
+                .unwrap()
+                .minimum_members,
+            u64::MAX
+        );
     }
 
     #[test]

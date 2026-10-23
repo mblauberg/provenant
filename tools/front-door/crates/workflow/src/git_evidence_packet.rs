@@ -101,14 +101,13 @@ impl PacketScanner {
                 return Ok(());
             };
             std::str::from_utf8(&self.header[..separator])?;
-            self.metadata = provenant_records::checked_json::from_slice(&self.header[..separator]).map_err(
-                |e| match e {
+            self.metadata = provenant_records::checked_json::from_slice(&self.header[..separator])
+                .map_err(|e| match e {
                     provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
                         PacketError::NumberOutOfRange
                     }
                     provenant_records::checked_json::DecodeError::Json(e) => PacketError::Json(e),
-                },
-            )?;
+                })?;
             if self.validate_on_feed && !validate_header(&self.metadata).unwrap_or(false) {
                 return Err(PacketError::InvalidHeader);
             }
