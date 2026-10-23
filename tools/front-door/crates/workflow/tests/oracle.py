@@ -81,7 +81,10 @@ for case in cases:
     elif unit == "review_panel":
         try:
             op = case["op"]
-            if op == "resolve":
+            if op == "raw_shortfall":
+                spec = json.loads(case["raw"])
+                results.append({"errors": module.validate_panel(spec, []), "wire": json.dumps(module.panel_shortfall(spec, []), separators=(",", ":"))})
+            elif op == "resolve":
                 results.append(module.resolve_panel(case["preset"], case.get("overrides"), **case.get("axis_overrides", {})))
             elif op == "validate":
                 results.append(module.validate_panel(case["spec"], case["members"]))

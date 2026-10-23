@@ -1456,3 +1456,15 @@ inputs. Raw-input differentials preserve `spared: true`, negative counts,
 string length, string reaped evidence and character-wise warning iteration.
 The old output-fed-back oracle was removed. Observer restore/replay effects
 remain partial; `lane_exit.py#interface` will not be claimed complete.
+
+## RP-WF2-007: review-panel integer range (improvement)
+
+Python accepts `minimum_members = 10**30` and returns that exact minimum and
+shortfall. `PanelSpec::from_json` now returns the shared typed
+`DecodeError::NumberOutOfRange` before conversion/validation, instead of
+rounding it to f64 and reporting an invalid positive integer. The differential
+runs Python validation and public `panel_shortfall` on the raw integer and
+checks its exact output spelling. Rust `panel_shortfall` is public and supports
+all positive u64 minima. Already-decoded values cannot recover integers lost
+by an unchecked caller; raw input must use the checked boundary. This is the
+PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.

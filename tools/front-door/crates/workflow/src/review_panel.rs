@@ -132,6 +132,16 @@ pub struct PanelSpec {
     pub degradation: Value,
 }
 
+impl PanelSpec {
+    /// Raw panel input must be checked before converting it to JSON values.
+    /// In particular, a Python-sized integer must never become a rounded float
+    /// and then receive an ordinary "positive integer" validation diagnostic.
+    pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
+        let checked = provenant_records::checked_json::from_slice(raw)?;
+        Ok(serde_json::from_value(checked)?)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PanelShortfall {
@@ -406,7 +416,7 @@ pub fn validate_panel_result_with(
     errors
 }
 
-fn panel_shortfall(
+pub fn panel_shortfall(
     spec: &Map<String, Value>,
     members: &Value,
 ) -> Result<Option<PanelShortfall>, PanelError> {
@@ -591,6 +601,18 @@ mod tests {
             Ok(value) => value,
             Err(error) => json!({"error":error.to_string()}),
         }
+    }
+
+    #[test]
+    fn oversized_minimum_is_a_typed_boundary_refusal_and_python_accepts_it() {
+        let raw = r#"{"preset":"breadth","membership":[],"distribution":"split","reduction":"union","degradation":{"minimum_members":1000000000000000000000000000000}}"#;
+        assert!(matches!(PanelSpec::from_json(raw.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+        if let Some(outputs) = crate::test_support::oracle("review_panel", &json!([{"op":"raw_shortfall","raw":raw}])) {
+            assert!(outputs[0]["errors"].as_array().unwrap().is_empty());
+            assert!(outputs[0]["wire"].as_str().unwrap().contains("1000000000000000000000000000000"));
+        }
+        let spec = json!({"degradation":{"minimum_members":u64::MAX}});
+        assert_eq!(panel_shortfall(spec.as_object().unwrap(), &json!([])).unwrap().unwrap().minimum_members, u64::MAX);
     }
 
     #[test]
