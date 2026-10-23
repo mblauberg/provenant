@@ -1,1 +1,4 @@
-//! Fabric identity, run registry and status, execution facade, federation and graph owner.
+//! Inert Fabric runtime contracts and policy. No command is switched to this crate.
+#![forbid(unsafe_code)]
+
+pub mod batch_execution;
