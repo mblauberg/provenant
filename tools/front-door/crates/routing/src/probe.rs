@@ -174,3 +174,14 @@ pub fn kiro_probe_enforced(evidence: &Value) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// Like os.environ.get, a present empty root overrides the home default.
+pub fn state_root(
+    environment: &std::collections::BTreeMap<String, String>,
+    home: &std::path::Path,
+) -> std::path::PathBuf {
+    environment
+        .get("AGENT_FABRIC_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state/agent-harness/fabric"))
+}
