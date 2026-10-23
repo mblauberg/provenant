@@ -3,8 +3,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const PRIVATE_BIN: &str = ".gemini/antigravity-cli/bin";
-pub const UNLINKED: [&str; 4] = ["agentapi", "antigravity-oauth-token", "mcp_oauth_tokens.json", "oauth_creds.json"];
-pub const RENAMED_STATE: [&str; 5] = ["history.jsonl", "jetbox_summaries_proto.pb", "jetski_state.pbtxt", "last_check.timestamp", "installation_id"];
+pub const UNLINKED: [&str; 4] = [
+    "agentapi",
+    "antigravity-oauth-token",
+    "mcp_oauth_tokens.json",
+    "oauth_creds.json",
+];
+pub const RENAMED_STATE: [&str; 5] = [
+    "history.jsonl",
+    "jetbox_summaries_proto.pb",
+    "jetski_state.pbtxt",
+    "last_check.timestamp",
+    "installation_id",
+];
 pub const STATE_COPY_MAX: u64 = 64 * 1024 * 1024;
 pub const DATABASE: &str = "conversation_summaries.db";
 pub const COPY_BACK_LOCK: &str = ".provenant-copy-back.lock";
@@ -40,8 +51,9 @@ impl HomePlan<'_> {
     }
 
     pub fn needs_ps_shim(self, platform: &str) -> bool {
-        platform == "darwin" && ((self.adapter == "codex" && self.sandbox != "full")
-            || self.confinement == Some("sandbox-exec"))
+        platform == "darwin"
+            && ((self.adapter == "codex" && self.sandbox != "full")
+                || self.confinement == Some("sandbox-exec"))
     }
 }
 
@@ -58,8 +70,15 @@ mod tests {
     fn only_confined_agy_stages_home() {
         for adapter in ["agy", "codex", "claude"] {
             for confinement in [None, Some("native"), Some("sandbox-exec")] {
-                let plan = HomePlan { adapter, confinement, sandbox: "full" };
-                assert_eq!(plan.stages_home(), adapter == "agy" && confinement == Some("sandbox-exec"));
+                let plan = HomePlan {
+                    adapter,
+                    confinement,
+                    sandbox: "full",
+                };
+                assert_eq!(
+                    plan.stages_home(),
+                    adapter == "agy" && confinement == Some("sandbox-exec")
+                );
             }
         }
     }
@@ -69,10 +88,17 @@ mod tests {
         for adapter in ["agy", "codex", "claude"] {
             for sandbox in ["full", "read_only", "workspace_write"] {
                 for confinement in [None, Some("sandbox-exec")] {
-                    let plan = HomePlan { adapter, confinement, sandbox };
+                    let plan = HomePlan {
+                        adapter,
+                        confinement,
+                        sandbox,
+                    };
                     assert!(!plan.needs_ps_shim("linux"));
-                    assert_eq!(plan.needs_ps_shim("darwin"),
-                        adapter == "codex" && sandbox != "full" || confinement == Some("sandbox-exec"));
+                    assert_eq!(
+                        plan.needs_ps_shim("darwin"),
+                        adapter == "codex" && sandbox != "full"
+                            || confinement == Some("sandbox-exec")
+                    );
                 }
             }
         }

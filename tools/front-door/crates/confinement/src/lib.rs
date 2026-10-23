@@ -4,6 +4,8 @@
 pub mod agy_home;
 pub mod instruction_quarantine;
 pub mod lane_protection;
-mod pending;
 pub mod output_custody;
+mod pending;
+#[cfg(test)]
+mod python;
 pub mod trusted_git;

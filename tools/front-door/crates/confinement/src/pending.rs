@@ -5,7 +5,12 @@ use std::path::Path;
 
 // port: belongs in provenant-supervisor
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileKind { Regular, Directory, Symlink, Other }
+pub enum FileKind {
+    Regular,
+    Directory,
+    Symlink,
+    Other,
+}
 
 // port: belongs in provenant-supervisor
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,9 +34,19 @@ pub trait CustodyFs {
     type File: Read + Write + Seek;
     fn root(&self, absolute: bool) -> io::Result<Self::Directory>;
     fn directory_metadata(&self, dir: &Self::Directory) -> io::Result<Metadata>;
-    fn metadata_at(&self, dir: &Self::Directory, name: &OsStr, follow: bool) -> io::Result<Metadata>;
+    fn metadata_at(
+        &self,
+        dir: &Self::Directory,
+        name: &OsStr,
+        follow: bool,
+    ) -> io::Result<Metadata>;
     /// O_DIRECTORY; O_NOFOLLOW unless follow is explicitly permitted by the caller.
-    fn open_directory(&self, dir: &Self::Directory, name: &OsStr, follow: bool) -> io::Result<Self::Directory>;
+    fn open_directory(
+        &self,
+        dir: &Self::Directory,
+        name: &OsStr,
+        follow: bool,
+    ) -> io::Result<Self::Directory>;
     /// O_RDONLY | O_NOFOLLOW, without creation.
     fn open_read(&self, dir: &Self::Directory, name: &OsStr) -> io::Result<Self::File>;
     /// O_RDONLY | O_NOFOLLOW, without creation.
@@ -45,6 +60,7 @@ pub trait CustodyFs {
     fn create_new(&self, dir: &Self::Directory, name: &OsStr) -> io::Result<Self::File>;
     fn sync_file(&self, file: &Self::File) -> io::Result<()>;
     fn sync_directory(&self, dir: &Self::Directory) -> io::Result<()>;
-    fn replace(&self, dir: &Self::Directory, source: &OsStr, destination: &OsStr) -> io::Result<()>;
+    fn replace(&self, dir: &Self::Directory, source: &OsStr, destination: &OsStr)
+        -> io::Result<()>;
     fn unlink(&self, dir: &Self::Directory, name: &OsStr) -> io::Result<()>;
 }

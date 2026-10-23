@@ -1,6 +1,6 @@
 //! Restore-view interface, independent of provider discovery and Git effects.
-use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Git's mode and object ID retain the Python two-element array encoding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -33,27 +33,55 @@ pub const QUARANTINE_NAME: &str = "Provenant Fabric";
 pub const QUARANTINE_EMAIL: &str = "fabric@provenant.invalid";
 
 pub fn quarantinable<'a>(changes: impl IntoIterator<Item = &'a str>) -> bool {
-    changes.into_iter().all(|path| path.starts_with(".agents/")
-        && !path.ends_with(" (unresolved conflict)"))
+    changes
+        .into_iter()
+        .all(|path| path.starts_with(".agents/") && !path.ends_with(" (unresolved conflict)"))
 }
 
 /// Merge a qualifying integration ref after the caller establishes ancestry.
 /// On a diverged branch, a lane-authored path wins over the incoming entry.
 pub fn integrate(target: &Entries, incoming: &Entries, base: &Entries) -> Entries {
-    target.keys().chain(incoming.keys()).filter_map(|path| {
-        let source = if target.get(path) == base.get(path) { incoming } else { target };
-        source.get(path).map(|entry| (path.clone(), entry.clone()))
-    }).collect()
+    target
+        .keys()
+        .chain(incoming.keys())
+        .filter_map(|path| {
+            let source = if target.get(path) == base.get(path) {
+                incoming
+            } else {
+                target
+            };
+            source.get(path).map(|entry| (path.clone(), entry.clone()))
+        })
+        .collect()
 }
 
 pub fn restore_views(start: &InstructionSnapshot, target: Entries) -> RestoreViews {
-    let integrated: BTreeSet<_> = target.keys().chain(start.tree.keys())
-        .filter(|path| target.get(*path) != start.tree.get(*path)).cloned().collect();
-    let view = |entries: &Entries| entries.keys().chain(integrated.iter()).filter_map(|path| {
-        let source = if integrated.contains(path) { &target } else { entries };
-        source.get(path).map(|entry| (path.clone(), entry.clone()))
-    }).collect();
-    RestoreViews { index: view(&start.index), disk: view(&start.disk), head: target, integrated }
+    let integrated: BTreeSet<_> = target
+        .keys()
+        .chain(start.tree.keys())
+        .filter(|path| target.get(*path) != start.tree.get(*path))
+        .cloned()
+        .collect();
+    let view = |entries: &Entries| {
+        entries
+            .keys()
+            .chain(integrated.iter())
+            .filter_map(|path| {
+                let source = if integrated.contains(path) {
+                    &target
+                } else {
+                    entries
+                };
+                source.get(path).map(|entry| (path.clone(), entry.clone()))
+            })
+            .collect()
+    };
+    RestoreViews {
+        index: view(&start.index),
+        disk: view(&start.disk),
+        head: target,
+        integrated,
+    }
 }
 
 /// Removals precede updates. BTree collections make unspecified set order deterministic.
@@ -75,14 +103,21 @@ pub fn index_info(entries: &Entries, paths: &BTreeSet<String>, object_format: &s
 mod tests {
     use super::*;
     fn entries(rows: &[(&str, &str)]) -> Entries {
-        rows.iter().map(|(path, oid)| (path.to_string(), Entry("100644".into(), oid.to_string()))).collect()
+        rows.iter()
+            .map(|(path, oid)| (path.to_string(), Entry("100644".into(), oid.to_string())))
+            .collect()
     }
 
     #[test]
     fn only_ordinary_instruction_changes_are_quarantinable() {
         assert!(quarantinable([]));
         assert!(quarantinable([".agents/skills/x", ".agents/new"]));
-        for path in [".agents", ".AGENTS/x", "src/x", ".agents/x (unresolved conflict)"] {
+        for path in [
+            ".agents",
+            ".AGENTS/x",
+            "src/x",
+            ".agents/x (unresolved conflict)",
+        ] {
             assert!(!quarantinable([path]));
         }
     }
@@ -92,14 +127,21 @@ mod tests {
         let base = entries(&[("a", "old"), ("b", "old"), ("c", "old")]);
         let lane = entries(&[("a", "lane"), ("b", "old"), ("c", "old")]);
         let incoming = entries(&[("a", "new"), ("b", "new"), ("d", "new")]);
-        assert_eq!(integrate(&lane, &incoming, &base), entries(&[("a", "lane"), ("b", "new"), ("d", "new")]));
+        assert_eq!(
+            integrate(&lane, &incoming, &base),
+            entries(&[("a", "lane"), ("b", "new"), ("d", "new")])
+        );
     }
 
     #[test]
     fn restored_index_and_disk_keep_starting_edits_except_integrated_paths() {
-        let start = InstructionSnapshot { head: "sha".into(), object_format: "sha1".into(),
-            tree: entries(&[("a", "old"), ("b", "old")]), index: entries(&[("a", "staged"), ("b", "old")]),
-            disk: entries(&[("a", "dirty"), ("b", "old")]) };
+        let start = InstructionSnapshot {
+            head: "sha".into(),
+            object_format: "sha1".into(),
+            tree: entries(&[("a", "old"), ("b", "old")]),
+            index: entries(&[("a", "staged"), ("b", "old")]),
+            disk: entries(&[("a", "dirty"), ("b", "old")]),
+        };
         let restored = restore_views(&start, entries(&[("a", "old")]));
         assert_eq!(restored.index, entries(&[("a", "staged")]));
         assert_eq!(restored.disk, entries(&[("a", "dirty")]));
@@ -111,14 +153,19 @@ mod tests {
         let paths = BTreeSet::from(["a\t雪".into(), "z".into()]);
         let entries = entries(&[("a\t雪", "abc")]);
         for (format, size) in [("sha1", 40), ("sha256", 64)] {
-            assert_eq!(index_info(&entries, &paths, format),
-                format!("0 {}\tz\0{}", "0".repeat(size), "100644 abc\ta\t雪\0").as_bytes());
+            assert_eq!(
+                index_info(&entries, &paths, format),
+                format!("0 {}\tz\0{}", "0".repeat(size), "100644 abc\ta\t雪\0").as_bytes()
+            );
         }
     }
 
     #[test]
     fn snapshot_wire_entries_remain_pairs() {
         let entry = Entry("120000".into(), "abc".into());
-        assert_eq!(serde_json::to_string(&entry).unwrap(), "[\"120000\",\"abc\"]");
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            "[\"120000\",\"abc\"]"
+        );
     }
 }
