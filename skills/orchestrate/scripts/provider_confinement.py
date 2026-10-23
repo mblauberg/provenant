@@ -18,7 +18,10 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from adapters import profile
 from adapters import claude as claude_adapter
+import layout
+from trusted_git import owner_location, writer_git_writes, writer_read_only
 
 # Home-relative paths a confined provider needs for its own state and sign-in.
 # Initial probes (2026-09-24) were narrowed using name-only layouts for #927:
@@ -735,3 +738,348 @@ def _project_config_reads(plan, root):
     parents = [parent for parent in cwd.parents if parent.is_relative_to(stop)]
     return ([parent / name for parent in parents for name in files],
             [parent / name for parent in parents for name in directories])
+
+# Toolchain commands a read-only lane runs tests with, looked up on the provider's PATH. npm, npx
+# and corepack ship inside node's prefix.
+TOOLCHAIN_COMMANDS = ("python3", "python", "uv", "node")
+
+# uv looks for its project and workspace in every directory above cwd and stops on a file it
+# can see but not read.
+UV_PROJECT_FILES = ("pyproject.toml", "uv.toml", "uv.lock", ".python-version")
+
+def _executable_file(path):
+    return path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+
+# CPython interpreter and library names, free-threaded (t) builds included.
+PYTHON_EXECUTABLE = re.compile(r"python(3(\.\d+)?t?)?")
+
+PYTHON_LIBRARY = re.compile(r"python3\.\d+t?")
+
+# Runtime directories of an install prefix. Anything else beside them, such as a stray auth.json,
+# stays unreadable.
+TOOLCHAIN_RUNTIME_DIRS = ("lib", "include", "libexec")
+
+def _toolchain_grant(executable):
+    """Canonical (files, directories) a resolved toolchain executable may be read through.
+
+    Only a real install counts: a regular executable with a toolchain name, in the `bin` of a
+    prefix with that toolchain's library layout (lib/python3.* or lib/node_modules), which is not
+    home, not above it and holds no credential store. The grant is the executable and the
+    prefix's runtime directories, never the prefix itself; uv is a single binary granted alone.
+    Repository content (a .venv link, a pyvenv.cfg) can name a candidate, never a grant.
+    """
+    resolved = executable.resolve()
+    if not _executable_file(resolved) or credential_path(resolved):
+        return [], []
+    if re.fullmatch(r"uvx?", resolved.name):
+        return [resolved], []
+    prefix = resolved.parent.parent
+    if resolved.parent.name != "bin":
+        return [], []
+    library = prefix / "lib"
+    if library.is_symlink() or not library.is_dir():
+        return [], []
+    if PYTHON_EXECUTABLE.fullmatch(resolved.name):
+        layout = any(PYTHON_LIBRARY.fullmatch(path.name) and path.is_dir() for path in library.iterdir())
+    elif resolved.name == "node":
+        layout = (library / "node_modules").is_dir()
+    else:
+        return [], []
+    home = Path.home().resolve()
+    if not layout or home.is_relative_to(prefix) or credential_path(prefix):
+        return [], []
+    directories = [path for name in TOOLCHAIN_RUNTIME_DIRS if (path := _runtime_component(prefix, name, directory=True))]
+    files = [resolved]
+    if resolved.name != "node" and prefix.parent.name == "Versions" and prefix.parent.parent.suffix == ".framework":
+        # A framework build's interpreter loads <prefix>/<framework name>, the library dyld opens
+        # at launch, and may re-exec Resources/Python.app.
+        if library_file := _runtime_component(prefix, prefix.parent.parent.stem, directory=False):
+            files.append(library_file)
+        if resources := _runtime_component(prefix, "Resources", directory=True):
+            directories.append(resources)
+    return files, directories
+
+def _runtime_component(prefix, name, *, directory):
+    """<prefix>/<name> as a canonical grant, or None.
+
+    It must be a real entry of the expected kind, not a link, so it can neither name the prefix
+    itself (a link to `.`) nor reach outside it; it must lie strictly below the prefix and hold
+    no credential store.
+    """
+    path = prefix / name
+    if path.is_symlink() or not (path.is_dir() if directory else path.is_file()):
+        return None
+    canonical = path.resolve()
+    if canonical != path or canonical == prefix or not canonical.is_relative_to(prefix) or credential_path(canonical):
+        return None
+    return canonical
+
+# v2 logs are `timestamp=... level=ERROR ...`; v1 printed `ERROR ...` at line start.
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|\blevel=ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+
+OPENCODE_QUIET_LOG = r"\s*(?:WARN|INFO|DEBUG)\b|.*\blevel=(?:WARN|INFO|DEBUG)\b"
+
+_OPENCODE_VERSION_CACHE = {}
+
+def _opencode_version_error(executable, path):
+    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence).
+
+    Only a parsed answer is cached, keyed on the binary's mtime, so a timeout is retried and
+    `opencode upgrade` is noticed by a long-lived process.
+    """
+    found = shutil.which(executable, path=path)
+    if not found:
+        return None
+    try:
+        key = (found, os.stat(found).st_mtime_ns)
+    except OSError:
+        return None
+    if key in _OPENCODE_VERSION_CACHE:
+        return _OPENCODE_VERSION_CACHE[key]
+    try:
+        text = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    error = profile("opencode").version_error(text)
+    if re.search(r"\d+\.\d+", text or ""):
+        _OPENCODE_VERSION_CACHE[key] = error
+    return error
+
+def _pyenv_version_dir(root, selected):
+    """versions/<selected>, or the highest installed versions/<selected>.* for a prefix like 3.12."""
+    versions = root / "versions"
+    if (versions / selected).is_dir():
+        return versions / selected
+    prefix = selected + "."
+    matches = [path for path in versions.glob(selected + ".*") if path.is_dir() and path.name.startswith(prefix)]
+    key = lambda path: [(0, int(part), "") if part.isdigit() else (-1, 0, part) for part in re.split(r"[.-]", path.name)]
+    return max(matches, key=key, default=None)
+
+def _pyenv_shim(executable, cwd, search_path):
+    """Resolve ordinary pyenv selections from data, never by executing a shim or hook.
+
+    Returns (None, [], []) with a warning when the selection cannot be resolved, so the caller
+    skips that candidate; an unsafe shim, root or version name still raises ValueError.
+    """
+    root = Path(os.environ.get("PYENV_ROOT") or Path.home() / ".pyenv").expanduser().resolve()
+    if executable.parent.resolve() != root / "shims":
+        return executable, [], []
+    error = f"cannot resolve pyenv shim {executable}; fix: select an installed Python version or put its bin on PATH"
+    if not _executable_file(executable) or credential_path(root) or credential_path(executable):
+        raise ValueError(error)
+    version = os.environ.get("PYENV_VERSION", "")
+    files = [executable.resolve()]
+    if not version:
+        start = Path(os.environ.get("PYENV_DIR") or cwd).expanduser().resolve()
+        source = next((parent / ".python-version" for parent in (start, *start.parents)
+                       if _plain_file(parent / ".python-version")), root / "version")
+        if _plain_file(source):
+            if credential_path(source):
+                raise ValueError(error)
+            version = ":".join(line.partition("#")[0].strip().split()[0]
+                               for line in source.read_text(errors="replace").splitlines()
+                               if line.partition("#")[0].strip())
+            files.append(source.resolve())
+    for selected in (version or "system").split(":"):
+        if selected == "system":
+            without_shims = os.pathsep.join(part for part in search_path.split(os.pathsep)
+                                           if Path(part).resolve() != root / "shims")
+            found = shutil.which(executable.name, path=without_shims)
+            target = Path(found) if found else None
+        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", selected):
+            directory = _pyenv_version_dir(root, selected)
+            target = directory / "bin" / executable.name if directory else None
+        else:
+            raise ValueError(error)
+        if target is not None and _toolchain_grant(target)[0]:
+            # The shim and pyenv's scripts still run inside the lane's sandbox.
+            libexec = _runtime_component(root, "libexec", directory=True)
+            return target, files, [libexec] if libexec else []
+    logging.getLogger(__name__).warning("skipping toolchain candidate: %s", error)
+    return None, [], []
+
+def _toolchain_reads(plan, root, search_path=None):
+    """Files, unresolved project files and directories of the toolchain a read-only lane uses.
+
+    Commands on the provider PATH, and each .venv between cwd and the repository root with the
+    interpreter it links to or its pyvenv.cfg names, are candidates; each is granted only through
+    _toolchain_grant. Nothing is run to find them, so a planted interpreter cannot act outside
+    the sandbox, and nothing is writable.
+    """
+    search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    cwd = Path(plan["cwd"]).resolve()
+    stop = _git_toplevel(cwd) or root
+    candidates = [Path(found) for name in TOOLCHAIN_COMMANDS if (found := shutil.which(name, path=search_path))]
+    directories = []
+    for parent in (cwd, *(parent for parent in cwd.parents if parent.is_relative_to(stop))):
+        venv = parent / ".venv"
+        config = venv / "pyvenv.cfg"
+        if venv.is_symlink() or not venv.is_dir() or not _plain_file(config) or credential_path(venv):
+            continue
+        directories.append(venv)  # Workspace content, readable to a lane whose cwd holds it.
+        candidates.append(venv / "bin" / "python")
+        base = next((line.partition("=")[2].strip() for line in config.read_text(errors="replace").splitlines()
+                     if line.partition("=")[0].strip() == "home"), "")
+        if base and Path(base).is_absolute():
+            candidates.extend(Path(base) / name for name in ("python3", "python"))
+    files = []
+    for candidate in candidates:
+        candidate, shim_files, shim_directories = _pyenv_shim(candidate, cwd, search_path)
+        if candidate is None:
+            continue
+        granted_files, granted_directories = _toolchain_grant(candidate)
+        files.extend([*granted_files, *shim_files])
+        directories.extend([*granted_directories, *shim_directories])
+    project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
+                     if any(path.name.startswith("uv") for path in files) else [])
+    return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
+
+def _plain_file(path):
+    return path.is_file() and not path.is_symlink()
+
+def _adapter_binary_reads(plan, search_path=None):
+    """(launcher links, install directories) the provider's own executable is read through.
+
+    The launcher is the PATH entry and every link hop to the real file, granted by name. A real
+    file inside an install folder (cursor-agent's ~/.local/share/cursor-agent/versions/<version>)
+    also grants that folder, since the launcher script runs siblings from it. A binary in a plain
+    `bin` directory is granted alone, never the directory. A path that is, holds or sits in home
+    or a credential store grants nothing.
+    """
+    argv = plan.get("argv")
+    found = shutil.which(argv[0], path=search_path) if argv else None
+    if not found:
+        return [], []
+    home = Path.home().resolve()
+    links, current = [], Path(found)
+    for _ in range(16):
+        links.append(current)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    else:
+        return [], []
+    resolved = current.resolve()
+    links = [path for path in links if not credential_path(path.parent.resolve() / path.name)]
+    if not resolved.is_file() or credential_path(resolved):
+        return links, []
+    links = list(dict.fromkeys([*links, resolved]))
+    install = resolved.parent
+    if install.name == "bin" or home.is_relative_to(install) or credential_path(install):
+        return links, []
+    return links, [install]
+
+# A lane can replace any entry it may write with a link, including run_dir/tmp and the overlay
+# within it. The supervisor runs unconfined, so it reaches those entries only by walking open
+# directories with O_NOFOLLOW from a root the lane cannot write.
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+def _open_canonical_dir(path):
+    """Open an absolute, canonical directory from / without following a link at any component."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(path).parts[1:]:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+def _private_dir(parent_fd, name):
+    """Open name below parent_fd as a 0o700 directory, replacing a link or file left there."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        if not stat.S_ISDIR(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+            os.unlink(name, dir_fd=parent_fd)
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+    fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    os.fchmod(fd, 0o700)  # mkdir leaves an existing directory's mode as it was
+    return fd
+
+def _write_new(directory_fd, name, data, mode):
+    """Create name below an open directory; never through an entry that is already there."""
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def _unlinked_file(tmp_fd):
+    """A read-write file made in the open attempt tmp and unlinked at once, so no path names it."""
+    name = f".provenant-{uuid.uuid4().hex}"
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=tmp_fd)
+    os.unlink(name, dir_fd=tmp_fd)
+    return os.fdopen(fd, "w+b")
+
+def _open_attempt_tmp(attempt_dir):
+    """Open the attempt's tmp from /, held for the whole attempt and any retry of it.
+
+    Only the attempt directory's parent is resolved: the lane may write the attempt directory
+    and everything in it.
+    """
+    attempt_dir = Path(attempt_dir).parent.resolve() / Path(attempt_dir).name
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_fd = _open_canonical_dir(attempt_dir)
+    try:
+        return _private_dir(attempt_fd, "tmp")
+    finally:
+        os.close(attempt_fd)
+
+def _prepare_state_directories(plan):
+    """Bootstrap runtime directories and the actual project root before confinement.
+
+    Granting root creation would also permit transplanting hooks or trust/MCP settings there.
+    The provider home is already canonical; refuse links below it and leave existing files alone.
+    """
+    state = _provider_state(plan)
+    root = state.get("resolved_home", Path.home().resolve())
+    prepare = state.get("prepare_dirs")
+    for directory in prepare(root, plan) if prepare else ():
+        root.mkdir(parents=True, exist_ok=True)
+        current, fd = root, None
+        try:
+            fd = _open_canonical_dir(root)
+            for part in directory.relative_to(root).parts:
+                current = current / part
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+        except OSError as exc:
+            raise PermissionError(f"provider state directory must be a real directory: {current}; "
+                                  "fix: replace the link or file with a directory") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+def confinement_command(plan, command, search_path=None):
+    if plan.get("applied", {}).get("confinement") != "sandbox-exec":
+        return list(command)
+    sandbox_exec = _sandbox_exec_path()
+    if not sandbox_exec:
+        raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    _prepare_state_directories(plan)
+    return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
+
+def read_boundary(workspace_root, read_roots=()):
+    """The workspace plus the roots a caller authorised for a read cwd or prompt.
+
+    Fabric passes a read root for a directory it has matched to a registered project, so a
+    read-only dispatch can work in another project while its run stays in the caller's.
+    """
+    roots = [Path(root).expanduser().resolve() for root in read_roots]
+    if any(credential_path(root) for root in roots):
+        raise ValueError("read roots must exclude credential and authentication stores")
+    return [Path(workspace_root).expanduser().resolve(), *roots]

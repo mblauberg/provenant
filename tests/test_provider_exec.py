@@ -108,8 +108,8 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     )
     assert git_config_rule in profile
     assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(add_dir) + '"))' in profile
-    monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan, _search_path=None: "(version 1)")
-    assert supervisor.confinement_command(plan, ["/bin/cat", "file"]) == [
+    monkeypatch.setattr(supervisor.provider_confinement, "os_confinement_profile", lambda _plan, _search_path=None: "(version 1)")
+    assert supervisor.provider_confinement.confinement_command(plan, ["/bin/cat", "file"]) == [
         "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/cat", "file",
     ]
 
@@ -266,7 +266,7 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     for path in (worktree / ".git", private / "commondir", private / "gitdir", private / "config.worktree",
                  common / "objects/info"):
         assert f'(subpath "{path}")' in deny
-    for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
+    for state_path in mod.provider_confinement.CONFINED_STATE[adapter]["read_write"]:
         assert mod.provider_confinement._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
     assert '(subpath "/dev")' in profile
@@ -433,7 +433,7 @@ def test_agy_writer_requires_os_confinement_and_uses_write_profile(monkeypatch, 
         '{"protected_paths":["secret/"]}'
     )
     probes = iter(("/usr/bin/sandbox-exec", None))
-    force_sandbox(monkeypatch, next(probes))
+    force_sandbox(monkeypatch, lambda: next(probes))
     with pytest.raises(ValueError, match="sandbox-exec"):
         mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write")
 
@@ -456,7 +456,7 @@ def test_agy_writer_requires_os_confinement_and_uses_write_profile(monkeypatch, 
     )
     force_sandbox(monkeypatch, None)
     with pytest.raises(RuntimeError, match="sandbox-exec"):
-        mod.confinement_command(plan, plan["argv"])
+        mod.provider_confinement.confinement_command(plan, plan["argv"])
 
 
 @pytest.mark.parametrize("adapter", ["agy", "opencode", "claude", "cursor", "kiro"])
@@ -468,7 +468,7 @@ def test_wrapped_writer_uses_only_provider_cache(monkeypatch, tmp_path, adapter)
     })
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
-    for path in mod.CONFINED_STATE[adapter]["read_write"]:
+    for path in mod.provider_confinement.CONFINED_STATE[adapter]["read_write"]:
         assert mod.provider_confinement._sbpl_filter(Path.home() / path) in profile
 
 
@@ -799,7 +799,7 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
     attempt.mkdir(parents=True)
     add_dir.mkdir()
     monkeypatch.setattr(mod.Path, "home", lambda: home)
-    monkeypatch.setattr(mod, "CONFINED_STATE", {adapter: {
+    monkeypatch.setattr(mod.provider_confinement, "CONFINED_STATE", {adapter: {
         "home": ".claude", "read_write": ("state",), "read": (),
     }})
     plan = {"adapter": adapter, "mode": "read_only", "workspace_root": str(workspace),
@@ -897,7 +897,7 @@ def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypat
     tool.write_text("#!/bin/sh\n", encoding="utf-8")
     tool.chmod(0o755)
     monkeypatch.setattr(mod.Path, "home", lambda: home)
-    links, directories = mod._adapter_binary_reads({"argv": ["tool"]}, str(home / ".local/bin"))
+    links, directories = mod.provider_confinement._adapter_binary_reads({"argv": ["tool"]}, str(home / ".local/bin"))
     assert links == [tool]
     assert directories == []
 
@@ -1044,7 +1044,7 @@ def test_file_link_cannot_cross_protected_provider_state(monkeypatch, tmp_path,
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": adapter, "mode": mode, "cwd": str(workspace), "workspace_root": str(workspace),
             "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
-    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    command = mod.provider_confinement.confinement_command(plan, ["/bin/sh", "-c"])
     probe = subprocess.run([*command, f"printf ok > {shlex.quote(str(attempt / 'probe'))}"],
                            check=False, capture_output=True, text=True)
     assert probe.returncode == 0, probe.stderr
@@ -1088,7 +1088,7 @@ def test_provider_state_symlink_home_and_cwd_alias_use_canonical_paths(monkeypat
     force_sandbox(monkeypatch, sandbox_exec or "/usr/bin/sandbox-exec")
     plan = {"adapter": adapter, "mode": "read_only", "cwd": str(alias), "workspace_root": str(workspace),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
-    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    command = mod.provider_confinement.confinement_command(plan, ["/bin/sh", "-c"])
     slug = (mod.provider_confinement._claude_project_dir(home, workspace).name if adapter == "claude" else
             re.sub(r"[^A-Za-z0-9]+", "-", str(workspace)).strip("-"))
     project = (target if adapter == "kiro" else target / "antigravity-cli/scratch" if adapter == "agy" else
@@ -1140,7 +1140,7 @@ def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch
     force_sandbox(monkeypatch, sandbox_exec or "/usr/bin/sandbox-exec")
     plan = {"adapter": "agy", "mode": "read_only", "cwd": str(workspace), "workspace_root": str(workspace),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
-    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    command = mod.provider_confinement.confinement_command(plan, ["/bin/sh", "-c"])
     root = home / ".gemini/antigravity-cli"
     for name in ("updater", "scratch", "cache", "conversations", "presence"):
         assert (root / name).is_dir(), name
@@ -1183,7 +1183,7 @@ def agy_home_fixture(mod, monkeypatch, tmp_path):
 
 def stage_agy(mod, plan, private_tmp):
     """Stage as execute does, in the attempt tmp opened once without following a link."""
-    tmp_fd = mod._open_canonical_dir(private_tmp)
+    tmp_fd = mod.provider_confinement._open_canonical_dir(private_tmp)
     return mod.agy_home.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
 
 
@@ -1243,7 +1243,7 @@ def test_agy_home_keeps_dangling_links_and_tolerates_a_missing_bin(monkeypatch, 
 
 def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_files(monkeypatch, tmp_path):
     mod = supervisor()
-    agy_state = mod.CONFINED_STATE["agy"]
+    agy_state = mod.provider_confinement.CONFINED_STATE["agy"]
     granted = {entry.removesuffix("*") for entry in (*agy_state["read_write"], *agy_state["write_literal"])}
     # Only state the profile already lets the lane write is ever copied back.
     assert {f".gemini/antigravity-cli/{name}" for name in mod.agy_home.AGY_RENAMED_STATE} <= granted
@@ -1328,7 +1328,7 @@ def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkey
     attempt = tmp_path / "attempt"
     attempt.mkdir()
     (attempt / "tmp").symlink_to(victim)
-    tmp_fd = mod._open_attempt_tmp(attempt)
+    tmp_fd = mod.provider_confinement._open_attempt_tmp(attempt)
     staged = mod.agy_home.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
     assert (attempt / "tmp").is_dir() and not (attempt / "tmp").is_symlink()
     assert stat.S_IMODE((attempt / "tmp").stat().st_mode) == 0o700
@@ -1337,7 +1337,7 @@ def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkey
     linked = tmp_path / "linked-attempt"
     linked.symlink_to(attempt)
     with pytest.raises(OSError):
-        mod._open_attempt_tmp(linked)
+        mod.provider_confinement._open_attempt_tmp(linked)
 
 
 def _plant_victim_overlay(victim, name):
@@ -1666,7 +1666,7 @@ def test_confined_launch_prepares_only_the_actual_project_root(monkeypatch, tmp_
             "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     project_root = home / f".{adapter}/projects" / project
     assert not project_root.exists()
-    command = mod.confinement_command(plan, ["provider"])
+    command = mod.provider_confinement.confinement_command(plan, ["provider"])
     assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
     assert project_root.is_dir()
     assert list(project_root.iterdir()) == []
@@ -1687,7 +1687,7 @@ def test_project_root_preparation_refuses_symlink_ancestors(monkeypatch, tmp_pat
     force_sandbox(monkeypatch, "/usr/bin/sandbox-exec")
     plan = {"adapter": adapter, "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec"}}
     with pytest.raises(PermissionError, match="provider state directory must be a real directory"):
-        mod.confinement_command(plan, ["provider"])
+        mod.provider_confinement.confinement_command(plan, ["provider"])
     assert list(target.iterdir()) == []
 
 
@@ -1799,7 +1799,9 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
 
 STATE_WRITE_ENTRIES = [
     (adapter, entry)
-    for adapter, state in importlib.import_module("skills.orchestrate.scripts.provider_exec").CONFINED_STATE.items()
+    for adapter, state in importlib.import_module(
+        "skills.orchestrate.scripts.provider_exec"
+    ).provider_confinement.CONFINED_STATE.items()
     for entry in (*state.get("read_write", ()), *state.get("write_literal", ()), *state.get("write_in_place", ()))
     if not entry.endswith("*")
 ]
@@ -1872,7 +1874,7 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
             "cwd": str(workspace), "session_id": "11111111-2222-3333-4444-555555555555",
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     lines = mod.provider_confinement.os_confinement_profile(plan).splitlines()
-    denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
+    denied = [f'(subpath "{home / path}")' for path in mod.provider_confinement.EXTRA_DENIED_READS]
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
     later = [line for line in lines[last_deny + 1:]
@@ -1998,7 +2000,10 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
     (xdg_git / "config").write_text("[user]\n\temail = xdg-config@example.invalid\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(cwd)], check=True)
     monkeypatch.setattr(supervisor.Path, "home", lambda: home)
-    monkeypatch.setattr(supervisor, "CONFINED_STATE", {"agy": {"read_write": ("state", "creds.json*"), "read": ()}})
+    monkeypatch.setattr(
+        supervisor.provider_confinement, "CONFINED_STATE",
+        {"agy": {"read_write": ("state", "creds.json*"), "read": ()}},
+    )
     plan = {
         "adapter": "agy", "mode": "read_only", "workspace_root": str(home / "repo"),
         "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
@@ -2971,7 +2976,7 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert '(deny signal)' in profile
     assert '(allow signal (target same-sandbox))' in profile
     assert '(deny user-preference-write)' in profile
-    for service in mod.CODEX_BASE_MACH_SERVICES:
+    for service in mod.provider_confinement.CODEX_BASE_MACH_SERVICES:
         assert f'(global-name "{service}")' in profile
     assert '(allow ipc-sysv-shm ipc-sysv-sem)' in profile
     assert 'MachPortRendezvousServer.' not in profile
@@ -3014,9 +3019,10 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert f'(remote unix-socket (subpath "{browser_tmp}"))' in browser_profile
     assert browser_tmp in browser["applied"]["write_boundary"]["writable_paths"]
     assert "browser_tmpdir" not in plan["applied"]
-    for service in mod.CODEX_BASE_MACH_SERVICES + mod.CODEX_BROWSER_MACH_SERVICES:
+    for service in (mod.provider_confinement.CODEX_BASE_MACH_SERVICES
+                    + mod.provider_confinement.CODEX_BROWSER_MACH_SERVICES):
         assert f'(global-name "{service}")' in browser_profile
-    for prefix in mod.CODEX_BROWSER_MACH_PORT_PREFIXES:
+    for prefix in mod.provider_confinement.CODEX_BROWSER_MACH_PORT_PREFIXES:
         assert f'(global-name-prefix "{prefix}")' in browser_profile
     assert '(allow mach-register' in browser_profile
     assert 'ipc-sysv-shm' not in browser_profile
@@ -6514,12 +6520,12 @@ def test_opencode_version_probe_failure_is_not_cached(tmp_path, monkeypatch):
     cli.write_text("#!/bin/sh\necho nothing\n")
     cli.chmod(0o755)
     mod = supervisor()
-    mod._OPENCODE_VERSION_CACHE.clear()
-    assert mod._opencode_version_error("opencode", str(cli.parent)) is None
-    assert mod._OPENCODE_VERSION_CACHE == {}
+    mod.provider_confinement._OPENCODE_VERSION_CACHE.clear()
+    assert mod.provider_confinement._opencode_version_error("opencode", str(cli.parent)) is None
+    assert mod.provider_confinement._OPENCODE_VERSION_CACHE == {}
     cli.write_text("#!/bin/sh\necho 1.2.3\n")
-    assert "unsupported" in mod._opencode_version_error("opencode", str(cli.parent))
-    mod._OPENCODE_VERSION_CACHE.clear()
+    assert "unsupported" in mod.provider_confinement._opencode_version_error("opencode", str(cli.parent))
+    mod.provider_confinement._OPENCODE_VERSION_CACHE.clear()
 
 
 def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
@@ -6529,10 +6535,10 @@ def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
     cli.chmod(0o755)
     monkeypatch.setenv("PATH", str(cli.parent) + ":" + os.environ["PATH"])
     mod = supervisor()
-    mod._OPENCODE_VERSION_CACHE.clear()
+    mod.provider_confinement._OPENCODE_VERSION_CACHE.clear()
     with pytest.raises(ValueError, match="unsupported; fix: upgrade OpenCode to v2"):
         mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
-    mod._OPENCODE_VERSION_CACHE.clear()
+    mod.provider_confinement._OPENCODE_VERSION_CACHE.clear()
 
 
 def test_opencode_bad_variant_fix_names_the_variant_to_drop():
@@ -7683,7 +7689,7 @@ def test_toolchain_reads_resolve_path_commands_to_their_runtime_components(tmp_p
     repo = tmp_path / "repo"
     repo.mkdir()
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
-    files, _, directories = supervisor()._toolchain_reads(plan, repo, search_path)
+    files, _, directories = supervisor().provider_confinement._toolchain_reads(plan, repo, search_path)
     node, python = home / ".nvm/versions/node/v24.0.0", home / ".pyenv/versions/3.13.0"
     assert tools["node"] in files and tools["python3"] in files
     assert sorted(directories) == sorted([node / "lib", python / "lib", python / "include"])
@@ -7722,7 +7728,7 @@ def test_toolchain_reads_resolve_pyenv_shims_without_running_them(tmp_path, monk
     else:
         (root / "version").write_text("3.13.0\n")
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
-    files, _, directories = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    files, _, directories = supervisor().provider_confinement._toolchain_reads(plan, repo, str(root / "shims"))
     assert tools["python3"] in files
     assert tools["python3"].parent.parent / "lib" in directories
     assert tools["python3"].parent.parent not in directories
@@ -7750,7 +7756,7 @@ def test_unsafe_pyenv_shim_fails_clearly(tmp_path, monkeypatch, version):
     repo.mkdir()
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
     with pytest.raises(ValueError, match="pyenv shim.*fix:"):
-        supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+        supervisor().provider_confinement._toolchain_reads(plan, repo, str(root / "shims"))
 
 
 @pytest.mark.parametrize("version", ["missing-version", "3.13.0", None])
@@ -7774,7 +7780,7 @@ def test_unresolvable_pyenv_selection_is_skipped_with_a_warning(tmp_path, monkey
     repo = tmp_path / "repo"
     repo.mkdir()
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
-    files, _, _ = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    files, _, _ = supervisor().provider_confinement._toolchain_reads(plan, repo, str(root / "shims"))
     assert shim.resolve() not in files
     if version:
         assert "skipping toolchain candidate" in caplog.text
@@ -7791,18 +7797,18 @@ def test_pyenv_prefix_selection_uses_the_highest_installed_patch(tmp_path, monke
     shim.chmod(0o755)
     (root / "versions/3.13.9").symlink_to(root / "versions/3.13.0")
     # 3.13.10 outranks 3.13.9 numerically, 3.130.0 is not a 3.13 patch.
-    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.9"
+    assert supervisor().provider_confinement._pyenv_version_dir(root, "3.13").name == "3.13.9"
     (root / "versions/3.13.10").symlink_to(root / "versions/3.13.0")
     (root / "versions/3.130.0").symlink_to(root / "versions/3.13.0")
-    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.10"
-    assert supervisor()._pyenv_version_dir(root, "3.13.0").name == "3.13.0"
-    assert supervisor()._pyenv_version_dir(root, "3.99") is None
+    assert supervisor().provider_confinement._pyenv_version_dir(root, "3.13").name == "3.13.10"
+    assert supervisor().provider_confinement._pyenv_version_dir(root, "3.13.0").name == "3.13.0"
+    assert supervisor().provider_confinement._pyenv_version_dir(root, "3.99") is None
 
 
 def test_unsafe_pyenv_shim_is_rejected_by_execute(tmp_path, monkeypatch):
     def refuse(*args, **kwargs):
         raise ValueError("cannot resolve pyenv shim x; fix: select an installed Python version")
-    monkeypatch.setattr(supervisor(), "confinement_command", refuse)
+    monkeypatch.setattr(supervisor().provider_confinement, "confinement_command", refuse)
     plan = fixture_plan(tmp_path, "pass", "claude")
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "rejected"
@@ -7819,7 +7825,7 @@ def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_pat
     (repo / ".venv/pyvenv.cfg").write_text(f"home = {tools['python3'].parent}\n")
     (repo / ".venv/bin/python").symlink_to(tools["python3"])
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
-    files, project_files, directories = supervisor()._toolchain_reads(plan, repo, "/nonexistent")
+    files, project_files, directories = supervisor().provider_confinement._toolchain_reads(plan, repo, "/nonexistent")
     assert repo.resolve() / ".venv" in directories
     assert home / ".pyenv/versions/3.13.0/lib" in directories
     assert tools["python3"] in files
@@ -7931,7 +7937,7 @@ def test_pyvenv_home_naming_a_home_folder_grants_nothing(tmp_path, monkeypatch):
     fake_executable(home / "Documents/bin/python3")
     (home / "Documents/taxes.pdf").write_text("private\n")
     repo, plan = venv_repo(tmp_path, home_line=str(home / "Documents/bin"))
-    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+    assert granted_outside(repo, supervisor().provider_confinement._toolchain_reads(plan, repo, "/nonexistent")) == []
 
 
 def test_venv_link_to_a_credential_file_grants_nothing(tmp_path, monkeypatch):
@@ -7939,14 +7945,14 @@ def test_venv_link_to_a_credential_file_grants_nothing(tmp_path, monkeypatch):
     secret = fake_executable(home / ".git-credentials", "https://user:token@example.invalid\n")
     repo, plan = venv_repo(tmp_path, python_target=secret)
     assert supervisor().provider_confinement.credential_path(secret)
-    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+    assert granted_outside(repo, supervisor().provider_confinement._toolchain_reads(plan, repo, "/nonexistent")) == []
 
 
 def test_venv_link_to_a_non_toolchain_folder_grants_nothing(tmp_path, monkeypatch):
     home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
     target = fake_executable(home / "Documents/project/bin/python3")  # no lib/python3.* beside it
     repo, plan = venv_repo(tmp_path, python_target=target)
-    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+    assert granted_outside(repo, supervisor().provider_confinement._toolchain_reads(plan, repo, "/nonexistent")) == []
 
 
 def test_interpreter_installed_directly_in_home_grants_nothing(tmp_path, monkeypatch):
@@ -7954,14 +7960,14 @@ def test_interpreter_installed_directly_in_home_grants_nothing(tmp_path, monkeyp
     target = fake_executable(home / "bin/python3")
     (home / "lib/python3.13").mkdir(parents=True)
     repo, plan = venv_repo(tmp_path, python_target=target, home_line=str(home / "bin"))
-    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, str(home / "bin"))) == []
+    assert granted_outside(repo, supervisor().provider_confinement._toolchain_reads(plan, repo, str(home / "bin"))) == []
 
 
 def test_venv_link_to_a_real_install_grants_its_runtime_components(tmp_path, monkeypatch):
     home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
     repo, plan = venv_repo(tmp_path, python_target=tools["python3"], home_line=str(tools["python3"].parent))
     prefix = home / ".pyenv/versions/3.13.0"
-    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == [
+    assert granted_outside(repo, supervisor().provider_confinement._toolchain_reads(plan, repo, "/nonexistent")) == [
         tools["python3"], prefix / "lib", prefix / "include"
     ]
 
@@ -7972,7 +7978,7 @@ def test_free_threaded_interpreter_is_a_toolchain(tmp_path, monkeypatch, name):
     prefix = home / ".local/share/uv/python/cpython-3.14.0t-macos-aarch64-none"
     interpreter = fake_executable(prefix / "bin" / name)
     (prefix / "lib/python3.14t").mkdir(parents=True)
-    assert supervisor()._toolchain_grant(interpreter) == ([interpreter], [prefix / "lib"])
+    assert supervisor().provider_confinement._toolchain_grant(interpreter) == ([interpreter], [prefix / "lib"])
 
 
 def fake_framework_python(home):
@@ -7990,7 +7996,7 @@ def fake_framework_python(home):
 def test_framework_python_grants_its_library_and_resources_but_not_the_prefix(tmp_path, monkeypatch):
     home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
     prefix, interpreter = fake_framework_python(home)
-    files, directories = supervisor()._toolchain_grant(interpreter)
+    files, directories = supervisor().provider_confinement._toolchain_grant(interpreter)
     assert files == [interpreter, prefix / "Python"]
     assert directories == [prefix / "lib", prefix / "include", prefix / "Resources"]
     assert not any((prefix / "auth.json").is_relative_to(granted) for granted in [*files, *directories])
@@ -8003,13 +8009,13 @@ def test_framework_python_library_or_resources_linked_out_of_the_prefix_is_not_g
     (prefix / "Python").symlink_to(home / ".ssh/id_ed25519")
     shutil.rmtree(prefix / "Resources")
     (prefix / "Resources").symlink_to(home / ".ssh")
-    assert supervisor()._toolchain_grant(interpreter) == (
+    assert supervisor().provider_confinement._toolchain_grant(interpreter) == (
         [interpreter], [prefix / "lib", prefix / "include"])
     # Even a link that stays inside the prefix is left out: only a real entry is canonical.
     (prefix / "Python").unlink()
     (prefix / "lib/Python").write_bytes(b"dylib")
     (prefix / "Python").symlink_to(prefix / "lib/Python")
-    assert supervisor()._toolchain_grant(interpreter)[0] == [interpreter]
+    assert supervisor().provider_confinement._toolchain_grant(interpreter)[0] == [interpreter]
 
 
 @pytest.mark.parametrize("component", ["Resources", "include", "libexec"])
@@ -8020,7 +8026,7 @@ def test_runtime_directory_linked_to_the_prefix_itself_is_not_granted(tmp_path, 
         shutil.rmtree(prefix / component)
     (prefix / component).symlink_to(".")
     assert (prefix / component).resolve() == prefix
-    files, directories = supervisor()._toolchain_grant(interpreter)
+    files, directories = supervisor().provider_confinement._toolchain_grant(interpreter)
     assert prefix not in [*files, *directories]
     assert (prefix / component) not in directories
     assert not any((prefix / "auth.json").is_relative_to(granted) for granted in [*files, *directories])
@@ -8038,7 +8044,7 @@ def test_lib_linked_to_the_prefix_itself_grants_nothing(tmp_path, monkeypatch, i
     (prefix / "python3.13").mkdir()  # so lib/python3.13 still exists through the link
     (prefix / "lib").symlink_to(".")
     assert (prefix / "lib/python3.13").is_dir()
-    assert supervisor()._toolchain_grant(interpreter) == ([], [])
+    assert supervisor().provider_confinement._toolchain_grant(interpreter) == ([], [])
 
 
 def test_runtime_component_must_lie_strictly_inside_the_prefix(tmp_path):
@@ -8048,11 +8054,11 @@ def test_runtime_component_must_lie_strictly_inside_the_prefix(tmp_path):
     (prefix / "Python").write_bytes(b"dylib")
     (prefix / "Resources").symlink_to(".")
     (prefix / "include").symlink_to(tmp_path)
-    assert mod._runtime_component(prefix, "lib", directory=True) == prefix / "lib"
-    assert mod._runtime_component(prefix, "Python", directory=False) == prefix / "Python"
+    assert mod.provider_confinement._runtime_component(prefix, "lib", directory=True) == prefix / "lib"
+    assert mod.provider_confinement._runtime_component(prefix, "Python", directory=False) == prefix / "Python"
     for name in ("Resources", "include", ".", ""):
-        assert mod._runtime_component(prefix, name, directory=True) is None, name
-    assert mod._runtime_component(prefix, "lib", directory=False) is None
+        assert mod.provider_confinement._runtime_component(prefix, name, directory=True) is None, name
+    assert mod.provider_confinement._runtime_component(prefix, "lib", directory=False) is None
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not all(map(shutil.which, ("install_name_tool", "codesign", "otool"))),
@@ -8106,7 +8112,7 @@ def test_linked_runtime_directory_is_not_granted(tmp_path, monkeypatch):
     prefix = home / ".pyenv/versions/3.13.0"
     shutil.rmtree(prefix / "include")
     (prefix / "include").symlink_to(home / ".ssh")
-    assert supervisor()._toolchain_grant(tools["python3"]) == ([tools["python3"]], [prefix / "lib"])
+    assert supervisor().provider_confinement._toolchain_grant(tools["python3"]) == ([tools["python3"]], [prefix / "lib"])
 
 
 def test_toolchain_rules_emit_the_validated_path_without_resolving_again(tmp_path):
@@ -8221,8 +8227,8 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
 
 
 def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
-    fatal = supervisor().provider_observer.OPENCODE_FATAL_LOG
-    quiet = supervisor().provider_observer.OPENCODE_QUIET_LOG
+    fatal = supervisor().provider_confinement.OPENCODE_FATAL_LOG
+    quiet = supervisor().provider_confinement.OPENCODE_QUIET_LOG
     assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
     assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
     assert re.match(quiet, "timestamp=x level=WARN message=y")
@@ -8230,7 +8236,7 @@ def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
 
 def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
     mod = supervisor()
-    monkeypatch.setattr(mod, "_opencode_version_error",
+    monkeypatch.setattr(mod.provider_confinement, "_opencode_version_error",
                         lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
     with pytest.raises(mod.CapabilityError) as caught:
         mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
@@ -8262,7 +8268,7 @@ def test_provider_state_symlink_home_into_credential_store_is_refused(monkeypatc
         mod.provider_confinement.os_confinement_profile(plan)
     force_sandbox(monkeypatch, "/usr/bin/sandbox-exec")
     with pytest.raises(PermissionError, match="credential store"):
-        mod.confinement_command(plan, ["/usr/bin/true"])
+        mod.provider_confinement.confinement_command(plan, ["/usr/bin/true"])
     assert list((home / ".ssh").iterdir()) == []
 
 
@@ -9048,7 +9054,7 @@ def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_pat
             agy_home_fixture(mod, monkeypatch, tmp_path)
             plan['applied']['confinement'] = 'sandbox-exec'
             # Run the fixture process directly while exercising real home staging and cleanup.
-            monkeypatch.setattr(mod, 'confinement_command', lambda plan, command, search_path=None: command)
+            monkeypatch.setattr(mod.provider_confinement, 'confinement_command', lambda plan, command, search_path=None: command)
             finish = mod.agy_home.finish_agy_home
 
             def failed_finish(*args):

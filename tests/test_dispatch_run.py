@@ -5052,7 +5052,7 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
     monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
         adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
-    monkeypatch.setattr(module.provider_exec, "_opencode_version_error",
+    monkeypatch.setattr(module.provider_exec.provider_confinement, "_opencode_version_error",
                         lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
     task = {"id": "old", "adapter": "opencode", "model": "opencode/deepseek-v4.1-flash-free", "prompt": "hello"}
 
