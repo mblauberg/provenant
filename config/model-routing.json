@@ -102,6 +102,14 @@
         ]
       },
       {
+        "model": "codex/gpt-6-luna",
+        "weight": "normal",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
+      {
         "model": "opencode/opencode/deepseek-v4.1-flash-free",
         "weight": "sparing",
         "confidential": false

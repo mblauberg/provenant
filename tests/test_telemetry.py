@@ -1,7 +1,10 @@
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import sqlite3
@@ -579,11 +582,11 @@ def test_stats_prices_preserve_missingness_and_bill_reasoning_once(tmp_path):
            'output_tokens': 4_000_000, 'reasoning_tokens': 5_000_000}
     prices = {'claude/synthetic': {'usd_per_million': {
         'input': 2, 'cached_input': 0.2, 'cache_write': 3, 'output': 10}}}
-    assert telemetry.estimated_cost(row, prices) == 101.4
-    assert telemetry.estimated_cost({**row, 'cache_write_tokens': None}, prices) is None
-    assert telemetry.estimated_cost(row, {'claude/synthetic': {'usd_per_million': {
+    assert telemetry.costs_owner().estimated_cost(telemetry, row, prices) == 101.4
+    assert telemetry.costs_owner().estimated_cost(telemetry, {**row, 'cache_write_tokens': None}, prices) is None
+    assert telemetry.costs_owner().estimated_cost(telemetry, row, {'claude/synthetic': {'usd_per_million': {
         'input': 2, 'cached_input': 0.2, 'cache_write': None, 'output': 10}}}) is None
-    assert telemetry.estimated_cost({**row, 'cache_write_tokens': 0}, {
+    assert telemetry.costs_owner().estimated_cost(telemetry, {**row, 'cache_write_tokens': 0}, {
         'claude/synthetic': {'usd_per_million': {
             'input': 2, 'cached_input': 0.2, 'cache_write': None, 'output': 10}}}) == 92.4
 
@@ -726,7 +729,7 @@ def test_opencode_price_lookup_keeps_provider_namespace():
     row = {'adapter':'opencode','provider':'opencode-go','model':'synthetic',
            'input_tokens':1_000_000,'cache_read_tokens':0,'cache_write_tokens':0,
            'output_tokens':0,'reasoning_tokens':0}
-    assert telemetry.estimated_cost(row, {'opencode/opencode-go/synthetic': {
+    assert telemetry.costs_owner().estimated_cost(telemetry, row, {'opencode/opencode-go/synthetic': {
         'usd_per_million':{'input':2}}}) == 2
 
 
@@ -908,12 +911,12 @@ def test_stats_normalise_models_against_the_catalogue_and_keep_raw_values(tmp_pa
 
 def test_opencode_native_and_receipt_spellings_share_one_model_key(tmp_path):
     from scripts import telemetry
-    catalogue = telemetry.catalogue()
-    assert telemetry.normalise_model('opencode', 'opencode-go', 'deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
-    assert telemetry.normalise_model('opencode', 'opencode', 'opencode-go/deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
-    assert telemetry.normalise_model('opencode', 'openrouter', 'z-ai/glm-5.2:free', catalogue) == 'openrouter/z-ai/glm-5.2:free'
-    assert telemetry.normalise_model('codex', 'openai', 'gpt-6-sol', catalogue) == 'gpt-6-sol'
-    assert telemetry.normalise_model('codex', 'openai', None, catalogue) is None
+    catalogue = telemetry.costs_owner().catalogue(telemetry)
+    assert telemetry.costs_owner().normalise_model('opencode', 'opencode-go', 'deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.costs_owner().normalise_model('opencode', 'opencode', 'opencode-go/deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.costs_owner().normalise_model('opencode', 'openrouter', 'z-ai/glm-5.2:free', catalogue) == 'openrouter/z-ai/glm-5.2:free'
+    assert telemetry.costs_owner().normalise_model('codex', 'openai', 'gpt-6-sol', catalogue) == 'gpt-6-sol'
+    assert telemetry.costs_owner().normalise_model('codex', 'openai', None, catalogue) is None
 
 
 def test_fixture_rows_are_excluded_and_unattributed_rows_reported_separately(tmp_path):
@@ -1133,7 +1136,7 @@ else:
     spec.loader.exec_module(telemetry)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         db.row_factory = sqlite3.Row
-        summary = telemetry.peer_summary(db, host='peer')
+        summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
     Path(str(shim) + '.json').write_text(json.dumps(summary))
     env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim),
            'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / 'home/.agents')}
@@ -1165,7 +1168,7 @@ def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_pa
     federation = load('merge_federation_test', 'telemetry_hosts.py')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     with telemetry.connect() as db:
-        first = telemetry.peer_summary(db, host='studio')
+        first = telemetry.report_owner().peer_summary(telemetry, db, host='studio')
     second = {**first, 'host': 'peer'}
     def quota(host, observed, used):
         return {'schema': 'provenant.quota.v1', 'provider': 'claude', 'account': 'work', 'host': host,
@@ -1188,7 +1191,7 @@ def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, mon
     federation = load('bad_peer_federation', 'telemetry_hosts.py')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     with telemetry.connect() as db:
-        good = telemetry.peer_summary(db, host='peer')
+        good = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
         hosts = federation.hosts_owner()
         monkeypatch.setattr(hosts, 'load_config', lambda: hosts.HostsConfig(telemetry.host_id(), {'peer': object()}))
         response = {**good, 'excluded_rows': []}
@@ -1707,7 +1710,7 @@ def test_peer_outcomes_carry_latency_samples_and_old_peers_still_validate(tmp_pa
     telemetry = load_script('peer_outcome_telemetry', 'telemetry.py')
     hosts = load_script('peer_outcome_hosts', 'telemetry_hosts.py')
     with telemetry.connect() as db:
-        summary = telemetry.peer_summary(db, host='peer')
+        summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
     assert summary['outcomes'] and summary['outcomes'][0]['latency_samples'] == 1
     hosts.validate(telemetry, json.loads(json.dumps(summary)), 'peer')
     old = json.loads(json.dumps(summary))
@@ -2174,7 +2177,7 @@ def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(
     with telemetry.connect() as db:
         telemetry.ingest(db)
         db.row_factory = sqlite3.Row
-        report = telemetry.stats(db, summary=True)
+        report = telemetry.report_owner().stats(telemetry, db, summary=True)
     with sqlite3.connect(database) as db:
         stored = sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host'))
     assert stored == [('Anes-MacBook-Pro.local', 1), ('anes-macbook-pro', 1), ('local', 1)]
@@ -2198,11 +2201,11 @@ def test_long_lived_telemetry_refreshes_peer_aliases_after_hosts_config_changes(
         db.execute("UPDATE usage SET host='box'")
         db.execute("UPDATE usage_files SET host='box'")
         db.row_factory = sqlite3.Row
-        before = telemetry.stats(db, summary=True)
+        before = telemetry.report_owner().stats(telemetry, db, summary=True)
         assert [(row['host'], row['rows']) for row in before['session_usage']] == [('studio', 1)]
         write_json(config, {'schema_version': 1, 'local_host': 'studio',
                             'peers': {'box': {'ssh_destination': 'box'}}})
-        after = telemetry.stats(db, summary=True)
+        after = telemetry.report_owner().stats(telemetry, db, summary=True)
     assert [(row['host'], row['rows']) for row in after['session_usage']] == [('box', 1)]
 
 
@@ -2250,7 +2253,7 @@ def test_stats_hosts_all_merges_three_hosts(tmp_path, monkeypatch):
         db.row_factory = sqlite3.Row
         for name in ('b', 'c'):
             # Each peer reports the same session ID; the merge keys sessions by host.
-            Path(f'{shim}.{name}.json').write_text(json.dumps(telemetry.peer_summary(db, host=name)))
+            Path(f'{shim}.{name}.json').write_text(json.dumps(telemetry.report_owner().peer_summary(telemetry, db, host=name)))
     shim.write_text('''#!/usr/bin/env python3
 import json, sys
 request = json.load(sys.stdin)
@@ -2298,7 +2301,7 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
     with telemetry.connect() as db:
         telemetry.ingest(db)
         db.row_factory = sqlite3.Row
-        report = telemetry.stats(db, summary=True)
+        report = telemetry.report_owner().stats(telemetry, db, summary=True)
     assert telemetry.same_host('box') == 'box'
     with sqlite3.connect(database) as db:
         assert {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables} == before
@@ -2438,7 +2441,13 @@ def load_telemetry(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     # The oracle runs against the module's own helpers.
-    module.legacy_stats = types.FunctionType(legacy_stats.__code__, vars(module), argdefs=legacy_stats.__defaults__)
+    costs, report = module.costs_owner(), module.report_owner()
+    names = {**vars(module), 'itertools': itertools, 'timedelta': timedelta,
+             'load_prices': partial(costs.load_prices, module), 'catalogue': partial(costs.catalogue, module),
+             'aggregate': partial(costs.aggregate, module), 'unit': partial(costs.unit, module),
+             'normalise_model': costs.normalise_model, 'classify': costs.classify, 'combine': costs.combine,
+             'outcomes': report.outcomes, 'OUTCOME_KEYS': report.OUTCOME_KEYS}
+    module.legacy_stats = types.FunctionType(legacy_stats.__code__, names, argdefs=legacy_stats.__defaults__)
     module.legacy_stats.__kwdefaults__ = legacy_stats.__kwdefaults__
     return module
 
@@ -2481,8 +2490,8 @@ def serialised(report, telemetry):
     # `session_usage` is full-precision transport to the host merge; compare it at the output edge.
     # The legacy oracle predates the output-edge rounding of `usage_totals`.
     for row in report.get('session_usage', []) + report['usage_totals']:
-        row['known_cost_usd'] = telemetry.micro(row['known_cost_usd'])
-        row['reported_cost_usd'] = telemetry.micro(row['reported_cost_usd'])
+        row['known_cost_usd'] = telemetry.costs_owner().micro(row['known_cost_usd'])
+        row['reported_cost_usd'] = telemetry.costs_owner().micro(row['reported_cost_usd'])
     for event in report['last_limit_events']:
         event.pop('age_seconds')  # depends on the clock
     return json.dumps(report, indent=2)
@@ -2495,7 +2504,7 @@ def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
         for kwargs in ({}, {'summary': True}, {'since': '2026-10-20'}, {'since': '2026-10-20T12:00:00Z'},
                        {'until': '2026-10-22'}, {'since': '2026-10-20', 'until': '2026-10-22T06:00:00+00:00'},
                        {'since': '2026-10-21T00:00:00+10:00', 'summary': True}):
-            new = telemetry.stats(db, **kwargs)
+            new = telemetry.report_owner().stats(telemetry, db, **kwargs)
             old = telemetry.legacy_stats(db, **kwargs)
             assert new['usage'] and new['unattributed'] and new['excluded_rows'], kwargs
             assert serialised(new, telemetry) == serialised(old, telemetry), kwargs
@@ -2507,7 +2516,7 @@ def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
     hosts = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hosts)
     def group(session):
-        row = telemetry.unit({'adapter': 'codex', 'provider': 'openai', 'model': 'gpt-5.5', 'day': '2026-10-21',
+        row = telemetry.costs_owner().unit(telemetry, {'adapter': 'codex', 'provider': 'openai', 'model': 'gpt-5.5', 'day': '2026-10-21',
                               'account': None, 'input_tokens': 1, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
                               'output_tokens': 0, 'reasoning_tokens': 0, 'reported_cost': 4e-7, 'model_raw': 'gpt-5.5'},
                              (), {}, {})

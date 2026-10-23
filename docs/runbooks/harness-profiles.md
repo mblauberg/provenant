@@ -27,7 +27,7 @@ behaves as it did before profiles existed.
 4. For one session or one experiment, use the environment instead of a file:
    `PROVENANT_PROFILE=rigorous` or `PROVENANT_KNOB_EFFORT_SHIFT=1`. For one
    dispatch, pass `provenant dispatch --knob effort.shift=1`. Both beat the
-   files. `--knob` is refused for a lane placed on a peer host.
+   files, including when the dispatch is placed on a peer host.
 5. Confirm with `provenant profile show --resolved` (add `--task-class` and
    `--risk-tier` to see a specific lane). Each line names the layer that set
    the value; `floor:crucial` means a risk-tier floor overrode the profile.

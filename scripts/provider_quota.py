@@ -1709,7 +1709,7 @@ def reset_text(resets):
 
 
 def render(value, verbose=False):
-    table = _telemetry().table
+    table = _telemetry().report_owner().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
     rows = []
     for row in value['accounts']:
@@ -1769,7 +1769,7 @@ def schedule_main(argv):
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    lines = _telemetry().table(('provider', 'account', 'next due', 'reason', 'ttl', 'failures', 'error'), [
+    lines = _telemetry().report_owner().table(('provider', 'account', 'next due', 'reason', 'ttl', 'failures', 'error'), [
         (row['provider'], row['account'], (block.get('next_due_at') or '-')[:19].replace('T', ' '),
          block.get('reason') or '-', duration(block.get('ttl_seconds')), str(block.get('failures') or 0),
          block.get('error_kind') or '-') for row in rows for block in [row['schedule'] or {}]])
@@ -1790,7 +1790,7 @@ def trace_main(argv):
         print(json.dumps(value, indent=2))
         return 0
     lines = [f"Quota fetches since {value['since']}: {value['fetches']} ({value['failures']} failed)"]
-    lines += _telemetry().table(('provider', 'account', 'fetches', 'failures', 'p50', 'max', 'last'), [
+    lines += _telemetry().report_owner().table(('provider', 'account', 'fetches', 'failures', 'p50', 'max', 'last'), [
         (row['provider'], row['account'], str(row['fetches']),
          ', '.join(f'{kind} {count}' for kind, count in sorted(row['failures'].items())) or '-',
          f"{row['p50_ms']}ms" if row['p50_ms'] is not None else '-',

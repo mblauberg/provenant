@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "install-provenant-command.py"
@@ -140,7 +142,28 @@ def test_publish_preserves_a_displaced_file_when_rollback_raises(
     assert any(path.read_bytes() == foreign for path in recovery_paths)
 
 
-def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("exc_type", "code", "message", "label"),
+    (
+        pytest.param(
+            OSError,
+            errno.EINVAL,
+            "Invalid argument",
+            "racing type swap",
+            id="test_snapshot_maps_a_racing_type_swap_to_a_collision",
+        ),
+        pytest.param(
+            FileNotFoundError,
+            errno.ENOENT,
+            "No such file or directory",
+            "racing delete",
+            id="test_snapshot_maps_a_racing_delete_to_a_collision",
+        ),
+    ),
+)
+def test_snapshot_maps_a_racing_change_to_a_collision(
+    tmp_path, monkeypatch, exc_type, code, message, label
+):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
@@ -148,19 +171,19 @@ def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
     destination.symlink_to(foreign_target)
     real_readlink = os.readlink
 
-    def swapped_before_read(path, *args, **kwargs):
+    def raced_before_read(path, *args, **kwargs):
         if Path(path) == destination:
-            raise OSError(errno.EINVAL, "Invalid argument", str(path))
+            raise exc_type(code, message, str(path))
         return real_readlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(helper.os, "readlink", swapped_before_read)
+    monkeypatch.setattr(helper.os, "readlink", raced_before_read)
 
     try:
         helper._raw_snapshot(destination)
     except helper.Collision:
         pass
     else:
-        raise AssertionError("racing type swap was not mapped to a collision")
+        raise AssertionError(f"{label} was not mapped to a collision")
 
 
 def test_snapshot_propagates_a_non_race_read_failure(tmp_path, monkeypatch):
@@ -186,31 +209,6 @@ def test_snapshot_propagates_a_non_race_read_failure(tmp_path, monkeypatch):
         raise AssertionError("non-race read failure was masked as a collision")
     else:
         raise AssertionError("non-race read failure was swallowed")
-
-
-def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
-    helper = load_helper()
-    destination = tmp_path / "bin/provenant"
-    destination.parent.mkdir()
-    foreign_target = tmp_path / "foreign/provenant"
-    destination.symlink_to(foreign_target)
-    real_readlink = os.readlink
-
-    def deleted_before_read(path, *args, **kwargs):
-        if Path(path) == destination:
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", str(path)
-            )
-        return real_readlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(helper.os, "readlink", deleted_before_read)
-
-    try:
-        helper._raw_snapshot(destination)
-    except helper.Collision:
-        pass
-    else:
-        raise AssertionError("racing delete was not mapped to a collision")
 
 
 # --- A compiled front door goes through the same managed-file rule (ADR 0027) ---

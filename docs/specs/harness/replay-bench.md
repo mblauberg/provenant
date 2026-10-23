@@ -261,13 +261,9 @@ missing.
    require, `review.rereview_scope` full, one at a time rather than
    factorial until the pilot sizes the cost. Per-finding defect recall is
    blocked on finding dispositions; the oracle outcome is not.
-5. **`repair.escalate_after` 0, 1, 2 and `repair.max_cycles` 2, 3, default**
-   (R1 Q2 without probes, R3 Q2). Both are advisory, so the arms test prose
-   adherence. Per-cycle attribution is blocked on escalation links and the
-   per-cycle failing-check set.
-6. **`routing.pool_mode` top against rotate** (R1 Q6). Watch pass^3 for the
+5. **`routing.pool_mode` top against rotate** (R1 Q6). Watch pass^3 for the
    consistency cost.
-7. **`context.ceiling_tokens` 200000 against null** (R1 Q4, R2 Q1 in part).
+6. **`context.ceiling_tokens` 200000 against null** (R1 Q4, R2 Q1 in part).
    Blocked on compaction counts, and limited to adapters that honour the
    ceiling, since Provenant does not compact lanes itself.
 
