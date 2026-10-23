@@ -31,7 +31,7 @@ def environment(tmp_path):
             'AGENT_FABRIC_ROUTE_HEALTH_PATH': str(tmp_path / 'state/route-health.json')}
 
 
-def cli(tmp_path, *args):
+def cli(tmp_path, *args, scripts_path=True):
     spec = importlib.util.spec_from_file_location('telemetry_cli_under_test', ROOT / 'scripts/telemetry.py')
     assert spec is not None and spec.loader is not None
     telemetry = importlib.util.module_from_spec(spec)
@@ -42,7 +42,8 @@ def cli(tmp_path, *args):
     try:
         os.chdir(tmp_path)
         with patch.dict(os.environ, environment(tmp_path)), \
-                patch.object(sys, 'path', [str(ROOT / 'scripts'), *sys.path]), \
+                patch.object(sys, 'path', ([str(ROOT / 'scripts'), *sys.path] if scripts_path else
+                                           [path for path in sys.path if path != str(ROOT / 'scripts')])), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             sys.modules[spec.name] = telemetry
             spec.loader.exec_module(telemetry)
@@ -110,6 +111,108 @@ def test_sources_query_reads_a_read_only_ledger(tmp_path):
         'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery'}
     assert stats.returncode == 0, stats.stderr
     assert isinstance(json.loads(stats.stdout), dict)
+
+
+def test_stats_auto_ingest_runs_when_a_source_is_stale_but_skips_fresh_sources(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    stamp = datetime.now(UTC).isoformat()
+    receipt(tmp_path, 'first', status='ok', ended_at=stamp)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    receipt(tmp_path, 'second', status='ok', ended_at=stamp)
+    fresh = cli(tmp_path, 'stats', '--json')
+    assert fresh.returncode == 0, fresh.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 1
+        db.execute("UPDATE sources SET last_ingest=? WHERE source='fabric'",
+                   ((datetime.now(UTC) - timedelta(hours=2)).isoformat(),))
+    stale = cli(tmp_path, 'stats', '--json')
+    assert stale.returncode == 0, stale.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
+
+
+def test_stats_auto_ingest_works_when_telemetry_is_loaded_by_file_path(tmp_path):
+    from datetime import UTC, datetime
+
+    receipt(tmp_path, 'file-path', status='ok', ended_at=datetime.now(UTC).isoformat())
+    result = cli(tmp_path, 'stats', '--json', scripts_path=False)
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 1
+
+
+def test_concurrent_stats_auto_ingest_skips_a_held_lock_without_losing_rows(tmp_path):
+    from datetime import UTC, datetime
+
+    for name in ('first', 'second'):
+        receipt(tmp_path, name, status='ok', ended_at=datetime.now(UTC).isoformat())
+    workers = [subprocess.Popen([str(ROOT / 'scripts/provenant'), 'stats', '--json'],
+                                env=environment(tmp_path), cwd=tmp_path,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+               for _ in range(2)]
+    results = [worker.communicate(timeout=10) + (worker.returncode,) for worker in workers]
+    assert all(code == 0 for _, _, code in results), results
+    assert all(json.loads(stdout)['schema_version'] == 2 for stdout, _, _ in results)
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
+
+
+def test_auto_ingest_failure_warns_but_query_returns_available_ledger(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    receipt(tmp_path, 'available', status='ok', ended_at=datetime.now(UTC).isoformat())
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    bad = tmp_path / 'state/otel/broken.ndjson'
+    bad.parent.mkdir(parents=True)
+    bad.write_text('{ malformed\n')
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("UPDATE sources SET last_ingest=? WHERE source='otel'",
+                   ((datetime.now(UTC) - timedelta(hours=2)).isoformat(),))
+    result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0
+    assert json.loads(result.stdout)['schema_version'] == 2
+    assert 'auto-ingest failed' in result.stderr
+
+
+def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_fields(tmp_path):
+    from datetime import UTC, datetime
+
+    stamp = datetime.now(UTC)
+    nanos = str(int(stamp.timestamp() * 1_000_000_000))
+    jsonl(tmp_path / 'state/otel/logs-current.ndjson', otlp_line('logs', {'resourceLogs': [{
+        'resource': {'attributes': []}, 'scopeLogs': [{'logRecords': [{
+            'timeUnixNano': nanos,
+            'attributes': otlp_attributes(**{'event.name': 'api_request', 'model': 'gpt-6-luna',
+                                              'input_tokens': 17, 'output_tokens': 4,
+                                              'prompt_text': 'PRIVATE_PROMPT', 'tool_output': 'PRIVATE_TOOL'})}]}]}]}))
+    run = tmp_path / '.agent-run/runs/delivery-fixture'
+    receipt_data = json.loads((ROOT / 'skills/deliver/templates/RUN.template.json').read_text())
+    receipt_data.update({
+        'run_id': 'delivery-fixture', 'risk_tier': 'substantial', 'chair_family': 'openai',
+        'writer_model': 'gpt-6-luna', 'reviews': [
+            {'id': 'review-a', 'role': 'targeted', 'status': 'pass', 'provider_family': 'anthropic',
+             'model': 'claude-sonnet', 'lenses': ['correctness']},
+            {'id': 'review-b', 'role': 'targeted', 'status': 'fail', 'provider_family': 'openai',
+             'model': 'gpt-review', 'lenses': ['privacy']}],
+    })
+    shape_spec = importlib.util.spec_from_file_location(
+        'delivery_run_shape_test', ROOT / 'skills/deliver/scripts/delivery_run_shape.py')
+    shape = importlib.util.module_from_spec(shape_spec)
+    shape_spec.loader.exec_module(shape)
+    assert shape.shape_errors(receipt_data) == []
+    write_json(run / 'RUN.json', receipt_data)
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    delivery = next(row for row in report['deliveries'] if row['run_id'] == 'delivery-fixture')
+    assert delivery['writer_model'] == 'gpt-6-luna'
+    assert [row['verdict'] for row in delivery['review_verdicts']] == ['pass', 'fail']
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        attrs = db.execute("SELECT attrs FROM events WHERE kind='otel.api_request'").fetchone()[0]
+    assert 'PRIVATE_PROMPT' not in attrs and 'PRIVATE_TOOL' not in attrs
+    assert 'prompt_text' not in attrs and 'tool_output' not in attrs
+    assert json.loads(attrs)['input_tokens'] == 17
 
 
 @pytest.mark.parametrize('version,message', [
@@ -2552,6 +2655,7 @@ def fixture_ledger(db):
 def serialised(report, telemetry):
     # `session_usage` is full-precision transport to the host merge; compare it at the output edge.
     # The legacy oracle predates the output-edge rounding of `usage_totals`.
+    report.pop('deliveries', None)  # Delivery receipt fields were added after the row-by-row oracle.
     for row in report.get('session_usage', []) + report['usage_totals']:
         row['known_cost_usd'] = telemetry.costs_owner().micro(row['known_cost_usd'])
         row['reported_cost_usd'] = telemetry.costs_owner().micro(row['reported_cost_usd'])

@@ -27,6 +27,7 @@ FIELD_TYPES: dict[str, tuple[type | None, ...]] = {
     "risk_tier": (str,),
     "initial_risk_tier": (str,),
     "chair_family": (str,),
+    "writer_model": (str, None),
     "risk_assessment": (dict,),
     "risk_override": (dict,),
     "high_stakes": (bool,),
@@ -58,6 +59,7 @@ FIELD_TYPES: dict[str, tuple[type | None, ...]] = {
 # `software_delivery` appear only for the runs that bind them.
 OPTIONAL_FIELDS = frozenset({
     "fabric_relationships", "project_policy", "software_delivery", "delivery_acceptance",
+    "writer_model",
 })
 REQUIRED_FIELDS = frozenset(FIELD_TYPES) - OPTIONAL_FIELDS
 KNOWN_FIELDS = frozenset(FIELD_TYPES)

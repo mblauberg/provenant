@@ -217,6 +217,7 @@ def stats(telemetry, db, since=None, prices=None, *, summary=False, until=None):
                                        age_seconds=max(0, round((telemetry.since_time(telemetry.now()) - telemetry.since_time(stamp)).total_seconds())))
                                   for (host, provider, account), stamp in sorted(last_limits.items(), key=str)],
             'quota_observations': sorted(windows.values(), key=lambda row: tuple(str(row[k] or '') for k in ('provider', 'account', 'window'))),
+            'deliveries': telemetry.delivery_owner().report_deliveries(telemetry, db, since),
             'excluded_rows': dict(excluded),
             'unattributed': [{'source': source, 'adapter': adapter, 'rows': group['rows'],
                               'input_tokens': group['input_tokens'], 'statuses': dict(sorted(group['statuses'].items()))}

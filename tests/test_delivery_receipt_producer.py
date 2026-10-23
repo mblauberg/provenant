@@ -493,6 +493,16 @@ def test_init_derives_tier_and_writes_a_flat_receipt(tmp_path):
     assert (run_dir / ".RUN.lock").exists()
 
 
+def test_init_records_a_known_writer_model(tmp_path):
+    (tmp_path / "intent.md").write_text("# Intent\n")
+
+    result = run_cli(tmp_path, *init_args("DEL-WRITER"), "--writer-model", "gpt-6-luna")
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((tmp_path / ".agent-run" / "DEL-WRITER" / "RUN.json").read_text())
+    assert receipt["writer_model"] == "gpt-6-luna"
+
+
 def test_producer_run_reaches_a_validator_clean_closed_receipt(tmp_path):
     run_dir = deliver_run(tmp_path)
 

@@ -3,7 +3,9 @@
 The ledger implements the first ingestion and reporting slice of
 [R4](../specs/harness/operating-model.md#r4-local-telemetry-ledger). It stores
 usage and routing metadata locally, with no message text, prompts, tool
-output or file contents. Ingestion reads provider stores without modifying
+output or file contents. OTel ingestion stores only allowlisted usage and
+metric fields; prompt, response and tool-content attributes are discarded.
+Ingestion reads provider stores without modifying
 them. Ledger ingestion does not contact providers or fetch prices. The separate quota
 command contacts provider quota services on demand.
 
@@ -19,17 +21,29 @@ command contacts provider quota services on demand.
 3. Run `provenant stats --since 2026-10-21` (or add `--json` or `--detail`) for provider,
    adapter and model token totals, cache-read share, estimated cost, latest
    lane status, attempt outcomes, daily provider/account usage, daily limit
-   events and observed Codex quota windows. The default output is the summary
+   events, observed Codex quota windows, and JSON delivery records with writer
+   model and review verdicts when recorded. The default output is the summary
    tables only; per-account rows (last limit events, quota observations) and
    uncapped tables are behind `--detail`, and `--json` prints the full report.
    `--since` accepts an ISO date or
    timestamp, inclusive; dates and daily buckets use UTC. Undated records are
-   included only when no date filter is supplied. Stats reads the last ingest;
-   it does not refresh sources.
+   included only when no date filter is supplied. `stats`, `retro`, and read-only
+   `changes` refresh all sources first when any source has not been ingested or
+   its last attempt is older than one hour. They then open the ledger read-only.
+   An ingest error or another active ingest is reported on stderr and the
+   available ledger is still reported. SQLite waits briefly for a reader or
+   writer; a second ingest skips immediately while the first holds the ingest
+   lock.
 4. Run `provenant telemetry changes --sync` to record merged PRs as change
    markers, then `provenant stats --compare <PR#|rev|date>` for before/after
    metrics or `provenant retro` for a digest. See
    [Events, change markers and comparison](#events-change-markers-and-comparison).
+
+Set `PROVENANT_TELEMETRY_AUTO_INGEST_SECONDS` to change the one-hour refresh
+interval for those report commands. It accepts a non-negative number of seconds;
+the default is `3600`. The interval is an environment setting, not a harness
+profile knob. `provenant telemetry ingest` remains available for an immediate
+refresh.
 
 ## Storage and inputs
 

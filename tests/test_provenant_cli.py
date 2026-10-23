@@ -1098,6 +1098,8 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     stats_db = tmp_path / "fabric-state" / "telemetry.sqlite3"
     used_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with sqlite3.connect(stats_db) as db:
+        fresh_ingest = datetime.now(timezone.utc).isoformat()
+        db.execute("UPDATE sources SET last_ingest=?", (fresh_ingest,))
         for i in range(40):
             db.execute(
                 "INSERT INTO usage (source,event_id,host,session,adapter,provider,model,account,timestamp,"
