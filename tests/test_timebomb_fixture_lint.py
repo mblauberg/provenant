@@ -108,3 +108,17 @@ def test_finds_date_in_referenced_helper_used_by_changed_window_test(tmp_path):
     )
     assert module.scan_file(path) == [(2, "2026-10-23T12:00:00Z")]
     assert module._context_changed(path, 2, {4})
+
+
+def test_does_not_treat_a_shadowed_helper_name_as_a_fixture_reference(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'def fixture():\n'
+        '    return "2026-10-23T12:00:00Z"\n'
+        'def test_window():\n'
+        '    fixture = "static data"\n'
+        '    assert datetime.now() > parse(fixture)\n',
+        encoding="utf-8",
+    )
+    assert module.scan_file(path) == []

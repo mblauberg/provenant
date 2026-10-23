@@ -43,10 +43,10 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         if WINDOW.search(ast.get_source_segment(source, function) or "")
     }
     referenced_helpers = {
-        node.id
+        node.func.id
         for function in functions if function.name in window_functions
         for node in ast.walk(function)
-        if isinstance(node, ast.Name)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
