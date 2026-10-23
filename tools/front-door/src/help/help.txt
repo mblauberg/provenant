@@ -1,3 +1,0 @@
-usage: provenant help [command]
-
-Print general help, or detail for a specific command.

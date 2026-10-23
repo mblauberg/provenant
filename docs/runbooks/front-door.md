@@ -19,3 +19,11 @@ yet wire `install`, `check install` or `uninstall`, and the legacy
 The library requires explicit harness selection and manages per-entry links.
 Client MCP/hook editors and legacy-entry matching are part of the later harness cut-over. No command-line installation procedure is
 available in this slice.
+
+The CLI parser now recognises the frozen grammar in [cli.md](../specs/rust-port/design/cli.md).
+`help --json` is its structured catalogue; help and version need no roots.
+`root --json` adds state/project/build identity to the human asset-root path.
+An unbound owner returns `OWNER_UNAVAILABLE`, status `unavailable`, exit 4.
+The parser replaces forwarding; live Python callers invoke their owner scripts
+directly until those owners land. No-argument invocation prints usage, even
+when a legacy Fabric seat variable is set.

@@ -1,8 +1,0 @@
-usage: provenant profile list | show [--resolved] [--task-class X] [--risk-tier T]
-       provenant profile use <preset> | set <knob>=<value> | reset <knob> [--project] [--task-class X]
-       provenant profile diff <presetA> <presetB>
-
-Delegates to scripts/provenant-profile.
-Cost/quality knobs and presets (economy, balanced, rigorous) from
-config/harness-knobs.json; balanced is today's behaviour. Writes the user file,
-or with --project the checkout's .agents/harness-profile.json.

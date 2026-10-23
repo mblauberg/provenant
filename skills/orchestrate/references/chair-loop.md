@@ -74,7 +74,7 @@ After dispatch, keep one `provenant lanes --wait` running in the background.
 Without `--all` it exits at the first finisher, so the chair acts on each lane
 as it lands and re-arms; the next wait reports any lane that finished in
 between. Add `--all --timeout N` only to hold the report until a whole fan-out
-is terminal. Add `--summary` for a bounded one-line-per-lane report. Read one lane's status and result tail with `provenant run show <run-id|task-id> --tail N`. For CI, `provenant pr checks <pr> --wait` exits 0 green, 1 failed, 4 when the required set is unreadable (not success), 124 on timeout. Do not start one wait per lane. `provenant lanes` is
+is terminal. Add `--summary` for a bounded one-line-per-lane report. Read one lane's status and result tail with `skills/orchestrate/scripts/run_controls.py show <run-id|task-id> --tail N`. For CI, `scripts/provenant-pr checks <pr> --wait` exits 0 green, 1 failed, 4 when the required set is unreadable (not success), 124 on timeout. Do not start one wait per lane. `provenant lanes` is
 the source of truth after compaction or restart (by default showing active
 lanes plus the 5 most recent terminal ones, with `--all` listing all lanes). Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and

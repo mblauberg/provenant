@@ -1,5 +1,0 @@
-usage: provenant extract FILE --schema SCHEMA.json [--non-confidential]
-
-Schema-validated JSON (draft 7, 2019-09 or 2020-12; local refs only).
-Already valid JSON uses plain code; otherwise utility, one retry, then junior.
-Confidential by default; --non-confidential permits free models for public/synthetic input.

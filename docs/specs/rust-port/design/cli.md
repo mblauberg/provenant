@@ -1,6 +1,6 @@
 # Command surface
 
-Status: **proposal for the command-tree freeze**, 2026-10-24. Covers
+Status: **accepted command-tree freeze**, 2026-10-24. Covers
 `provenant-cli` and the `provenant` binary. Author route:
 `codex/gpt-6.1-sol@high`.
 
@@ -91,11 +91,13 @@ Global options are accepted before or after subcommands:
 | `--state-dir ABS` | Fresh-state root, overriding `PROVENANT_STATE_DIR`, then `~/.local/share/provenant/v1`. Refuse a root inside any legacy root. |
 | `--project PATH` | Select a canonical verified project instead of cwd; no process chdir or product-checkout selection. |
 
-Product environment inputs are exactly `PROVENANT_STATE_DIR` and
+Installed product environment inputs are exactly `PROVENANT_STATE_DIR` and
 `PROVENANT_AGENT_LABEL`. The latter separates inboxes for agents of one
 provider, replacing `AGENT_FABRIC_LABEL`. Provider/harness variables pass
 through as those tools define them; there are no other `PROVENANT_*` or
-`AGENT_FABRIC_*` inputs. Config is one user-owned `config.toml`, optionally
+`AGENT_FABRIC_*` inputs. For an uninstalled development binary only, state's explicit `PROVENANT_ROOT`
+selects asset fixtures; an installed binary ignores it.
+Config is one user-owned `config.toml`, optionally
 with `profile =`; no overlays, layering, mutation verbs or per-knob variables.
 `config show` renders the resolved typed config with secrets redacted.
 
@@ -109,8 +111,12 @@ Expiry never cancels underlying work. A wait condition is satisfied by terminal
 or `InputRequired` state; that wait exits 0, with the observed outcome in data.
 
 `root` reports product asset root, state directory, selected project and
-installation version/digest. It is read-only: no threads, database, provider
-probes or old-root discovery. Config owns resolution and installation identity.
+installation version/digest in JSON. Human output retains the newline-terminated
+asset path used by script callers (state slice 3); non-UTF-8 bytes are escaped.
+It is read-only: no database, provider probes or old-root discovery. Default
+root reporting starts no threads or processes. An explicit `--project` uses
+the supervisor's bounded Git runner with isolated configuration to verify the
+selected checkout. Config owns resolution and installation identity.
 
 ### Run grammar
 
@@ -199,6 +205,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `resume` | `resume ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | run `resume(ResumeRequest { target, prompt, expected_generation: 0 }, OperationKey, …)` | Prompt required, at most 1 MiB, matching Fabric's non-optional `prompt`. No `ROUTE`/`ACCESS`: run's fresh mode is dropped for Fabric's fixed-route request. The edge sends generation 0, so an attempt continues once; resuming an already-continued attempt refuses and names the newer attempt to continue. |
 | `reconcile` | `reconcile [--id RUN…] [--abandon-uncertain]` | run `recover(ProjectId, OperationId)`; with the flag, `reconcile(ProjectId, OperationId, ReconcileDecision::AbandonUncertain)` | At most 100 IDs; the edge maps each run to its operation. `--abandon-uncertain` requires at least one `--id`. No `--operation-id` or budget flag: the owner API takes neither, and recovery is idempotent. |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | fabric-runtime and fabric-mcp requests | Fabric freezes its leaves. CLI supplies only globals, envelope, exits and help catalogue entries; the mount lands with Fabric's crate, never as a forwarding route. |
+| `fabric mcp` | `fabric mcp` | fabric-mcp transport | Explicit command-tree leaf frozen in step 1; no positionals or local flags. `--json` refused before stdin. Until the owner binds, returns owner-unavailable; remaining Fabric leaves mount with their owner's subtree. |
 | `telemetry stats` | `telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail]` | telemetry `stats(facts, &PriceTable, StatsWindow { since, until, detail })` | Dates mean midnight UTC; timestamps need an offset; `since < until`. |
 | `worktree create` | `worktree create BRANCH [--base REV]` | confinement `worktrees::create(WorktreeCreate { branch, base })` | Creates `.worktrees/<BRANCH with / as ->`. An existing branch with `--base` is invalid; a new branch's base defaults to the project's `HEAD`, pinned and returned. `--repo` is dropped for global `--project`. |
 | `worktree list` | `worktree list` | confinement `worktrees::list(VerifiedRepo)` | Unpaged bounded list; no `--repo`. |
@@ -211,7 +218,12 @@ satisfied as the run grammar states. Two shorthands recur:
 | `check writing` | `check writing PATHS… [--rules general\|academic\|legal] [--limit N] [--cursor TOKEN]` | workflow writing matcher | 1–256 paths; rules default general. Workflow's `--rules` replaces `--profile`, which collided with config's `profile`. |
 | `hook claude …` | `hook claude pre-tool-use \| pre-compact \| compact` | `HookSpec` handler | No flags; `--json` refused before stdin. |
 | `hook git pre-push` | `hook git pre-push REMOTE LOCATION` | `HookSpec` handler | No flags; `--json` refused. |
-| `internal supervise` | `internal supervise` | supervisor launch handshake | Hidden from help; no arguments; `--json` refused. Run's scheduler and attempt guardian both enter here; the handshake names the role. |
+| `internal supervise` | `internal supervise [FD FD FD FD FD]` | supervisor launch handshake | Hidden from help; zero or exactly five private descriptor numbers, each 3–2147483647; `--json` refused. Run's scheduler and attempt guardian both enter here; the handshake names the role. |
+
+S2 currently transfers the channel, two directory handles and two lease handles
+as five private argv values. Step 1 preserves that existing Rust custody handoff;
+none is public or opens arbitrary authority. A supervisor follow-up should move
+that descriptor transfer into its handshake so this leaf can take no arguments.
 
 No `clean` verb exists: guardian settlement and `reconcile` recovery delete
 disposable scratch, and history stays retained. No utility, classifier or
@@ -242,10 +254,13 @@ The following mapping is exhaustive; `error` status cannot choose two exits.
 | `refused` | 1 | Policy/authority refusal. |
 | `invalid` | 2 | Invalid input/flags, missing or ambiguous target, unsupported record/config version. |
 | `error` | 3 | Cannot proceed: setup, I/O, contention, unavailable required evidence or result too large. |
+| `unavailable` | 4 | `OWNER_UNAVAILABLE`: the leaf parsed fully, but its typed library binding has not landed in this build. No forwarding or placeholder success. |
 | `timeout` | 124 | Explicit reader wait deadline; run continues. |
 | `cancelled` | 130 | Invocation cancelled; owner acknowledgement precedes custody release. |
 
-There is **no exit 4**. Partial data states coverage and unavailable sources;
+Exit 4 is reserved for an unbuilt command owner; this keeps it distinct from
+operational error/3 and the retired lease wrapper's held-by-another-holder/3.
+Partial data states coverage and unavailable sources;
 if required evidence prevents the operation, use `error`/3. Hook/Git protocol
 exits below and MCP's JSON-RPC errors obey their external protocols, not this
 process-exit table. An MCP wait ending on its deadline reports `timeout` in
@@ -269,7 +284,7 @@ then let Clap validate. JSON help/version data is catalogue/build identity.
 A JSON write failure exits 3 and cannot promise a complete envelope. SIGPIPE
 on a human read-only listing succeeds; failure writing a mutation result is
 I/O/3 after recording its outcome, never a second execution. Non-UTF-8 paths
-use records' tagged `utf8`/`unix_bytes` representation; human output escapes
+use records' tagged `utf8`/`native_bytes` representation; human output escapes
 bytes. No Python repr/surrogateescape/argparse emulation.
 
 ## Hooks and checks
@@ -567,6 +582,10 @@ crates. Against Python plus the 2,989 deleted Rust scaffold lines, expected
 `Net lines:` is **−6,067 to −5,067** across Python/TS/Rust, plus 511 shell
 lines removed. Further router/oracle/test simplification is uncredited upside.
 Recount the actual diff in each PR; budget growth needs an explanation.
+
+Step 1 also retires the remaining `tests/golden/` CLI judge with its router/help
+subjects under R10. Its CI invocation and oracle environment variables need
+workflow cleanup before landing; workflow edits are outside this parser lane.
 
 ## Build order
 

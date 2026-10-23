@@ -261,7 +261,7 @@ enum Power {
     }
 }
 
-/// Runs `provenant quota` off the main thread. The app never reads credentials itself.
+/// Runs the Python quota owner off the main thread. The app never reads credentials itself.
 enum CLI {
     struct Failure: Error { let message: String }
     enum Outcome { case report(QuotaReport), failure(Failure), unsupported }
@@ -299,14 +299,14 @@ enum CLI {
             return fail(nil, "not found", "provenant was not found on the login shell's PATH or at ~/.local/bin/provenant. "
                         + "Set PROVENANT_BIN to its path.")
         }
-        let name = launcher.custom ? "PROVENANT_BIN (\(launcher.url.path))" : "provenant"
+        let name = launcher.url.path
         let run: Output
-        do { run = try exec(launcher.url, arguments, path: launcher.path, limit: 60) } catch {
+        do { run = try exec(launcher.url, Array(arguments.dropFirst()), path: launcher.path, limit: 60) } catch {
             return fail(nil, "launch", "Could not start \(name): \(error.localizedDescription)")
         }
         let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
-        if run.timedOut { return fail(launcher, "timeout", "provenant quota timed out after 60 seconds.") }
-        if run.signalled { return fail(launcher, "signal \(run.status)", "provenant quota was killed by signal \(run.status).") }
+        if run.timedOut { return fail(launcher, "timeout", "quota owner timed out after 60 seconds.") }
+        if run.signalled { return fail(launcher, "signal \(run.status)", "quota owner was killed by signal \(run.status).") }
         if run.status == 127 {   // the launcher or its interpreter is gone: re-resolve next time
             let hint = launcher.custom ? "" : " Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
             return fail(nil, "status 127", "\(name) exited with status 127: \(detail).\(hint)")
@@ -327,11 +327,23 @@ enum CLI {
     static func resolve() -> Launcher? {
         let environment = ProcessInfo.processInfo.environment
         if let bin = environment["PROVENANT_BIN"], !bin.isEmpty {
-            return Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true)
+            return owner(Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true))
         }
-        if let shell = loginShell(environment), let found = lookup(shell) { return found }
+        if let shell = loginShell(environment), let found = lookup(shell), let direct = owner(found) { return direct }
         let local = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/provenant")
-        return FileManager.default.isExecutableFile(atPath: local.path) ? Launcher(url: local, path: nil, custom: false) : nil
+        return FileManager.default.isExecutableFile(atPath: local.path) ? owner(Launcher(url: local, path: nil, custom: false)) : nil
+    }
+
+    /// The Python quota owner remains live during the Rust rewrite. Resolve its
+    /// asset path once, then invoke it directly; the Rust tree has no forwarding route.
+    static func owner(_ binary: Launcher) -> Launcher? {
+        guard let run = try? exec(binary.url, ["root"], path: binary.path, limit: 20),
+              run.status == 0, !run.timedOut,
+              let root = String(data: run.out, encoding: .utf8)?.trimmingCharacters(in: .newlines),
+              root.hasPrefix("/"), !root.contains("\n") else { return nil }
+        let url = URL(fileURLWithPath: root).appending(path: "scripts/provenant-quota")
+        guard FileManager.default.isExecutableFile(atPath: url.path) else { return nil }
+        return Launcher(url: url, path: binary.path, custom: binary.custom)
     }
 
     /// $SHELL, else the account's shell; nil when neither is an absolute executable.

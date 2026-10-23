@@ -418,18 +418,30 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
+ "provenant-cli",
  "provenant-config",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "toml_edit",
 ]
 
 [[package]]
 name = "provenant-cli"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "provenant-core",
+ "provenant-records",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-config"

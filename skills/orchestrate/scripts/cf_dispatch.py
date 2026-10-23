@@ -601,19 +601,19 @@ class Dispatcher:
 
     def resolve_routing(self, a: Attempt, requested_model: str, effort: str,
                         capabilities_file: str, diag: str) -> tuple[int, str]:
-        """Resolve the route via provenant if available, else scripts/model_route.py.
+        """Resolve the route through the model-route owner.
 
-        Returns the router's exit status and JSON. With neither available, the
-        JSON carries status model_routing_unavailable.
+        Returns the owner's exit status and JSON. Without its wrapper or source,
+        the JSON carries status model_routing_unavailable.
         """
         opts = self.opts
-        # The installed `provenant` resolves config from wherever it was installed
-        # from, which is not this checkout when the dispatcher runs inside a linked
-        # worktree. Pin it to the tree this script actually lives in, so a
-        # worktree's config edits are the ones under test.
+        # Pin route resolution to the product tree containing this dispatcher.
+        # This matters when dispatch runs from a linked worktree, whose config
+        # edits must be the ones under test rather than the primary checkout's.
+        # The instance root remains independently selected below.
         product_root = resolve_product_root()
         instance_root = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or f"{os.environ.get('HOME', '')}/.agents"
-        # Catalogue fallback belongs to the router invocation, never the provider seat.
+        # Catalogue fallback belongs to the route-owner invocation, never the provider seat.
         if not os.path.lexists(f"{instance_root}/config/model-routing.json"):
             instance_root = product_root
 
@@ -635,18 +635,16 @@ class Dispatcher:
         if endpoint:
             args += ["--endpoint", endpoint]
 
-        if shutil.which("provenant"):
-            command = ["provenant", "route", "resolve", *args]
-        elif os.access(f"{product_root}/scripts/model-route", os.X_OK):
+        if os.access(f"{product_root}/scripts/model-route", os.X_OK):
             # The wrapper picks an interpreter with PyYAML; a stock python3 may lack it.
             command = [f"{product_root}/scripts/model-route", "resolve", *args]
         elif os.path.isfile(f"{product_root}/scripts/model_route.py"):
             command = [sys.executable, f"{product_root}/scripts/model_route.py", "resolve", *args]
         else:
-            return 127, '{"status":"model_routing_unavailable","reason":"neither provenant nor scripts/model_route.py found"}'
+            return 127, '{"status":"model_routing_unavailable","reason":"scripts/model-route and scripts/model_route.py not found"}'
         env = dict(os.environ)
         # A defaulted alias beside a named model is ours, not the caller's; an env
-        # hint (not a flag) keeps an older installed router working.
+        # hint (not a flag) preserves that distinction in the model-route owner.
         env["FABRIC_ALIAS_IMPLIED"] = "0" if opts.alias_explicit else "1"
         env["AGENT_FABRIC_PRODUCT_ROOT"] = product_root
         env["AGENT_FABRIC_INSTANCE_ROOT"] = instance_root

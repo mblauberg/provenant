@@ -128,7 +128,7 @@ def host_name(value, code='invalid_identifier'):
 @dataclass(frozen=True)
 class PeerConfig:
     ssh_destination: str
-    peer_command: str = '.local/bin/provenant peer'
+    peer_command: str
     connect_timeout: int = 5
     response_deadline: float = 15
 
@@ -186,6 +186,8 @@ def load_config(path=None):
         if name == local:
             raise HostError(code, 'Local host cannot also be a peer')
         fields(settings, {'ssh_destination', 'peer_command', 'connect_timeout', 'response_deadline'}, {'ssh_destination'}, code)
+        if 'peer_command' not in settings:
+            raise HostError(code, 'Peer command is required; configure peer_command as an executable followed by peer')
         peer = PeerConfig(**settings)
         if (not isinstance(peer.ssh_destination, str) or peer.ssh_destination.startswith('-')
                 or not DESTINATION.fullmatch(peer.ssh_destination)):

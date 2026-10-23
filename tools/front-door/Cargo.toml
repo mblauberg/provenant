@@ -46,14 +46,12 @@ provenant-cli = { path = "crates/cli" }
 # Empty rewrite crates and the retained CLI-owned generated scaffold are
 # deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = [
-  "crates/cli/src/lib.rs",
   "crates/confinement/src/lib.rs",
   "crates/fabric-mcp/src/lib.rs",
   "crates/providers/src/lib.rs",
   "crates/run/src/lib.rs",
 ]
 ignored = [
-  "provenant-cli",
   "provenant-confinement",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
@@ -86,11 +84,16 @@ name = "provenant"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Provenant front door: resolves the product checkout and execs the owner of each verb"
+description = "Provenant command composition and transport edge"
 publish = false
 license.workspace = true
 
 [dependencies]
+provenant-cli = { workspace = true }
+provenant-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
@@ -121,3 +124,8 @@ strip = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "fake_provider"
+path = "tests/fake_provider.rs"
+harness = false

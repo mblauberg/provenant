@@ -42,8 +42,6 @@ import process_info
 import run_lineage
 import provider_output
 import provider_observer
-import lane_launch
-import lane_exit
 import provider_confinement
 try:
     from . import instruction_quarantine, agy_home
@@ -1775,19 +1773,8 @@ def _run_attempt(
         suffix = uuid.uuid4().hex[:6]
         events_path = events_path.with_name(events_path.name + "." + suffix)
         stderr_path = stderr_path.with_name(stderr_path.name + "." + suffix)
-    lane_impl = control_environment.get("PROVENANT_LANE_IMPL", "python")
-    if lane_impl not in {"python", "rust"}:
-        raise ValueError("PROVENANT_LANE_IMPL must be python or rust")
-    lane_warnings = []
-    if lane_impl == "rust" and plan["adapter"] in {"claude", "cursor", "opencode"}:
-        warning = plan["adapter"] + " observer terminal retraction is not frozen; falling back to Python lane"
-        logging.warning(warning)
-        lane_warnings.append(warning)
-        lane_impl = "python"
-    raw = lane_exit.Capture(events_path) if lane_impl == "rust" else BoundedCapture(events_path)
-    diagnostics = lane_exit.Capture(stderr_path) if lane_impl == "rust" else BoundedCapture(stderr_path)
-    lane_result = None
-    lane_stdin_path = None
+    raw = BoundedCapture(events_path)
+    diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
     resolution, _ = harness_profile.lenient(cwd=Path(plan["cwd"]), environ=control_environment)
@@ -1868,149 +1855,110 @@ def _run_attempt(
             if model_check == "invalid":
                 raise CapabilityError("model_unavailable", model_check_detail)
             command = provider_confinement.confinement_command(plan, command, environment.get("PATH"))
-            if lane_impl == "rust":
-                if plan["stdin_policy"] == "prompt":
-                    name = "lane-stdin-" + uuid.uuid4().hex
-                    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=tmp_fd)
-                    lane_stdin_path = private_tmp / name
-                    with os.fdopen(descriptor, "wb") as prompt:
-                        prompt.write(plan["prompt"].encode())
-                launch_plan = {**plan, "_lineage_token": plan.get("_lineage_token") or control_environment.get("PROVENANT_RUN_TOKEN", "")}
-                spec = lane_launch.build_spec(launch_plan, environment, argv=command, stdin_path=lane_stdin_path,
-                                              events_path=events_path, stderr_path=stderr_path,
-                                              max_bytes=provider_observer.MAX_EVENTS_BYTES, silence_seconds=silence_seconds)
-                lane_result = lane_launch.run(spec, control_environment, on_start=on_start, on_progress=on_progress,
-                                               cancelled=cancelled, signal_requested=lambda: cancel_signal)
-                if lane_result.unsupported:
-                    warning = "lane run rejected the launch spec (exit 64); falling back to Python lane"
-                    logging.warning(warning)
-                    lane_warnings.append(warning)
-                    lane_result = None
-                    lane_impl = "python"
-                    raw, diagnostics = BoundedCapture(events_path), BoundedCapture(stderr_path)
-                else:
-                    process = lane_result.provider
-                    fields = lane_result.fields
-                    forced = fields["forced"]
-                    reaped = fields["reaped"]
-                    terminal_grace_break = bool(fields["terminal_event_seen"] and fields["exit"] is not None
-                                                and fields["exit"] < 0 and not forced)
-                    provider_exit_before_cleanup = fields["exit"] if not forced and not terminal_grace_break else None
-                    started_at = fields["started_at"] or started_at
-                    last_progress_at = fields["last_progress_at"] or last_progress_at
-                    lane_warnings.extend(fields["warnings"])
-                    observer = lane_exit.settle_observer(plan, lane_result.record, events_path, stderr_path)
-                    for name, capture in (("events", raw), ("stderr", diagnostics)):
-                        metadata = fields["capture"].get(name, {})
-                        capture.total = metadata.get("bytes", 0)
-                        if metadata.get("truncated"):
-                            capture.total = max(capture.total, provider_observer.MAX_EVENTS_BYTES + 1)
+            subreaper = _enable_subreaper()
+            process = subprocess.Popen(
+                command,
+                cwd=plan["cwd"],
+                env=environment,
+                stdin=stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            launched = time.monotonic()
+            descendants = _Descendants(process, attempt_marker)
+            descendants.sample()
+            if on_start:
+                on_start(process)
+            for stream, name in (
+                (process.stdout, "stdout"),
+                (process.stderr, "stderr"),
+            ):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            excluded = {
+                path.resolve() for path in (output_path, events_path, stderr_path)
+            }
+            workspace = (
+                WorkspaceProgress(plan["cwd"], excluded)
+                if plan["mode"] == "worktree_write"
+                else None
+            )
+            cpu, next_sample = (), started + 1
+            next_tree_sample = started + 1.0
+            while True:
+                for key, mask in selector.select(0.05):
+                    data = os.read(key.fileobj.fileno(), 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.data == "stdout":
+                        produced = True
+                        raw.write(data)
+                        observer.feed_stdout(data)
+                    else:
+                        diagnostics.write(data)
+                    observer.feed_stderr(data, key.data)
+                    last_output = time.monotonic()
+                    next_watch = last_output + silence_seconds
+                    last_progress = last_output
+                    last_progress_at = now()
+                    if on_progress:
+                        on_progress(last_progress_at)
+                current = time.monotonic()
+                if current >= next_tree_sample:
+                    descendants.sample()
+                    next_tree_sample = current + 1.0
+                exited = process.poll() is not None
+                if exited and not selector.get_map():
+                    break
+                if exited and not stopped:
+                    provider_exit_before_cleanup = process.returncode
+                    reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
                     stopped = True
-            if lane_impl == "python":
-                subreaper = _enable_subreaper()
-                process = subprocess.Popen(
-                    command,
-                    cwd=plan["cwd"],
-                    env=environment,
-                    stdin=stdin,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                )
-                launched = time.monotonic()
-                descendants = _Descendants(process, attempt_marker)
-                descendants.sample()
-                if on_start:
-                    on_start(process)
-                for stream, name in (
-                    (process.stdout, "stdout"),
-                    (process.stderr, "stderr"),
+                if cancelled and cancelled():
+                    forced = "cancelled"
+                    break
+                if cancel_signal:
+                    forced = "interrupted"
+                    break
+                if plan["adapter"] == "opencode" and "usage_limited" in observer.semantic_failures:
+                    observer.live_failure = observer.semantic_failures["usage_limited"]
+                if observer.live_failure:
+                    forced = observer.live_failure["status"]
+                    break
+                if (
+                    observer.terminal_at is not None
+                    and current - observer.terminal_at >= plan["grace_seconds"]
                 ):
-                    os.set_blocking(stream.fileno(), False)
-                    selector.register(stream, selectors.EVENT_READ, name)
-                excluded = {
-                    path.resolve() for path in (output_path, events_path, stderr_path)
-                }
-                workspace = (
-                    WorkspaceProgress(plan["cwd"], excluded)
-                    if plan["mode"] == "worktree_write"
-                    else None
-                )
-                cpu, next_sample = (), started + 1
-                next_tree_sample = started + 1.0
-                while True:
-                    for key, mask in selector.select(0.05):
-                        data = os.read(key.fileobj.fileno(), 65536)
-                        if not data:
-                            selector.unregister(key.fileobj)
-                            continue
-                        if key.data == "stdout":
-                            produced = True
-                            raw.write(data)
-                            observer.feed_stdout(data)
-                        else:
-                            diagnostics.write(data)
-                        observer.feed_stderr(data, key.data)
-                        last_output = time.monotonic()
-                        next_watch = last_output + silence_seconds
-                        last_progress = last_output
+                    # Completion is evidenced by the event, even when the CLI hangs.
+                    terminal_grace_break = True
+                    break
+                if current - started >= plan["timeout_seconds"]:
+                    forced = "timed_out"
+                    break
+                # Only provider stdout counts: a banner on stderr is not a started turn.
+                if not produced and current - launched >= plan.get("startup_seconds", STARTUP_SECONDS):
+                    forced = "startup_timeout"
+                    break
+                if current >= next_sample:
+                    next_sample = current + 1
+                    changed = workspace.probe() if workspace is not None else False
+                    new_cpu = _cpu_stamp(process.pid)
+                    if changed or (cpu and new_cpu and new_cpu != cpu):
+                        last_progress = current
                         last_progress_at = now()
                         if on_progress:
                             on_progress(last_progress_at)
-                    current = time.monotonic()
-                    if current >= next_tree_sample:
-                        descendants.sample()
-                        next_tree_sample = current + 1.0
-                    exited = process.poll() is not None
-                    if exited and not selector.get_map():
-                        break
-                    if exited and not stopped:
-                        provider_exit_before_cleanup = process.returncode
-                        reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
-                        stopped = True
-                    if cancelled and cancelled():
-                        forced = "cancelled"
-                        break
-                    if cancel_signal:
-                        forced = "interrupted"
-                        break
-                    if plan["adapter"] == "opencode" and "usage_limited" in observer.semantic_failures:
-                        observer.live_failure = observer.semantic_failures["usage_limited"]
-                    if observer.live_failure:
-                        forced = observer.live_failure["status"]
-                        break
-                    if (
-                        observer.terminal_at is not None
-                        and current - observer.terminal_at >= plan["grace_seconds"]
-                    ):
-                        # Completion is evidenced by the event, even when the CLI hangs.
-                        terminal_grace_break = True
-                        break
-                    if current - started >= plan["timeout_seconds"]:
-                        forced = "timed_out"
-                        break
-                    # Only provider stdout counts: a banner on stderr is not a started turn.
-                    if not produced and current - launched >= plan.get("startup_seconds", STARTUP_SECONDS):
-                        forced = "startup_timeout"
-                        break
-                    if current >= next_sample:
-                        next_sample = current + 1
-                        changed = workspace.probe() if workspace is not None else False
-                        new_cpu = _cpu_stamp(process.pid)
-                        if changed or (cpu and new_cpu and new_cpu != cpu):
-                            last_progress = current
-                            last_progress_at = now()
-                            if on_progress:
-                                on_progress(last_progress_at)
-                        cpu = new_cpu
-                    if current >= next_watch and not exited:
-                        # poll() observes this child directly; silence alone never authorises a signal.
-                        try:
-                            stall_watchdog.write_observation(output_path.parent, plan["cwd"], process.pid,
-                                                             True, current - last_output)
-                        except (OSError, ValueError) as exc:
-                            logging.warning("stall observation unavailable: %s", exc)
-                        next_watch = current + silence_seconds
+                    cpu = new_cpu
+                if current >= next_watch and not exited:
+                    # poll() observes this child directly; silence alone never authorises a signal.
+                    try:
+                        stall_watchdog.write_observation(output_path.parent, plan["cwd"], process.pid,
+                                                         True, current - last_output)
+                    except (OSError, ValueError) as exc:
+                        logging.warning("stall observation unavailable: %s", exc)
+                    next_watch = current + silence_seconds
     except FileNotFoundError as exc:
         forced = "tool_missing"
         diagnostics.write(str(exc).encode())
@@ -2054,8 +2002,6 @@ def _run_attempt(
                 selector.close()
                 if input_file:
                     input_file.close()
-                if lane_stdin_path is not None:
-                    os.unlink(lane_stdin_path.name, dir_fd=tmp_fd)
                 for sig, handler in old_handlers.items():
                     signal.signal(sig, handler)
             finally:
@@ -2177,7 +2123,7 @@ def _run_attempt(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = provider_output._observed_model(plan, parsed, environment)
-    warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings, *lane_warnings]
+    warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings]
     if model_check == "unavailable":
         warnings.append(model_check_detail)
     for capture in (raw, diagnostics):
@@ -2487,8 +2433,7 @@ def _run_attempt(
         "warnings": warnings,
         "reaped": reaped,
         **({"children": child_cancellations} if child_cancellations else {}),
-        **({"spared": lane_result.fields["spared"]} if lane_result and lane_result.fields["spared"] else
-           {"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
+        **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
         in {"usage_limited", "rate_limited", "model_unavailable", "stalled", "startup_timeout"},
@@ -2513,9 +2458,9 @@ def _run_attempt(
             "signature": parsed["signature"],
             "excerpt": parsed["excerpt"][:200],
         },
-        "pgid": lane_result.fields["pgid"] if lane_result else process.pid if process else None,
+        "pgid": process.pid if process else None,
         "started_at": started_at,
-        "ended_at": lane_result.fields["ended_at"] if lane_result else now(),
+        "ended_at": now(),
         "last_progress_at": last_progress_at,
         "auth_or_quota_error": status
         in {"usage_limited", "rate_limited", "auth_required"},

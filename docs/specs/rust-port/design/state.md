@@ -594,6 +594,12 @@ help/golden and caller-test wiring only after the last Python importer retires.
 It also removes surviving profile/knob instructions then. The final deletion
 inventory belongs to that slice, not to this typed-loader PR.
 
+The CLI parser step retired `scripts/configure-fabric-mcp.py` (818 actual
+lines) and the remaining `tests/test_configure_fabric_mcp.py` (1,148 actual
+lines) with the implicit no-argument MCP route. The inventories below retain
+the original planning baseline; do not count those deletions again in later
+owner slices. The explicit transport and new registrations land at cut-over.
+
 | Slice | Python source/helper | Lines |
 | --- | --- | ---: |
 | 5 | `scripts/lib/roots.py` | 33 |

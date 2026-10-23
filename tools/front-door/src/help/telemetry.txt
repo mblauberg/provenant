@@ -1,7 +1,0 @@
-usage: provenant telemetry ingest|sources [--json]
-       provenant telemetry accepted [--since ISO-DATE] [--json]
-       provenant telemetry changes [--sync | --add LABEL --at ISO] [--since ISO] [--json]
-
-Delegates to scripts/provenant-telemetry.
-Local metadata-only usage and event ledger. `changes --sync` records merged
-PRs through gh; `--add` records a manual change marker.

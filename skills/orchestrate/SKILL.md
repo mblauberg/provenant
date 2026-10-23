@@ -5,6 +5,13 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 
 # Multi-agent orchestration
 
+During the Rust rewrite, the Python owner commands below run from the product
+checkout. CLI forwarding is retired. Fabric CLI/MCP mounts and run bindings
+remain unavailable until their owner slices land. The lane/status/wait examples
+below describe that later binding and cannot currently be executed through
+`provenant`; no legacy TS owner remains to invoke directly.
+
+
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
@@ -29,16 +36,16 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Partition writers into separate registered worktrees, and name each writer lane's write scope (files or directories) before fan-out. Lanes with overlapping write scopes run serially, and dependent lanes merge in dependency order. The chair owns authority, decisions, user communication and the final synthesis. A worker's report is a claim: verify commits, counts and tests against the live tree and transcript.
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
-- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `provenant routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `scripts/model-route routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
-  - Before fan-out, run `provenant routes`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
+  - Before fan-out, run `scripts/model-route routes`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
   - Set route or model on every spawn, including native subagents; name Claude members directly (haiku junior, sonnet senior, opus principal) because Agent accepts no tier aliases. Brief native subagents with paths; end each when its deliverable lands.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
-  - Wait with `provenant lanes --wait` or `provenant pr checks --wait` as a background command; never a bare sleep or a manual polling loop.
+  - Wait with `provenant lanes --wait` or `scripts/provenant-pr checks --wait` as a background command; never a bare sleep or a manual polling loop.
   - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. Cache lifetimes vary by provider (Anthropic's default is five minutes; others differ), so keep waits short and let receipts record cache reads.
   - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
   - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.
