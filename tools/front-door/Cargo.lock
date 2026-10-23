@@ -420,6 +420,14 @@ dependencies = [
 [[package]]
 name = "provenant-routing"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-run"
