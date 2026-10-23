@@ -8,7 +8,7 @@
 use crate::exec::{is_executable, REPAIR};
 use crate::json::{self, Value};
 use std::env;
-use std::ffi::{c_char, CStr, CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -78,42 +78,15 @@ enum Account<'a> {
     Named(&'a [u8]),
 }
 
-/// Leading fields of `struct passwd` up to `pw_dir` on macOS and Linux.
-#[repr(C)]
-struct Passwd {
-    name: *const c_char,
-    password: *const c_char,
-    uid: u32,
-    gid: u32,
-    #[cfg(target_os = "macos")]
-    change: i64,
-    #[cfg(target_os = "macos")]
-    class: *const c_char,
-    gecos: *const c_char,
-    dir: *const c_char,
-}
-
-unsafe extern "C" {
-    fn getuid() -> u32;
-    fn getpwuid(uid: u32) -> *const Passwd;
-    fn getpwnam(name: *const c_char) -> *const Passwd;
-}
-
 fn passwd_home(account: Account) -> Option<OsString> {
-    // SAFETY: libc returns null or a pointer to static storage that stays
-    // valid until the next passwd call; the process is single-threaded here
-    // and the directory is copied out immediately.
-    unsafe {
-        let entry = match account {
-            Account::Current => getpwuid(getuid()),
-            Account::Named(name) => getpwnam(CString::new(name).ok()?.as_ptr()),
-        };
-        let entry = entry.as_ref()?;
-        if entry.dir.is_null() {
-            return None;
-        }
-        Some(OsStr::from_bytes(CStr::from_ptr(entry.dir).to_bytes()).to_os_string())
-    }
+    let account = match account {
+        Account::Current => provenant_supervisor::sys::Account::Current,
+        Account::Named(name) => provenant_supervisor::sys::Account::Named(OsStr::from_bytes(name)),
+    };
+    provenant_supervisor::sys::account(account)
+        .ok()
+        .flatten()
+        .map(|entry| entry.home)
 }
 
 /// `Path.resolve()`: symlinks resolved, missing tail components kept
