@@ -307,7 +307,7 @@ struct WindowList: View {
     var body: some View {
         let meta = [account.planTitle, account.isSignedOut ? "signed out" : nil,
                     account.observedAt.map { "\(account.isSignedOut ? "last read" : "observed") \(Fmt.ago($0, now: now))" },
-                    account.status == "stale" ? "latest fetch failed" : nil].compactMap { $0 }
+                    account.status == "stale" ? (account.error != nil ? "last fetch failed" : "window reset since reading") : nil].compactMap { $0 }
         let burn = account.isDrawing(now: now) ? account.creditBurnPerHour : nil
         // Present only when the account has some.
         let extras = account.credits.map { Fmt.credit($0, burn: burn) } + [account.banked.map(Fmt.resets)].compactMap { $0 }
@@ -372,7 +372,7 @@ struct Ring: View {
     }
 
     static func tint(_ state: String) -> Color {
-        ["exhausted": .red, "credit_only": .blue, "deficit": .orange, "on_pace": .green, "reserve": .green, "early": .green, "not_started": .green][state]
+        ["exhausted": .red, "credit_only": .blue, "ahead_of_pace": .orange, "deficit": .orange, "on_pace": .green, "reserve": .green, "early": .green, "not_started": .green][state]
             ?? .secondary
     }
 }
