@@ -1155,7 +1155,7 @@ def binding(rows):
 
 def reset_passed(row, now):
     reset = parse_time(row.get('reset_at'))
-    return bool(reset and reset <= now)
+    return bool(reset and reset <= now - timedelta(seconds=CLOCK_SKEW_SECONDS))
 
 
 def credits(*, raw=False):
