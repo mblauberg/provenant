@@ -5,6 +5,8 @@ Companion to [the spec](rust-supervisor.md). Measured on `origin/main` at
 TypeScript, the lines from one top-level `test(` to the next). File headers,
 imports and shared helpers are not counted. A test is deleted with its slice's
 Python fallback, never when Rust first lands.
+Names below include later watchdog regressions; the counts remain the baseline
+measurement.
 
 **Firm** tests check only mechanics that Rust takes over and that the lane
 conformance suite or Rust unit tests cover. **Conditional** tests go only when
@@ -117,19 +119,21 @@ calls and 157 of the 224 signal and kill references in Python tests.
   - `test_nested_owner_accepts_canonical_ps_when_computed_start_differs`
   - `test_nested_fabric_owner_and_its_child_are_spared`
   - `test_terminal_grace_with_live_claude_skips_settle_and_eof_child`
-  - `test_all_adapters_stall_with_durable_diagnostics`
+  - `test_all_adapters_observe_silence_without_killing_live_provider`
+  - `test_all_adapters_wall_deadline_terminates_silent_provider`
+  - `test_capture_registration_failure_returns_typed_receipt`
   - `test_silent_provider_fails_as_startup_timeout_and_is_reaped`
   - `test_provider_output_before_startup_window_keeps_running`
   - `test_cursor_terminal_event_closes_open_stdin_and_reaps_descendants`
-  - `test_wall_timeout_is_distinct_from_idle`
+  - `test_wall_timeout_terminates_without_output`
   - `test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result`
-  - `test_writer_watchdog_does_not_count_its_own_warning_as_progress`
+  - `test_writer_watchdog_observation_does_not_reset_silence`
   - `test_cancel_allows_provider_session_flush`
   - `test_writer_progress_probe_is_bounded_and_reaches_late_files`
   - `test_writer_progress_uses_string_keys_for_large_tree_memory`
   - `test_writer_progress_advances_when_probe_budget_expires_immediately`
   - `test_writer_progress_tolerates_coarse_creation_clock`
-  - `test_writer_stall_waits_for_full_idle_interval_scan`
+  - `test_writer_wall_deadline_does_not_wait_for_silence_interval`
   - `test_writer_progress_sees_preserved_mtime_copy_during_initial_scan`
   - `test_writer_progress_sees_preserved_mtime_copy_at_root`
   - `test_writer_progress_tracks_deletion_without_counting_excluded_paths`
@@ -152,7 +156,7 @@ calls and 157 of the 224 signal and kill references in Python tests.
 - `tests/test_cf_dispatch.py` (4 tests, 113 lines):
   - `test_opencode_dispatch_group_signal_terminates_provider_and_grandchild`
   - `test_opencode_normal_exit_reaps_grandchild`
-  - `test_opencode_idle_watchdog_terminates_silent_provider`
+  - `test_opencode_silence_observation_keeps_provider_alive`
   - `test_opencode_stderr_progress_keeps_writer_alive`
 
 ## S2, conditional
@@ -218,6 +222,8 @@ readers no longer wait through gaps.
   - `test_reap_attempt_owners_without_run_token`
   - `test_process_evidence_without_start_time_is_unknown`
   - `test_reap_attempt_recovers_missing_pgid`
+  - `test_reaper_checkpoint_failure_still_publishes_terminal`
+  - `test_reaper_git_summaries_share_one_pass_budget`
 - `tests/test_exec_layout.py` (1 test, 16 lines):
   - `test_orphan_reaping_does_not_close_a_live_unindexed_provider`
 - `runtime/fabric/tests/process-reaping.test.ts`: whole file, 3 tests, 131 lines

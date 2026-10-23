@@ -17,6 +17,33 @@ import { liveness, observedAlive, reapAttemptRuns, runOwners, type ProcessIdenti
 
 const execFileAsync = promisify(execFile);
 
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+function readWatchdog(runDir: string, value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "string" || isAbsolute(value)) return undefined;
+  let path: string;
+  try {
+    const root = realpathSync.native(runDir);
+    const candidate = resolve(root, value);
+    const local = relative(root, candidate);
+    if (isAbsolute(local) || local === ".." || local.startsWith(`..${sep}`)) return undefined;
+    let component = root;
+    for (const part of local.split(sep)) {
+      component = join(component, part);
+      if (lstatSync(component).isSymbolicLink()) return undefined;
+    }
+    path = realpathSync.native(candidate);
+    const rel = relative(root, path);
+    if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
+    if (lstatSync(path).size > 64 * 1024) return undefined;
+  } catch { return undefined; }
+  const record = readJson(path);
+  return record?.schema === "fabric.watchdog.v1" && typeof record.process_alive === "boolean" &&
+    typeof record.silent_seconds === "number" && Number.isFinite(record.silent_seconds) && record.silent_seconds >= 0 &&
+    typeof record.checked_at === "string" && ISO_STAMP.test(record.checked_at) && Number.isFinite(Date.parse(record.checked_at))
+    ? record : undefined;
+}
+
 /**
  * A launcher that announced an attempt and died before starting any owner: nothing will run it.
  * The launcher stamps its owner into status before writing an owner record, so with no stamp
@@ -195,6 +222,10 @@ async function legacyStatus(
         const newest = Math.max(started, newestMtimeMs(outputPaths));
         const silence = Math.max(0, (Date.now() - newest) / 1000);
         const paths = status?.paths as Record<string, unknown> | undefined;
+        const profile = (selectedTask ?? attempts[0] ?? status)?.profile as { knobs?: Record<string, unknown> } | undefined;
+        const savedSilence = profile?.knobs?.["lanes.silence_seconds"];
+        const silenceSeconds = typeof savedSilence === "number" && savedSilence >= 1 && savedSilence <= 3600
+          ? savedSilence : 300;
         const result = (selectedTask ?? attempts[0])?.result as Record<string, unknown> | undefined;
         const finished = Date.parse(
           String(
@@ -222,7 +253,7 @@ async function legacyStatus(
           ),
           output_age_seconds: Math.round(silence),
           stalled:
-            state === "running" && alive && silence > Math.max(600, Number(status?.timeout_seconds ?? 3600) * 0.2),
+            state === "running" && alive && silence >= silenceSeconds,
           result_path:
             safePath(
               selectedTask === undefined
@@ -279,6 +310,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
         )) {
           const row = readJson(join(dir, attempt.name, "attempt.json"));
           if (row?.schema !== "fabric.attempt.v1") continue;
+          const watchdog = readWatchdog(runDir, (row.paths as Record<string, unknown> | undefined)?.watchdog ??
+            relative(runDir, join(dir, attempt.name, "watchdog.json")));
+          if (watchdog) row.watchdog = watchdog;
           const rows = grouped.get(task.name) ?? [];
           rows.push(row);
           grouped.set(task.name, rows);

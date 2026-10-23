@@ -33,6 +33,7 @@ and the owning prose or constant still holds today's value until it is wired.
 |---|---|---|---|---|
 | Effort of each task-class route | `config/model-routing.json` `task_class_routes.*.effort`, floored by `TASK_CLASS_POLICY` in `scripts/model_route.py` | mechanical/bulk `low`; legwork/research `medium`; the rest `high` | Reasoning tokens against depth | `effort.shift`, wired |
 | Batch fan-out width | `skills/orchestrate/scripts/batch_run.py` `MAX_CONCURRENCY` 8, `DEFAULT_CONCURRENCY` 4; Fabric batch 4, councils 8 (`runtime/fabric/src/execution.ts`) | up to 8 lanes | Quota and memory pacing against wall time | `lanes.max_concurrency`, wired |
+| Silent-provider re-check | `skills/orchestrate/scripts/provider_exec.py`, abandoned attempts in `dispatch_run.py` | 300 seconds (1–3600) | Earlier observation against filesystem sampling cost; never kills for silence | `lanes.silence_seconds`, wired |
 | Auto-compaction ceiling | `config/model-routing.json` `context.ceiling_tokens`; `context_usage.py` clamps 100k–1M | 300,000 | Re-read tokens per turn against loss of detail | `context.ceiling_tokens`, wired |
 | Reviewers above the ladder | `HARNESS.md` Review ladder; `skills/code-review/SKILL.md` step 5; `references/multi-agent-review.md` (one reviewer at substantial, councils 2–4) | ladder minimum | Reviewer lanes against defect coverage | `review.extra_reviewers`, wired (skill) |
 | Cross-family requirement | `HARNESS.md` ladder: substantial falls back to same-family with another lens | prefer | Decorrelation against waiting on quota | `review.cross_family`, wired (skill) |
@@ -153,6 +154,10 @@ explicit `--knob` are strict and exit with an error instead.
   of the configured and shifted effort.
 - `lanes.max_concurrency` (`batch_run.py`): caps the requested concurrency for
   both `provenant batch` and Fabric batches; it never raises it.
+- `lanes.silence_seconds` (`dispatch_run.py`, `provider_exec.py`): interval
+  without stdout or stderr before retaining `watchdog.json`; default 300,
+  range 1–3600. The reaper and status readers use the attempt's saved knob.
+  Silence never signals a provider; startup and wall deadlines still apply.
 - `context.ceiling_tokens` (`dispatch_run.py`): the ceiling for a dispatch that
   passes no `--context-ceiling`. An explicit flag and a resumed run's ceiling
   still win.

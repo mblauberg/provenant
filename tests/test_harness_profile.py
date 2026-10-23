@@ -67,7 +67,7 @@ def test_balanced_is_every_default_and_has_a_stable_digest(space):
 
 def test_registry_entries_name_an_existing_reader_and_a_trade_off():
     wired = [name for name, spec in REGISTRY.knobs.items() if spec["status"] == "wired"]
-    assert 4 <= len(wired) <= 7
+    assert 4 <= len(wired) <= 8
     for name, spec in REGISTRY.knobs.items():
         reader = spec["reader"].split(" ", 1)[0].rstrip(",")
         assert (ROOT / reader).exists(), (name, reader)
@@ -327,18 +327,21 @@ def test_attempt_receipt_carries_the_profile_stamp(space, monkeypatch):
     # export_knob_overrides writes os.environ; registering the names restores them afterwards.
     monkeypatch.setenv("PROVENANT_KNOB_LANES_MAX_CONCURRENCY", "8")
     monkeypatch.setenv("PROVENANT_KNOB_EFFORT_SHIFT", "0")
+    monkeypatch.setenv("PROVENANT_KNOB_LANES_SILENCE_SECONDS", "300")
     monkeypatch.setenv("PROVENANT_RISK_TIER", "routine")
     monkeypatch.delenv("PROVENANT_KNOB_LANES_MAX_CONCURRENCY")
     monkeypatch.delenv("PROVENANT_KNOB_EFFORT_SHIFT")
+    monkeypatch.delenv("PROVENANT_KNOB_LANES_SILENCE_SECONDS")
     monkeypatch.delenv("PROVENANT_RISK_TIER")
 
     row = dispatch.contract_row(dispatch_args(), space.project, 1, space.project / "attempt", {}, "now")
     assert row["profile"]["preset"] == "balanced"
+    assert row["profile"]["knobs"]["lanes.silence_seconds"] == 300
     assert row["profile"]["digest"] == resolved(space).digest
 
     write(space.user, {"preset": "economy"})
     args = dispatch_args(task_class="review", risk_tier="crucial",
-                         knobs=["lanes.max_concurrency=3", "effort.shift=-1"])
+                         knobs=["lanes.max_concurrency=3", "effort.shift=-1", "lanes.silence_seconds=120"])
     dispatch.export_knob_overrides(args)
     assert os.environ["PROVENANT_KNOB_LANES_MAX_CONCURRENCY"] == "3"
     assert os.environ["PROVENANT_RISK_TIER"] == "crucial"
@@ -347,6 +350,8 @@ def test_attempt_receipt_carries_the_profile_stamp(space, monkeypatch):
     assert stamp["knobs"]["lanes.max_concurrency"] == 3 and stamp["knobs"]["effort.shift"] == 0
     assert stamp["floored"] == ["effort.shift"]
     assert dispatch.profile_knob(args, "context.ceiling_tokens") == 200000
+    assert stamp["knobs"]["lanes.silence_seconds"] == 120
+    assert os.environ["PROVENANT_KNOB_LANES_SILENCE_SECONDS"] == "120"
 
     with pytest.raises(dispatch.harness_profile.ProfileError, match="unknown knob"):
         dispatch.export_knob_overrides(dispatch_args(knobs=["no.such=1"]))

@@ -65,7 +65,9 @@ function digestBase(row: Record<string, any>): string {
   return JSON.stringify(row);
 }
 export function digest(row: Record<string, any>): string {
-  const base = digestBase(row);
+  const rendered = digestBase(row);
+  const observation = watchdogStatus(row);
+  const base = observation && !rendered.includes(observation) ? rendered + observation : rendered;
   // Python renders its warnings as one "  ! " + "; ".join(unique)[:200] line; skip the ones
   // fewest that render to that line; a warning truncated out of it is shown again, never dropped.
   const all = Array.isArray(row.warnings) ? [...new Set(row.warnings.filter(Boolean).map(String))] : [];
@@ -76,13 +78,27 @@ export function digest(row: Record<string, any>): string {
   const warnings = all.slice(covered).join("\n");
   return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
+
+export function watchdogStatus(row: Record<string, any>): string {
+  const observation = row.watchdog;
+  if (!observation || typeof observation.silent_seconds !== "number" ||
+      !Number.isFinite(observation.silent_seconds) || typeof observation.process_alive !== "boolean") return "";
+  // Re-render the stamp so a forged watchdog.json can't put raw text in the terminal.
+  const checked = Date.parse(String(observation.checked_at));
+  if (!Number.isFinite(checked)) return "";
+  const at = new Date(checked).toISOString();
+  const silent = Math.round(observation.silent_seconds);
+  // Nothing rewrites the observation once the lane ends, so a finished row shows it as history.
+  if ((row.status ?? row.state) !== "running") return ` · last watchdog: silent ${silent}s at ${at}`;
+  return ` · watchdog: silent ${silent}s; ${observation.process_alive ? "alive" : "dead"} at ${at}`;
+}
 /** Keep the default structured reply as small as its text digest. */
 export function runView(value: Record<string, any>, detail = "brief"): Record<string, any> {
   if (detail === "full" || (value.status === "rejected" && !value.run_id)) return value;
   if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => runView(row)) };
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "host", "hosts", "reachability", "last_known_state", "last_known_status", "age_seconds", "observed_at", "operation_id", "placement_fallback",
-    "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
+    "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied", "watchdog",
     "provenance", "warnings", "notes", "landable", "quarantine", "reason", "question", "error", "error_class", "result_partial", "fix", "retryable", "reset_at", "retry_after", "tasks"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
@@ -115,7 +131,7 @@ export function quarantineAction(row: Record<string, any>): string {
 
 /** One line per lane: outcome, id, route, result path and any landing block. */
 export function laneLine(row: Record<string, any>): string {
-  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}${row.result_partial ? " · partial result" : ""}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`;
+  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}${watchdogStatus(row)}${row.result_partial ? " · partial result" : ""}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`;
 }
 export function lanesDigest(result: Record<string, any>): string {
   if (!Array.isArray(result.runs)) return digest(result);

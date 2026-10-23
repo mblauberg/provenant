@@ -40,6 +40,8 @@ import layout
 import context_usage
 import process_info
 import run_lineage
+import stall_watchdog
+from _shared import harness_profile
 from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
@@ -1281,7 +1283,6 @@ def build_plan(
     add_dirs=(),
     capabilities=None,
     timeout_seconds=None,
-    idle_seconds=None,
     startup_seconds=None,
     preface=True,
     run_id="",
@@ -1566,17 +1567,12 @@ def build_plan(
     if sandbox == "full" and adapter != "codex":
         warnings.append("sandbox control unsupported by " + adapter)
     timeout = float(timeout_seconds or (10800 if mode == "worktree_write" else 3600))
-    idle = float(
-        idle_seconds
-        or os.environ.get("CF_DISPATCH_IDLE_SECONDS")
-        or (config.IDLE_WRITE if mode == "worktree_write" else config.IDLE_READ)
-    )
     startup = float(
         startup_seconds
         or os.environ.get("CF_DISPATCH_STARTUP_SECONDS")
         or STARTUP_SECONDS
     )
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts. "
@@ -1604,7 +1600,6 @@ def build_plan(
         "run_dir": str(attempt_dir),
         "original_prompt_file": original_path,
         "timeout_seconds": timeout,
-        "idle_seconds": idle,
         "startup_seconds": startup,
         "grace_seconds": 5.0,
         "session_id": session_id
@@ -2148,9 +2143,13 @@ class BoundedCapture:
         # Append to disk only until the cap. Keep subsequent tail chunks in a
         # deque: every byte is copied a bounded number of times, even for JSONL.
         room = max(0, self.limit - self.total)
-        if room and self.write_error is None:
+        if data and self.write_error is None:
             try:
-                self.file.write(data[:room])
+                if room:
+                    self.file.write(data[:room])
+                else:
+                    # Retained bytes are capped; the timestamp still tracks provider output.
+                    os.utime(self.file.fileno(), None)
             except OSError as exc:
                 self.write_error = exc
         self.total += len(data)
@@ -2719,15 +2718,12 @@ class WorkspaceProgress:
         self.started_wall_ns = time.time_ns() - 20_000_000
         self.known = {}
         self.initial_pass_complete = False
-        self.completed_pass_started_at = None
         self.last_visited = 0
         self._stack = []
         self._seen = set()
-        self._pass_started_at = None
 
     def _start_pass(self):
         self._seen = set()
-        self._pass_started_at = time.monotonic()
         try:
             self._stack = [os.scandir(self.cwd)]
         except OSError:
@@ -2780,7 +2776,6 @@ class WorkspaceProgress:
                     for path in missing:
                         del self.known[path]
             self.initial_pass_complete = True
-            self.completed_pass_started_at = self._pass_started_at
         return changed
 
     def close(self):
@@ -3773,6 +3768,9 @@ def _run_attempt(
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
+    resolution, _ = harness_profile.lenient(cwd=Path(plan["cwd"]), environ=control_environment)
+    silence_seconds = plan.get("silence_seconds", resolution.knobs["lanes.silence_seconds"] if resolution else 300)
+    last_output, next_watch = started, started + silence_seconds
     launched, produced = started, False
     process = None
     descendants = None
@@ -3931,6 +3929,7 @@ def _run_attempt(
     browser_tmp, browser_tmp_identity, browser_tmp_warnings = None, None, []
     selector = selectors.DefaultSelector()
     try:
+        stall_watchdog.register_capture(output_path.parent, events_path, stderr_path)
         if "browser" in plan["applied"].get("capabilities", []):
             browser_tmp = _fabric_hosts_owner().browser_temporary_directory(plan["run_dir"], create=True)
             browser_tmp_identity = browser_tmp.lstat()
@@ -3995,7 +3994,6 @@ def _run_attempt(
             ):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, name)
-            warned = False
             excluded = {
                 path.resolve() for path in (output_path, events_path, stderr_path)
             }
@@ -4019,9 +4017,10 @@ def _run_attempt(
                     else:
                         diagnostics.write(data)
                     consume_diagnostic(data, key.data)
-                    last_progress = time.monotonic()
+                    last_output = time.monotonic()
+                    next_watch = last_output + silence_seconds
+                    last_progress = last_output
                     last_progress_at = now()
-                    warned = False
                     if on_progress:
                         on_progress(last_progress_at)
                 current = time.monotonic()
@@ -4067,30 +4066,17 @@ def _run_attempt(
                     if changed or (cpu and new_cpu and new_cpu != cpu):
                         last_progress = current
                         last_progress_at = now()
-                        warned = False
                         if on_progress:
                             on_progress(last_progress_at)
                     cpu = new_cpu
-                idle = current - last_progress
-                covered_idle = idle if workspace is None else max(
-                    0, (workspace.completed_pass_started_at or last_progress) - last_progress
-                )
-                if cpu is not None and covered_idle >= plan["idle_seconds"]:
-                    forced = "stalled"
-                    break
-                if idle >= plan["idle_seconds"] / 2 and not warned:
-                    raw.write(
-                        (
-                            json.dumps(
-                                {
-                                    "type": "fabric.idle_warning",
-                                    "silent_seconds": round(idle, 3),
-                                }
-                            )
-                            + "\n"
-                        ).encode()
-                    )
-                    warned = True
+                if current >= next_watch and not exited:
+                    # poll() observes this child directly; silence alone never authorises a signal.
+                    try:
+                        stall_watchdog.write_observation(output_path.parent, plan["cwd"], process.pid,
+                                                         True, current - last_output)
+                    except (OSError, ValueError) as exc:
+                        logging.warning("stall observation unavailable: %s", exc)
+                    next_watch = current + silence_seconds
     except FileNotFoundError as exc:
         forced = "tool_missing"
         diagnostics.write(str(exc).encode())
@@ -4173,11 +4159,7 @@ def _run_attempt(
     if pending:
         consume(b"\n")
     consume_diagnostic(b"\n", "stderr")
-    if forced == "stalled":
-        diagnostics.write(
-            f"idle for {plan['idle_seconds']:g}s; try another model\n".encode()
-        )
-    elif forced == "timed_out":
+    if forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
     elif forced == "startup_timeout":
         diagnostics.write(
@@ -4239,7 +4221,6 @@ def _run_attempt(
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {
-            "stalled": "idle_watchdog",
             "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",

@@ -270,9 +270,6 @@ def validate_options(opts: Options) -> None:
     # headless timeout consume it; the rest stay bounded by the calling owner.
     if opts.timeout_seconds and not re.fullmatch(r"[1-9][0-9]*", opts.timeout_seconds):
         die(f"invalid timeout-seconds: {opts.timeout_seconds}")
-    idle = os.environ.get("CF_DISPATCH_IDLE_SECONDS")
-    if idle and not re.fullmatch(r"[0-9]*[1-9][0-9]*", idle):
-        die("CF_DISPATCH_IDLE_SECONDS must be a positive integer")
     # An adapter with no arm is an input error, refused here rather than after a
     # temporary directory, prompt staging and route resolution have been paid for.
     for candidate in (*opts.tool.split(), *opts.chain.split()):
