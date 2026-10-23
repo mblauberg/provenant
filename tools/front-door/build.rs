@@ -4,8 +4,10 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use toml_edit::{DocumentMut, Item};
 
 type BuildResult<T> = Result<T, Box<dyn Error>>;
@@ -40,7 +42,7 @@ impl Inputs {
             .map(|file| (&file.name, &file.bytes, file.executable))
     }
 
-    fn read_file(&mut self, path: &Path, name: String) -> BuildResult<()> {
+    fn read_file(&mut self, path: &Path, name: String, metadata: &fs::Metadata) -> BuildResult<()> {
         if self.files.len() >= MAX_SOURCE_FILES {
             return Err(invalid("source inventory exceeds the file-count limit").into());
         }
@@ -52,10 +54,6 @@ impl Inputs {
         let read_limit = limit
             .checked_add(1)
             .ok_or_else(|| invalid("source inventory byte limit overflowed"))?;
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(invalid("source inventory input is not a regular file").into());
-        }
         let executable = metadata.permissions().mode() & 0o111 != 0;
         let file = fs::File::open(path)?;
         let mut bytes = Vec::new();
@@ -78,6 +76,70 @@ impl Inputs {
     }
 }
 
+struct TrackedFiles {
+    repository: PathBuf,
+    names: BTreeSet<Vec<u8>>,
+}
+
+impl TrackedFiles {
+    fn load(workspace: &Path, repository: &Path) -> BuildResult<Self> {
+        let top_level = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(workspace)
+            .output()?;
+        if !top_level.status.success() {
+            return Err(invalid("source inventory requires a git checkout").into());
+        }
+        let top_level = top_level
+            .stdout
+            .strip_suffix(b"\n")
+            .ok_or_else(|| invalid("git did not return a repository root"))?;
+        let top_level = fs::canonicalize(std::str::from_utf8(top_level)?)?;
+        if top_level != repository {
+            return Err(invalid("source workspace is outside its expected git checkout").into());
+        }
+
+        let output = Command::new("git")
+            .args(["ls-files", "--full-name", "-z", "--", ":/"])
+            .current_dir(workspace)
+            .output()?;
+        if !output.status.success() {
+            return Err(invalid("cannot list tracked source files").into());
+        }
+        let names = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        Ok(Self {
+            repository: repository.to_path_buf(),
+            names,
+        })
+    }
+
+    fn contains(&self, path: &Path) -> BuildResult<bool> {
+        let relative = path
+            .strip_prefix(&self.repository)
+            .map_err(|_| invalid("source inventory path escapes its repository"))?;
+        Ok(self.names.contains(relative.as_os_str().as_bytes()))
+    }
+
+    fn has_descendant(&self, path: &Path) -> BuildResult<bool> {
+        let relative = path
+            .strip_prefix(&self.repository)
+            .map_err(|_| invalid("source inventory path escapes its repository"))?;
+        let mut prefix = relative.as_os_str().as_bytes().to_vec();
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        Ok(self
+            .names
+            .iter()
+            .any(|tracked| tracked.starts_with(&prefix)))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Member {
     directory: PathBuf,
@@ -94,6 +156,7 @@ fn main() -> BuildResult<()> {
         .and_then(Path::parent)
         .ok_or_else(|| invalid("workspace is not nested below the repository root"))?;
     let repository = fs::canonicalize(repository)?;
+    let tracked = TrackedFiles::load(&workspace, &repository)?;
 
     let mut watched = BTreeSet::new();
     let mut inputs = Inputs::default();
@@ -104,6 +167,7 @@ fn main() -> BuildResult<()> {
         &workspace,
         &workspace_manifest,
         "Cargo.toml".to_owned(),
+        &tracked,
         &mut inputs,
     )?;
     let workspace_document = parse_toml(
@@ -115,21 +179,39 @@ fn main() -> BuildResult<()> {
 
     let lockfile = workspace.join("Cargo.lock");
     watch(&mut watched, lockfile.clone())?;
-    add_required_file(&workspace, &lockfile, "Cargo.lock".to_owned(), &mut inputs)?;
+    add_required_file(
+        &workspace,
+        &lockfile,
+        "Cargo.lock".to_owned(),
+        &tracked,
+        &mut inputs,
+    )?;
 
-    let members = discover_members(&workspace, &workspace_document, &mut watched)?;
+    let members = discover_members(&workspace, &workspace_document, &mut watched, &tracked)?;
     for member in &members {
         let manifest = member.directory.join("Cargo.toml");
         let logical_manifest = join_logical(&member.logical_directory, "Cargo.toml");
         watch(&mut watched, manifest.clone())?;
         if logical_manifest != "Cargo.toml" {
-            add_required_file(&workspace, &manifest, logical_manifest, &mut inputs)?;
+            add_required_file(
+                &workspace,
+                &manifest,
+                logical_manifest,
+                &tracked,
+                &mut inputs,
+            )?;
         }
 
         let build_script = member.directory.join("build.rs");
         let logical_build_script = join_logical(&member.logical_directory, "build.rs");
         watch(&mut watched, build_script.clone())?;
-        add_optional_file(&workspace, &build_script, logical_build_script, &mut inputs)?;
+        add_optional_file(
+            &workspace,
+            &build_script,
+            logical_build_script,
+            &tracked,
+            &mut inputs,
+        )?;
 
         for source_directory in ["src", "tests", "examples", "benches", "assets"] {
             let directory = member.directory.join(source_directory);
@@ -139,6 +221,7 @@ fn main() -> BuildResult<()> {
                 &directory,
                 &mut inputs,
                 source_directory == "src",
+                &tracked,
             )?;
         }
     }
@@ -156,7 +239,7 @@ fn main() -> BuildResult<()> {
         let directory = repository.join(source);
         watch(&mut watched, directory.clone())?;
         let required = source != "templates";
-        collect_external_tree(&directory, release_name, &mut inputs, required)?;
+        collect_external_tree(&directory, release_name, &mut inputs, required, &tracked)?;
     }
     for (source, release_name) in [
         ("AGENTS.md", "instructions/AGENTS.md"),
@@ -164,11 +247,17 @@ fn main() -> BuildResult<()> {
     ] {
         let path = repository.join(source);
         watch(&mut watched, path.clone())?;
-        add_required_file(&repository, &path, release_name.to_owned(), &mut inputs)?;
+        add_required_file(
+            &repository,
+            &path,
+            release_name.to_owned(),
+            &tracked,
+            &mut inputs,
+        )?;
     }
 
-    add_workspace_configuration(&workspace, &repository, &mut watched, &mut inputs)?;
-    let toolchain = pinned_toolchain(&workspace, &repository, &mut watched, &mut inputs)?;
+    add_workspace_configuration(&workspace, &repository, &mut watched, &tracked, &mut inputs)?;
+    let toolchain = pinned_toolchain(&workspace, &repository, &mut watched, &tracked, &mut inputs)?;
     let target = env::var("TARGET")
         .map_err(|_| invalid("Cargo did not provide TARGET to the build script"))?;
     validate_metadata_value(&target)?;
@@ -238,6 +327,7 @@ fn discover_members(
     workspace: &Path,
     manifest: &DocumentMut,
     watched: &mut BTreeSet<PathBuf>,
+    tracked: &TrackedFiles,
 ) -> BuildResult<Vec<Member>> {
     let members = manifest
         .as_table()
@@ -271,9 +361,18 @@ fn discover_members(
                     let child = child?;
                     let kind = child.file_type()?;
                     if kind.is_symlink() {
-                        return Err(invalid("workspace member path is a symlink").into());
+                        if tracked.contains(&child.path())?
+                            || tracked.has_descendant(&child.path())?
+                        {
+                            return Err(invalid("workspace member path is a symlink").into());
+                        }
+                        continue;
                     }
                     if !kind.is_dir() {
+                        continue;
+                    }
+                    let directory = child.path();
+                    if !tracked.contains(&directory.join("Cargo.toml"))? {
                         continue;
                     }
                     let name = child
@@ -281,7 +380,6 @@ fn discover_members(
                         .into_string()
                         .map_err(|_| invalid("workspace member name is not UTF-8"))?;
                     let logical_directory = format!("crates/{name}");
-                    let directory = child.path();
                     result.push(Member {
                         directory,
                         logical_directory,
@@ -308,6 +406,7 @@ fn add_workspace_configuration(
     workspace: &Path,
     repository: &Path,
     watched: &mut BTreeSet<PathBuf>,
+    tracked: &TrackedFiles,
     inputs: &mut Inputs,
 ) -> BuildResult<()> {
     for config_name in ["config.toml", "config", "rustc-wrapper.sh"] {
@@ -317,6 +416,7 @@ fn add_workspace_configuration(
             workspace,
             &workspace_path,
             posix_relative(workspace, &workspace_path)?,
+            tracked,
             inputs,
         )?;
 
@@ -326,6 +426,7 @@ fn add_workspace_configuration(
             repository,
             &repository_path,
             format!("repo/.cargo/{config_name}"),
+            tracked,
             inputs,
         )?;
     }
@@ -337,7 +438,13 @@ fn add_workspace_configuration(
     ] {
         let workspace_path = workspace.join(config_name);
         watch(watched, workspace_path.clone())?;
-        add_optional_file(workspace, &workspace_path, config_name.to_owned(), inputs)?;
+        add_optional_file(
+            workspace,
+            &workspace_path,
+            config_name.to_owned(),
+            tracked,
+            inputs,
+        )?;
 
         let repository_path = repository.join(config_name);
         watch(watched, repository_path.clone())?;
@@ -345,6 +452,7 @@ fn add_workspace_configuration(
             repository,
             &repository_path,
             format!("repo/{config_name}"),
+            tracked,
             inputs,
         )?;
     }
@@ -355,6 +463,7 @@ fn pinned_toolchain(
     workspace: &Path,
     repository: &Path,
     watched: &mut BTreeSet<PathBuf>,
+    tracked: &TrackedFiles,
     inputs: &mut Inputs,
 ) -> BuildResult<String> {
     let candidates = [
@@ -371,7 +480,8 @@ fn pinned_toolchain(
     for (anchor, relative, logical_name) in candidates {
         let path = anchor.join(relative);
         watch(watched, path.clone())?;
-        if add_optional_file(anchor, &path, logical_name.to_owned(), inputs)? && selected.is_none()
+        if add_optional_file(anchor, &path, logical_name.to_owned(), tracked, inputs)?
+            && selected.is_none()
         {
             selected = Some((path, logical_name.to_owned()));
         }
@@ -412,12 +522,13 @@ fn collect_workspace_tree(
     directory: &Path,
     inputs: &mut Inputs,
     required: bool,
+    tracked: &TrackedFiles,
 ) -> BuildResult<()> {
     let mut add = |path: &Path| {
         let name = posix_relative(workspace, path)?;
-        add_file(path, name, inputs)
+        add_file(workspace, path, name, tracked, inputs)
     };
-    collect_tree(directory, &mut add, required)
+    collect_tree(directory, &mut add, required, tracked)
 }
 
 fn collect_external_tree(
@@ -425,18 +536,26 @@ fn collect_external_tree(
     release_prefix: &str,
     inputs: &mut Inputs,
     required: bool,
+    tracked: &TrackedFiles,
 ) -> BuildResult<()> {
     let mut add = |path: &Path| {
         let relative = posix_relative(directory, path)?;
-        add_file(path, format!("{release_prefix}/{relative}"), inputs)
+        add_file(
+            directory,
+            path,
+            format!("{release_prefix}/{relative}"),
+            tracked,
+            inputs,
+        )
     };
-    collect_tree(directory, &mut add, required)
+    collect_tree(directory, &mut add, required, tracked)
 }
 
 fn collect_tree(
     directory: &Path,
     add: &mut dyn FnMut(&Path) -> BuildResult<()>,
     required: bool,
+    tracked: &TrackedFiles,
 ) -> BuildResult<()> {
     let Some(metadata) = optional_metadata(directory)? else {
         if required {
@@ -459,13 +578,26 @@ fn collect_tree(
             continue;
         }
         if kind.is_symlink() {
-            return Err(invalid("source inventory contains a symlink").into());
+            if tracked.contains(&path)? || tracked.has_descendant(&path)? {
+                return Err(invalid("source inventory contains a symlink").into());
+            }
+            continue;
         }
         if kind.is_dir() {
-            collect_tree(&path, add, true)?;
+            if tracked.contains(&path)? {
+                return Err(invalid("tracked source file is not a regular file").into());
+            }
+            if tracked.has_descendant(&path)? {
+                collect_tree(&path, add, true, tracked)?;
+            }
         } else if kind.is_file() {
-            add(&path)?;
-        } else {
+            if tracked.has_descendant(&path)? {
+                return Err(invalid("tracked source directory is not a directory").into());
+            }
+            if tracked.contains(&path)? {
+                add(&path)?;
+            }
+        } else if tracked.contains(&path)? || tracked.has_descendant(&path)? {
             return Err(invalid("source inventory contains a non-file entry").into());
         }
     }
@@ -497,9 +629,10 @@ fn add_required_file(
     anchor: &Path,
     path: &Path,
     logical_name: String,
+    tracked: &TrackedFiles,
     inputs: &mut Inputs,
 ) -> BuildResult<()> {
-    if add_optional_file(anchor, path, logical_name, inputs)? {
+    if add_optional_file(anchor, path, logical_name, tracked, inputs)? {
         Ok(())
     } else {
         Err(invalid("required source inventory file is missing").into())
@@ -510,27 +643,38 @@ fn add_optional_file(
     anchor: &Path,
     path: &Path,
     logical_name: String,
+    tracked: &TrackedFiles,
     inputs: &mut Inputs,
 ) -> BuildResult<bool> {
+    if !tracked.contains(path)? {
+        return Ok(false);
+    }
     let Some(metadata) = metadata_beneath(anchor, path)? else {
         return Ok(false);
     };
     if !metadata.is_file() {
         return Err(invalid("source inventory input is not a regular file").into());
     }
-    inputs.read_file(path, logical_name)?;
+    inputs.read_file(path, logical_name, &metadata)?;
     Ok(true)
 }
 
-fn add_file(path: &Path, logical_name: String, inputs: &mut Inputs) -> BuildResult<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(invalid("source inventory contains a symlink").into());
+fn add_file(
+    anchor: &Path,
+    path: &Path,
+    logical_name: String,
+    tracked: &TrackedFiles,
+    inputs: &mut Inputs,
+) -> BuildResult<()> {
+    if !tracked.contains(path)? {
+        return Ok(());
     }
+    let metadata = metadata_beneath(anchor, path)?
+        .ok_or_else(|| invalid("tracked source inventory input is missing"))?;
     if !metadata.is_file() {
         return Err(invalid("source inventory input is not a regular file").into());
     }
-    inputs.read_file(path, logical_name)
+    inputs.read_file(path, logical_name, &metadata)
 }
 
 fn optional_metadata(path: &Path) -> BuildResult<Option<fs::Metadata>> {
@@ -583,9 +727,6 @@ fn posix_relative(root: &Path, path: &Path) -> BuildResult<String> {
         let name = name
             .to_str()
             .ok_or_else(|| invalid("source inventory path is not UTF-8"))?;
-        if name.is_empty() || name.contains('\\') || name.contains('\0') {
-            return Err(invalid("source inventory path is not a POSIX name").into());
-        }
         components.push(name);
     }
     if components.is_empty() {
@@ -643,4 +784,76 @@ fn validate_metadata_value(value: &str) -> BuildResult<()> {
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildResult, Inputs, TrackedFiles, collect_external_tree, invalid, source_digest};
+    use provenant_records::SourceInput;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[test]
+    fn untracked_and_ignored_files_do_not_change_the_source_digest() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        let assets = repository.join("assets");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(&assets)?;
+        fs::write(repository.join(".gitignore"), b"assets/ignored.txt\n")?;
+        fs::write(assets.join("tracked.txt"), b"tracked\n")?;
+        run_git(&repository, &["init", "--quiet"])?;
+        run_git(&repository, &["add", ".gitignore", "assets/tracked.txt"])?;
+        run_git(
+            &repository,
+            &["check-ignore", "--quiet", "assets/ignored.txt"],
+        )?;
+
+        let initial = digest_assets(&workspace, &repository, &assets)?;
+        fs::write(assets.join("untracked.txt"), b"untracked\n")?;
+        fs::write(assets.join("ignored.txt"), b"ignored\n")?;
+        let after_untracked_files = digest_assets(&workspace, &repository, &assets)?;
+
+        assert_eq!(initial, after_untracked_files);
+        Ok(())
+    }
+
+    #[test]
+    fn source_inventory_requires_a_git_checkout() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        fs::create_dir_all(&workspace)?;
+
+        assert!(TrackedFiles::load(&workspace, &repository).is_err());
+        Ok(())
+    }
+
+    fn digest_assets(
+        workspace: &Path,
+        repository: &Path,
+        assets: &Path,
+    ) -> BuildResult<provenant_records::SourceDigest> {
+        let tracked = TrackedFiles::load(workspace, repository)?;
+        let mut inputs = Inputs::default();
+        collect_external_tree(assets, "assets", &mut inputs, true, &tracked)?;
+        let borrowed: Vec<SourceInput<'_>> = inputs
+            .iter()
+            .map(|(name, bytes, _)| SourceInput { name, bytes })
+            .collect();
+        Ok(source_digest(&borrowed)?)
+    }
+
+    fn run_git(repository: &Path, arguments: &[&str]) -> BuildResult<()> {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(repository)
+            .status()?;
+        if !status.success() {
+            return Err(invalid("git test fixture command failed").into());
+        }
+        Ok(())
+    }
 }

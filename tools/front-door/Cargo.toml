@@ -103,6 +103,8 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-core = { workspace = true }
+tempfile = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["test-fixtures"] }

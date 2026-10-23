@@ -15,7 +15,7 @@ Precedence, in one place:
 2. Otherwise this file's own location. `roots.py` always sits at
    `<product root>/skills/_shared/roots.py`. It lives in the shared skill
    library rather than under `scripts/lib/` because the installed skills
-   catalogue has to be self-sufficient: `install-skills` materialises a tree
+   catalogue has to be self-sufficient: release packaging provides a tree
    carrying `skills/` and nothing else, and the deliver and orchestrate
    consumers are run from exactly that tree under `python -I`. `scripts/lib/
    roots.py` re-exports this module for callers on the `scripts/` side.

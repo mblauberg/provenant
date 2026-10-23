@@ -555,9 +555,9 @@ Two processes in one bundle, `Provenant.app` (decided).
   login item, so logging in never opens the console. On Linux the
   command prints that the console is macOS only and exits 2. If the app is not
   installed the command says so and exits 2; no other command mentions it.
-- **Migration.** `scripts/install-harness` boots out the old label if loaded,
-  removes its plist, writes and bootstraps `dev.provenant.app` (the agent),
-  and is idempotent. Uninstall removes both labels.
+- **Migration.** `provenant install` boots out the old label if loaded, removes
+  its plist, writes and bootstraps `dev.provenant.app` (the agent), and is
+  idempotent. Uninstall removes both labels.
 
 ### Independence from the menu bar
 
@@ -703,10 +703,10 @@ The amendments to ADR 0020 and Fabric hosts must list exactly these:
    contact peers, only while a watcher is registered.
 3. **Its own directory.** It writes only under
    `$AGENT_FABRIC_STATE_ROOT/projector/`.
-4. **One supervised process.** A LaunchAgent `dev.provenant.projector`
-   (`KeepAlive`, background process type, low-priority I/O), installed opt-in
-   by `scripts/install-harness --projector`. No Linux supervisor; `provenant
-   projector run --foreground` serves CI and manual runs.
+4. **One supervised process.** An opt-in LaunchAgent named
+   `dev.provenant.projector` (`KeepAlive`, background process type, low-priority
+   I/O). No Linux supervisor; `provenant projector run --foreground` serves CI
+   and manual runs.
 
 It holds no authority over lanes, opens no port and serves nothing. Every
 reader keeps its CLI path; a stale or absent contract means the reader runs
@@ -867,7 +867,7 @@ Acceptance:
 
 Tests: parser fixtures per provider; schema validation; the privacy test;
 Swift view-model tests on recorded CLI JSON in a path-filtered macOS CI job;
-an install-harness test for the label migration.
+a test of the Rust install path's label migration.
 
 ### Slice 2: Fleet and statusline, this host
 

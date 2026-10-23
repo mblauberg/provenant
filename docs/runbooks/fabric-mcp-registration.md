@@ -1,12 +1,11 @@
 # Fabric MCP registration
 
-Status: legacy registry editor; Rust CLI cut-over pending
+Status: legacy registry editor for existing client registrations
 Applies to: `scripts/configure-fabric-mcp.py`
 
-The `provenant-config` crate owns release and managed-file operations; it does
-not configure client registries. The legacy `install-harness` and
-`install-skills` entrypoints refuse the retired install path. Harness-specific
-MCP, hook and link changes belong to the later Rust CLI cut-over.
+The `provenant` CLI owns release and managed-file operations. `provenant install`
+manages harness-specific MCP, hook and link entries; this page documents the
+separate legacy registry editor for existing registrations.
 
 `scripts/configure-fabric-mcp.py` remains a separate legacy registry editor. It
 can add, check or repair registry entries when the stable shim is already
@@ -20,7 +19,7 @@ Pass `--instance-root` when the registration needs an explicit instance root.
 The legacy registration format names the stable shim at
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant` and supplies the client seat.
 It stores no product checkout path. The old pointer-based relocation procedure
-is retired; Rust MCP registration will be defined at CLI cut-over.
+is retired; Rust-managed registrations are outside this editor's scope.
 
 Every entry carries these three environment variables by default:
 
@@ -61,11 +60,11 @@ adapter compatibility.
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
 
-When `CLAUDE_CONFIG_DIR` targets an alternate account directory, `install-harness`
-links its `settings.json` to `~/.claude/settings.json`. The shared `settings.json`
-link means settings changed in one account apply to all linked accounts, and if
-Claude replaces the link with a regular file the accounts stop sharing; rerunning
-the installer does not overwrite it.
+When `CLAUDE_CONFIG_DIR` targets an alternate account directory, the Rust install
+command links its `settings.json` to `~/.claude/settings.json`. The shared
+`settings.json` link means settings changed in one account apply to all linked
+accounts, and if Claude replaces the link with a regular file the accounts stop
+sharing; rerunning `provenant install` does not overwrite it.
 
 Each client has its own seat (`claude`, `codex`, `cursor`, `agy`, `kiro`, or
 `opencode`) and therefore its own default inbox. A seat does not establish the
@@ -82,7 +81,7 @@ product `HARNESS.md`. The standalone editor preserves unrelated entries and
 requires a string array; pass `--agents-home` and `--instance-root` to select
 those paths explicitly. It does not rebind paths from a product-root pointer.
 OpenCode JSONC with comments is read safely. If adding Fabric would require a
-rewrite that discards those comments, the installer leaves the file intact and
+rewrite that discards those comments, the editor leaves the file intact and
 prints the exact `instructions` and `mcp.fabric` entries to add manually.
 With `--platform all`, a detected client's configuration conflict produces a
 per-client skip warning; explicitly named clients still fail.

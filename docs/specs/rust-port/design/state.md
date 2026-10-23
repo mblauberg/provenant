@@ -54,7 +54,7 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | Build root | An uninstalled binary requires explicit absolute `PROVENANT_ROOT`; installed binaries use their release location, never this override |
 | User config | `<state>/config.toml`; optional, user-owned, only configuration file |
 | Host identity | `<state>/state.json` |
-| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/lock` |
+| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
 | Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/,runtime/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
@@ -285,7 +285,10 @@ root holding `release.json`; `provenant root` prints that root. The release
 contains `skills`, `library`, `templates`, `config`, `instructions`, `scripts`
 and `runtime` directly so `$(provenant root)/skills/...` remains usable. An uninstalled
 build requires an explicit absolute `PROVENANT_ROOT`; it refuses without it.
-These reads never create state.
+These reads never create state. An installed release launches no Python owner by default. Without a checkout
+Git entry, a local `.venv` interpreter or explicit `HARNESS_PYTHON`, each
+Python-owned route fails with typed `owner unavailable in installed release`
+and exit 3. Tests that exercise a Python owner set `HARNESS_PYTHON` explicitly.
 Install verifies manifest, platform, file bytes and modes, then asks the
 binary composition edge to run bounded version/help smoke checks through
 supervisor (30 s, capped output, no provider access). A digest proves identity,
@@ -301,7 +304,7 @@ release is immutable. Equal source digests with different manifest bytes fail
 with typed `ReleaseConflict`, naming both manifest digests and recovery.
 Upgrades remove unchanged owned entries dropped by each selected harness;
 changed or unmanaged entries remain. The sole installation lock is
-`<state>/install/lock`; no locks are left in harness or bin directories. Receipt
+`<state>/install/install.lock`; no locks are left in harness or bin directories. Receipt
 records release identity, resolved targets, selectors, expected owned
 values and the optional absolute `legacy_checkout` substitution root plus
 compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last. No cross-file or two-host atomicity is claimed.
@@ -613,7 +616,7 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 4 | `scripts/configure-codex-skill-overrides.py` | 140 |
 | 4 | `scripts/check-provenant-install.py` | 165 |
 
-| Slice | Deleted Python test | Lines |
+| Slice | Deleted or trimmed Python tests | Lines removed |
 | --- | --- | ---: |
 | 5 | `tests/test_host_identity.py` | 129 |
 | 1 | `tests/test_product_root_single_resolver.py` | 59 |
@@ -625,19 +628,19 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 3 | `tests/test_instance_installation.py` | 931 |
 | 3 | `tests/test_install_provenant_command.py` | 272 |
 | 3 | `tests/test_install_skills.py` | 1,311 |
-| 4 | `tests/test_configure_fabric_mcp.py` | 1,310 |
+| 3 | `tests/test_configure_fabric_mcp.py` (five tests trimmed; module retained) | 162 |
 | 4 | `tests/test_check_provenant_install.py` | 358 |
-| 4 | `tests/test_install_harness.py` | 2,427 |
+| 3 | `tests/test_install_harness.py` (deleted) | 2,177 |
 
-Python total: **13,125 lines**. Shell entrypoints removed in the corresponding
-slices: `scripts/provenant-profile` **5**, `scripts/install-skills` **87**,
-`scripts/install-harness` **702**; shell total **794**. The installation test
-module also tests collector/workflow/other hook subjects: those domain lanes
-must land their replacement tests or retire their subject before slice 4
-removes it; state counts its OTel slices within the 2,427 lines, and telemetry
-excludes them. State deletes all of `tests/test_install_skills.py` with the old
-installer in slice 3; execution-run has no edit/deletion claim on that file.
-Do not carry unrelated old tests into Rust config.
+Python total: **11,727 lines removed**. Shell entrypoints removed in the
+corresponding slices: `scripts/provenant-profile` **5**, `scripts/install-skills`
+**87**, `scripts/install-harness` **702**; shell total **794**. The removed
+installation test module also covered collector, workflow and other hook
+subjects. Its OTel tests moved to `tests/test_install_otel_collector.py`; the
+2,177 deleted lines include their old cases once, and telemetry excludes those
+cases. State deletes all of `tests/test_install_skills.py` with the old installer
+in slice 3; execution-run has no edit/deletion claim on that file. Do not carry
+unrelated old tests into Rust config.
 
 No TS file is wholly owned/deleted by this area. The dependent lanes delete
 these mixed files with their own consumers, without double-counting them here:

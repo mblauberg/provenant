@@ -17,9 +17,9 @@ use exec::{Launch, replace_process};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 /// Identity is computed by build.rs from the complete source inventory. No
 /// environment variable can override it at build or runtime.
@@ -67,7 +67,6 @@ const OWNERS: &[(&str, &str)] = &[
 const PREFIXED: [&str; 7] = [
     "stats", "retro", "hosts", "peer", "digest", "classify", "extract",
 ];
-
 /// What a command line asks for, decided without touching the filesystem.
 #[derive(Debug, PartialEq)]
 enum Route {
@@ -248,9 +247,9 @@ impl std::error::Error for ProductRootError {
     }
 }
 
-/// Installed executables live under `<release>/bin/provenant` (or at the
-/// release root). The manifest next to that location identifies the root.
-/// Build-tree binaries have no manifest and need an explicit fixture root.
+/// Installed executables live under `<release>/bin/provenant`. The manifest
+/// next to that location identifies the root. Build-tree binaries have no
+/// manifest and need an explicit fixture root.
 fn product_root() -> Result<PathBuf, ProductRootError> {
     let executable = std::env::current_exe().map_err(ProductRootError::CurrentExecutable)?;
     let executable =
@@ -258,15 +257,13 @@ fn product_root() -> Result<PathBuf, ProductRootError> {
     let parent = executable
         .parent()
         .ok_or_else(|| ProductRootError::MissingExecutableParent(executable.clone()))?;
-    let candidate = if parent.file_name() == Some(OsStr::new("bin")) {
-        parent
+    if parent.file_name() == Some(OsStr::new("bin")) {
+        let candidate = parent
             .parent()
-            .ok_or_else(|| ProductRootError::MissingExecutableParent(executable.clone()))?
-    } else {
-        parent
-    };
-    if is_file(&candidate.join("release.json")) {
-        return Ok(candidate.to_path_buf());
+            .ok_or_else(|| ProductRootError::MissingExecutableParent(executable.clone()))?;
+        if is_file(&candidate.join("release.json")) {
+            return Ok(candidate.to_path_buf());
+        }
     }
 
     let Some(value) = std::env::var_os("PROVENANT_ROOT") else {
@@ -284,10 +281,6 @@ fn product_root() -> Result<PathBuf, ProductRootError> {
     Ok(root)
 }
 
-fn target(relative: &str) -> Result<PathBuf, ProductRootError> {
-    Ok(product_root()?.join(relative))
-}
-
 fn launch(program: &Path, args: &[OsString], scrub_git: bool) -> u8 {
     replace_process(&Launch {
         program,
@@ -296,11 +289,181 @@ fn launch(program: &Path, args: &[OsString], scrub_git: bool) -> u8 {
     })
 }
 
-fn launch_target(relative: &str, args: &[OsString], scrub_git: bool) -> u8 {
-    match target(relative) {
-        Ok(program) => launch(&program, args, scrub_git),
-        Err(error) => fail(&error.to_string()),
+#[derive(Debug)]
+enum OwnerAvailabilityError {
+    PythonOwnerUnavailableInInstalledRelease,
+}
+impl fmt::Display for OwnerAvailabilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PythonOwnerUnavailableInInstalledRelease => {
+                formatter.write_str("owner unavailable in installed release")
+            }
+        }
     }
+}
+
+fn has_explicit_python() -> bool {
+    std::env::var_os("HARNESS_PYTHON").is_some_and(|value| !value.is_empty())
+}
+
+fn has_git_metadata(root: &Path) -> bool {
+    std::fs::symlink_metadata(root.join(".git")).is_ok()
+}
+
+fn python_owner_unavailable(root: &Path) -> bool {
+    if !is_file(&root.join("release.json")) || has_explicit_python() {
+        return false;
+    }
+    let venv_python = root.join(".venv/bin/python");
+    !exec::is_executable(&venv_python) && !has_git_metadata(root)
+}
+
+fn run_owner(relative: &'static str, args: &[OsString]) -> u8 {
+    let root = match product_root() {
+        Ok(root) => root,
+        Err(error) => return fail(&error.to_string()),
+    };
+    if python_owner_unavailable(&root) {
+        return fail(&OwnerAvailabilityError::PythonOwnerUnavailableInInstalledRelease.to_string());
+    }
+    let program = root.join(relative);
+    if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
+        let helper = root.join("scripts/lib/harness-python.sh");
+        if !is_file(&helper) {
+            return fail(&format!(
+                "cannot execute {}: Python helper is missing at {}; {}",
+                program.display(),
+                helper.display(),
+                exec::REPAIR
+            ));
+        }
+        let mut forwarded = vec![helper.into_os_string(), program.into_os_string()];
+        forwarded.extend_from_slice(args);
+        launch(Path::new("/bin/bash"), &forwarded, false)
+    } else {
+        launch(&program, args, false)
+    }
+}
+
+#[derive(Debug)]
+enum CheckTargetError {
+    CurrentDirectory,
+    GitUnavailable,
+    GitCommand,
+    NotGitCheckout,
+    InvalidGitOutput,
+    InvalidCheckoutRoot,
+    NotProvenantCheckout,
+}
+impl fmt::Display for CheckTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDirectory => formatter.write_str("cannot resolve the current directory"),
+            Self::GitUnavailable => formatter.write_str("Git is unavailable"),
+            Self::GitCommand => formatter.write_str("cannot run Git checkout discovery"),
+            Self::NotGitCheckout | Self::InvalidGitOutput | Self::InvalidCheckoutRoot => {
+                formatter.write_str("check requires a Provenant Git checkout")
+            }
+            Self::NotProvenantCheckout => {
+                formatter.write_str("check requires a Provenant Git checkout with HARNESS.md and an executable scripts/check-harness")
+            }
+        }
+    }
+}
+
+fn trusted_git() -> Option<&'static Path> {
+    for candidate in [
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+        "/opt/local/bin/git",
+        "/usr/bin/git",
+        "/bin/git",
+    ] {
+        let path = Path::new(candidate);
+        if exec::is_executable(path) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+fn check_target() -> Result<PathBuf, CheckTargetError> {
+    let cwd = std::env::current_dir().map_err(|_| CheckTargetError::CurrentDirectory)?;
+    let git = trusted_git().ok_or(CheckTargetError::GitUnavailable)?;
+    let mut command = Command::new(git);
+    command
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    for variable in exec::GIT_REDIRECTS {
+        command.env_remove(variable);
+    }
+    for (name, _) in std::env::vars_os() {
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("GIT_CONFIG_KEY_")
+            || name.starts_with("GIT_CONFIG_VALUE_")
+            || matches!(
+                name,
+                "GIT_CONFIG_COUNT"
+                    | "GIT_CONFIG_PARAMETERS"
+                    | "GIT_CONFIG_GLOBAL"
+                    | "GIT_CONFIG_SYSTEM"
+                    | "GIT_CONFIG_NOSYSTEM"
+            )
+        {
+            command.env_remove(name);
+        }
+    }
+    let output = command.output().map_err(|_| CheckTargetError::GitCommand)?;
+    if !output.status.success() {
+        return Err(CheckTargetError::NotGitCheckout);
+    }
+    let mut bytes = output.stdout;
+    if bytes.last() != Some(&b'\n') {
+        return Err(CheckTargetError::InvalidGitOutput);
+    }
+    bytes.pop();
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    if bytes.is_empty() || bytes.contains(&b'\n') || bytes.contains(&0) {
+        return Err(CheckTargetError::InvalidGitOutput);
+    }
+    let top = PathBuf::from(OsString::from_vec(bytes));
+    if !top.is_absolute() {
+        return Err(CheckTargetError::InvalidGitOutput);
+    }
+    let root = std::fs::canonicalize(top).map_err(|_| CheckTargetError::InvalidCheckoutRoot)?;
+    let checker = root.join("scripts/check-harness");
+    if !is_regular_file(&root.join("HARNESS.md"))
+        || !is_regular_file(&checker)
+        || !exec::is_executable(&checker)
+    {
+        return Err(CheckTargetError::NotProvenantCheckout);
+    }
+    let resolved_checker =
+        std::fs::canonicalize(&checker).map_err(|_| CheckTargetError::NotProvenantCheckout)?;
+    if !resolved_checker.starts_with(&root) {
+        return Err(CheckTargetError::NotProvenantCheckout);
+    }
+    Ok(checker)
+}
+
+fn run_check(args: &[OsString]) -> u8 {
+    let checker = match check_target() {
+        Ok(checker) => checker,
+        Err(error) => {
+            eprintln!("provenant: usage error: {error}");
+            return 2;
+        }
+    };
+    launch(&checker, args, true)
 }
 
 fn run(args: &[OsString]) -> u8 {
@@ -348,33 +511,9 @@ fn run(args: &[OsString]) -> u8 {
             }
             Err(message) => fail(&message.to_string()),
         },
-        Route::Mcp => launch_target(FABRIC_MCP, &[], false),
-        Route::Check(rest) => launch_target("scripts/check-harness", &rest, true),
-        Route::Owner { relative, args } => match target(relative) {
-            Ok(program) => {
-                if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
-                    let checkout = program
-                        .ancestors()
-                        .nth(Path::new(relative).components().count())
-                        .unwrap();
-                    let helper = checkout.join("scripts/lib/harness-python.sh");
-                    if !is_file(&helper) {
-                        return fail(&format!(
-                            "cannot execute {}: Python helper is missing at {}; {}",
-                            program.display(),
-                            helper.display(),
-                            exec::REPAIR
-                        ));
-                    }
-                    let mut forwarded = vec![helper.into_os_string(), program.into_os_string()];
-                    forwarded.extend(args);
-                    launch(Path::new("/bin/bash"), &forwarded, false)
-                } else {
-                    launch(&program, &args, false)
-                }
-            }
-            Err(error) => fail(&error.to_string()),
-        },
+        Route::Mcp => run_owner(FABRIC_MCP, &[]),
+        Route::Check(rest) => run_check(&rest),
+        Route::Owner { relative, args } => run_owner(relative, &args),
     }
 }
 

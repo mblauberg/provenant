@@ -131,9 +131,9 @@ additional authority to remove. Run artifacts and retention are described in
   check for consumers that resolve into it; if any exist, do the work in a
   linked worktree, or repoint the consumer first and then invoke the installed
   command to confirm it still resolves. Editing a template in the repository
-  does not update an already installed copy: rerun the installer and exercise
-  the installed command, because a clean tree is not evidence that anything
-  outside the tree still works.
+  does not update an already installed copy: rebuild and install a release
+  containing the updated asset, then exercise the installed command, because a
+  clean tree is not evidence that anything outside the tree still works.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
   handoff. Use `scripts/worktree remove NAME`, never raw
   `git worktree remove` and never filesystem deletion: the helper runs the
@@ -177,13 +177,13 @@ To disable it, remove only the symlink to this hook:
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
 ```
 
-An optional `pre-push` guard is off by default and installs the same way. It
-refuses pushes to the default branch from a linked worktree, non-fast-forward
-updates and deletion of the default branch, and pushed commits that add
-conflict markers. It reads the default branch from `origin/HEAD`, falling back
-to `main` or `master`. Run `scripts/install-harness --platform <platform>
---pre-push-hook` from the primary checkout (`--no-pre-push-hook` removes its
-own symlink only; it never replaces an existing hook).
+An optional `pre-push` guard is off by default. It refuses pushes to the
+default branch from a linked worktree, non-fast-forward updates and deletion of
+the default branch, and pushed commits that add conflict markers. It reads the
+default branch from `origin/HEAD`, falling back to `main` or `master`. Enable it
+by linking `scripts/hooks/pre-push` at the free path
+`$(git rev-parse --git-path hooks)/pre-push`. Disable it only by removing that symlink;
+never replace an existing hook.
 
 For a manual prune after one merge, name each branch that merge brought in:
 

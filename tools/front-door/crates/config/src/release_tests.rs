@@ -174,7 +174,7 @@ fn package_refuses_when_binary_smoke_identity_differs_from_manifest() {
     .unwrap_err();
     assert!(matches!(
         error,
-        InstallError::Manifest("binary build identity differs from release manifest")
+        InstallError::Manifest("binary identity differs from release manifest")
     ));
     assert!(!fixture.source.join("release.json").exists());
 }

@@ -273,7 +273,8 @@ synthesis from absence (`provider_lost`, `reap_attempts`).
 | `cancel.request`, `termination-request.json` | Python, TS | Unchanged | None |
 
 A launch spec with an unknown major version is refused with exit 64 and
-`fix: scripts/install-harness`. The owner does not fall back to Python.
+`fix: install a compatible Provenant release`. The owner does not fall back to
+Python.
 
 ## Structural guarantees
 
@@ -363,13 +364,14 @@ about 2,500 lines plus tests.
 ## Front door
 
 1. **Pinned local builds.** Each Mac carries rustup, and
-   `rust-toolchain.toml` pins 1.94.1. `install-harness` builds with a
-   persistent `CARGO_TARGET_DIR` (`~/.cache/provenant/cargo-target`), so a
-   rebuild after a pull is incremental, and CI caches the same directory keyed
-   on `Cargo.lock` and the toolchain. The existing digest identity makes a
-   stale binary visible. No release pipeline, signing or download path is
-   needed. The lane module adds one crate dependency, `libc`, locked in
-   `Cargo.lock`; this amends ADR 0027's "no crate dependencies".
+   `rust-toolchain.toml` pins 1.94.1. Contributors build with
+   `cargo build --release --locked` and install an accepted release with
+   `provenant install`, using a persistent `CARGO_TARGET_DIR`
+   (`~/.cache/provenant/cargo-target`) for incremental rebuilds. CI caches the
+   same directory keyed on `Cargo.lock` and the toolchain. The existing digest
+   identity makes a stale binary visible. No release pipeline, signing or
+   download path is needed. The lane module adds one crate dependency, `libc`,
+   locked in `Cargo.lock`; this amends ADR 0027's "no crate dependencies".
 2. **Moves before any deletion.** The behind-origin advisory
    (`lib/stale_checkout.py`) fires from the binary on every route the Python
    dispatcher scans today, with `test_stale.py` kept against the binary. The
@@ -381,12 +383,12 @@ about 2,500 lines plus tests.
 3. **Switch:** once the S1 conformance rows are green, both Macs use the binary.
    S1a (#1231) completed this switch.
 4. **Delete:** the Python checkout dispatcher and installed template, the `python`
-   and `auto` branches in `install-harness` and `front_door_build.py`, the
-   template branch of `check-provenant-install.py`, and the S1 tests.
-   `scripts/check-provenant-install.py` itself stays, because
+   and `auto` branches in the retired checkout installer and
+   `front_door_build.py`, the template branch of `check-provenant-install.py`,
+   and the S1 tests. `scripts/check-provenant-install.py` itself stays, because
    `check-harness` and the provider and routing checks depend on it; S1 keeps
-   its Rust build and install-drift checks. Without `cargo`,
-   `install-harness` exits 3 with the rustup command as its `fix:` line.
+   its Rust build and install-drift checks. The retired checkout entrypoint
+   exits 3 and directs users to an accepted packaged release.
 
 `lane` is a built-in verb, handled in-process like `help` and `root`, and
 hidden from `help`. User-facing verbs keep their names.
@@ -443,8 +445,8 @@ after cutover.
 - **Two implementations before conformance.** The cutover deletes the Python
   path as soon as its conformance rows are green; rollback is a git revert.
 - **Toolchain drift.** Source changes under `tools/` make installed binaries
-  stale until `install-harness` runs; `check-provenant-install.py` says so,
-  and launch spec versioning refuses a mismatched binary.
+  stale until `provenant install` runs; `provenant check install` reports the
+  mismatch, and launch spec versioning refuses a mismatched binary.
 
 ## Decisions
 

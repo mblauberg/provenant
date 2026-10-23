@@ -5,7 +5,7 @@
 RUST_TEST_THREADS = "1"
 
 [build]
+# This repository setting overrides build.rustc-wrapper in global Cargo config.
+# To retain that wrapper, set RUSTC_WRAPPER to a chaining wrapper that also invokes
+# .cargo/rustc-wrapper.sh; Cargo gives RUSTC_WRAPPER precedence over this setting.
 rustc-wrapper = ".cargo/rustc-wrapper.sh"
-
-[target.'cfg(target_vendor = "apple")']
-rustflags = ["-C", "link-arg=-Wl,-S", "-C", "link-arg=-Wl,-x"]

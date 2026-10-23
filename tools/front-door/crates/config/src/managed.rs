@@ -263,7 +263,7 @@ impl Snapshots {
             }
             Some(_) => return Err(InstallError::Tampered(manifest_path)),
         };
-        match crate::release::inventory(&installed, fs) {
+        match crate::release::inventory_with_cleanup(&installed, fs, !completed) {
             Ok(paths) => {
                 for path in paths {
                     if !release.files.contains_key(&path) {
@@ -696,23 +696,12 @@ pub fn install(
             dry_run: true,
         });
     }
-    let binary_info = smoke
-        .check(&plan.release, context.cancel)
-        .map_err(InstallError::Smoke)?;
-    if binary_info.source_digest != plan.release.manifest.source_digest
-        || binary_info.asset_digest != plan.release.manifest.asset_digest
-        || binary_info.target != plan.release.manifest.target
-        || binary_info.toolchain != plan.release.manifest.toolchain
-    {
-        return Err(InstallError::Manifest(
-            "binary identity differs from release manifest",
-        ));
-    }
+    crate::release::verify_binary_identity(&plan.release, smoke, context.cancel)?;
     let fs = context.fs;
     let install_root = plan.targets.roots.state.as_path().join("install");
     let dir = directory(&install_root, true, fs)?;
     let _lock = dir.lock(
-        OsStr::new("lock"),
+        OsStr::new("install.lock"),
         LockMode::Exclusive,
         context.budget,
         context.cancel,
@@ -1113,24 +1102,6 @@ fn permitted_entry(
     Ok(false)
 }
 /// Read-only digest comparison, without locks, repair or initialisation.
-fn verify_binary_identity(
-    release: &Release,
-    smoke: &dyn ReleaseSmoke,
-    cancel: &CancelToken,
-) -> Result<(), InstallError> {
-    let actual = smoke.check(release, cancel).map_err(InstallError::Smoke)?;
-    if actual.source_digest != release.manifest.source_digest
-        || actual.asset_digest != release.manifest.asset_digest
-        || actual.target != release.manifest.target
-        || actual.toolchain != release.manifest.toolchain
-    {
-        return Err(InstallError::Manifest(
-            "binary identity differs from release manifest",
-        ));
-    }
-    Ok(())
-}
-
 pub fn check_install(
     targets: &Targets,
     source: Option<&Release>,
@@ -1155,7 +1126,7 @@ pub fn check_install(
         .join(receipt.source_digest.to_string());
     match Release::read(&release_path, target, fs) {
         Ok(release) => {
-            verify_binary_identity(&release, smoke, cancel)?;
+            crate::release::verify_binary_identity(&release, smoke, cancel)?;
             if release.manifest.source_digest == receipt.source_digest
                 && release.manifest.target == receipt.target
                 && release.manifest.toolchain == receipt.toolchain
@@ -1194,7 +1165,7 @@ pub fn check_install(
         Err(error) => return Err(error),
     }
     if let Some(source) = source {
-        verify_binary_identity(source, smoke, cancel)?;
+        crate::release::verify_binary_identity(source, smoke, cancel)?;
         if source.manifest.source_digest != receipt.source_digest
             || source.manifest.asset_digest != receipt.asset_digest
             || source.manifest.target != receipt.target
@@ -1318,7 +1289,7 @@ pub fn uninstall(
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     let install_dir = directory(&state_root.join("install"), false, fs)?;
     let _lock = install_dir.lock(
-        OsStr::new("lock"),
+        OsStr::new("install.lock"),
         LockMode::Exclusive,
         context.budget,
         context.cancel,

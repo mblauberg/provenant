@@ -479,6 +479,7 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultMode {
     ReceiptPublish,
+    InterruptedReleasePublish,
     CancelAfterFirstPublication,
     SkillLinkSync,
 }
@@ -613,6 +614,22 @@ impl SafeDir for FaultDir {
         permissions: u32,
         mode: PublishMode,
     ) -> TestFsResult<Publication> {
+        if self.state.mode == FaultMode::InterruptedReleasePublish
+            && name == OsStr::new("release.json")
+            && !self.state.fired.swap(true, Ordering::AcqRel)
+        {
+            // Leave the actual supervisor staging name and bytes behind, as a
+            // process interrupted between staging and rename would do.
+            let temporary = LocalFs.temporary_name()?;
+            let mut file = self.inner.create_new(&temporary)?;
+            std::io::Write::write_all(&mut file, bytes).unwrap();
+            file.sync()?;
+            return Err(TestFsError::Io {
+                operation: "publish",
+                path: PathBuf::from(name),
+                source: io::Error::other("interrupted release publication"),
+            });
+        }
         if self.state.mode == FaultMode::ReceiptPublish
             && name == OsStr::new("receipt.json")
             && !self.state.fired.swap(true, Ordering::AcqRel)
@@ -1521,7 +1538,7 @@ fn a_completed_release_with_a_different_manifest_is_a_typed_conflict() {
 }
 
 #[test]
-fn unfinished_release_replaces_a_partial_file_and_publishes_manifest_last() {
+fn interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file() {
     let f = Fixture::new();
     let release = f.release();
     let release_root = f
@@ -1536,31 +1553,77 @@ fn unfinished_release_replaces_a_partial_file_and_publishes_manifest_last() {
     fs::write(&binary, b"interrupted old bytes").unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let plan = f.plan_for(release);
-    let mut release_actions: Vec<_> = plan
-        .actions()
-        .iter()
-        .filter(|action| action.selector == "release")
-        .collect();
-    assert!(release_actions.iter().any(|action| {
-        action.disposition == Disposition::Replace && action.path.to_path_buf().unwrap() == binary
-    }));
-    release_actions.sort_by_key(|action| {
-        action
-            .path
-            .to_path_buf()
-            .unwrap()
-            .file_name()
-            .is_some_and(|name| name == "release.json")
-    });
-    assert_ne!(
-        release_actions.last().unwrap().path.to_path_buf().unwrap(),
-        binary
-    );
-    assert_eq!(
-        release_actions.last().unwrap().path.to_path_buf().unwrap(),
-        release_root.join("release.json")
-    );
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let faults = FaultFs::new(FaultMode::InterruptedReleasePublish, None);
+    let error = install(
+        &f.plan_for(release.clone()),
+        &fault_context(&faults, &clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(matches!(error, InstallError::Partial { .. }));
+    assert!(!release_root.join("release.json").exists());
+    // Every payload was published before the failed completion marker.
+    for (path, (bytes, _)) in &release.files {
+        assert_eq!(fs::read(release_root.join(path)).unwrap(), *bytes);
+    }
+    let staging = fs::read_dir(&release_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".provenant-staging.")
+        })
+        .unwrap();
+    assert!(staging.is_file());
+
+    install(
+        &f.plan_for(release.clone()),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(!staging.exists());
+    Release::read(&release_root, &release.manifest.target, &LocalFs).unwrap();
+}
+
+#[test]
+fn completed_release_tolerates_only_supervisor_staging_names() {
+    let f = Fixture::new();
+    let release = f.release();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan_for(release.clone()),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let root = f
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(release.manifest.source_digest.to_string());
+    let staging = root.join(LocalFs.temporary_name().unwrap());
+    fs::write(&staging, b"leftover staging").unwrap();
+    f.plan_for(release.clone());
+    Release::read(&root, &release.manifest.target, &LocalFs).unwrap();
+    assert!(staging.exists());
+    let foreign = root.join(".provenant-staging.not-supervisor");
+    fs::write(&foreign, b"foreign").unwrap();
+    assert!(matches!(Snapshots::capture(&release, &f.targets, &LocalFs),
+        Err(InstallError::Tampered(path)) if path == foreign));
 }
 
 struct WrongSmoke;

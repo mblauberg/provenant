@@ -204,17 +204,12 @@ pub fn package_release(
     let names = inventory(source, fs)?;
     let mut files = BTreeMap::new();
     let mut release_files = Vec::new();
-    let mut total = 0u64;
     for relative in names {
         let path = source.join(&relative);
         let current = snapshot(&path, fs)?.ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
         };
-        total = total
-            .checked_add(bytes.len() as u64)
-            .filter(|total| *total <= RELEASE_LIMIT)
-            .ok_or(InstallError::Manifest("release byte bound"))?;
         let mode = source_mode(&relative, mode)?;
         release_files.push(ReleaseFile {
             path: path_wire(&relative)?,
@@ -229,14 +224,6 @@ pub fn package_release(
         return Err(InstallError::Manifest(
             "release assets differ from build inventory",
         ));
-    }
-    if expected.target.is_empty()
-        || expected.target.len() > 256
-        || expected.toolchain.is_empty()
-        || expected.toolchain.len() > 256
-        || !files.contains_key(Path::new("bin/provenant"))
-    {
-        return Err(InstallError::Manifest("inventory bounds"));
     }
     let manifest = ReleaseManifest {
         schema_version: 1,
@@ -270,11 +257,11 @@ pub fn package_release(
             });
         }
         let release = Release::read(source, &expected.target, fs)?;
-        check_binary_identity(&release, smoke, cancel)?;
+        verify_binary_identity(&release, smoke, cancel)?;
         return Ok(release);
     }
 
-    check_binary_identity(&candidate, smoke, cancel)?;
+    verify_binary_identity(&candidate, smoke, cancel)?;
     normalise_staged_modes(source, &candidate.files, fs)?;
     crate::managed::durable(directory(source, false, fs)?.publish(
         OsStr::new("release.json"),
@@ -323,7 +310,7 @@ fn normalise_staged_modes(
     Ok(())
 }
 
-fn check_binary_identity(
+pub(crate) fn verify_binary_identity(
     release: &Release,
     smoke: &dyn ReleaseSmoke,
     cancel: &CancelToken,
@@ -335,13 +322,40 @@ fn check_binary_identity(
         || actual.toolchain != release.manifest.toolchain
     {
         return Err(InstallError::Manifest(
-            "binary build identity differs from release manifest",
+            "binary identity differs from release manifest",
         ));
     }
     Ok(())
 }
 
 pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
+    inventory_with_cleanup(root, fs, false)
+}
+
+// These are the exact names produced by supervisor temporary_name and
+// replace_link/atomic_write with the release staging prefix.
+fn is_supervisor_staging_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(suffix) = name.strip_prefix(".provenant-staging.") else {
+        return false;
+    };
+    let random = suffix
+        .strip_prefix(".provenant-staging.")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .unwrap_or(suffix);
+    random.len() == 24
+        && random
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+pub(crate) fn inventory_with_cleanup(
+    root: &Path,
+    fs: &dyn SafeFs,
+    remove_staging: bool,
+) -> Result<Vec<PathBuf>, InstallError> {
     fn allowed_directory(path: &Path) -> bool {
         path == Path::new("bin")
             || [
@@ -363,6 +377,7 @@ pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, In
         fs: &dyn SafeFs,
         output: &mut Vec<PathBuf>,
         count: &mut usize,
+        remove_staging: bool,
     ) -> Result<(), InstallError> {
         if depth > 64 {
             return Err(InstallError::Manifest("inventory bounds"));
@@ -376,9 +391,18 @@ pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, In
             }
             let path = tail.join(&name);
             let metadata = dir.metadata_at(&name, false)?;
+            if matches!(metadata.kind, FileKind::Regular | FileKind::Symlink)
+                && is_supervisor_staging_name(&name)
+            {
+                if remove_staging {
+                    dir.unlink(&name)?;
+                    dir.sync()?;
+                }
+                continue;
+            }
             match metadata.kind {
                 FileKind::Directory if allowed_directory(&path) => {
-                    walk(root, &path, depth + 1, fs, output, count)?
+                    walk(root, &path, depth + 1, fs, output, count, remove_staging)?
                 }
                 FileKind::Regular if path == Path::new("release.json") => {}
                 FileKind::Regular => output.push(path),
@@ -388,7 +412,15 @@ pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, In
         Ok(())
     }
     let mut output = Vec::new();
-    walk(root, Path::new(""), 0, fs, &mut output, &mut 0)?;
+    walk(
+        root,
+        Path::new(""),
+        0,
+        fs,
+        &mut output,
+        &mut 0,
+        remove_staging,
+    )?;
     output.sort();
     Ok(output)
 }

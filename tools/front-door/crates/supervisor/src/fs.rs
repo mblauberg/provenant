@@ -924,38 +924,3 @@ pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs};
 
 mod path_io;
 pub use path_io::*;
-
-/// Read-only binding for core's explicit root inputs. Existing ancestor aliases
-/// are resolved once, and only normal missing tail components are appended.
-pub struct RootPathResolver;
-impl provenant_core::PathResolver for RootPathResolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-        let mut existing = path.to_path_buf();
-        let mut tail = Vec::new();
-        loop {
-            match std::fs::canonicalize(&existing) {
-                Ok(mut bound) => {
-                    for name in tail.iter().rev() {
-                        bound.push(name);
-                    }
-                    return Ok(bound);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    // A dangling link is not an absent normal component.
-                    if std::fs::symlink_metadata(&existing).is_ok() {
-                        return Err(error);
-                    }
-                    let name = existing
-                        .file_name()
-                        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
-                        .to_os_string();
-                    tail.push(name);
-                    if !existing.pop() {
-                        return Err(error);
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-}
