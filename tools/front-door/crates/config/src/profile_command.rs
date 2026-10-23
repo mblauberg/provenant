@@ -6,7 +6,6 @@ use crate::{
     profiles::{self, Context, Registry},
     Result,
 };
-use std::path::Path;
 
 #[derive(Debug, clap::Parser)]
 #[command(name = "provenant profile")]
@@ -179,7 +178,10 @@ fn execute(registry: &Registry, command: &Command, context: &Context<'_>) -> Res
             for (name, preset) in &registry.presets {
                 out.push_str(&format!(
                     "  {name}: {}\n",
-                    preset["description"].string().unwrap_or("")
+                    preset
+                        .get("description")
+                        .map(|v| v.python_str())
+                        .unwrap_or_default()
                 ));
             }
         }
@@ -434,7 +436,11 @@ fn execute(registry: &Registry, command: &Command, context: &Context<'_>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, fs, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
+    };
     fn root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../..")
@@ -486,10 +492,12 @@ mod tests {
             current: Some(space.clone()),
             ..Default::default()
         };
-        let env = BTreeMap::from([(
+        let env: crate::OrderedMap<String> = [(
             profiles::PROFILE_ROOT_ENV.into(),
             instance.display().to_string(),
-        )]);
+        )]
+        .into_iter()
+        .collect();
         let context = Context {
             cwd: &project,
             environment: &env,
@@ -511,5 +519,32 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
             serde_json::json!(actual)
         );
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+    #[test]
+    fn list_formats_non_string_descriptions_like_python() {
+        let mut registry=Registry::from_json(br#"{"knobs":{},"presets":{"balanced":{"description":7},"other":{"description":null}}}"#,vec![],vec![]).unwrap();
+        registry.presets.push((
+            "array".into(),
+            Json::Object(vec![(
+                "description".into(),
+                Json::Array(vec![Json::Bool(true)]),
+            )]),
+        ));
+        let env = crate::OrderedMap::new();
+        let homes = provenant_core::paths::Homes::default();
+        let context = Context {
+            cwd: std::path::Path::new("/"),
+            environment: &env,
+            homes: &homes,
+        };
+        let output = run(&registry, &Command::List { json: false }, &context);
+        assert!(output
+            .stdout
+            .contains("  balanced: 7\n  other: None\n  array: [True]\n"));
     }
 }

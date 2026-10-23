@@ -58,7 +58,7 @@ pub fn env_name(knob: &str) -> String {
 }
 
 pub fn user_path(
-    environment: &BTreeMap<String, String>,
+    environment: &crate::OrderedMap<String>,
     homes: &provenant_core::paths::Homes,
 ) -> Result<PathBuf> {
     let instance = environment
@@ -97,7 +97,7 @@ fn read(path: &Path) -> Result<Json> {
     })?;
     ordered::decode(&bytes, "unreadable JSON", path)
 }
-fn object<'a>(value: &'a Json, message: impl Into<String>) -> Result<&'a [(String, Json)]> {
+fn object(value: &Json, message: impl Into<String>) -> Result<&[(String, Json)]> {
     value.object().ok_or_else(|| invalid(message))
 }
 fn keys(value: &Json) -> Vec<&str> {
@@ -402,17 +402,18 @@ impl Registry {
         }
         Ok(())
     }
-    pub fn env_layer(&self, environment: &BTreeMap<String, String>) -> Result<Layer> {
+    pub fn env_layer(&self, environment: &crate::OrderedMap<String>) -> Result<Layer> {
         let names = self
             .knobs
             .iter()
             .map(|(n, _)| (env_name(n), n))
             .collect::<BTreeMap<_, _>>();
-        let unknown = environment
+        let mut unknown = environment
             .keys()
             .filter(|k| k.starts_with(KNOB_ENV_PREFIX) && !names.contains_key(*k))
             .map(String::as_str)
             .collect::<Vec<_>>();
+        unknown.sort();
         if !unknown.is_empty() {
             return Err(invalid(format!(
                 "unknown knob variable(s) {}; `provenant profile list` names the knobs",
@@ -972,10 +973,12 @@ mod tests {
             current: Some(dir.path().into()),
             named: BTreeMap::from([("other".into(), "/other".into())]),
         };
-        let mut env = BTreeMap::from([
+        let mut env: crate::OrderedMap<String> = [
             ("AGENT_FABRIC_INSTANCE_ROOT".into(), "~/instance".into()),
             ("AGENTS_HOME".into(), "/ignored".into()),
-        ]);
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
             user_path(&env, &homes).unwrap(),
             dir.path().join("instance").join(USER_FILE)
@@ -1032,7 +1035,7 @@ pub fn parse_assignments(
 /// Routing may repoint AGENT_FABRIC_INSTANCE_ROOT; PROFILE_ROOT_ENV stays pinned.
 pub struct Context<'a> {
     pub cwd: &'a Path,
-    pub environment: &'a BTreeMap<String, String>,
+    pub environment: &'a crate::OrderedMap<String>,
     pub homes: &'a provenant_core::paths::Homes,
 }
 pub fn current(

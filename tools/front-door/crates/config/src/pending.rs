@@ -1,14 +1,15 @@
 //! Temporary shared primitives until their owners land on main.
 use crate::Result;
-use std::{fs, path::Path};
+use std::path::Path;
 
 // port: belongs in provenant-records
 pub(crate) fn json_bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let value = serde_json::to_value(record).map_err(|e| crate::invalid(e.to_string()))?;
-    let mut output = String::new();
-    encode_json(&value, 0, &mut output)?;
-    output.push('\n');
-    Ok(output.into_bytes())
+    Ok(format!(
+        "{}\n",
+        crate::ordered::dumps(&crate::ordered::Json::from_value(value), true, true)?
+    )
+    .into_bytes())
 }
 
 // port: belongs in provenant-records
@@ -26,67 +27,6 @@ pub(crate) fn json_string(value: &str) -> Result<String> {
         }
     }
     Ok(output)
-}
-
-// port: belongs in provenant-records
-fn encode_json(value: &serde_json::Value, depth: usize, output: &mut String) -> Result<()> {
-    use serde_json::Value;
-    let indent = "  ".repeat(depth);
-    match value {
-        Value::Array(items) if !items.is_empty() => {
-            output.push_str("[\n");
-            for (index, value) in items.iter().enumerate() {
-                output.push_str(&indent);
-                output.push_str("  ");
-                encode_json(value, depth + 1, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&indent);
-            output.push(']');
-        }
-        Value::Object(items) if !items.is_empty() => {
-            output.push_str("{\n");
-            for (index, (key, value)) in items.iter().enumerate() {
-                output.push_str(&indent);
-                output.push_str("  ");
-                output.push_str(&json_string(key)?);
-                output.push_str(": ");
-                encode_json(value, depth + 1, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&indent);
-            output.push('}');
-        }
-        Value::String(s) => output.push_str(&json_string(s)?),
-        Value::Number(n) if n.is_f64() => {
-            if let Some(value) = n.as_f64() {
-                let abs = value.abs();
-                if abs != 0.0 && !(1e-4..1e16).contains(&abs) {
-                    let scientific = format!("{value:e}");
-                    if let Some((mantissa, exponent)) = scientific.split_once('e') {
-                        let exponent: i32 = exponent
-                            .parse()
-                            .map_err(|e: std::num::ParseIntError| crate::invalid(e.to_string()))?;
-                        output.push_str(&format!("{mantissa}e{exponent:+03}"));
-                    }
-                } else {
-                    let decimal = value.to_string();
-                    output.push_str(&decimal);
-                    if !decimal.contains('.') {
-                        output.push_str(".0");
-                    }
-                }
-            }
-        }
-        _ => output.push_str(&value.to_string()),
-    }
-    Ok(())
 }
 
 // port: belongs in provenant-records
@@ -117,22 +57,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-// port: belongs in provenant-records
-pub(crate) fn read_json(path: &Path, context: &'static str) -> Result<serde_json::Value> {
-    let bytes = fs::read(path).map_err(|source| crate::Error::Read {
-        context,
-        path: path.into(),
-        source,
-    })?;
-    provenant_records::checked_json::from_slice(&bytes).map_err(|source| {
-        crate::Error::CheckedJson {
-            context,
-            path: path.into(),
-            source,
-        }
-    })
-}
-
 // port: belongs in provenant-core
 pub(crate) fn path_sort_key(name: &std::ffi::OsStr) -> Vec<u32> {
     use std::os::unix::ffi::OsStrExt;
@@ -159,6 +83,10 @@ pub(crate) fn path_sort_key(name: &std::ffi::OsStr) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    fn read_json(path: &Path, _context: &str) -> crate::Result<serde_json::Value> {
+        Ok(crate::ordered::decode(&fs::read(path).unwrap(), "test", path)?.value())
+    }
     #[test]
     fn python_json_bytes_cover_float_thresholds_and_ascii_escaping() {
         let dir = tempfile::tempdir().unwrap();

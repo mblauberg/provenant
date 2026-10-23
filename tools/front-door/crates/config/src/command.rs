@@ -521,3 +521,24 @@ mod publication_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn missing_source_diagnostic_matches_python_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        fs::write(&destination, "foreign").unwrap();
+        let Some(old)=crate::oracle::python("scripts/install-provenant-command.py","import io,json,contextlib\no=io.StringIO();e=io.StringIO()\nwith contextlib.redirect_stdout(o),contextlib.redirect_stderr(e): code=m.main(['classify','--source',str(p.parent/'source'),'--destination',str(p)])\nprint(json.dumps([code,o.getvalue(),e.getvalue()]))",&destination)else{return;};
+        let output = run(&Command::Classify {
+            source,
+            destination,
+        });
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
+            serde_json::json!([output.exit_code, output.stdout, output.stderr])
+        );
+    }
+}

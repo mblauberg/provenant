@@ -91,7 +91,7 @@ fn path_free(value: &Value, pointer: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_desired_state(value: Value) -> Result<DesiredState> {
+fn validate_desired_state_value(value: Value) -> Result<DesiredState> {
     validate_desired_state_inner(value, true)
 }
 
@@ -152,7 +152,7 @@ pub fn install_mode(product_root: &Path, instance_root: &Path) -> Result<Install
 }
 
 pub fn build_desired_state(version: &str, mode: InstallMode) -> Result<DesiredState> {
-    validate_desired_state(
+    validate_desired_state_value(
         serde_json::json!({"schema_version":1,"contract":DESIRED_STATE_CONTRACT,"product":{"name":"provenant","version":version},"mode":mode}),
     )
 }
@@ -162,7 +162,11 @@ pub fn load_desired_state(instance_root: &Path) -> Result<Option<DesiredState>> 
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).map_err(|e| io(&path, e))?;
+    let bytes = fs::read(&path).map_err(|source| crate::Error::Read {
+        context: "desired state is unreadable",
+        path: path.clone(),
+        source,
+    })?;
     validate_desired_state_bytes(&bytes).map(Some)
 }
 
@@ -279,21 +283,21 @@ mod tests {
         let mut value = serde_json::to_value(state).unwrap();
         for reference in ["/opt/product", "~/.agents", "C:\\product", "${ROOT}"] {
             value["product"]["ref"] = reference.into();
-            assert!(validate_desired_state(value.clone())
+            assert!(validate_desired_state_value(value.clone())
                 .unwrap_err()
                 .to_string()
                 .contains("path-free"));
         }
         value["product"]["ref"] = Value::Null;
         assert_eq!(
-            validate_desired_state(value.clone())
+            validate_desired_state_value(value.clone())
                 .unwrap()
                 .product
                 .reference(),
             Some(&Value::Null)
         );
         assert_eq!(
-            serde_json::to_value(validate_desired_state(value.clone()).unwrap()).unwrap(),
+            serde_json::to_value(validate_desired_state_value(value.clone()).unwrap()).unwrap(),
             value
         );
     }
@@ -309,7 +313,7 @@ mod tests {
                 serde_json::to_value(build_desired_state("1", InstallMode::Fused).unwrap())
                     .unwrap();
             value[field] = bad;
-            assert!(validate_desired_state(value).is_err());
+            assert!(validate_desired_state_value(value).is_err());
         }
     }
     #[test]
@@ -416,9 +420,9 @@ mod tests {
                     .unwrap();
             value["product"]["ref"] = reference;
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-            let Some(output) = crate::oracle::python("scripts/instance_installation.py", "import json\ntry: print(json.dumps(m.validate_desired_state(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))", &path) else { return; };
+            let Some(output) = crate::oracle::python("scripts/instance_installation.py", "import json\ntry: print(json.dumps(m.validate_desired_state_value(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))", &path) else { return; };
             let old: Value = serde_json::from_slice(&output).unwrap();
-            match validate_desired_state(value) {
+            match validate_desired_state_value(value) {
                 Ok(v) => assert_eq!(old, serde_json::to_value(v).unwrap()),
                 Err(e) => assert_eq!(old, e.to_string()),
             }
@@ -579,4 +583,9 @@ mod contract_tests {
                 .collect::<Vec<_>>())
         );
     }
+}
+
+/// Ordered JSON input retains the source validator's first-error policy.
+pub fn validate_desired_state(bytes: &[u8]) -> Result<DesiredState> {
+    validate_desired_state_bytes(bytes)
 }

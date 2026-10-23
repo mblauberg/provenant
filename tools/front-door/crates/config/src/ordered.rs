@@ -386,3 +386,43 @@ impl<'a, T> IntoIterator for &'a OrderedMap<T> {
         self.iter()
     }
 }
+
+impl<T> FromIterator<(String, T)> for OrderedMap<T> {
+    fn from_iter<I: IntoIterator<Item = (String, T)>>(iter: I) -> Self {
+        let mut map = Self::new();
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
+    }
+}
+
+impl Json {
+    pub(crate) fn python_str(&self) -> String {
+        if let Self::String(text) = self {
+            text.clone()
+        } else {
+            self.python_repr()
+        }
+    }
+    fn python_repr(&self) -> String {
+        match self {
+            Self::Object(items) => {
+                let rendered = items
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.python_repr()))
+                    .collect::<Vec<_>>();
+                provenant_core::py::python_dict_repr(rendered.iter().map(|(k, v)| (*k, v.as_str())))
+            }
+            Self::Array(items) => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(Self::python_repr)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => provenant_core::py::python_value_repr(&self.value()),
+        }
+    }
+}
