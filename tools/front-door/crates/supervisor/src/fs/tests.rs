@@ -1,7 +1,11 @@
 use super::*;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
+#[cfg(feature = "fixture")]
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Barrier};
+#[cfg(feature = "fixture")]
+use std::time::{Duration, Instant};
 
 fn names(dir: &Directory) -> Vec<OsString> {
     dir.entries().unwrap().collect::<Result<_>>().unwrap()
@@ -593,19 +597,17 @@ fn atomic_publication_replaces_or_refuses_and_always_removes_staging_entries() {
 fn both_publication_modes_report_visible_directory_sync_failure_without_retrying() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
-    let sync_failure = || {
-        Err(error("fsync directory", temp.path())(io::Error::other(
-            "injected directory sync failure",
-        )))
+    let mut sync_failure = FailAtomicWriteAt {
+        phase: AtomicWritePhase::DirectorySync,
+        errno: libc::EIO,
     };
-
     let first = dir
-        .atomic_write_with_sync(
+        .atomic_write_with_faults(
             OsStr::new("created"),
             ".stage.",
             b"visible",
             PublishMode::NoReplace,
-            sync_failure,
+            &mut sync_failure,
         )
         .unwrap();
     assert!(matches!(
@@ -625,13 +627,17 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
         PublishMode::Replace,
     )
     .unwrap();
+    let mut sync_failure = FailAtomicWriteAt {
+        phase: AtomicWritePhase::DirectorySync,
+        errno: libc::EIO,
+    };
     let second = dir
-        .atomic_write_with_sync(
+        .atomic_write_with_faults(
             OsStr::new("replaced"),
             ".stage.",
             b"new",
             PublishMode::Replace,
-            sync_failure,
+            &mut sync_failure,
         )
         .unwrap();
     assert!(matches!(
@@ -640,6 +646,283 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
     ));
     assert_eq!(dir.read_bounded(OsStr::new("replaced"), 3).unwrap(), b"new");
     assert_eq!(names(&dir).len(), 2);
+}
+
+struct FailAtomicWriteAt {
+    phase: AtomicWritePhase,
+    errno: i32,
+}
+impl AtomicWriteOperations for FailAtomicWriteAt {
+    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
+        if self.phase == AtomicWritePhase::Write {
+            let partial = bytes.len() / 2;
+            file.write_all(&bytes[..partial])
+                .map_err(error("write staging file", path))?;
+            Err(error("write staging file", path)(
+                io::Error::from_raw_os_error(self.errno),
+            ))
+        } else {
+            LocalAtomicWriteOperations.write(file, bytes, path)
+        }
+    }
+    fn sync_file(&mut self, file: &FileHandle) -> Result<()> {
+        if self.phase == AtomicWritePhase::FileSync {
+            Err(error("fsync file", &file.path)(
+                io::Error::from_raw_os_error(self.errno),
+            ))
+        } else {
+            LocalAtomicWriteOperations.sync_file(file)
+        }
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> Result<()> {
+        if self.phase == AtomicWritePhase::Rename {
+            Err(FsError::Rename {
+                from_path: directory.path.join(temporary),
+                to_path: directory.path.join(name),
+                source: io::Error::from_raw_os_error(self.errno),
+            })
+        } else {
+            LocalAtomicWriteOperations.rename(directory, temporary, name, mode)
+        }
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> Result<()> {
+        if self.phase == AtomicWritePhase::DirectorySync {
+            Err(error("fsync directory", &directory.path)(
+                io::Error::from_raw_os_error(self.errno),
+            ))
+        } else {
+            LocalAtomicWriteOperations.sync_directory(directory)
+        }
+    }
+}
+impl AtomicWriteFaults for FailAtomicWriteAt {}
+
+#[test]
+fn write_fsync_and_rename_faults_leave_the_previous_complete_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new("receipt.json");
+    let old = b"old complete receipt";
+    let new = b"new complete receipt";
+    dir.atomic_write(name, ".receipt.", old, PublishMode::Replace)
+        .unwrap();
+
+    for (phase, errno) in [
+        (AtomicWritePhase::Write, libc::ENOSPC),
+        (AtomicWritePhase::FileSync, libc::EIO),
+        (AtomicWritePhase::Rename, libc::EIO),
+    ] {
+        let mut faults = FailAtomicWriteAt { phase, errno };
+        let error = dir
+            .atomic_write_with_faults(name, ".receipt.", new, PublishMode::Replace, &mut faults)
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(errno));
+        assert_eq!(dir.read_bounded(name, 64).unwrap(), old);
+        assert_eq!(names(&dir), [OsString::from("receipt.json")]);
+    }
+}
+
+#[test]
+fn directory_sync_fault_reports_new_complete_file_as_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new("receipt.json");
+    let old = b"old complete receipt";
+    let new = b"new complete receipt";
+    dir.atomic_write(name, ".receipt.", old, PublishMode::Replace)
+        .unwrap();
+
+    let mut faults = FailAtomicWriteAt {
+        phase: AtomicWritePhase::DirectorySync,
+        errno: libc::EIO,
+    };
+    let publication = dir
+        .atomic_write_with_faults(name, ".receipt.", new, PublishMode::Replace, &mut faults)
+        .unwrap();
+    match publication {
+        Publication::VisibleDurabilityUnconfirmed { sync_error } => {
+            assert_eq!(sync_error.raw_os_error(), Some(libc::EIO));
+        }
+        Publication::Durable => panic!("directory sync fault was not reported"),
+    }
+    assert_eq!(dir.read_bounded(name, 64).unwrap(), new);
+    assert_eq!(names(&dir), [OsString::from("receipt.json")]);
+}
+
+#[cfg(feature = "fixture")]
+struct PauseAtAtomicWritePhase {
+    phase: AtomicWritePhase,
+    socket: PathBuf,
+}
+#[cfg(feature = "fixture")]
+impl PauseAtAtomicWritePhase {
+    fn pause(&mut self, phase: AtomicWritePhase) -> Result<()> {
+        if self.phase == phase {
+            let mut stream = UnixStream::connect(&self.socket)
+                .map_err(error("fixture socket connect", &self.socket))?;
+            stream
+                .write_all(b"R")
+                .map_err(error("fixture handshake", &self.socket))?;
+            loop {
+                std::thread::park_timeout(Duration::from_secs(60));
+            }
+        }
+        Ok(())
+    }
+}
+#[cfg(feature = "fixture")]
+impl AtomicWriteOperations for PauseAtAtomicWritePhase {
+    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
+        self.pause(AtomicWritePhase::Write)?;
+        LocalAtomicWriteOperations.write(file, bytes, path)
+    }
+    fn sync_file(&mut self, file: &FileHandle) -> Result<()> {
+        self.pause(AtomicWritePhase::FileSync)?;
+        LocalAtomicWriteOperations.sync_file(file)
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> Result<()> {
+        self.pause(AtomicWritePhase::Rename)?;
+        LocalAtomicWriteOperations.rename(directory, temporary, name, mode)
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> Result<()> {
+        self.pause(AtomicWritePhase::DirectorySync)?;
+        LocalAtomicWriteOperations.sync_directory(directory)
+    }
+}
+#[cfg(feature = "fixture")]
+impl AtomicWriteFaults for PauseAtAtomicWritePhase {}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn atomic_write_crash_fixture() {
+    let (Some(root), Some(socket), Some(phase)) = (
+        std::env::var_os("PROVENANT_TEST_ATOMIC_ROOT"),
+        std::env::var_os("PROVENANT_TEST_ATOMIC_SOCKET"),
+        std::env::var_os("PROVENANT_TEST_ATOMIC_PHASE"),
+    ) else {
+        return;
+    };
+    let phase = match phase.to_str() {
+        Some("rename") => AtomicWritePhase::Rename,
+        Some("directory-sync") => AtomicWritePhase::DirectorySync,
+        _ => panic!("unknown atomic write fixture phase"),
+    };
+    let dir = Directory::open_anchor(Path::new(&root)).unwrap();
+    let mut faults = PauseAtAtomicWritePhase {
+        phase,
+        socket: PathBuf::from(socket),
+    };
+    let _ = dir.atomic_write_with_faults(
+        OsStr::new("receipt.json"),
+        ".receipt.",
+        b"new complete receipt",
+        PublishMode::Replace,
+        &mut faults,
+    );
+    panic!("fixture passed its requested crash boundary");
+}
+
+#[cfg(feature = "fixture")]
+fn kill_fixture(
+    child: &mut crate::sys::raw_exec::OwnedPid,
+    reaper: &crate::sys::reaper::Reaper,
+) -> bool {
+    if child.signal(crate::identity::Signal::Kill).is_err() {
+        reaper.resume();
+        return false;
+    }
+    let Some(deadline) = Instant::now().checked_add(Duration::from_secs(2)) else {
+        reaper.resume();
+        return false;
+    };
+    loop {
+        match child.observe() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => {
+                reaper.resume();
+                return false;
+            }
+        }
+        if Instant::now() >= deadline {
+            reaper.resume();
+            return false;
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
+    for (phase, expected) in [
+        ("rename", &b"old complete receipt"[..]),
+        ("directory-sync", &b"new complete receipt"[..]),
+    ] {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = Directory::open_anchor(temp.path()).unwrap();
+        dir.atomic_write(
+            OsStr::new("receipt.json"),
+            ".receipt.",
+            b"old complete receipt",
+            PublishMode::Replace,
+        )
+        .unwrap();
+        let socket = temp.path().join("boundary.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let current_exe = std::env::current_exe().unwrap();
+        let argv = [
+            current_exe.into_os_string(),
+            "--exact".into(),
+            "fs::tests::atomic_write_crash_fixture".into(),
+            "--nocapture".into(),
+        ];
+        let env = [
+            ("PROVENANT_TEST_ATOMIC_ROOT".into(), temp.path().into()),
+            (
+                "PROVENANT_TEST_ATOMIC_SOCKET".into(),
+                socket.into_os_string(),
+            ),
+            ("PROVENANT_TEST_ATOMIC_PHASE".into(), phase.into()),
+        ];
+        let reaper = crate::sys::reaper::Reaper::new_paused(1).unwrap();
+        let permit = reaper.reserve().unwrap();
+        let mut child = crate::sys::raw_exec::OwnedPid::spawn(
+            permit,
+            &argv,
+            Some(&env),
+            temp.path(),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let mut stream = crate::sys::fixture_accept(&listener, Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            crate::sys::fixture_read_byte(&mut stream, Duration::from_secs(5)).unwrap(),
+            b'R'
+        );
+        assert!(
+            kill_fixture(&mut child, &reaper),
+            "fixture did not stop after boundary kill"
+        );
+        assert_eq!(
+            dir.read_bounded(OsStr::new("receipt.json"), 64).unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]

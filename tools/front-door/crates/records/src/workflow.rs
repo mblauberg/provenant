@@ -387,6 +387,25 @@ impl DeliveryReceipt {
             updated_at: self.updated_at,
         })
     }
+    /// Store-owned commit metadata. Expected-revision locking belongs to workflow.
+    /// Consumes the candidate so invalid metadata cannot escape as a record.
+    pub fn with_commit_metadata(
+        mut self,
+        revision: u64,
+        created_at: UtcMicros,
+        updated_at: UtcMicros,
+        subject_changed: bool,
+    ) -> Result<Self, RecordError> {
+        if subject_changed {
+            self.decision = Decision::pending();
+            self.review_attempts.clear();
+        }
+        self.revision = revision;
+        self.created_at = created_at;
+        self.updated_at = updated_at;
+        self.validate_shape()?;
+        Ok(self)
+    }
     pub fn schema_version(&self) -> u64 {
         self.schema_version
     }

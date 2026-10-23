@@ -88,25 +88,13 @@ impl SessionStore {
         }
     }
     fn directory(&self, create: bool) -> Result<Directory, FsError> {
-        let mut dir = Directory::open_anchor(self.root.as_path())?;
-        for name in [
-            "workflow",
-            "projects",
-            &self.project.to_string(),
+        crate::persistence::directory(
+            &self.root,
+            self.project,
             "sessions",
             self.session.as_str(),
-        ] {
-            let name = OsStr::new(name);
-            if create {
-                match dir.mkdir(name, 0o700) {
-                    Ok(()) => dir.sync()?,
-                    Err(error) if error.is_exists() => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            dir = dir.open_verified_directory(name)?;
-        }
-        Ok(dir)
+            create,
+        )
     }
     /// Replaces all Markdown. The caller must preserve originating authority refs.
     /// The final cancellation check is the publication boundary. After it,

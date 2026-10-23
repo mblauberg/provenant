@@ -51,7 +51,6 @@ ignored-paths = [
   "crates/fabric-mcp/src/lib.rs",
   "crates/providers/src/lib.rs",
   "crates/run/src/lib.rs",
-  "crates/workflow/src/pending/python_word.rs",
 ]
 ignored = [
   "provenant-cli",
