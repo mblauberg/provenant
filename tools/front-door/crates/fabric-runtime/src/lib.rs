@@ -9,5 +9,6 @@ pub mod hosts;
 pub mod identity;
 pub mod json_subprocess;
 pub mod lane_watch;
+pub mod success_status;
 
 mod pending;
