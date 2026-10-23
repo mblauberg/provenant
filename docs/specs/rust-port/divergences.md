@@ -1729,7 +1729,7 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   as `0.09090909090909093`. CPython and Rust lexical float parsing retain
   `0.09090909090909091`. The owner currently uses serde_json's default decoder.
 - Evidence: required `differential::costs_and_outcomes_match_python` fails with
-  these exact number spellings. The other 119 crate tests pass. No epsilon or
+  these exact number spellings. The other 121 crate tests pass. No epsilon or
   rewritten expectation is accepted. The shared owner must repair its float
   decoding; the telemetry lane cannot change records or workspace features.
 - Disposition: costs unit-01 stays partial and absent from `ported.txt`/PR Units
@@ -1768,3 +1768,17 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
 - Disposition: report unit-01 remains partial. Complete typed ordered report
   records and byte differentials before claiming or cutting over this unit;
   no workspace serde_json feature is added by this lane.
+
+### RP-TEL-SORT-ERROR: mixed-label comparison failure order (open)
+
+- Class: `bug`; not accepted. Changes unit-01 uses a minimal private fallible
+  sorter in `pending`, marked for core ownership. Main's `provenant_core::py`
+  has no CPython-compatible fallible sort API yet.
+- Native adversarial review reproduced labels `[3, 1, 2.0, "x"]`: CPython's
+  `sorted()` reports incompatible `str` and `float`; the pending insertion
+  sorter reports `str` and `int`. Successful sortable values retain their
+  stable ordering, but the comparison schedule changes the error message.
+- Disposition: changes unit-01 is partial and excluded from `ported.txt` and
+  PR `Units:`. A shared core sort implementation preserving CPython's
+  comparison/error ordering and mixed-value differentials is required before
+  claiming this unit. No command calls the partial implementation.

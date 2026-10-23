@@ -10,7 +10,7 @@ owner. The installed `provenant root` remains `/Users/mikey/Repos/provenant`.
 
 | Unit | Status | Work in this batch | Remaining |
 |---|---|---|---|
-| `scripts/telemetry_changes.py#unit-01` | Complete | SQLite change/meta/event store; durable bounded sync; GH/git command/environment/error policy; markers, pivots, side/comparison assembly, rendering and attention | Actual bounded utility execution is an injected owner seam, not a new process owner |
+| `scripts/telemetry_changes.py#unit-01` | Partial, shared API blocked | SQLite change/meta/event store; durable bounded sync; GH/git command/environment/error policy; markers, pivots, side/comparison assembly, rendering and attention | Core has no fallible CPython-compatible sort API; the pending sorter changes mixed-label comparison-error order (RP-TEL-SORT-ERROR) |
 | `scripts/telemetry_costs.py#unit-01` | Partial, shared API blocked | SQL usage cells, alias deduplication, null/positive reducers, ordered group serialization and exact byte differential | Shared `provenant_records::checked_json` must preserve lexical float rounding; RP-TEL-JSON-FLOAT blocks the complete-unit claim |
 | `scripts/telemetry_delivery.py#unit-01` | Partial | Concrete SQLite cursor/delivery/report/accepted-cost adapter; receipt and sidecar policy; discovery/read contracts; output and malformed-input differentials | A permitted adapter to supervisor safe filesystem/discovery APIs; R2 excludes a telemetry-to-supervisor dependency |
 | `scripts/telemetry_ingest.py#unit-01` | Partial | Concrete SQLite cursor/clear-file adapter and verified JSONL seam; shared semantic owners | Concrete supervisor-backed no-follow adapter is outside the current R2 edges; input-limit decision remains open |
@@ -37,8 +37,9 @@ module, Unicode printable table and generator are deleted.
 
 Pending helpers still have no corresponding public owner API on the source
 snapshot: telemetry Usage/Event/Observation records, exact Numeric arithmetic,
-Python sorted JSON/hash/hex encoders belong in records; decimal digits and
-letter classification, UTC text rendering belong in core. Timestamp wrappers
+Python sorted JSON/hash/hex encoders belong in records; decimal digits,
+letter classification, JSON value type names/comparison/sort and UTC text rendering
+belong in core. Timestamp wrappers
 only adapt the shared core owner to telemetry errors and UTC-naive policy.
 Filesystem traits name the safe-owner contract; supervisor's safe filesystem
 API does exist on main, but the telemetry edge is not permitted by R2.
@@ -51,7 +52,7 @@ Pinned Rust toolchain and Python 3.14.8; isolated `-I -B` oracle with explicit
 environment and bounded child observation. `cargo fmt --all` and
 `cargo clippy -p provenant-telemetry --all-targets -- -D warnings` pass.
 `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-telemetry` currently
-reports **119 passed, 1 failed**: the pre-existing cost/outcome differential
+reports **121 passed, 1 failed**: the pre-existing cost/outcome differential
 exposes RP-TEL-JSON-FLOAT after shared-owner adoption. No tolerance, skip,
 private decoder restoration or expected-value change masks it. The shared
 owner request was sent to the chair through Fabric; its fix is outside this

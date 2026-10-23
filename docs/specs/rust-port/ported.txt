@@ -43,6 +43,5 @@ skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
 skills/_shared/bounded_process.py#unit-01
 workspace:front-door-syscalls
-scripts/telemetry_changes.py#unit-01
 scripts/telemetry_changes.py#unit-02
 skills/orchestrate/scripts/context_usage.py#unit-02
