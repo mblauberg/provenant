@@ -153,3 +153,20 @@ float/shlex/repr compatibility API yet, so the minimal pure helpers remain in
 JSON codec; records already owns checked JSON and core owns future datetime
 conversion. Integration must wire those shared owners before these OS adapters
 are completed.
+
+`worker_liveness.py#unit-02` is partial: the pure `collect` reducer and exact
+Unicode-aware table `render` are ported. Collection scopes observations by
+repository before counting shared cwd users, binds output baselines to PID,
+keeps missing sizes as null, labels live worktrees `writer-live`, and reports
+stalls only as advisories. It consumes resolved census/log/repository values;
+OS collection, CLI argument parsing, JSON edge formatting and main remain.
+Tests cover missing baselines/logs, short workers, unchanged/growing output,
+shared cwd ambiguity, repository filtering/errors, malformed elapsed values,
+null fields and exact differential table bytes (including empty tables).
+
+Batch-2 source/oracle baseline: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
+merged main `600dec09bcda3b6a86272e391420e89d38777953` adds the batch ledger,
+not source changes. Rulebook v4; author route `codex/gpt-6.1-sol@high`.
+The root syscall unit remains partial: exec.rs/resolve.rs are authorised, but
+linking the existing supervisor wrappers requires a root Cargo.toml dependency
+change outside this lane's write scope. No command is switched here.

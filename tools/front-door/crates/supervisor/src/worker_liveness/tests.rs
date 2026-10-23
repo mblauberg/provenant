@@ -221,3 +221,136 @@ print(json.dumps({{'duration':[bits(m.parse_duration(x)) for x in {durations}], 
         expected
     );
 }
+
+fn located(pid: i64, cwd: &str, elapsed: &str) -> LocatedProcess {
+    LocatedProcess {
+        process: Process {
+            pid,
+            ppid: 1,
+            elapsed: elapsed.into(),
+            cpu: "0:00.01".into(),
+            command: "codex exec task".into(),
+        },
+        cwd: cwd.into(),
+        repository_id: Some("repo".into()),
+    }
+}
+#[test]
+fn collection_uses_per_pid_growth_not_cpu_log_age_or_worktree_state() {
+    let processes = [located(41, "/repo/λ", "01:00")];
+    let logs = BTreeMap::from([(
+        "/repo/λ".into(),
+        SessionLog {
+            path: "/sessions/rollout-1.jsonl".into(),
+            modified: "2026-01-01T00:00:00+00:00".into(),
+            age_seconds: Some(3600.0),
+            output_size: Some(3),
+        },
+    )]);
+    let scope = RepositoryScope {
+        path: "/repo".into(),
+        repository_id: Some("repo".into()),
+    };
+    let workers = collect(
+        &processes,
+        &logs,
+        Some(&scope),
+        Some(&BTreeMap::from([(41, 2)])),
+    )
+    .unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0].output_size, Some(3));
+    assert_eq!(workers[0].worktree, "writer-live");
+    assert!(!workers[0].stalled);
+}
+
+#[test]
+fn stalls_are_advisory_and_require_a_unique_cwd_owned_baseline() {
+    let mut processes = vec![located(44, "/repo", "01:00")];
+    let logs = BTreeMap::from([(
+        "/repo".into(),
+        SessionLog {
+            path: "/log".into(),
+            modified: "mtime".into(),
+            age_seconds: Some(10_000.0),
+            output_size: Some(3),
+        },
+    )]);
+    let previous = BTreeMap::from([(44, 3), (45, 2)]);
+    assert!(collect(&processes, &logs, None, Some(&previous)).unwrap()[0].stalled);
+    assert!(!collect(&processes, &logs, None, None).unwrap()[0].stalled);
+    assert!(!collect(&processes, &BTreeMap::new(), None, Some(&previous)).unwrap()[0].stalled);
+    processes[0].process.elapsed = "00:59".into();
+    assert!(!collect(&processes, &logs, None, Some(&previous)).unwrap()[0].stalled);
+    processes[0].process.elapsed = "01:00".into();
+    processes.push(located(45, "/repo", "01:00"));
+    let workers = collect(&processes, &logs, None, Some(&previous)).unwrap();
+    assert!(workers
+        .iter()
+        .all(|w| w.output_size.is_none() && !w.stalled));
+    assert!(workers
+        .iter()
+        .all(|w| w.session_log == "/log" && w.worktree == "writer-live"));
+    processes[1].repository_id = Some("other-repo".into());
+    let scope = RepositoryScope {
+        path: "/repo".into(),
+        repository_id: Some("repo".into()),
+    };
+    let workers = collect(&processes, &logs, Some(&scope), Some(&previous)).unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0].output_size, Some(3));
+    assert!(workers[0].stalled);
+    let scope = RepositoryScope {
+        path: "/not-repo".into(),
+        repository_id: None,
+    };
+    assert_eq!(
+        collect(&processes, &logs, Some(&scope), None),
+        Err(LivenessError::Repository("/not-repo".into()))
+    );
+}
+#[test]
+fn missing_logs_preserve_nulls_and_bad_elapsed_refuses_collection() {
+    let mut process = located(9, "?", "00:01");
+    let workers = collect(&[process.clone()], &BTreeMap::new(), None, None).unwrap();
+    let value = serde_json::to_value(&workers[0]).unwrap();
+    assert_eq!(value["session_log"], "-");
+    assert_eq!(value["session_log_mtime"], "-");
+    assert!(value.get("session_log_age_seconds").unwrap().is_null());
+    assert!(value.get("output_size").unwrap().is_null());
+    process.process.elapsed = "bad-00:01".into();
+    assert!(collect(&[process], &BTreeMap::new(), None, None).is_err());
+}
+#[test]
+fn differential_render_preserves_unicode_padding_missing_values_and_advisories() {
+    let processes = [
+        located(9, "/repo/λ😀\u{1c}", "01:00"),
+        located(82, "/repo/long directory", "1-00:00:00"),
+    ];
+    let logs = BTreeMap::from([(
+        "/repo/long directory".into(),
+        SessionLog {
+            path: "/log".into(),
+            modified: "2026-01-01T00:00:00.000001+00:00".into(),
+            age_seconds: Some(0.0),
+            output_size: Some(0),
+        },
+    )]);
+    let workers = collect(&processes, &logs, None, Some(&BTreeMap::from([(82, 0)]))).unwrap();
+    let rows = serde_json::to_string(&serde_json::to_string(&workers).unwrap()).unwrap();
+    let script = format!(
+        r#"
+import importlib.util, json, sys
+from pathlib import Path
+s=importlib.util.spec_from_file_location('worker_liveness', Path('skills/orchestrate/scripts/worker_liveness.py'))
+m=importlib.util.module_from_spec(s); sys.modules[s.name]=m; s.loader.exec_module(m)
+rows=json.loads({rows})
+print(json.dumps([m.render([]),m.render([m.Worker(**row) for row in rows])]))
+"#
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let Some(expected) = crate::test_support::python(&root, &script) else {
+        return;
+    };
+    assert_eq!(serde_json::json!([render(&[]), render(&workers)]), expected);
+}

@@ -207,5 +207,139 @@ pub fn require_inspection_quiescent(
     Ok(())
 }
 
+/// A resolved cwd and repository observation for one process. The OS adapter
+/// owns canonicalisation and repository probing; absence is distinct from '?'.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocatedProcess {
+    pub process: Process,
+    pub cwd: String,
+    pub repository_id: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionLog {
+    pub path: String,
+    pub modified: String,
+    pub age_seconds: Option<f64>,
+    pub output_size: Option<i64>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryScope {
+    pub path: String,
+    pub repository_id: Option<String>,
+}
+
+/// Sans-IO collection over a single census and session-log snapshot. A session
+/// shared by multiple workers never provides a per-PID output-growth baseline.
+pub fn collect(
+    processes: &[LocatedProcess],
+    logs: &BTreeMap<String, SessionLog>,
+    scope: Option<&RepositoryScope>,
+    previous_sizes: Option<&BTreeMap<i64, i64>>,
+) -> Result<Vec<Worker>, LivenessError> {
+    let scope_id = match scope {
+        Some(scope) => Some(
+            scope
+                .repository_id
+                .as_ref()
+                .ok_or_else(|| LivenessError::Repository(scope.path.clone()))?,
+        ),
+        None => None,
+    };
+    let located: Vec<_> = processes
+        .iter()
+        .filter(|row| scope_id.is_none_or(|id| row.repository_id.as_ref() == Some(id)))
+        .collect();
+    let mut cwd_counts = BTreeMap::new();
+    for row in &located {
+        *cwd_counts.entry(&row.cwd).or_insert(0_usize) += 1;
+    }
+    let mut workers = Vec::new();
+    for row in located {
+        let process = &row.process;
+        let elapsed_seconds = parse_elapsed(&process.elapsed)?;
+        let log = logs.get(&row.cwd);
+        let output_size = if cwd_counts.get(&row.cwd).copied().unwrap_or(0) > 1 {
+            None
+        } else {
+            log.and_then(|log| log.output_size)
+        };
+        let previous = previous_sizes.and_then(|sizes| sizes.get(&process.pid));
+        let stalled = elapsed_seconds >= STALL_WINDOW_SECONDS
+            && previous
+                .zip(output_size)
+                .is_some_and(|(&previous, current)| !output_grew(previous, current));
+        workers.push(Worker {
+            pid: process.pid,
+            elapsed: process.elapsed.clone(),
+            elapsed_seconds,
+            cpu: process.cpu.clone(),
+            cpu_seconds: parse_duration(&process.cpu),
+            cwd: row.cwd.clone(),
+            session_log: log.map_or("-", |log| log.path.as_str()).into(),
+            session_log_mtime: log.map_or("-", |log| log.modified.as_str()).into(),
+            session_log_age_seconds: log.and_then(|log| log.age_seconds),
+            output_size,
+            worktree: "writer-live".into(),
+            stalled,
+        });
+    }
+    Ok(workers)
+}
+
+/// Return the Python table body, without the CLI's final newline. Widths count
+/// Unicode codepoints, as str.ljust does, rather than bytes or terminal cells.
+pub fn render(workers: &[Worker]) -> String {
+    let mut rows = vec![[
+        "PID",
+        "ELAPSED",
+        "CPU",
+        "OUTPUT SIZE",
+        "SESSION LOG MTIME",
+        "WORKTREE",
+        "STATUS",
+        "CWD",
+    ]
+    .map(String::from)];
+    for worker in workers {
+        rows.push([
+            worker.pid.to_string(),
+            worker.elapsed.clone(),
+            worker.cpu.clone(),
+            worker
+                .output_size
+                .map_or_else(|| "-".into(), |size| size.to_string()),
+            worker.session_log_mtime.clone(),
+            worker.worktree.clone(),
+            if worker.stalled { "STALLED?" } else { "active" }.into(),
+            worker.cwd.clone(),
+        ]);
+    }
+    let mut widths = [0; 8];
+    for row in &rows {
+        for (index, value) in row.iter().enumerate() {
+            widths[index] = widths[index].max(value.chars().count());
+        }
+    }
+    rows.into_iter()
+        .map(|row| {
+            let line = row
+                .into_iter()
+                .enumerate()
+                .map(|(index, mut value)| {
+                    value.extend(std::iter::repeat_n(
+                        ' ',
+                        widths[index] - value.chars().count(),
+                    ));
+                    value
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            line.trim_end_matches(crate::pending::python_space)
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests;
