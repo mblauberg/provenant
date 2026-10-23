@@ -404,8 +404,8 @@ Shared **test** support in the binary's `tests/support/` provides:
   silence, exits and descendants, recording only fixture argv/environment.
 - `TestRig::command`: invokes `env!("CARGO_BIN_EXE_provenant")` through
   supervisor's safe runner, separately captures bounded stdout/stderr/status.
-  All test child creation uses that API. `McpClient` drives initialize,
-  initialized, list/call, correlation, cancellation and EOF; bounded draining
+  All test child creation uses that API. `McpClient` drives initialise,
+  initialised, list/call, correlation, cancellation and EOF; bounded draining
   threads keep floods from deadlocking and assert protocol-only stdout.
 - FIFO/barrier handshakes establish spawn/ready/terminal/cleanup ordering, with
   watchdogs rather than sleeps. Explicit teardown cancels only owned processes,
