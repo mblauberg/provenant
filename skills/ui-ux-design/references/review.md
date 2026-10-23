@@ -16,16 +16,14 @@ Here, the protected tree is the reviewed project tree.
 ## Establish coverage
 
 State the surface, representative viewport and input modes, applicable states,
-and supplied references. Prefer the actual rendered surface; source and static
-detector output are supporting evidence, not render proof. A quick review may
+and supplied references. Prefer the actual rendered surface; source is supporting evidence for rendered claims. A quick review may
 sample the critical path. A full review expands the state and viewport matrix,
 but neither implies exhaustive coverage.
 
-For deterministic leads, run
-`node "$(provenant root)/skills/ui-ux-design/scripts/detect.mjs" --help`,
-then scan the relevant file, directory, or URL. Treat every structured
-`incomplete` target or engine failure as missing coverage, not a clean result.
-A clean scan remains supporting evidence and never certifies the rendered UI.
+Use the existing `playwright` skill for navigation, accessible snapshots and
+screenshots against the app-owned preview. Check tool availability and version;
+never download it implicitly. Keep browser output outside the reviewed tree.
+If no authorised browser is available, mark browser evidence `not tested`.
 
 For each selected lane, report one status: `tested`, `failed`, `not tested`, or
 `not applicable`. Mark each claim `verified` when tied to an observed artefact
@@ -42,8 +40,7 @@ different from a test that ran and failed.
 
 Route source-diff causality and the canonical severity/finding schema to
 `code-review`. UI review adds the affected surface, state, viewport/input mode,
-observed impact, evidence label, and the smallest useful remedy. Detector
-findings remain leads until confirmed. Rank issues by user harm and reach, not
+observed impact, evidence label, and the smallest useful remedy. Rank issues by user harm and reach, not
 personal taste.
 
 For a compact critique, cover the applicable dimensions among visual hierarchy,

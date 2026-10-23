@@ -23,7 +23,7 @@ references:
   - {old: harden.md, status: folded, owners: [interaction-states.md, responsive-accessibility.md, visual-qa.md]}
   - {old: interaction-design.md, status: folded, owners: [interaction-states.md]}
   - {old: layout.md, status: folded, owners: [visual-system.md, surfaces.md]}
-  - {old: live.md, status: retained, owners: [live.md]}
+  - {old: live.md, status: removed, owners: []}
   - {old: motion-design.md, status: folded, owners: [motion.md]}
   - {old: onboard.md, status: folded, owners: [content-conversion.md, interaction-states.md]}
   - {old: overdrive.md, status: folded, owners: [design.md, motion.md]}

@@ -21,10 +21,10 @@ screenshot alone never certifies motion quality.
 Use rendered inspection, screenshots, accessibility tree, keyboard path,
 console, and network evidence as distinct lanes. Check hierarchy, alignment,
 clipping, layering, focus, overflow, state continuity, assets, errors, and
-unexpected requests. For a quick anti-pattern and contrast lead, run
-`node "$(provenant root)/skills/ui-ux-design/scripts/detect.mjs" --help`;
-its output or a build stamp is
-not evidence that the page rendered as claimed, so verify the shipped artefact.
+unexpected requests. Use the existing `playwright` skill with the app-owned
+preview for browser evidence. Check availability/version and never download
+the tool implicitly. View each capture and verify the shipped artefact; mark
+unavailable browser evidence `not tested`.
 
 Translate subjective goals into binary conditions tied to the approved intent.
 Record each matrix cell as tested, failed, not tested, or not applicable and

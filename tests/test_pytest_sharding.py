@@ -58,8 +58,7 @@ def test_temp_paths_stay_under_tmpdir_inside_a_checkout(tmp_path, monkeypatch) -
     assert selected.is_dir()
 
 
-def test_detached_checkout_temp_sources_pass_generated_file_guard(tmp_path, monkeypatch) -> None:
-    import json
+def test_detached_checkout_temp_sources_stay_outside_git(tmp_path, monkeypatch) -> None:
     import os
     import subprocess
     import tempfile
@@ -81,14 +80,6 @@ def test_detached_checkout_temp_sources_pass_generated_file_guard(tmp_path, monk
     conftest._keep_tmpdir_outside_git()
     fixture = Path(os.environ["TMPDIR"]) / "frontend"
     fixture.mkdir()
-    (fixture / "index.html").write_text('<div class="target">Source</div>')
-    (fixture / "generated.html").write_text('<!-- GENERATED FILE -->')
-    guard = (ROOT / "runtime/ui-live/is-generated.mjs").as_uri()
-    probe = subprocess.run(["node", "--input-type=module", "-e",
-        f'import {{ isGeneratedFile }} from {json.dumps(guard)};'
-        'console.log(JSON.stringify([isGeneratedFile("index.html"), isGeneratedFile("generated.html")]));'],
-        cwd=fixture, check=True, capture_output=True, text=True)
-    assert json.loads(probe.stdout) == [False, True]
     assert subprocess.run(["git", "rev-parse", "--git-dir"], cwd=fixture,
                           capture_output=True).returncode != 0
     # A fixture can still establish its own Git repository below the boundary.

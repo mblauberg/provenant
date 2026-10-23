@@ -53,7 +53,7 @@ orchestrate:
     notes: "the declared public interface; dedup target"
   - file: dynamic-workflows.md
     verdict: slim
-    notes: "advisory ~60 lines; must retain: Workflow contract binding, saved-workflow conventions, pointers; drop restated native Workflow docs and the run-dir list duplicated from memory-scratchpad"
+    notes: "accelerator instructions retired by workflow lane H; points to native orchestration and the host-independent contract"
   - file: paired-primary.md
     verdict: keep
     notes: "replace its Fabric-vs-Herdr restatement with a pointer"

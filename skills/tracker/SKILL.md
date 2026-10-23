@@ -57,9 +57,8 @@ retry. See [references/rate-limits.md](references/rate-limits.md).
 
 ## Steward mode
 
-A coordinator hands off all tracker work with: "load the `tracker` skill in
-steward mode; queue `<path>`" — normally to a cheaper subagent (default route:
-a Sonnet subagent). The steward drains an append-only queue file in order,
-replays idempotently, and returns a digest of at most 15 lines. See
-[references/steward.md](references/steward.md) for the queue schema and
-replay contract.
+A coordinator can delegate tracker work to an authorised worker using
+Fabric tasks and current issue/PR references. Before retrying a write,
+reconcile current issues and tasks with `gh` reads to avoid duplicates.
+Return a digest of at most 15 lines with links and blockers. See
+[references/steward.md](references/steward.md).

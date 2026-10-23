@@ -92,7 +92,7 @@ cases:
   - id: b008
     relation: boundary
     branch: review
-    prompt: "Use live variants to review this page, but keep the attempt read-only and do not edit source."
+    prompt: "Inspect this app-owned preview with the Playwright skill, but keep the attempt read-only and do not edit source."
     expected:
       tool_calls_forbidden: [Write, Edit, NotebookEdit, ApplyPatch, Delete]
       shell_mutation_forbidden: true
@@ -100,7 +100,7 @@ cases:
       browser_read_effects_permitted: [navigate, get, screenshot]
       tree_unchanged: true
       report_outside_protected_root: true
-      behaviour: Explicit read-only authority prevents live setup, injection, wrapping and acceptance; use non-mutating rendered evidence.
+      behaviour: Check browser availability/version without an implicit download; use non-mutating navigation, snapshots and screenshots outside the protected tree. Mark unavailable browser evidence not tested.
   - id: b009
     relation: boundary
     branch: composition

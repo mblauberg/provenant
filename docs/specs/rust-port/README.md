@@ -77,8 +77,8 @@ remove more; it records each removal with its reason.
   `delivery_run_shape` copy, and `crates/core/scripts/generate_unicode.py`.
   These exist only to reproduce Python or V8 behaviour, which R0 no longer
   requires. Each crate's first build step deletes its share.
-- **Tools:** the Herdr checker (`check_herdr_cli.py`), the `extract` utility
-  with its utility schema and Ajv validation, and the direct `cf_dispatch.py`
+- **Tools:** the `extract` utility with its utility schema and Ajv validation,
+  and the direct `cf_dispatch.py`
   entry. Command aliases are dropped in the frozen command tree.
 - **Port machinery:** the unit graph and its generator, inventory, ported
   list and divergence log, which tracked a unit-by-unit port.
@@ -97,8 +97,5 @@ Left to the owning design doc, with the evidence so far:
 - Session helpers (`context_audit`, `validate_idle_pause`,
   `bootstrap-autopilot`): the council proposed retiring them. Workshop
   transcripts mention them, so the workflow design checks for real use first.
-- UI tooling (`scripts/detect.mjs`, `scripts/live*.mjs`): the council
-  proposed retiring them in favour of the Playwright skill. The workshop
-  transcripts show no executions of either script.
 - Delivery telemetry and retrospectives: the workshop telemetry ledger holds
   no delivery or change rows.

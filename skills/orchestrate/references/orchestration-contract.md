@@ -4,24 +4,10 @@ Any orchestrator — Claude Code, Codex, Cursor, or a future substrate — that
 drives multi-agent work through this skill's adaptive loop realises the same
 stage/gate/recovery graph. This file is the canonical, substrate-neutral
 description of that graph, and is this skill's **public interface**: external
-consumers (`codebase-polish`, `cross-verify`, and any future skill outside
-this skill's boundary) should bind to this contract, not to one substrate's
-private implementation notes.
-
-Two current adapters realise this contract:
-
-- **Claude Code Dynamic Workflows** —
-  [dynamic-workflows.md](dynamic-workflows.md) binds the graph to a
-  JavaScript `Workflow()` runtime.
-- **Codex / Cursor native subagents** —
-  [codex-subagents.md](codex-subagents.md) binds the graph to native
-  multi-agent collaboration, or explicit waves at lower efforts.
-
-A new substrate binds to this contract the same way: implement the stages,
-gates and recovery transitions below, then add a short adapter note analogous
-to the two above. Nothing in this file is Claude-specific; runtime facts
-(concurrency limits, session mechanics, saved-workflow syntax, native-subagent
-role names) live only in the adapters.
+consumers should bind to this contract and use native agents plus Fabric.
+[Codex / Cursor native subagents](codex-subagents.md) describes the native
+binding and explicit waves. Host mechanics do not change review, authority or
+recovery requirements.
 
 ## Stages
 
@@ -59,8 +45,7 @@ role names) live only in the adapters.
   the approved scope asks for it; a project may name landing as acceptance; a gate-adjacent stage ends there and records `awaiting-user` rather
   than blocking on it. How a given substrate enacts that stop-and-record (live
   process pause, script termination, new invocation to resume) is adapter
-  mechanics, not part of this contract — see `dynamic-workflows.md` and
-  `codex-subagents.md`.
+  mechanics, not part of this contract; see `codex-subagents.md`.
 - **Final gate** — no untriaged P0/P1, no missing anchors, no unresolved doc
   drift, and family/cross-family status recorded
   (`CROSS-FAMILY-NOT-RUN: <reason>` where applicable).
