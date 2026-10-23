@@ -5,11 +5,9 @@ from pathlib import Path
 import sys
 
 root, unit = Path(sys.argv[1]), sys.argv[2]
-source = root / ("skills/autopilot/scripts/bootstrap-autopilot.py" if unit == "bootstrap" else f"skills/_shared/{unit}.py")
+source = root / f"skills/_shared/{unit}.py"
 if unit in {"git_evidence_packet", "git_evidence_header"}:
     source = root / "skills/orchestrate/scripts/git_evidence_packet.py"
-if unit == "idle_pause":
-    source = root / "skills/autopilot/scripts/validate_idle_pause.py"
 if unit in {"preflight_contract", "preflight_wire", "preflight_decode"}:
     source = root / "skills/orchestrate/scripts/dispatch_preflight.py"
 if unit in {"lane_exit_contract", "lane_exit_raw"}:
@@ -22,8 +20,6 @@ if unit == "authority_mapping":
     source = root / "skills/deliver/scripts/authority_mapping.py"
 if unit == "writer_branch":
     source = root / "skills/orchestrate/scripts/writer_lease.py"
-if unit in {"compact_reverse", "compact_render"}:
-    source = root / "skills/session/scripts/compact_reinject.py"
 if unit == "style_lint":
     source = root / "skills/natural-writing/scripts/style_lint.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
@@ -58,11 +54,6 @@ for case in cases:
                     results.append(module.prose_word_count(path, latex=case.get("latex", False)))
                 else:
                     results.append(module.scan(path, latex=case.get("latex", False)))
-    elif unit == "compact_reverse":
-        import hashlib
-        results.append([{"length": len(line), "digest": "sha256:" + hashlib.sha256(line).hexdigest()} for line in module.reverse_lines(case["path"])])
-    elif unit == "compact_render":
-        results.append(module.render(case["path"]))
     elif unit == "writer_branch":
         results.append(None if len(case) <= 48 and module.BRANCH_PATTERN.fullmatch(case) else f"branch {case} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention")
     elif unit == "authority_mapping":
@@ -142,14 +133,6 @@ for case in cases:
         results.append(json.dumps(module.parse_fast_route_json(case["raw"]), ensure_ascii=False, separators=(",", ":")))
     elif unit == "preflight_contract":
         results.append(module.parse_fast_route_json(json.dumps(case)))
-    elif unit == "idle_pause":
-        import tempfile
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory) / "STATE.md"
-            queue = Path(directory) / "QUEUE.md"
-            state.write_text(case["text"])
-            queue.write_text(case["queue"])
-            results.append(module.validate(state, queue))
     elif unit == "git_evidence_packet":
         scanner = module.PacketScanner(ValueError, case["limit"], validate_on_feed=case["validate"])
         try:
@@ -198,21 +181,4 @@ for case in cases:
                 results.append(None)
             except ValueError as error:
                 results.append(str(error))
-    elif unit == "bootstrap":
-        if case["op"] == "args":
-            import contextlib, io
-            out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                try:
-                    values, rest = module.parse_args(case["args"])
-                    result = {"values": values, "rest": rest}
-                except SystemExit as error:
-                    result = {"exit": error.code, "stdout": out.getvalue(), "stderr": err.getvalue()}
-            results.append(result)
-        elif case["op"] == "fallback":
-            results.append(module.fallback_content(case["name"], case["domain"]))
-        elif case["op"] == "knobs":
-            results.append(module.parse_knobs(case["goal"]))
-        elif case["op"] == "usage":
-            results.append(module.usage())
 json.dump(results, sys.stdout)

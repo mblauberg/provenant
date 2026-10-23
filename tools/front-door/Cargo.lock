@@ -547,8 +547,10 @@ dependencies = [
 name = "provenant-workflow"
 version = "0.1.0"
 dependencies = [
+ "provenant-core",
+ "provenant-supervisor",
+ "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
 ]

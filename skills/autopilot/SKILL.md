@@ -1,83 +1,77 @@
 ---
 name: autopilot
-description: "Use for large, open-ended missions across sessions/crashes until STOP; delegate lifecycle work. Not for bounded PR-gate delivery; use orchestrate autonomous mode or deliver."
+description: "Use for a large, open-ended mission that must continue across sessions until the user writes STOP. Use orchestrate for bounded waves and the owning lifecycle skills for decisions and changes. Not for bounded PR-gate delivery."
 ---
 
 # Autopilot
 
-A thin autonomous **conductor** for large missions: autonomous scoping,
-self-drive, durable cross-session state/recovery, and a hard user `STOP`
-gate. It owns no lifecycle machinery itself; it delegates every bounded wave
-to `orchestrate` and every decision/software change to `implement`/`deliver`,
-then records the durable pointers. Delivery acceptance follows objective checks
-and tier-required review; explicit user acceptance is required only for
-`terminal` work or when the approved scope asks for it. A project may name
-landing as acceptance. One-way doors and external actions retain their user gates.
+Autopilot guides a long-running mission. It delegates bounded work to
+`orchestrate` and decisions or software changes to their owning skills. The run
+and Fabric own task state, execution, admission, and recovery; this skill keeps
+the mission goal and user authority clear. It does not create a second queue,
+lease ledger, or run journal.
 
-It is **higher-authority** than `orchestrate`'s pre-scoped
-autonomous-implementation mode, which follows the project's landing gate; autopilot
-keeps going until a user writes `STATUS: STOP`.
-
-Claude Code and Codex are equal operators; Codex operators read
-[codex-operator.md](references/codex-operator.md) first.
+The mission remains open until the user sets `STATUS: STOP` in its goal. An
+empty lane list or an idle run means there is no eligible work now; it does not
+mean the mission is complete. Record what event can resume work, end the current
+invocation, and leave the mission open.
 
 ## Entry gate
 
-Needs all of: an open-ended mission too large for one bounded wave, a
-survivable-crash requirement, and an explicit user STOP gate as the only
-clean exit; otherwise use a lighter-weight skill.
+Use autopilot only when the work is open-ended, spans multiple work waves or
+sessions, and the user has set an explicit STOP gate. Otherwise use a bounded
+skill such as `orchestrate`, `implement`, or `deliver`.
 
-## Bootstrap
-
-1. Run `scripts/bootstrap-autopilot.py <mission-id>`, fill every CONFIG KNOB,
-   then rerun to substitute/validate. See
-   [state-contract.md](references/state-contract.md) for the file set and
-   `.agent-run/runs/<mission-run-dir>/` location.
-2. Use `orchestrate` for every bounded wave: it owns topology, provider
-   routing, coordination, the review ladder and degradation.
-   Delegate decisions/software change to `implement`/`deliver` and record
-   the returned route/result in `QUEUE.md`.
-3. Operate one iteration at a time after reading
-   [operating-loop.md](references/operating-loop.md),
-   [state-contract.md](references/state-contract.md), `GOAL.md`, `STATE.md`,
-   `QUEUE.md`'s head. Keep one conductor lease.
-4. Interactive missions use Herdr and record owned panes. External-driver-only
-   missions record `HERDR-NOT-USED: external driver; filesystem state is
-   authoritative` in the run-local `STATE.md`.
-
-Bootstrap authorises only mission-declared isolation. Source-repository
-implementation branches and linked worktrees are covered by standing authority
-and use `provenant worktree`; project restrictions, other worktrees and
-destructive cleanup remain separately gated.
+Before proceeding, read the goal, current project instructions, scope and
+authority, and the current owner records. Stop for missing authority or a
+one-way-door decision. Keep other in-scope work moving where it is independent.
 
 ## Operating loop
 
-Run `RECONCILE -> READ -> SELECT -> DISPATCH -> RECORD -> PROPAGATE ->
-REORG-if-due -> STATE -> WAKE/STOP`. Flip a `QUEUE.md` row to `LEASED` before
-launch. Delegate deep work; fan out independent contexts and serialise shared
-state. Bound retries; escalate stalls with evidence. An empty queue triggers
-one bounded re-enumeration pass, then an idle checkpoint and paused dispatch;
-only user STOP closes the mission. See
-[operating-loop.md](references/operating-loop.md) and
-[recovery-and-cadence.md](references/recovery-and-cadence.md) for detail.
+1. Check the user-owned goal and STOP status. Reopen the current scope and
+   authority sources.
+2. Run `provenant reconcile` after an interruption or when task state may be
+   stale. Inspect `provenant lanes` and the relevant Fabric tasks before
+   selecting work.
+3. Dispatch bounded work through `provenant dispatch` and `orchestrate`.
+   Use Fabric tasks for assignment, coordination, and results. `orchestrate`
+   owns routing, topology, and review requirements.
+4. Inspect returned work with `provenant output`; verify artifacts and checks
+   before treating a task as complete. Route changes through `implement` or
+   `deliver` as required.
+5. Respect bounded retry and escalation rules from the owning lifecycle. Do
+   not bypass a user gate, widen the build ceiling, or infer authority from a
+   worker's result.
+6. When work is interrupted, use `provenant resume` and `provenant reconcile`
+   with the run's existing identity. Preserve partial outputs and verify the
+   target before retrying.
+7. Before compaction or a substantial handoff, save a bounded Markdown
+   checkpoint for the actual host session with
+   `provenant workflow session save <session-id> --file <checkpoint.md>`.
+   Include authority/evidence references, verified progress, next actions,
+   blockers, and a resume trigger.
+8. If the run has no eligible or active work, follow run admission and pause
+   behavior. Report the waiting condition and resume trigger. Do not label the
+   mission complete or change `STATUS`; only the user can stop it.
 
-## Evidence and closure
+## Mission evidence and STOP
 
-The run-local `STATE.md` holds current recovery truth; `QUEUE.md` is the durable work queue
-and item-lease ledger. Durable decisions are delegated, not forked here; see
-[state-contract.md](references/state-contract.md). Decisions taken while the
-user is away go to the assumption ledger for later confirmation; see
-[assumptions-and-steering.md](references/assumptions-and-steering.md).
+Keep durable project knowledge in its existing owner. Run lanes and Fabric
+retain live task state and results; a session checkpoint carries only the
+context needed to resume one host session. SessionStart injects only the
+checkpoint for its exact key, or an explicit missing/stale status. PreCompact
+reports whether that checkpoint needs saving. Neither hook expands authority
+or selects a latest file.
 
-Cleanup must classify first: never delete unknown files; prune only
-mission-owned, manifest-classified ephemeral payload with no live reference.
-STOP requires `GOAL`/`STATE`/`HANDOFF` agreement and reconciled, closed work;
-see [recovery-and-cadence.md](references/recovery-and-cadence.md) for the
-closure protocol.
+When the user sets `STATUS: STOP`, reconcile current work, verify the outcome,
+and provide a concise handoff with completed evidence, remaining work, and any
+unresolved gate. Do not close the mission because the current frontier is dry.
+External actions retain their own user gates.
 
 ## References
 
-Load one relevant reference: [state-contract.md](references/state-contract.md),
-[cross-family-review.md](references/cross-family-review.md),
-[assumptions-and-steering.md](references/assumptions-and-steering.md), or the
-loop/recovery/Codex files above.
+Read [state-contract.md](references/state-contract.md) for state ownership,
+[operating-loop.md](references/operating-loop.md) for the run/Fabric work loop,
+[recovery-and-cadence.md](references/recovery-and-cadence.md) for interruption
+and idle handling, and [assumptions-and-steering.md](references/assumptions-and-steering.md)
+for decisions made within an approved authority envelope.
