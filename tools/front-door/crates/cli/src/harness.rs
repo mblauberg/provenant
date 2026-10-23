@@ -19,13 +19,13 @@ pub fn sidecar_errors(
         if interface
             .get(field)
             .and_then(Value::as_str)
-            .is_none_or(|s| crate::pending::python_strip(s).is_empty())
+            .is_none_or(|s| provenant_core::py::python_strip(s).is_empty())
         {
             errors.push(format!("{prefix}: interface.{field} is required"));
         }
     }
     if let Some(short) = interface.get("short_description").and_then(Value::as_str) {
-        if !crate::pending::python_strip(short).is_empty()
+        if !provenant_core::py::python_strip(short).is_empty()
             && !(25..=64).contains(&short.chars().count())
         {
             errors.push(format!(
@@ -36,12 +36,7 @@ pub fn sidecar_errors(
     // Python str(container) uses repr for its members, including None/True.
     let prompt = interface
         .get("default_prompt")
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| crate::pending::python_value_repr(value))
-        })
+        .map(provenant_core::py::python_str)
         .unwrap_or_default();
     if !prompt.contains(&format!("${skill}")) {
         errors.push(format!("{prefix}: default_prompt must invoke ${skill}"));

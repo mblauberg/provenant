@@ -165,10 +165,13 @@ pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::IntegerErro
         if !decimal(target) {
             return Ok(Some(format!(
                 "kill target {} is not a literal PID",
-                crate::pending::python_repr(target)
+                provenant_core::py::python_repr(target)
             )));
         }
-        if target.chars().all(|c| crate::pending::decimal_digit(c) == Some(0)) {
+        if target
+            .chars()
+            .all(|c| crate::pending::decimal_digit(c) == Some(0))
+        {
             return Ok(Some("kill 0 signals the caller's process group".into()));
         }
     }
@@ -911,6 +914,7 @@ print(json.dumps(errors))
             vec!["99999999999999999999".into()],
             vec!["7".repeat(4300)],
             vec!["0".repeat(4300)],
+            vec!["٠".repeat(4300)],
             vec![format!("{}١", "٠".repeat(4299))],
         ]);
         let Some(expected): Option<Vec<Option<String>>> = crate::oracle::python(

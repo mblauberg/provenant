@@ -2,7 +2,9 @@
 
 Author route: `codex/gpt-6.1-sol@high`. Rulebook: `PORTING.md` version 4.
 Source/policy oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`; the affected
-sources are unchanged through merged main `cffeb4a54b6a702a008dbfee92bef5177803e8f3`.
+sources are unchanged through merged main `a05bcb46`, except cleanup's retained
+context now follows `f0661f88` (#1323). Main also includes the shared Python
+helpers and internal workspace dependencies (#1329).
 The crate remains inert. Nothing switches command ownership or retires source.
 
 ## Completion
@@ -11,8 +13,9 @@ Fully ported in this batch:
 
 - `scripts/lane_safety_guard.py#unit-01`: shell command parsing, substitutions,
   quotes, comments, redirections, heredocs, wrapper stripping and literal-PID
-  policy. Python's 4300-digit conversion limit has a typed error. Integers
-  beyond u64 follow the approved R4 `NumberOutOfRange` improvement.
+  policy. Literal PID zero checks have no integer range or digit limit.
+  RP-CLI2-06 records Python's >4300-digit crash and Rust's normal zero/nonzero
+  decision as an explicit divergence.
 
 ## Partial units
 
@@ -48,35 +51,39 @@ error repair and uses the common bounded oracle helper.
 
 ## Shared owners and pending items
 
-The root manifest has no internal `[workspace.dependencies]` entries. Under
-this lane's workspace-only dependency and crate-only write scope, the public
-supervisor APIs and `provenant_records::checked_json` cannot be linked. This
-lane does not add a local checked JSON codec or a replacement process runner.
-`LocalGit` exposes the exact read request to the future bounded executor.
+The root manifest now exposes internal workspace dependencies. CLI uses
+`provenant_core::py` for repr, strip and string/value rendering. Equivalent
+pending helpers, the local printable table and its generator section have been
+removed.
+The existing repr/strip differential exercises those shared exports.
 
-The existing private `pending` items still belong in `provenant-core`:
-`decimal_digit`, `python_digit`, `python_repr`, `python_strip`, Unicode
-`printable`, and their tables. Additions are `IntegerError`, `decimal_integer`,
-`python_splitlines`, `python_word_character`, Unicode `alphanumeric`, and
-`python_value_repr` for sidecar skill-token membership. The latter is limited
-to that membership operation; sorted object members/number spelling are not a
-public repr contract. `IntegerError` is re-exported for typed public failures.
-The generator pins Python 3.14's Unicode 16 database. Shared public helpers are
-not present on this merged main; remove pending copies when those APIs land.
+Remaining private `pending` items belong in `provenant-core`: `decimal_digit`,
+`python_digit`, `IntegerError`, `decimal_integer`, `python_splitlines`,
+`python_word_character`, and Unicode `alphanumeric`. No equivalent exported
+helpers exist yet. `IntegerError` remains re-exported for cleanup's typed
+failures; PID zero checks no longer parse an integer. The remaining generator
+pins Python 3.14's Unicode 16 alphanumeric database.
+
+Supervisor and checked-JSON integration remain deferred owner work. This lane
+adds neither a local checked JSON codec nor a replacement process runner.
+`LocalGit` exposes the read request to the future bounded executor.
 
 ## Verification and review
 
 Pinned Rust 1.94.1; `cargo fmt --all`, warnings-denied crate clippy and
-`PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-cli` pass: 44 tests.
+`PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-cli` pass: 45 tests.
 Local Python oracle: the repository's Python 3.14 virtual environment, selected
 with `PROVENANT_PORT_PYTHON`. The helper uses `-I`, explicit environments,
 version checking, file-backed I/O and bounded waits. Missing/old interpreters
-print `skip:` and fail when differential coverage is required. The existing
+print `skip:` and fail when differential coverage is required. The sidecar
+oracle follows the same policy when PyYAML is missing. The existing
 Rust CI job installs Python 3.14 and requires differential coverage.
 
 Differentials cover the existing guard allow/deny fixtures plus 600 seeded
-shell inputs and additional Unicode/heredoc cases; 90 PID vectors; wrapper
-newline/Unicode edge cases; 175 PR-check combinations; registry signature and
+shell inputs and additional Unicode/heredoc/command-boundary cases; 95 PID
+vectors, including 4300-digit ASCII/Unicode zero/nonzero inputs; an explicit
+>4300-digit Python-crash/Rust-decision comparison; wrapper newline/Unicode
+edge cases; 175 PR-check combinations; registry signature and
 word-boundary cases; 11 actual install scenarios; decoded/invalid sidecar
 output; cleanup records; real stale Git inspection, linked worktrees and
 missing paths; and the retained projection/diff cases. Cleanup's fixture
@@ -84,8 +91,17 @@ initialises its own Git repository because sandbox TMPDIR may be inside a
 live checkout. This prevents ancestor discovery and keeps observations local.
 
 Native read-only source review assumed the port was wrong. Its completion
-review kept the path/YAML/process gaps partial. The missing CLI integer-bound
-divergence is now recorded as RP-CLI2-01. The retry newline false positive was
+review kept the path/YAML/process gaps partial. RP-CLI2-01 records cleanup's
+integer bounds;
+RP-CLI2-05 supersedes its old PID claims, and RP-CLI2-06 records the Python
+PID digit-limit crash. The retry newline false positive was
 caught by the differential and repaired; Unicode word categories use the
 Python property table. J1/J2 and cross-family acceptance remain cut-over gates;
 this lane does not claim them. Heavy checks remain in PR CI.
+
+The PR #1326 repair pass reproduced the wrapper-boundary and large-PID failures
+before fixing them. Missing-PyYAML optional and required modes were both run;
+required mode fails as intended. A native read-only reviewer checked the repair
+and shared-helper migration. Its Unicode-zero coverage note was addressed with
+an additional source differential vector. RP-CLI2-07 records the shared-helper
+migration and cleanup context drift found by the exact record differential.

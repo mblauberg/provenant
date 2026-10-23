@@ -100,7 +100,7 @@ impl Arguments {
             include: self
                 .include
                 .split(',')
-                .map(crate::pending::python_strip)
+                .map(provenant_core::py::python_strip)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect(),
@@ -215,6 +215,8 @@ pub struct SavedPlan {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlanContext {
+    pub prune_merged: bool,
+    pub since_revision: Option<String>,
     pub refs: Option<String>,
     pub pr_unknown: bool,
     pub open_heads: BTreeSet<String>,

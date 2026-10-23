@@ -21,41 +21,6 @@ pub(crate) fn decimal_digit(c: char) -> Option<u8> {
 }
 
 // port: belongs in provenant-core
-pub(crate) fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::from(quote);
-    for c in text.chars() {
-        match c {
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c == quote => {
-                result.push('\\');
-                result.push(c);
-            }
-            c if !python_unicode::printable(c) => {
-                let code = u32::from(c);
-                if code < 256 {
-                    result.push_str(&format!("\\x{code:02x}"));
-                } else if code <= 0xffff {
-                    result.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    result.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            c => result.push(c),
-        }
-    }
-    result.push(quote);
-    result
-}
-
-// port: belongs in provenant-core
 pub(crate) fn python_digit(c: char) -> bool {
     decimal_digit(c).is_some()
         || matches!(
@@ -190,14 +155,9 @@ pub(crate) fn python_digit(c: char) -> bool {
         )
 }
 
-// port: belongs in provenant-core
-pub(crate) fn python_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use provenant_core::py::{python_repr, python_strip};
 
     #[test]
     fn repr_and_strip_match_python_on_control_and_unicode_boundaries() {
@@ -249,34 +209,6 @@ pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
             .and_then(|n| n.checked_add(u64::from(d)))
             .ok_or(IntegerError::NumberOutOfRange)
     })
-}
-
-// port: belongs in provenant-core
-pub(crate) fn python_value_repr(value: &serde_json::Value) -> String {
-    use serde_json::Value;
-    match value {
-        Value::Null => "None".into(),
-        Value::Bool(true) => "True".into(),
-        Value::Bool(false) => "False".into(),
-        Value::String(text) => python_repr(text),
-        Value::Number(number) => number.to_string(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(python_value_repr)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Object(values) => format!(
-            "{{{}}}",
-            values
-                .iter()
-                .map(|(k, v)| format!("{}: {}", python_repr(k), python_value_repr(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
 }
 
 // port: belongs in provenant-core

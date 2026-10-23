@@ -93,7 +93,7 @@ pub fn validate_selection(revision: &str, paths: &[String]) -> Result<(), Error>
             || path.starts_with('-')
             || Path::new(path).is_absolute()
         {
-            return Err(Error::InvalidPath(crate::pending::python_repr(path)));
+            return Err(Error::InvalidPath(provenant_core::py::python_repr(path)));
         }
     }
     Ok(())

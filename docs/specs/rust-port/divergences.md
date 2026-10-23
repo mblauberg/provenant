@@ -1195,23 +1195,22 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
-## RP-CLI2-01: typed cleanup integer bounds
+## RP-CLI2-01: typed cleanup and PID integer bounds
 
 - Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
-- Unit: `scripts/clean.py#interface`.
+- Units: `scripts/clean.py#interface`, `scripts/lane_safety_guard.py#unit-01`.
   Source oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6` (unchanged through
   `cffeb4a54b6a702a008dbfee92bef5177803e8f3`). Author route:
   `codex/gpt-6.1-sol@high`.
-- Python accepts `18446744073709551616d`. Rust returns typed
-  `IntegerError::NumberOutOfRange` instead of storing unbounded decimal strings
-  or rounding through f64. Accepted day values remain u64. Hour durations retain
-  Python's float multiplication after the exact integer range check.
-- Cleanup preserves Python's separate 4300-digit conversion guard, including
+- Python accepts `18446744073709551616d` and the PID string
+  `18446744073709551616`. Rust returns typed `IntegerError::NumberOutOfRange`
+  instead of storing unbounded decimal strings or rounding through f64.
+  Accepted day values now remain u64. Hour durations retain Python's float
+  multiplication after the exact integer range check.
+- Python's separate 4300-digit conversion guard is preserved, including
   leading zeros and Unicode decimal digits, as `IntegerError::DigitLimit`.
-  Tests cover both typed failure classes and the accepted u64 edge.
-- This entry previously included PID bounds. That was a Rust bug: the PID
-  policy needs only a zero check and now accepts unbounded nonzero decimals.
-  The separate Python crash above 4300 PID digits is recorded in RP-CLI2-06.
+  `4301` decimal digits fail in both sources; this is not an improvement
+  divergence. Tests cover both typed failure classes and the accepted u64 edge.
 
 ## RP-CLI2-02: batch-1 compatibility repairs
 
@@ -1406,7 +1405,6 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
 
-
 ## RP-CLI2-05: wrapper command boundaries and large literal PIDs
 
 - Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
@@ -1415,6 +1413,8 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   Python's single regex. The suffix is anchored at both ends and checked for
   each candidate name at a Python word boundary. Differential neighbours cover
   semicolons, LF, pipes, ampersands, path prefixes and non-boundary names.
+- Supersedes RP-CLI2-01's PID bounds/digit-limit claims: those cleanup integer
+  limits do not apply to the repaired PID policy.
 - `99999999999999999999` is a nonzero literal PID in Python. Rust now checks
   decimal digit values directly instead of parsing a u64. Differentials include
   huge nonzero values and 4300-digit zero/nonzero ASCII and Unicode decimals.
@@ -1437,3 +1437,20 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
 - Evidence: `python_digit_limit_crash_has_an_explicit_safe_decision` checks both
   source exceptions against Rust's explicit decisions; the adjacent regression
   checks arbitrarily long and mixed Unicode zero/nonzero inputs.
+
+## RP-CLI2-07: shared Python helper migration and cleanup context drift
+
+- Class: `bug`; fixed in Rust. Same rulebook/author route as RP-CLI2-01.
+- After merging main through `a05bcb46` (#1329), CLI depends on the workspace's
+  `provenant-core` and uses `py::python_repr`, `py::python_strip`, and
+  `py::python_str` (including shared value repr). The equivalent pending bodies
+  and local printable table and its generator section were removed. The existing repr/strip
+  differential now exercises the shared exports.
+- Pending decimal/digit conversion, splitlines and word-character helpers keep
+  their owner markers because `provenant_core::py` has no equivalent exports.
+  The local Unicode 16 alphanumeric table remains for Python word boundaries.
+- Merging main also exposed `scripts/clean.py` context drift from `f0661f88`
+  (#1323). The existing exact saved/public-record differential failed because
+  Rust dropped `prune_merged` and `since_revision`; `PlanContext` now retains
+  both source fields. This updates only the retained shape, not cleanup policy
+  or process/deletion ownership.
