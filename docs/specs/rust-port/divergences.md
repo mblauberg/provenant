@@ -1746,3 +1746,18 @@ and withdrawn claims remain.
   claimed. Raw retention and ordered serialisation await p3-rrc's shared
   lossless codec, absent on main `b527d675`; no new codec is built here.
 - The fabric-policy unit remains absent from the ledger and Units line.
+
+### RP-FR3-007: unbounded Python integer repr (open)
+
+- Class: `library`, unresolved at the policy projection; same rulebook and
+  source baseline as RP-FR3-005. Python repr of `18446744073709551616` is
+  exactly `18446744073709551616`, never `1.8446744073709552e+19`.
+- The exact source repr fixture also asserts the shared checked codec's typed
+  `NumberOutOfRange` refusal. The policy no longer routes this token through
+  an unchecked f64 decode, but a selected exclusion list containing it becomes
+  invalid instead of producing Python's exact per-entry repr warning.
+- R4's integer refusal is an existing improvement rule, not authority to claim
+  this different policy warning or discard neighbouring entries as parity.
+  Exact diagnostic retention requires the shared lossless/raw-value owner from
+  p3-rrc, absent from main `b527d675`. The fabric-policy unit stays partial;
+  no new arbitrary-integer/JSON codec is introduced here.

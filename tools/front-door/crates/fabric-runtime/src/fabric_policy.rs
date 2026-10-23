@@ -361,6 +361,35 @@ t,w=m.tools_policy(pathlib.Path(sys.argv[2])); print(json.dumps([t['default_bran
     }
 
     #[test]
+    fn unbounded_python_integer_repr_is_a_documented_codec_gap() {
+        let raw = "18446744073709551616";
+        let Some(expected) = crate::test_support::python(
+            "import json,sys; print(json.dumps(repr(json.loads(sys.argv[1]))))",
+            &[raw.into()],
+        ) else {
+            return;
+        };
+        assert_eq!(expected, serde_json::json!(raw));
+        assert!(matches!(
+            provenant_records::checked_json::from_str(raw),
+            Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))
+        ));
+        // The current policy projection cannot retain that exact value for
+        // repr; it refuses the selected list rather than rounding through f64.
+        let root = tempfile::tempdir().unwrap();
+        write_policy(
+            root.path(),
+            &format!(r#"{{"secret_scan_exclude":[{raw}]}}"#),
+        );
+        assert_eq!(
+            secret_scan_exclude(root.path()).1,
+            [format!(
+                "{POLICY} secret_scan_exclude must be a list; ignoring it"
+            )]
+        );
+    }
+
+    #[test]
     fn shared_repr_covers_quotes_controls_nonprintable_and_exponents() {
         let values = serde_json::json!([
             "../it's",

@@ -131,3 +131,10 @@ keys and substitute null for unsupported extension representations. Preserving
 raw extensions, non-finite values and insertion order in that output needs the
 absent p3-rrc codec (RP-FR3-006). These output gaps keep fabric-policy partial;
 the repaired decision projection is not a complete value decoder.
+
+Item 4: Python repr retains `18446744073709551616` exactly. The shared checked
+codec returns typed `NumberOutOfRange`, following R4, rather than an f64 repr
+`1.8446744073709552e+19`. The selected exclusion-list projection cannot yet
+preserve this integer for the source warning and rejects the whole list. This
+remaining diagnostic/selection gap is RP-FR3-007, not accepted parity; the
+fabric-policy claim stays withdrawn pending the shared lossless owner.
