@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "tracker" / "scripts" / "steward.py"
-
-
-def steward():
-    spec = importlib.util.spec_from_file_location("tracker_steward_test", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-    return module
 
 
 def write_queue(path: Path, events: list[dict]) -> None:
@@ -26,7 +18,7 @@ def write_queue(path: Path, events: list[dict]) -> None:
 
 
 def test_replay_processes_each_pending_event_exactly_once(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     queue = tmp_path / "tracker-queue.jsonl"
     write_queue(queue, [
         {"id": "evt-1", "type": "pr_opened", "payload": {"pr": 1}},
@@ -56,7 +48,7 @@ def test_replay_processes_each_pending_event_exactly_once(tmp_path):
 
 
 def test_replay_only_touches_events_still_pending_after_a_partial_run(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     queue = tmp_path / "tracker-queue.jsonl"
     write_queue(queue, [
         {"id": "evt-1", "type": "pr_landed", "payload": {}, "outcome": {"status": "done", "summary": "closed #1"}},
@@ -74,7 +66,7 @@ def test_replay_only_touches_events_still_pending_after_a_partial_run(tmp_path):
 
 
 def test_record_outcome_is_idempotent(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     queue = tmp_path / "tracker-queue.jsonl"
     write_queue(queue, [{"id": "evt-1", "type": "owner_decision", "payload": {}}])
 
@@ -86,7 +78,7 @@ def test_record_outcome_is_idempotent(tmp_path):
 
 
 def test_load_events_rejects_duplicate_ids_and_unknown_types(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     duplicate = tmp_path / "duplicate.jsonl"
     write_queue(duplicate, [
         {"id": "evt-1", "type": "run_sweep", "payload": {}},
@@ -102,7 +94,7 @@ def test_load_events_rejects_duplicate_ids_and_unknown_types(tmp_path):
 
 
 def test_digest_is_bounded_at_fifteen_lines_with_a_truncation_marker(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     processed = [
         {"id": f"evt-{index}", "type": "run_sweep", "outcome": {"status": "done", "summary": f"swept {index}"}}
         for index in range(20)
@@ -114,7 +106,7 @@ def test_digest_is_bounded_at_fifteen_lines_with_a_truncation_marker(tmp_path):
 
 
 def test_digest_flags_outcomes_needing_a_coordinator_call(tmp_path):
-    module = steward()
+    module = load_script(SCRIPT, "tracker_steward_test")
     processed = [
         {"id": "evt-1", "type": "lane_followup", "outcome": {"status": "flagged", "summary": "possible duplicate of #42"}},
         {"id": "evt-2", "type": "pr_landed", "outcome": {"status": "done", "summary": "closed #7"}},

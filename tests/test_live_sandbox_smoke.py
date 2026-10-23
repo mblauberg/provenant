@@ -1,22 +1,17 @@
 """The live sandbox smoke's judging logic, exercised without provider calls."""
 
-import importlib.util
+import importlib
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
+
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "runtime/fabric/live-sandbox-smoke.py"
-
-
-def smoke():
-    spec = importlib.util.spec_from_file_location("live_sandbox_smoke", SMOKE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def probe(protected=False, outside=False, inside=False):
@@ -36,15 +31,15 @@ def test_requires_execute_flag():
 
 def test_fixture_branch_follows_repository_convention():
     pattern = importlib.import_module("skills.orchestrate.scripts.dispatch_run").BRANCH_PATTERN
-    assert pattern.fullmatch(smoke().BRANCH)
+    assert pattern.fullmatch(load_script(SMOKE, "live_sandbox_smoke").BRANCH)
 
 
 def test_every_writer_adapter_including_agy_is_covered():
-    assert [route[0] for route in smoke().ROUTES] == ["codex", "claude", "agy", "cursor", "kiro", "opencode"]
+    assert [route[0] for route in load_script(SMOKE, "live_sandbox_smoke").ROUTES] == ["codex", "claude", "agy", "cursor", "kiro", "opencode"]
 
 
 def test_read_probe_accepts_fenced_json_and_rejects_prose():
-    module = smoke()
+    module = load_script(SMOKE, "live_sandbox_smoke")
     fenced = "Done.\n```json\n" + json.dumps(probe(inside=True)) + "\n```\n"
     assert module.read_probe(fenced)["inside_write_succeeded"] is True
     with pytest.raises(RuntimeError, match="required JSON probe"):
@@ -52,7 +47,7 @@ def test_read_probe_accepts_fenced_json_and_rejects_prose():
 
 
 def test_protected_read_is_judged_only_where_the_receipt_denies_it(tmp_path):
-    module = smoke()
+    module = load_script(SMOKE, "live_sandbox_smoke")
     target = tmp_path / "protected/probe.txt"
     assert module.denies_protected({"protected_paths": [str(tmp_path / "protected")]}, target)
     assert not module.denies_protected({"protected_paths": []}, target)
@@ -79,14 +74,14 @@ def test_protected_read_is_judged_only_where_the_receipt_denies_it(tmp_path):
     ],
 )
 def test_boundary_failures(mode, result, outside_exists, inside_content, error):
-    row = smoke().assess({}, result, mode=mode, deny_expected=False,
+    row = load_script(SMOKE, "live_sandbox_smoke").assess({}, result, mode=mode, deny_expected=False,
                          outside_exists=outside_exists, inside_content=inside_content)
     assert row["passed"] is False
     assert error in row["error"]
 
 
 def test_evaluate_reads_the_result_path_from_the_dispatch_record(tmp_path):
-    module = smoke()
+    module = load_script(SMOKE, "live_sandbox_smoke")
     result = tmp_path / "dispatch/tasks/t/attempt-001/result.md"
     result.parent.mkdir(parents=True)
     result.write_text(json.dumps(probe()), encoding="utf-8")
@@ -104,7 +99,7 @@ def test_evaluate_reads_the_result_path_from_the_dispatch_record(tmp_path):
 
 
 def test_evaluate_skips_an_unavailable_provider_and_fails_a_missing_result(tmp_path):
-    module = smoke()
+    module = load_script(SMOKE, "live_sandbox_smoke")
     paths = {"mode": "read_only", "protected": tmp_path / "p", "outside": tmp_path / "o",
              "inside": tmp_path / "i"}
     limited = module.evaluate(completed({"fabric": {"status": "usage_limited", "paths": {"result": None},
@@ -119,7 +114,7 @@ def test_evaluate_skips_an_unavailable_provider_and_fails_a_missing_result(tmp_p
 @pytest.mark.parametrize("mode,written", [("worktree_write", "outside"), ("read_only", "outside"),
                                           ("read_only", "inside")])
 def test_a_forbidden_write_fails_even_when_the_provider_then_reports_unavailable(tmp_path, mode, written):
-    module = smoke()
+    module = load_script(SMOKE, "live_sandbox_smoke")
     paths = {"mode": mode, "protected": tmp_path / "p", "outside": tmp_path / "o", "inside": tmp_path / "i"}
     paths[written].write_text("smoke", encoding="utf-8")
     row = module.evaluate(completed({"fabric": {"status": "usage_limited", "paths": {"result": None}}}),

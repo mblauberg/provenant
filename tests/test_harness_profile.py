@@ -2,29 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import importlib.util
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts/provenant-profile"
 
 
 def load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script(path, name, register=True)
 
 
 hp = load("harness_profile_under_test", ROOT / "skills/_shared/harness_profile.py")

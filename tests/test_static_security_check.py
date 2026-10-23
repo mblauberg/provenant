@@ -1,21 +1,13 @@
-import importlib.util
 from pathlib import Path
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "static-security-check.py"
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("static_security_check", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_static_security_check_accepts_safe_calls_and_rejects_high_risk_patterns(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     (tmp_path / "safe.py").write_text("import subprocess\nsubprocess.run(['git', 'status'], check=False)\n")
     assert module.scan(tmp_path) == []
     (tmp_path / "unsafe.py").write_text("import subprocess\nsubprocess.run('echo unsafe', shell=True)\neval('1+1')\n")
@@ -23,7 +15,7 @@ def test_static_security_check_accepts_safe_calls_and_rejects_high_risk_patterns
 
 
 def test_static_security_check_resolves_import_aliases_and_safe_yaml_loader(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     (tmp_path / "aliases.py").write_text(
         "import subprocess as sp\nfrom os import system as run_system\n"
         "from pickle import loads as unpickle\n"
@@ -37,7 +29,7 @@ def test_static_security_check_resolves_import_aliases_and_safe_yaml_loader(tmp_
 
 
 def test_static_security_check_follows_legal_import_and_assignment_aliases_in_order(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     path = tmp_path / "ordered_aliases.py"
     path.write_text(
         "os.system('before-import')\n"
@@ -57,7 +49,7 @@ def test_static_security_check_follows_legal_import_and_assignment_aliases_in_or
 
 
 def test_static_security_check_scans_definitions_nested_under_match_cases(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     path = tmp_path / "match_case.py"
     path.write_text(
         "import os\n"
@@ -77,7 +69,7 @@ def test_static_security_check_scans_definitions_nested_under_match_cases(tmp_pa
 
 
 def test_match_pattern_bindings_shadow_import_aliases(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     path = tmp_path / "match_shadow.py"
     path.write_text(
         "import os\n"
@@ -90,7 +82,7 @@ def test_match_pattern_bindings_shadow_import_aliases(tmp_path):
 
 
 def test_match_pattern_bindings_do_not_shadow_imports_after_match(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     path = tmp_path / "match_postlude.py"
     path.write_text(
         "import os\n"
@@ -106,11 +98,11 @@ def test_match_pattern_bindings_do_not_shadow_imports_after_match(tmp_path):
 
 
 def test_repository_python_surface_passes_static_security_check():
-    assert load_module().scan(ROOT) == []
+    assert load_script(SCRIPT, "static_security_check").scan(ROOT) == []
 
 
 def test_pipe_wait_rule_finds_one_bad_fixture_and_accepts_bounded_drains(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     (tmp_path / "bad.py").write_text(
         "import subprocess as sp\n"
         "def bad():\n"
@@ -181,7 +173,7 @@ def test_pipe_wait_rule_finds_one_bad_fixture_and_accepts_bounded_drains(tmp_pat
 
 
 def test_pipe_wait_rule_conservatively_covers_bindings_and_branches(tmp_path):
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     fixtures = {
         "registration_only.py": (
             "import selectors, subprocess\n"
@@ -243,7 +235,7 @@ def test_pipe_wait_rule_conservatively_covers_bindings_and_branches(tmp_path):
 
 
 def test_pipe_wait_rule_is_clean_across_current_execution_sites():
-    module = load_module()
+    module = load_script(SCRIPT, "static_security_check")
     sites = (
         ROOT / "scripts" / "public_release_check.py",
         ROOT / "skills" / "_shared" / "bounded_process.py",

@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/log_reducer.py"
-SPEC = importlib.util.spec_from_file_location("log_reducer", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-log_reducer = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(log_reducer)
+log_reducer = load_script(SCRIPT, "log_reducer")
 
 
 def test_reducer_keeps_failure_error_counts_and_summary_and_marks_dropped_spans():
@@ -230,7 +229,8 @@ tests/test_sample.py:5: AssertionError
 
 
 def test_gh_log_prefix_and_tsc_snippets_keep_their_continuations():
-    stamp = "Python checks\tRun tests\t2026-10-22T08:09:36.7557617Z "
+    now = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z") + "7"
+    stamp = f"Python checks\tRun tests\t{now} "
     traceback = [
         "Traceback (most recent call last):",
         '  File "a.py", line 3, in g',

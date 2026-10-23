@@ -674,7 +674,7 @@ def render(document: dict[str, Any], full: bool = False) -> str:
                 continue
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
-            if entry.get("quota", {}).get("state") in ("deficit", "credit_only"):
+            if entry.get("quota", {}).get("state") in ("ahead_of_pace", "deficit", "credit_only"):
                 caveat += f"  [quota {entry['quota']['summary']}]"
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
         if hidden:

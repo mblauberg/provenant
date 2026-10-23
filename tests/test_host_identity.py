@@ -1,22 +1,18 @@
 """One local host id for fabric hosts, telemetry, quota and cooldowns."""
-from pathlib import Path
-import importlib.util
 import json
 import socket
 import sys
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def load(name, path):
-    spec = importlib.util.spec_from_file_location(name, ROOT / path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module  # dataclasses resolve annotations through sys.modules
-    spec.loader.exec_module(module)
-    return module
+    return load_script(ROOT / path, name, register=True)
 
 
 @pytest.fixture

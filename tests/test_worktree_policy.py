@@ -1,22 +1,18 @@
-import importlib.util
 import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "worktree.py"
-SPEC = importlib.util.spec_from_file_location("worktree_policy", SCRIPT)
-worktree_policy = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader
-sys.modules[SPEC.name] = worktree_policy
-SPEC.loader.exec_module(worktree_policy)
+worktree_policy = load_script(SCRIPT, "worktree_policy", register=True)
 
 
 @pytest.fixture(scope="module")

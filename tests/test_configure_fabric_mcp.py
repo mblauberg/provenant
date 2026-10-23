@@ -1,16 +1,15 @@
-import json
-import importlib.util
 import io
+import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
-import sys
 import tomllib
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure-fabric-mcp.py"
@@ -34,12 +33,7 @@ def stable_shim(tmp_path: Path) -> Path:
 
 
 def load_configurer():
-    spec = importlib.util.spec_from_file_location("configure_fabric_mcp", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script(SCRIPT, "configure_fabric_mcp", register=True)
 
 
 def run_configure(
