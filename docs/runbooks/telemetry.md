@@ -95,10 +95,12 @@ raw provider strings separately. Native Claude and Codex usage records set
 only `observed_model`. Existing ledgers re-read surviving Fabric receipts once;
 pruned receipts keep NULL components and their existing folded model.
 
-Before launch, dispatch checks the resolved slug against a fresh adapter model
-listing. Unknown slugs are refused with the nearest listed IDs. Adapter receipts
-record `model_check` as `passed`, `invalid` or `unavailable`, with a reason in
-`model_check_detail`. An unavailable listing permits execution. `model_changes`
+Before launch, dispatch checks the resolved slug against a validated cached
+adapter listing and refreshes once on a miss. Unknown slugs are refused with the
+nearest listed IDs. Adapter receipts record `model_check` as `passed`, `invalid`,
+`unavailable` (listing failure), `unsupported` (no listing command) or `skipped`
+(check not attempted or provider-selected model), with a reason in `model_check_detail`.
+Only listing failures warn; unavailable listings permit execution. `model_changes`
 records observed transitions as `from`/`to` pairs, including switches back to the
 requested model. Changes the provider does not report remain unknown.
 

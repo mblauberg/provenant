@@ -1878,6 +1878,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             result["terminal"] = False
         if not kind and isinstance(event.get("event"), str):
             kind = event["event"]  # agy names the event kind `event`
+        if adapter == "claude" and kind == "assistant" and event.get("parent_tool_use_id") is not None:
+            continue
         if adapter == "kiro" and event.get("jsonrpc") == "2.0":
             for item in _objects(event):
                 if item.get("sessionUpdate") == "agent_message_chunk":
@@ -3549,29 +3551,37 @@ def stage_ps_shim(tmp_fd, private_tmp):
     return Path(private_tmp) / "provenant-shim" / "bin"
 
 
-def _check_model(plan):
-    """Validate the slug sent to the CLI against a fresh adapter listing."""
+def _check_model(plan, env):
+    """Check the cached CLI listing first, refreshing once on a miss."""
+    if not plan["model"] or plan["model"].casefold() == "auto":
+        return "skipped", "Provider chooses the model; no pinned slug to check"
     try:
         try:
             from . import exec_routing
         except ImportError:
             import exec_routing
-        listing, code = exec_routing._model_route_module().probe_capabilities(
-            plan["adapter"], plan["argv"][0], listing_only=True, refresh=True,
-            deadline=time.monotonic() + min(20, plan["timeout_seconds"]),
-        )
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return "unavailable", f"Model list unavailable: {type(exc).__name__}"
-    models = [model for model in listing.get("models", []) if isinstance(model, str) and model]
-    if code or listing.get("refresh_failed") or not models:
-        return "unavailable", listing.get("message") or "Model list unavailable"
-    if plan["model"] in models:
-        return "passed", ""
-    # `auto` delegates selection to the provider and does not pin a model slug.
-    if not plan["model"] or plan["model"] == "auto":
-        return "unavailable", "Provider chooses the model; no pinned slug to check"
-    nearest = difflib.get_close_matches(plan["model"], models, n=3, cutoff=0)
-    return "invalid", f"Unknown model {plan['model']!r}; nearest valid models: {', '.join(nearest)}"
+        router = exec_routing._model_route_module()
+        deadline = time.monotonic() + min(20, plan["timeout_seconds"])
+        for refresh in (False, True):
+            listing, code = router.probe_capabilities(
+                plan["adapter"], plan["argv"][0], listing_only=True, refresh=refresh,
+                deadline=deadline, env=env, cache_failures=False,
+            )
+            if listing.get("status") == "unsupported_adapter":
+                return "unsupported", "Adapter has no model listing"
+            models = [model for model in listing.get("models", []) if isinstance(model, str) and model]
+            if code or listing.get("refresh_failed") or not models:
+                return "unavailable", listing.get("message") or "Model list unavailable"
+            catalog = router.load_catalog()
+            model_ids = {router._live_base(plan["adapter"], model, catalog).casefold() for model in models}
+            if router._live_base(plan["adapter"], plan["model"], catalog).casefold() in model_ids:
+                return "passed", ""
+            if not listing.get("cache_hit"):
+                break
+        nearest = difflib.get_close_matches(plan["model"], models, n=3, cutoff=0)
+        return "invalid", f"Unknown model {plan['model']!r}; nearest valid models: {', '.join(nearest)}"
+    except Exception as exc:  # noqa: BLE001 - advisory discovery must never prevent a launch
+        return "unavailable", type(exc).__name__
 
 
 def execute(plan, output_path, **options):
@@ -3771,7 +3781,7 @@ def _run_attempt(
     stopped = False
     forced, terminal_at, cancel_signal = None, None, None
     preflight_error = None
-    model_check, model_check_detail = "unavailable", "Provider not launched"
+    model_check, model_check_detail = "skipped", "Provider not launched"
     provider_exit_before_cleanup = None
     terminal_grace_break = False
     pending = b""
@@ -3799,6 +3809,16 @@ def _run_attempt(
     def consume_diagnostic(data, stream):
         nonlocal live_failure
         adapter = plan["adapter"]
+        if adapter == "agy" and stream == "stderr":
+            diagnostic_pending[stream] = (diagnostic_pending[stream] + data)[-65536:]
+            lines = diagnostic_pending[stream].split(b"\n")
+            diagnostic_pending[stream] = lines.pop()
+            for line in lines:
+                model = parse_output(adapter, "", line.decode(errors="replace")).get("observed_model")
+                if model:
+                    observe_model(model)
+                    semantic["observed_model"] = model
+            return
         if adapter not in {"opencode", "kiro"} or (adapter == "opencode" and stream != "stderr"):
             return
         # Preserve split diagnostics without buffering an unbounded log or interpreting answers.
@@ -3932,23 +3952,23 @@ def _run_attempt(
                 if plan["stdin_policy"] == "pipe"
                 else subprocess.DEVNULL
             )
+        cancelled_before_check = bool(cancelled and cancelled())
+        copilot_disabled = plan["adapter"] == "copilot" and environment.get("CF_DISPATCH_ENABLE_COPILOT") != "1"
+        command = list(plan["argv"])
+        command[0] = shutil.which(command[0], path=environment.get("PATH")) or command[0]
+        if not (plan.get("cooldown_blocked") or cancelled_before_check or cancel_signal or copilot_disabled):
+            model_check, model_check_detail = _check_model({**plan, "argv": command}, environment)
         if plan.get("cooldown_blocked"):
             forced = "usage_limited"
             diagnostics.write(b"all alias candidates cooling\n")
-        elif cancelled and cancelled():
+        elif cancelled_before_check or (cancelled and cancelled()):
             forced = "cancelled"
-        elif (
-            plan["adapter"] == "copilot"
-            and environment.get("CF_DISPATCH_ENABLE_COPILOT") != "1"
-        ):
+        elif cancel_signal:
+            forced = "interrupted"
+        elif copilot_disabled:
             forced = "rejected"
             diagnostics.write(b"copilot requires CF_DISPATCH_ENABLE_COPILOT=1\n")
         else:
-            command = list(plan["argv"])
-            command[0] = (
-                shutil.which(command[0], path=environment.get("PATH")) or command[0]
-            )
-            model_check, model_check_detail = _check_model({**plan, "argv": command})
             if model_check == "invalid":
                 raise CapabilityError("model_unavailable", model_check_detail)
             _preflight_opencode_mcp(plan, environment, tmp_fd)
@@ -4106,6 +4126,7 @@ def _run_attempt(
                             (raw if key.data == "stdout" else diagnostics).write(data)
                             if key.data == "stdout":
                                 consume(data)
+                            consume_diagnostic(data, key.data)
                     for stream in (process.stdin, process.stdout, process.stderr):
                         if stream:
                             stream.close()
@@ -4150,6 +4171,7 @@ def _run_attempt(
     termination_request = _termination_request(control_environment, process, exit_code, started_at, cancel_signal)
     if pending:
         consume(b"\n")
+    consume_diagnostic(b"\n", "stderr")
     if forced == "stalled":
         diagnostics.write(
             f"idle for {plan['idle_seconds']:g}s; try another model\n".encode()
@@ -4271,9 +4293,11 @@ def _run_attempt(
             parsed.update(status="partial", question=None, signature="output_truncated")
     notes = list(route.get("notes") or [])
     observe_model(observed)
-    substituted = bool(observed) and not _same_model(plan["adapter"], plan["model"], observed)
+    final_mismatch = bool(observed) and not _same_model(plan["adapter"], plan["model"], observed)
+    substituted = bool(model_changes) or final_mismatch
     if substituted:
-        notes.append("mismatch: resolved " + plan["model"] + "; observed " + observed)
+        notes.append("mismatch: resolved " + plan["model"] + "; observed " + observed if final_mismatch
+                     else "model changed during execution; final model " + observed)
         warnings.append(notes[-1])
         if plan["adapter"] == "agy" and plan.get("requested_model"):
             parsed["status"] = "model_unavailable"

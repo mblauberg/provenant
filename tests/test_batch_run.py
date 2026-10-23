@@ -798,6 +798,8 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     launches = tmp_path / 'launches'
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
+        if [ "$1" = "--help" ]; then exit 0; fi
         if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'

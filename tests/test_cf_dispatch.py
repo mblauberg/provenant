@@ -3265,7 +3265,7 @@ def test_opencode_idle_watchdog_terminates_silent_provider():
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\nsleep 10\n')
+        write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\n[ "$1" = "models" ] && exit 1\nsleep 10\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         env["CF_DISPATCH_IDLE_SECONDS"] = "1"
@@ -3357,6 +3357,7 @@ def test_opencode_normal_exit_reaps_grandchild():
         bin_dir.mkdir()
         write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
             [ "$1" = "--version" ] && {{ echo 2.0.30; exit 0; }}
+            [ "$1" = "models" ] && exit 1
             echo "$$" > "{tmp / 'provider.pid'}"
             (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
             while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done

@@ -130,6 +130,11 @@ def _isolated_route_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_fabric_state(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path_factory.mktemp("fabric-state")))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
     """Pin the Fabric instance root so `~/.agents` (hosts.json peers, quota config and
     snapshots) never leaks into a test, and pin the Claude config dir and bin dir so a

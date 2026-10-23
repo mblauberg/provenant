@@ -2002,6 +2002,7 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then exit 1; fi
         if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
