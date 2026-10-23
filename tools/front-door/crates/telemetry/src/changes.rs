@@ -2998,7 +2998,20 @@ for index, row in enumerate(input.get('events', [])):
             labels: vec![json!(7)],
             added_at: "2026-10-06T00:00:00Z".into(),
         };
-        let rust = render_changes(&[row], 10).unwrap_err().to_string();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE changes (
+                    change_id TEXT PRIMARY KEY, kind TEXT NOT NULL, pr INTEGER,
+                    merge_commit TEXT, merged_at TEXT NOT NULL, title TEXT,
+                    labels TEXT NOT NULL DEFAULT '[]', added_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let mut store = SqliteChangeStore::new(&connection, MemoryStore::default());
+        store.upsert_change(&row).unwrap();
+        let persisted = store.changes(None).unwrap();
+        let rust = render_changes(&persisted, 10).unwrap_err().to_string();
         if let Some(oracle) = oracle {
             crate::differential::equal(&json!(rust), &oracle);
         }
