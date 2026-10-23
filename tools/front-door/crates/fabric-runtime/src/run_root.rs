@@ -56,8 +56,30 @@ pub fn product_root(
 }
 
 fn real_path(path: &Path) -> Result<PathBuf, RunRootError> {
-    crate::pending::resolve_path(path)
-        .map_err(|_| RunRootError::Resolve(path.display().to_string()))
+    let absolute =
+        absolute_normal(path).map_err(|_| RunRootError::Resolve(path.display().to_string()))?;
+    let mut candidate = absolute.clone();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(real) = fs::canonicalize(&candidate) {
+            let mut result = real;
+            for component in missing.iter().rev() {
+                result.push(component);
+            }
+            return absolute_normal(&result)
+                .map_err(|_| RunRootError::Resolve(path.display().to_string()));
+        }
+        let Some(parent) = candidate.parent() else {
+            return Ok(absolute);
+        };
+        if parent == candidate {
+            return Ok(absolute);
+        }
+        if let Some(name) = candidate.file_name() {
+            missing.push(name.to_os_string());
+        }
+        candidate = parent.to_path_buf();
+    }
 }
 
 /// Fixture temp roots must stay outside Git work trees and run-root directories.
@@ -91,9 +113,9 @@ pub fn acceptable_fixture_temp_root(root: &Path) -> Result<bool, RunRootError> {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FixtureRoute {
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<serde_json::Value>,
     #[serde(default)]
-    pub cli_version: Option<String>,
+    pub cli_version: Option<serde_json::Value>,
 }
 
 pub fn assert_fixture_run_root(
@@ -103,7 +125,12 @@ pub fn assert_fixture_run_root(
     fabric_test_tmpdir: Option<&Path>,
 ) -> Result<(), RunRootError> {
     if !routes.iter().any(|route| {
-        route.model.as_deref() == Some("fixture") || route.cli_version.as_deref() == Some("fixture")
+        route.model.as_ref().and_then(serde_json::Value::as_str) == Some("fixture")
+            || route
+                .cli_version
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                == Some("fixture")
     }) {
         return Ok(());
     }
@@ -183,7 +210,7 @@ mod tests {
     fn fixtures_are_bounded_to_temp_or_scratch_but_real_routes_are_unrestricted() {
         let temp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let route = [FixtureRoute {
-            model: Some("fixture".into()),
+            model: Some(serde_json::Value::String("fixture".into())),
             cli_version: None,
         }];
         let under_temp = assert_fixture_run_root(
@@ -219,6 +246,26 @@ mod tests {
         let link = temp.path().join("link");
         symlink(repo.path(), &link).unwrap();
         assert!(!acceptable_fixture_temp_root(&link).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_path_keeps_a_dangling_symlink_lexical_path() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let link = temp.path().join("dangling");
+        symlink(temp.path().join("missing-target"), &link).unwrap();
+        assert_eq!(real_path(&link).unwrap(), link);
+    }
+
+    #[test]
+    fn fixture_route_accepts_non_string_source_values() {
+        let route: FixtureRoute = serde_json::from_value(serde_json::json!({
+            "model": 17,
+            "cli_version": {"name": "fixture"}
+        }))
+        .unwrap();
+        assert_eq!(route.model, Some(serde_json::json!(17)));
     }
 
     #[test]
