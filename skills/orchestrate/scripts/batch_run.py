@@ -42,22 +42,11 @@ from dispatch_run import (
     ACCESS_MODES,
     ATTEMPT_ID_RE,
     ESCALATION_REASONS,
-    AttemptEvidenceError,
     WORKTREE_WRITE_ADAPTERS,
     WorktreeLeaseError,
     resolve_writer_worktree,
-    digest,
-    ensure_manifest_appendable,
-    ensure_owned_directory,
-    reconcile_manifest,
-    retained_path,
-    cancellation_marker_present,
-    create_cancellation_marker,
-    remove_cancellation_marker,
-    prompt_temp_roots,
-    run_identity,
-    delivery_run_id,
 )
+import run_records
 import run_lineage
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from secret_scan import scan_inputs
@@ -133,7 +122,7 @@ def request_cancel() -> None:
     # to wake a live dispatch owner promptly; they must not kill it first.
     for batch_dir in batch_dirs:
         try:
-            create_cancellation_marker(batch_dir.parents[2], batch_dir)
+            run_records.create_cancellation_marker(batch_dir.parents[2], batch_dir)
         except (OSError, ValueError):
             pass
     for process in processes:
@@ -234,7 +223,7 @@ def _load_manifest(
     loaded: list[dict[str, Any]] = []
     if 'delivery_run_id' in value:
         try:
-            delivery_run_id(value['delivery_run_id'])
+            run_records.delivery_run_id(value['delivery_run_id'])
         except ValueError as exc:
             raise BatchInputError(str(exc)) from exc
     for index, task in enumerate(tasks):
@@ -244,7 +233,7 @@ def _load_manifest(
             task = {**task, 'delivery_run_id': value['delivery_run_id']}
         if 'delivery_run_id' in task:
             try:
-                delivery_run_id(task['delivery_run_id'])
+                run_records.delivery_run_id(task['delivery_run_id'])
             except ValueError as exc:
                 raise BatchInputError(f"task {index}: {exc}") from exc
         task_id = task.get("id")
@@ -277,7 +266,7 @@ def _load_manifest(
             if not prompt.is_absolute():
                 prompt = workspace / prompt
             prompt = _local_regular(prompt, f"task {task_id} prompt_file")
-            if not any(prompt.is_relative_to(Path(root).resolve()) for root in (workspace, *read_roots, *prompt_temp_roots())):
+            if not any(prompt.is_relative_to(Path(root).resolve()) for root in (workspace, *read_roots, *run_records.prompt_temp_roots())):
                 raise BatchInputError(f"task {task_id} prompt_file must be inside the workspace, a caller temp directory or a read root")
 
         adapter = task.get("adapter", task.get("tool"))
@@ -377,11 +366,11 @@ def _acquire_batch_lock(run_dir: Path):
     """Hold one custody lock for the complete batch lifetime."""
     dispatch_dir = run_dir / "dispatch"
     try:
-        ensure_owned_directory(run_dir, dispatch_dir)
-        ensure_owned_directory(run_dir, dispatch_dir / "batches")
+        run_records.ensure_owned_directory(run_dir, dispatch_dir)
+        run_records.ensure_owned_directory(run_dir, dispatch_dir / "batches")
         stream = run_lineage.acquire_owner_custody(run_dir)
         return stream
-    except (OSError, AttemptEvidenceError, OwnedFileError) as exc:
+    except (OSError, run_records.AttemptEvidenceError, OwnedFileError) as exc:
         if "stream" in locals():
             stream.close()
         raise BatchInputError("another batch already owns this orchestration run") from exc
@@ -481,7 +470,7 @@ def _preflight_rejection(record: dict[str, Any], process_exit: int | None) -> di
 
 
 def _contained_file(run_dir: Path, value: Any, label: str) -> tuple[str, bytes]:
-    relative = retained_path(run_dir, value)
+    relative = run_records.retained_path(run_dir, value)
     try:
         actual, _path, data = read_contained_regular(run_dir, relative, label=f"child {label}")
     except (OSError, OwnedFileError, ValueError) as exc:
@@ -650,13 +639,13 @@ def _child_queued_seconds(run_dir: Path, task_id: str, after_attempt: int) -> fl
 
 def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path, custody=None) -> dict[str, Any]:
     task_id = task["id"]
-    if _cancel_requested or cancellation_marker_present(run_dir, batch_dir):
+    if _cancel_requested or run_records.cancellation_marker_present(run_dir, batch_dir):
         return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled"}
     temporary_prompt: Path | None = None
     dispatch_task = {**task, "_batch_id": batch_dir.name}
     if "_inline_prompt" in task:
         temporary_prompt = batch_dir / "prompts" / f"{task_id}.md"
-        ensure_owned_directory(run_dir, temporary_prompt.parent)
+        run_records.ensure_owned_directory(run_dir, temporary_prompt.parent)
         atomic_write(run_dir, temporary_prompt, task["_inline_prompt"])
         dispatch_task = {**task, "prompt_file": str(temporary_prompt), "_batch_id": batch_dir.name}
     process: subprocess.Popen[str] | None = None
@@ -735,7 +724,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     batch_id = f"batch-{_batch_number(run_dir):03d}"
     batch_dir = run_dir / "dispatch" / "batches" / batch_id
     try:
-        ensure_owned_directory(run_dir, batch_dir)
+        run_records.ensure_owned_directory(run_dir, batch_dir)
         source_copy = batch_dir / "task-manifest.json"
         atomic_write_bytes(run_dir, source_copy, source_bytes)
     except BaseException:
@@ -772,8 +761,8 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
                                          "outcome": "batch_cancelled"}) for task in tasks]
     reconciliation_error = None
     try:
-        reconcile_manifest(run_dir, custody)
-    except (AttemptEvidenceError, OSError, ValueError) as exc:
+        run_records.reconcile_manifest(run_dir, custody)
+    except (run_records.AttemptEvidenceError, OSError, ValueError) as exc:
         reconciliation_error = str(exc)
     # A late request must not rewrite a naturally all-terminal batch as
     # cancelled.  Cancellation is evidenced by a task outcome, not by the
@@ -798,7 +787,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     if reconciliation_error:
         summary["reconciliation_error"] = reconciliation_error
     atomic_write(run_dir, summary_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    remove_cancellation_marker(run_dir, batch_dir)
+    run_records.remove_cancellation_marker(run_dir, batch_dir)
     index_error = None
     try:
         _index_batch_files(run_dir, batch_id, source_copy, summary_path, custody)
@@ -906,10 +895,10 @@ def batch(args: argparse.Namespace) -> int:
         try:
             run_dir = _validate_run_dir(args.run_dir)
             run_lineage.record_owner(run_dir, "batch")
-            run_lineage.register_run(run_dir, run_identity(run_dir))
-            reconcile_manifest(run_dir, batch_lock)
+            run_lineage.register_run(run_dir, run_records.run_identity(run_dir))
+            run_records.reconcile_manifest(run_dir, batch_lock)
             # The batch lock is the append handle; do not reopen MANIFEST.md.
-        except (BatchInputError, AttemptEvidenceError, OSError, ValueError) as exc:
+        except (BatchInputError, run_records.AttemptEvidenceError, OSError, ValueError) as exc:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
