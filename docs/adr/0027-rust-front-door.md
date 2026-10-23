@@ -69,7 +69,7 @@ about 120 ms, against a fork-and-exec floor of about 6 ms
   `install-harness` is re-run; `check-provenant-install.py` says so.
 - CI gains a `rust` job: `cargo fmt --check`, `clippy -D warnings`, `cargo test`,
   a release build and the parity suite against that build.
-- There is no macOS CI leg. macOS behaviour is checked on the user's Macs.
+- Lane conformance runs in Linux and macOS arm64 CI for tools and lane changes.
 
 ## Not decided here
 
