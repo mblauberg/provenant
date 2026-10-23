@@ -371,7 +371,10 @@
       ]
     },
     "account": {
-      "type": "string",
+      "type": [
+        "string",
+        "null"
+      ],
       "minLength": 1
     },
     "reason": {

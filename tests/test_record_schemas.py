@@ -193,6 +193,8 @@ def test_dispatch_records(flow_root, flow, status, outcome):
     reject("canonical-attempt", {**canonical, "unexpected_field": True})
     reject("canonical-attempt", {**canonical, "status": "invented"})
     reject("canonical-attempt", {**canonical, "paths": {}})
+    nullable_account = {**canonical, "account": None}
+    validate("canonical-attempt", nullable_account)
     if flow == "question":
         envelope = json.loads((run / "dispatch/tasks/task-1/attempt-001/result.md").read_text())
         validate("worker-terminal-envelope", envelope)
@@ -308,7 +310,7 @@ def test_quota_and_telemetry_records(flow_root, monkeypatch):
                "windows": [quota_window(10, 10080, reset_in=timedelta(days=2))]}
     quota.record_events(previous, current)
     source = run / "tasks/task-1/attempt-001/attempt.json"
-    retained = flow_root / ".agent-run/runs/schema-dispatch/tasks/task-1/attempt-001/attempt.json"
+    retained = flow_root / ".agent-run/runs/schema-success/tasks/task-1/attempt-001/attempt.json"
     retained.parent.mkdir(parents=True)
     retained.write_bytes(source.read_bytes())
     result = run_command([str(ROOT / "scripts/provenant"), "telemetry", "ingest"], flow_root)
@@ -351,14 +353,18 @@ def test_schema_inventory():
     documents = [validator(name).schema for name in SCHEMA_FILES]
     for document in documents:
         jsonschema.Draft202012Validator.check_schema(document)
-    # Include object literals, keyword updates, constants, assignments and TS
-    # unions, rather than assuming every writer uses a quoted `schema:` key.
+    # Broad scan includes object literals, keyword updates, constants,
+    # assignments and TS unions, rather than assuming every writer uses a
+    # quoted `schema:` key. Unrelated versioned IDs need a reasoned allowlist
+    # entry after checking whether they are persisted record writers.
     pattern = re.compile(r"['\"]([a-z][a-z0-9_.-]*\.v\d+)['\"]")
     observed = set()
     for directory in ("scripts", "skills", "runtime/fabric/src"):
         for path in (ROOT / directory).rglob("*"):
-            if path.is_file() and path.suffix in {"", ".py", ".ts", ".tsx", ".sh", ".js", ".mjs", ".cjs"}:
-                observed.update(pattern.findall(path.read_text(encoding="utf-8")))
+            relative_parts = path.relative_to(ROOT).parts
+            if (path.is_file() and not any(part.startswith(".") or part == "node_modules" for part in relative_parts)
+                    and path.suffix in {"", ".py", ".ts", ".tsx", ".sh", ".js", ".mjs", ".cjs"}):
+                observed.update(pattern.findall(path.read_text(encoding="utf-8", errors="ignore")))
     declared = {document.get("properties", {}).get("schema", {}).get("const") for document in documents}
     declared.discard(None)
     assert "date-time" in jsonschema.FormatChecker().checkers
@@ -374,7 +380,10 @@ def test_schema_inventory():
     assert NON_RECORD_SCHEMAS.keys() <= observed, "remove stale report exceptions"
     assert all(NON_RECORD_SCHEMAS.values())
     assert not (NON_RECORD_SCHEMAS.keys() & declared)
-    assert observed - NON_RECORD_SCHEMAS.keys() == declared - FUTURE_SCHEMA_IDS
+    assert observed - NON_RECORD_SCHEMAS.keys() == declared - FUTURE_SCHEMA_IDS, (
+        "unclassified versioned identifiers: add persisted record schemas, or after checking "
+        "record-writing contexts add non-record/report identifiers to NON_RECORD_SCHEMAS with a reason"
+    )
     for name in ("launch-spec", "observer-record", "supervisor-exit", "supervisor-state"):
         assert (SCHEMAS / "fixtures" / f"{name}.valid.json").is_file()
         assert (SCHEMAS / "fixtures" / f"{name}.invalid.json").is_file()
