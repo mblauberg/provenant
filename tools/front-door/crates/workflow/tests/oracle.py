@@ -12,6 +12,8 @@ if unit == "idle_pause":
     source = root / "skills/autopilot/scripts/validate_idle_pause.py"
 if unit == "preflight_contract":
     source = root / "skills/orchestrate/scripts/dispatch_preflight.py"
+if unit == "lane_exit_contract":
+    source = root / "skills/orchestrate/scripts/lane_exit.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -27,7 +29,9 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "preflight_contract":
+    if unit == "lane_exit_contract":
+        results.append(module.receipt_fields(case))
+    elif unit == "preflight_contract":
         results.append(module.parse_fast_route_json(json.dumps(case)))
     elif unit == "idle_pause":
         import tempfile
