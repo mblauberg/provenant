@@ -621,7 +621,7 @@ bridge to Rust.
 
 | Leaf | Importers/callers and last-importer deletion gate |
 | --- | --- |
-| `bounded_process.py` | dispatch_run, batch_run (R2+R3), capabilities (CLI), fabric_lanes (dynamic loader); R4+R5 after CLI/Fabric retire both remaining callers. |
+| `bounded_process.py` | dispatch_run, batch_run (R2+R3), capabilities (CLI), `scripts/fabric_lanes.py` (dynamic loader); R4+R5 after CLI/Fabric retire both remaining callers. |
 | `custody.py` | batch_run, dispatch_preflight, dispatch_run, layout, run_controls, run_dir_finalize, run_lineage, run_records, stall_watchdog and workflow's review_plan (10). Confinement deletes at R4+R5 only after workflow also replaces review_plan's import. |
 | `provider_confinement.py` | provider_exec; R4+R5 with providers' final caller cut, never S3 alone. |
 | `process_info.py` | dispatch_run, layout, memory_admission, provider_exec, run_lineage, worker_liveness, bin/ps; clean dynamically loads it and agy_home stages it. R4+R5 after clean/worktree, provider shim and diagnostic callers retire. |
