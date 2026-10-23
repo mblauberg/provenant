@@ -531,7 +531,7 @@ def test_probe_bare_executable_records_binary_found_on_path(tmp_path, monkeypatc
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
                    "if [ \"$1\" = --help ]; then exit; fi\necho '{\"models\":[\"auto\"]}'\n")
     cli.chmod(0o755)
-    record, code = router.probe_capabilities("kiro", "kiro-cli")
+    record, code = router.model_route_probe.probe_capabilities("kiro", "kiro-cli")
     assert code == 0
     assert record["executable"] == str(cli)
 
@@ -548,7 +548,7 @@ def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch)
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
-    record, code = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    record, code = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli")
     assert code == 0
     assert "read_only_probe" in record
     assert budgets == [60.0]
@@ -692,7 +692,7 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
 
 def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
-        "opencode/opencode-go/glm-5.3-flash": {"cooling_until": "2026-09-23T10:00:00"},
+        "opencode/opencode-go/glm-5.3-flash": {"cooling_until": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()},
     }}))
     result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias",
                              "principal", "--role", "worker"], capture_output=True, text=True,
@@ -804,10 +804,10 @@ def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, mon
                    "echo 'Fetching available models...'\n"
                    "printf 'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6\\n'\n")
     agy.chmod(0o755)
-    record, code = router.probe_capabilities("agy", str(agy))
+    record, code = router.model_route_probe.probe_capabilities("agy", str(agy))
     assert code == 0
     assert record["models"] == ["gemini-3.8-flash-high", "claude-sonnet-4-6"]
-    assert router._listed_models(json.dumps({"models": [{"slug": "gpt-6-luna"}, {"slug": "gpt-6.1-sol"}]})) == [
+    assert router.model_route_probe._listed_models(json.dumps({"models": [{"slug": "gpt-6-luna"}, {"slug": "gpt-6.1-sol"}]})) == [
         "gpt-6-luna", "gpt-6.1-sol"]
 
 
@@ -827,7 +827,7 @@ def test_discovery_accepts_captured_cli_listings(tmp_path, adapter, expected):
                    "elif sys.argv[1:] == ['--help']: pass\n"
                    f"else: print(pathlib.Path({str(fixture)!r}).read_text())\n")
     cli.chmod(0o755)
-    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True)
+    record, code = router.model_route_probe.probe_capabilities(adapter, str(cli), listing_only=True)
     assert code == 0
     assert record["models"] == expected
     cached = json.loads((Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json").read_text())
@@ -845,9 +845,9 @@ def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, 
     cli.chmod(0o755)
     state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
     previous = {adapter: {"listing_format": 1, "version": "1.0", "executable": str(cli),
-                          "models": ["last-good"], "observed_at": "2000-01-01T00:00:00Z"}}
+                          "models": ["last-good"], "observed_at": (datetime.now(timezone.utc) - timedelta(days=3650)).isoformat()}}
     state.write_text(json.dumps(previous))
-    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True, refresh=True,
+    record, code = router.model_route_probe.probe_capabilities(adapter, str(cli), listing_only=True, refresh=True,
                                              cache_failures=cache_failures)
     if cache_failures:
         assert code == 0 and record["models"] == ["last-good"] and record["refresh_failed"]
@@ -863,9 +863,9 @@ def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, 
 
 def test_discovery_keeps_colon_variants_beside_their_base_id():
     router = load_router()
-    assert router._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [
+    assert router.model_route_probe._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [
         "openrouter/vendor/model", "openrouter/vendor/model:free"]
-    assert router._listed_models("gpt-6-luna  Luna\ngpt-6-luna:beta  Luna beta\n") == ["gpt-6-luna", "gpt-6-luna:beta"]
+    assert router.model_route_probe._listed_models("gpt-6-luna  Luna\ngpt-6-luna:beta  Luna beta\n") == ["gpt-6-luna", "gpt-6-luna:beta"]
 
 
 @pytest.mark.parametrize("adapter,failure", [
@@ -897,7 +897,7 @@ def test_unreliable_listing_is_unavailable_without_replacing_cache(tmp_path, ada
     previous = json.dumps({adapter: {"models": ["last-good"]}})
     state.write_text(previous)
     started = time.monotonic()
-    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True,
+    record, code = router.model_route_probe.probe_capabilities(adapter, str(cli), listing_only=True,
                                             deadline=started + 0.3, refresh=True, cache_failures=False)
     assert code == 1 and record["status"] == "probe_unavailable"
     assert not record.get("models")
@@ -918,7 +918,7 @@ def test_capability_probe_uses_supplied_environment(tmp_path):
         "else: print('gemini-3.8-flash-low')\n"
     )
     cli.chmod(0o755)
-    record, code = router.probe_capabilities("agy", str(cli), listing_only=True, env={
+    record, code = router.model_route_probe.probe_capabilities("agy", str(cli), listing_only=True, env={
         **os.environ, "HOME": "/staged-home", "CODEX_HOME": "/capability-home", "ADAPTER_ENV": "attempt"})
     assert code == 0 and record["models"] == ["gemini-3.8-flash-low"]
 
@@ -930,9 +930,9 @@ def test_failed_capability_probe_reuses_negative_cache(tmp_path):
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
                    f"echo call >> '{calls}'\nexit 1\n")
     cli.chmod(0o755)
-    first, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    first, code = router.model_route_probe.probe_capabilities("agy", str(cli), listing_only=True)
     assert code == 1 and first["status"] == "probe_unavailable"
-    second, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    second, code = router.model_route_probe.probe_capabilities("agy", str(cli), listing_only=True)
     assert code == 1 and second["cache_hit"] is True
     assert calls.read_text().splitlines() == ["call"]
 
@@ -949,12 +949,12 @@ def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tm
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
-    listed, code = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    listed, code = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
     assert code == 0 and listed["models"] == ["auto"]
     assert "read_only_probe" not in listed and chats == []
-    full, code = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    full, code = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli")
     assert code == 0 and "read_only_probe" in full and len(chats) == 1
-    again, _ = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    again, _ = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
     assert again["cache_hit"] is True and "read_only_probe" in again and len(chats) == 1
 
 
@@ -972,9 +972,9 @@ def test_listing_only_probe_drops_kiro_evidence_from_another_executable(tmp_path
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     chats = []
     _fake_kiro(router, monkeypatch, chats)
-    full, _ = router.probe_capabilities("kiro", "/fake/a/kiro-cli")
+    full, _ = router.model_route_probe.probe_capabilities("kiro", "/fake/a/kiro-cli")
     assert "read_only_probe" in full
-    replaced, code = router.probe_capabilities("kiro", "/fake/b/kiro-cli", listing_only=True)
+    replaced, code = router.model_route_probe.probe_capabilities("kiro", "/fake/b/kiro-cli", listing_only=True)
     assert code == 0 and replaced["cache_hit"] is False
     assert "read_only_probe" not in replaced
 
@@ -984,16 +984,16 @@ def test_full_kiro_probe_rechecks_safety_older_than_a_day_despite_a_fresh_listin
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     chats = []
     _fake_kiro(router, monkeypatch, chats)
-    router.probe_capabilities("kiro", "/fake/kiro-cli")
+    router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli")
     path = tmp_path / "capabilities.json"
     cache = json.loads(path.read_text())
     stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     cache["kiro"]["read_only_probe"].update(
         {"checked_at": stale, "attempted_write": True, "permission_denied": True, "file_created": False})
     path.write_text(json.dumps(cache))
-    listed, _ = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    listed, _ = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
     assert listed["cache_hit"] is True and len(chats) == 1
-    full, _ = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    full, _ = router.model_route_probe.probe_capabilities("kiro", "/fake/kiro-cli")
     assert full["cache_hit"] is False and len(chats) == 2
 
 
@@ -1010,7 +1010,7 @@ def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
         "observed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
         "models": [],
     }}))
-    record, code = router.probe_capabilities("opencode", str(cli))
+    record, code = router.model_route_probe.probe_capabilities("opencode", str(cli))
     assert code == 0
     assert record["cache_hit"] is False
     assert record["models"] == ["opencode-go/glm-5.3-flash"]
@@ -1039,7 +1039,7 @@ def test_snapshot_reads_cached_probe_without_running_clis(tmp_path):
     kiro.write_text(f"#!/bin/sh\necho \"$@\" >> '{calls}'\necho auto\n")
     kiro.chmod(0o755)
     (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
-        "version": "1.2.2", "observed_at": "2020-01-01T00:00:00Z",
+        "version": "1.2.2", "observed_at": (datetime.now(timezone.utc) - timedelta(days=3650)).isoformat(),
         "models": ["gpt-6-luna"]}}))
     before = (tmp_path / "capabilities.json").read_bytes()
     run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "snapshot", "--json"],
@@ -1100,7 +1100,7 @@ def test_cursor_plain_text_model_probe_ignores_reworded_footer(tmp_path):
         "Tip: use --model <id>",
         "Choose one of these models with the --model option",
     )
-    assert router._listed_models(listing, "cursor") == [
+    assert router.model_route_probe._listed_models(listing, "cursor") == [
         "auto", "gpt-5.3-codex-low", "gpt-5.3-codex-low-fast",
     ]
 
@@ -3921,7 +3921,7 @@ def test_untrusted_capability_snapshot_fails_closed(tmp_path):
     snapshot.write_text(json.dumps({
         "schema_version": 1,
         "source": "forged",
-        "observed_at": "2000-01-01T00:00:00Z",
+        "observed_at": (datetime.now(timezone.utc) - timedelta(days=3650)).isoformat(),
         "models": {"gpt-5.6-sol": {"resolved_model": "gpt-5.6-sol", "supported_efforts": ["ultra"]}},
     }))
     result, route = resolve(
@@ -4795,7 +4795,8 @@ def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, mon
     assert second["warnings"] == [] and second["notes"] == [note]
     # A previous day's marker does not suppress today's warning.
     state = tmp_path / "newer-model-warnings.json"
-    state.write_text(state.read_text().replace(datetime.now(timezone.utc).date().isoformat(), "2000-01-01"))
+    state.write_text(state.read_text().replace(datetime.now(timezone.utc).date().isoformat(),
+                                   (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()))
     assert emit()["warnings"] == [note]
     # State failures must not fail routing or lose the receipt note.
     state.unlink()
@@ -5037,7 +5038,7 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
                    "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
     cli.chmod(0o755)
-    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    record, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and record["models"] == ["a/one", "a/two"]
     if not trusted:
         path = tmp_path / "capabilities.json"
@@ -5045,18 +5046,18 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
         cache["opencode"].pop("listing_format")
         path.write_text(json.dumps(cache))
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
-    failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    failed, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
     if not trusted:
         assert code == 1 and failed["status"] == "probe_unavailable" and not failed["models"]
         return
     assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
-    cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    cached, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
 
 
 @pytest.mark.parametrize("raw", ["Error.\n", "Loading...\nDone.\n", "auto - Auto\nError: sign in again\n", "auto - Auto\n\ngpt-5 - G\nError: sign in again\n"])
 def test_cursor_plain_text_probe_rejects_prose_without_a_listing(raw):
-    assert load_router()._listed_models(raw, "cursor") == []
+    assert load_router().model_route_probe._listed_models(raw, "cursor") == []
 
 
 def test_opencode_resolve_caches_a_timed_out_refresh(tmp_path, monkeypatch):
@@ -5067,7 +5068,7 @@ def test_opencode_resolve_caches_a_timed_out_refresh(tmp_path, monkeypatch):
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
                    "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
     cli.chmod(0o755)
-    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    record, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and record["models"] == ["a/one", "a/two"]
 
     original_run = router.subprocess.run
@@ -5094,7 +5095,7 @@ def test_failed_opencode_refresh_does_not_replace_a_newer_listing(tmp_path, monk
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
                    "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\n'\n")
     cli.chmod(0o755)
-    original, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    original, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and original["models"] == ["a/one"]
     cache_path = tmp_path / "capabilities.json"
     original_run = router.subprocess.run
@@ -5110,7 +5111,7 @@ def test_failed_opencode_refresh_does_not_replace_a_newer_listing(tmp_path, monk
         return original_run(command, *args, **kwargs)
 
     monkeypatch.setattr(router.subprocess, "run", run)
-    refreshed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    refreshed, code = router.model_route_probe.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
     assert code == 0 and refreshed["models"] == ["a/new"]
     assert json.loads(cache_path.read_text())["opencode"]["models"] == ["a/new"]
 
@@ -5118,7 +5119,7 @@ def test_failed_opencode_refresh_does_not_replace_a_newer_listing(tmp_path, monk
 def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monkeypatch):
     router = load_router()
     calls = []
-    monkeypatch.setattr(router, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
+    monkeypatch.setattr(router.model_route_probe, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
     assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
     assert not calls
     assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]
