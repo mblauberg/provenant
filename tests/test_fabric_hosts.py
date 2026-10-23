@@ -13,6 +13,8 @@ import unittest
 from contextlib import contextmanager, closing
 from unittest.mock import patch
 
+from tests.support.git import git
+
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
 
@@ -38,6 +40,15 @@ def git_isolated_tempdir():
         marker.write_text('fixture boundary')
         (root / '.git').write_text('gitdir: ' + str(marker) + '\n')
         yield directory
+
+
+def commit_file(repo, name, text, msg):
+    """Write ``name`` under ``repo``, stage it and commit it with ``msg``."""
+    path = Path(repo) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    git(repo, 'add', name)
+    git(repo, 'commit', '-qm', msg)
 
 
 class PeerContracts(unittest.TestCase):
@@ -1162,6 +1173,11 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
         return json.loads(process.stdout)
 
+    def launch_writer(self, worktree, operation_id, task_id='writer', **request):
+        """Dispatch a codex worktree_write task to the workshop peer."""
+        return self.client('dispatch', host='workshop', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', worktree=str(worktree), task_id=task_id, operation_id=operation_id, **request)
+
     def peer(self, verb, **request):
         environment = {**self.env, 'HOME': str(self.peer_home),
             'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents'),
@@ -1203,9 +1219,7 @@ class LaneLoopbackContracts(unittest.TestCase):
                     'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'})
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout.strip()
-        (self.workspace / 'code.txt').write_text('committed base\n')
-        git(self.workspace, 'add', 'code.txt')
-        git(self.workspace, 'commit', '-qm', 'fixture base')
+        commit_file(self.workspace, 'code.txt', 'committed base\n', 'fixture base')
         base = git(self.workspace, 'rev-parse', 'HEAD')
         local = self.workspace / '.worktrees/feat-writer'
         git(self.workspace, 'worktree', 'add', '-b', 'feat/writer', str(local), base)
@@ -1220,9 +1234,7 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_read_only_peer_uses_chair_head_in_detached_worktree_and_cleans_up(self):
         git, _, local = self.writer_fixture()
-        (local / 'code.txt').write_text('chair committed review input\n')
-        git(local, 'add', 'code.txt')
-        git(local, 'commit', '-qm', 'chair review head')
+        commit_file(local, 'code.txt', 'chair committed review input\n', 'chair review head')
         head = git(local, 'rev-parse', 'HEAD')
         brief = self.root / 'scratch-review.md'
         brief.write_text('slow')
@@ -1254,10 +1266,7 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_remote_reader_prompt_names_actual_checkout_cwd_and_head(self):
         git, _, local = self.writer_fixture()
-        (local / 'src').mkdir()
-        (local / 'src/review.txt').write_text('review input')
-        git(local, 'add', 'src/review.txt')
-        git(local, 'commit', '-qm', 'review subdirectory')
+        commit_file(local, 'src/review.txt', 'review input', 'review subdirectory')
         head = git(local, 'rev-parse', 'HEAD')
         brief = self.root / 'reader-brief.md'
         brief.write_text('Review ' + str(local / 'src') + '\n\nslow')
@@ -1374,9 +1383,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             adapter='codex', model='fixture', prompt='fixture only', operation_id='session-reader-first')
         self.wait_writer(first['id'])
         self.assertEqual(first['code_transport']['readers'][0]['base_revision'], base)
-        (self.workspace / 'code.txt').write_text('new committed session input\n')
-        git(self.workspace, 'add', 'code.txt')
-        git(self.workspace, 'commit', '-qm', 'second session input')
+        commit_file(self.workspace, 'code.txt', 'new committed session input\n', 'second session input')
         next_base = git(self.workspace, 'rev-parse', 'HEAD')
         self.assertNotEqual(next_base, base)
         second = self.client('dispatch', host='workshop', session='reader-session@workshop',
@@ -1511,15 +1518,24 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(result['code_transport_prelaunch_failure'])
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_knob_overrides_are_refused_for_a_remote_lane_and_kept_for_a_local_one(self):
+    def test_knob_overrides_are_forwarded_to_remote_lanes_and_kept_for_local_ones(self):
         import fabric_hosts as hosts
         request = {'mode': 'read_only', 'prompt': 'review', 'knobs': ['effort.shift=1']}
+        forwarded = {}
+        def exchange(verb, payload=None, **_kwargs):
+            if verb == 'hello':
+                return hosts.envelope({'ok': True})
+            if verb == 'dispatch':
+                forwarded.update(payload['input'])
+                return hosts.envelope({'status': 'running', 'id': 'knob-remote'})
+            raise AssertionError(verb)
         with patch.dict(os.environ, self.env):
             owner = hosts.lane_owner()
-            with self.assertRaises(hosts.HostError) as error:
-                owner.client_call('dispatch', str(self.workspace), {**request, 'operation_id': 'knob-remote'})
-            self.assertEqual(error.exception.code, 'knob_remote_unsupported')
-            self.assertIn('--host laptop', str(error.exception))
+            with patch.object(hosts.PeerClient, 'call', side_effect=exchange), \
+                    patch.object(type(owner.code()), 'outgoing', side_effect=lambda _project, clean, *_args: clean):
+                remote = owner.client_call('dispatch', str(self.workspace), {**request, 'host': 'workshop', 'operation_id': 'knob-remote'})
+            self.assertEqual(remote['status'], 'running', remote)
+            self.assertEqual(forwarded['knobs'], ['effort.shift=1'])
             local = owner.client_call('dispatch', str(self.workspace), {**request, 'host': 'laptop'})
             self.assertTrue(local['local'])
             self.assertEqual(local['input']['knobs'], ['effort.shift=1'])
@@ -1706,9 +1722,7 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_writer_transports_committed_base_and_fetches_verified_head_without_github(self):
         git, base, local = self.writer_fixture()
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='writer-once')
+        launched = self.launch_writer(local, 'writer-once')
         self.assertEqual(launched['status'], 'running', launched)
         remote = self.peer_workspace / '.worktrees/feat-writer'
         self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
@@ -1719,9 +1733,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             if self.lanes('writer@workshop')['runs'][0]['state'] == 'terminal':
                 break
             time.sleep(.05)
-        (remote / 'code.txt').write_text('remote implementation\n')
-        git(remote, 'add', 'code.txt')
-        git(remote, 'commit', '-qm', 'fixture implementation')
+        commit_file(remote, 'code.txt', 'remote implementation\n', 'fixture implementation')
         head = git(remote, 'rev-parse', 'HEAD')
         fetched = self.client('fetch', id='writer-once@workshop')
         self.assertEqual(fetched['status'], 'ok', fetched)
@@ -1730,9 +1742,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(fetched['verification']['host'], 'workshop')
         self.assertEqual(git(self.workspace, 'rev-parse', fetched['ref']), head)
         self.assertEqual((local / 'code.txt').read_text(), 'uncommitted chair edit\n')
-        replay = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='writer-once')
+        replay = self.launch_writer(local, 'writer-once')
         self.assertEqual(replay['id'], launched['id'])
         cli = subprocess.run([str(ROOT / 'scripts/provenant'), 'fabric', 'fetch', 'writer-once@workshop'],
             cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
@@ -2111,10 +2121,7 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_reader_keeps_the_requested_subdirectory_through_dispatch_and_resume(self):
         git, base, local = self.writer_fixture()
-        (local / 'pkg').mkdir()
-        (local / 'pkg/input.txt').write_text('package input\n')
-        git(local, 'add', 'pkg/input.txt')
-        git(local, 'commit', '-qm', 'package input')
+        commit_file(local, 'pkg/input.txt', 'package input\n', 'package input')
         launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
             prompt='fixture only', mode='read_only', cwd=str(local / 'pkg'), task_id='reader-pkg', operation_id='reader-pkg')
         self.assertEqual(launched['status'], 'running', launched)
@@ -2242,9 +2249,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(rejected['error'], 'code_transport_failed', rejected)
         self.assertIn('new operation ID', rejected['fix'])
         self.assertEqual(self.peer('dispatch', **request)['result'], rejected)
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='repaired-prepare')
+        launched = self.launch_writer(local, 'repaired-prepare')
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer(launched['id'])
 
@@ -2378,9 +2383,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertFalse((self.peer_home / '.agents/.agent-fabric/writer-contexts' / (identifier + '.json')).exists())
     def test_writer_fetch_refuses_active_lease_dirty_context_and_changed_branch(self):
         git, _, local = self.writer_fixture()
-        result = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='verify-writer')
+        result = self.launch_writer(local, 'verify-writer')
         self.assertEqual(result['status'], 'running', result)
         remote = self.peer_workspace / '.worktrees/feat-writer'
         try:
@@ -2389,9 +2392,7 @@ class LaneLoopbackContracts(unittest.TestCase):
                 time.sleep(.05)
             # No new commit is rejected by the existing verification owner.
             self.assertEqual(self.client('fetch', id='verify-writer@workshop')['error'], 'writer_verification_failed')
-            (remote / 'code.txt').write_text('implementation\n')
-            git(remote, 'add', 'code.txt')
-            git(remote, 'commit', '-qm', 'implementation')
+            commit_file(remote, 'code.txt', 'implementation\n', 'implementation')
             (remote / 'untracked.txt').write_text('residue')
             self.assertEqual(self.client('fetch', id='verify-writer@workshop')['error'], 'writer_verification_failed')
             (remote / 'untracked.txt').unlink()
@@ -2472,15 +2473,11 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_writer_handoff_and_resume_keep_context_and_publish_each_verified_head(self):
         git, _, local = self.writer_fixture()
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='continue-writer')
+        launched = self.launch_writer(local, 'continue-writer')
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer('writer@workshop')
         remote = self.peer_workspace / '.worktrees/feat-writer'
-        (remote / 'code.txt').write_text('first implementation\n')
-        git(remote, 'add', 'code.txt')
-        git(remote, 'commit', '-qm', 'first implementation')
+        commit_file(remote, 'code.txt', 'first implementation\n', 'first implementation')
         readonly = self.client('handoff', handoff=launched['id'], prompt='fixture only',
             adapter='codex', model='fixture', mode='read_only', operation_id='continue-writer.writer')
         self.assertEqual(readonly['status'], 'running', readonly)
@@ -2509,9 +2506,7 @@ class LaneLoopbackContracts(unittest.TestCase):
                 if 'mcp-' + directory.name.rsplit('-', 1)[-1] == run_id)
             (directory / 'release').touch()
             self.wait_writer(handed['id'])
-            (remote / 'code.txt').write_text('second implementation\n')
-            git(remote, 'add', 'code.txt')
-            git(remote, 'commit', '-qm', 'second implementation')
+            commit_file(remote, 'code.txt', 'second implementation\n', 'second implementation')
             again = self.client('fetch', id='handoff-writer@workshop')
             self.assertEqual(again['status'], 'ok', again)
             self.assertEqual(again['verification']['head_revision'], git(remote, 'rev-parse', 'HEAD'))
@@ -2525,9 +2520,7 @@ class LaneLoopbackContracts(unittest.TestCase):
     def test_resume_reservation_blocks_takeover_until_new_attempt_is_published_and_terminal(self):
         import fabric_hosts as hosts
         _, _, local = self.writer_fixture()
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='reserved-writer')
+        launched = self.launch_writer(local, 'reserved-writer')
         self.wait_writer(launched['id'])
         state = self.peer_home / '.agents/.agent-fabric'
         context = json.loads((state / 'writer-contexts/reserved-writer.json').read_text())[0]
@@ -2576,9 +2569,7 @@ class LaneLoopbackContracts(unittest.TestCase):
                 rows = self.wait_writer(task + '@workshop')
                 remote = self.peer_workspace / '.worktrees' / name
                 self.assertEqual(rows[0]['worktree'], str(remote))
-                (remote / 'code.txt').write_text(task + '\n')
-                git(remote, 'add', 'code.txt')
-                git(remote, 'commit', '-qm', task)
+                commit_file(remote, 'code.txt', task + '\n', task)
                 fetched = self.client('fetch', id=task + '@workshop')
                 self.assertEqual(fetched['status'], 'ok', fetched)
                 self.assertEqual(fetched['verification']['head_revision'], git(remote, 'rev-parse', 'HEAD'))
@@ -2591,9 +2582,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             mode='worktree_write', worktree=str(local), prompt='fixture only', operation_id='generated-writer')
         self.wait_writer(launched['id'])
         remote = self.peer_workspace / '.worktrees/feat-writer'
-        (remote / 'code.txt').write_text('generated task implementation\n')
-        git(remote, 'add', 'code.txt')
-        git(remote, 'commit', '-qm', 'generated task implementation')
+        commit_file(remote, 'code.txt', 'generated task implementation\n', 'generated task implementation')
         with self.subTest(stage='dispatch'):
             fetched = self.client('fetch', id=launched['task_id'])
             self.assertEqual(fetched['status'], 'ok', fetched)
@@ -2623,9 +2612,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             try:
                 self.wait_writer(task + '@workshop')
                 remote = self.peer_workspace / '.worktrees' / worktree.name
-                (remote / 'code.txt').write_text(seat + ' implementation\n')
-                git(remote, 'add', 'code.txt')
-                git(remote, 'commit', '-qm', seat + ' implementation')
+                commit_file(remote, 'code.txt', seat + ' implementation\n', seat + ' implementation')
                 fetched = self.mcp('fabric_fetch', {'id': 'mcp-' + task + '@workshop'}, seat)
                 self.assertEqual(fetched['status'], 'ok', fetched)
                 self.assertEqual(fetched['verification']['head_revision'], git(remote, 'rev-parse', 'HEAD'))
@@ -2683,13 +2670,9 @@ class LaneLoopbackContracts(unittest.TestCase):
         git(local, 'add', 'large.bin')
         git(local, 'commit', '-qm', 'history the peer already holds')
         git(self.peer_workspace, 'fetch', '-q', str(local), 'HEAD:refs/heads/main')
-        (local / 'new.txt').write_text('new chair commit\n')
-        git(local, 'add', 'new.txt')
-        git(local, 'commit', '-qm', 'chair base the peer lacks')
+        commit_file(local, 'new.txt', 'new chair commit\n', 'chair base the peer lacks')
         base = git(local, 'rev-parse', 'HEAD')
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='thin-writer')
+        launched = self.launch_writer(local, 'thin-writer')
         self.assertEqual(launched['status'], 'running', launched)
         sent = json.loads(next(self.local_home.rglob('thin-writer-0/outgoing.json')).read_text())['metadata']
         self.assertLess(sent['size'], 50_000)
@@ -2701,9 +2684,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
         self.assertEqual(len((remote / 'large.bin').read_bytes()), 200_000)
         self.wait_writer('writer@workshop')
-        (remote / 'result.txt').write_text('remote implementation\n')
-        git(remote, 'add', 'result.txt')
-        git(remote, 'commit', '-qm', 'remote implementation')
+        commit_file(remote, 'result.txt', 'remote implementation\n', 'remote implementation')
         head = git(remote, 'rev-parse', 'HEAD')
         fetched = self.client('fetch', id='thin-writer@workshop')
         self.assertEqual(fetched['status'], 'ok', fetched)
@@ -2803,12 +2784,8 @@ class LaneLoopbackContracts(unittest.TestCase):
         git(self.peer_workspace, 'config', 'filter.fixture.smudge', program('smudge', 'cat\n'))
         git(self.peer_workspace, 'config', 'filter.fixture.clean', program('clean', 'cat\n'))
         git(self.peer_workspace, 'config', 'filter.fixture.required', 'true')
-        (local / '.gitattributes').write_text('*.txt filter=fixture\n')
-        git(local, 'add', '.gitattributes')
-        git(local, 'commit', '-qm', 'filtered text')
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='hardened-writer')
+        commit_file(local, '.gitattributes', '*.txt filter=fixture\n', 'filtered text')
+        launched = self.launch_writer(local, 'hardened-writer')
         self.assertEqual(launched['status'], 'running', launched)
         try:
             self.wait_writer('writer@workshop')
@@ -2817,9 +2794,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             created = ran.read_text().split() if ran.exists() else []
             self.assertNotIn('post-checkout', created)
             self.assertNotIn('smudge', created)
-            (remote / 'result.txt').write_text('remote implementation\n')
-            git(remote, 'add', 'result.txt')
-            git(remote, 'commit', '-qm', 'remote implementation')
+            commit_file(remote, 'result.txt', 'remote implementation\n', 'remote implementation')
             ran.unlink(missing_ok=True)
             fetched = self.client('fetch', id='hardened-writer@workshop')
             self.assertEqual(fetched['status'], 'ok', fetched)
@@ -2902,9 +2877,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         try:
             self.wait_writer(first['id'])
             self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
-            (local / 'code.txt').write_text('advanced transported base\n')
-            git(local, 'add', 'code.txt')
-            git(local, 'commit', '-qm', 'advance transported base')
+            commit_file(local, 'code.txt', 'advanced transported base\n', 'advance transported base')
             advanced = git(local, 'rev-parse', 'HEAD')
 
             next_run = self.client('dispatch', **request, operation_id='writer-fast-forward')
@@ -2924,16 +2897,12 @@ class LaneLoopbackContracts(unittest.TestCase):
         import hashlib
         import fabric_hosts as hosts
         git, _, local = self.writer_fixture()
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='forged-writer')
+        launched = self.launch_writer(local, 'forged-writer')
         self.assertEqual(launched['status'], 'running', launched)
         try:
             self.wait_writer('writer@workshop')
             remote = self.peer_workspace / '.worktrees/feat-writer'
-            (remote / 'code.txt').write_text('verified implementation\n')
-            git(remote, 'add', 'code.txt')
-            git(remote, 'commit', '-qm', 'verified implementation')
+            commit_file(remote, 'code.txt', 'verified implementation\n', 'verified implementation')
             original = self.peer('git-result', id='forged-writer')['result']
             for changed in [{'host': 'laptop'}, {'base_revision': 'a' * 40}, {'worktree': 'feat-other'},
                             {'operation_id': 'another-writer'}, {'head_revision': 'f' * 40}]:
@@ -2964,23 +2933,15 @@ class LaneLoopbackContracts(unittest.TestCase):
         import hashlib
         import fabric_hosts as hosts
         git, _, local = self.writer_fixture()
-        first = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer-a', operation_id='input-a')
+        first = self.launch_writer(local, 'input-a', task_id='writer-a')
         self.wait_writer(first['id'])
         other = self.workspace / '.worktrees/feat-other'
         git(self.workspace, 'worktree', 'add', '--orphan', '-b', 'feat/other', str(other))
-        (other / 'other.txt').write_text('unrelated input\n')
-        git(other, 'add', 'other.txt')
-        git(other, 'commit', '-qm', 'unrelated root')
-        second = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(other),
-            task_id='writer-b', operation_id='input-b')
+        commit_file(other, 'other.txt', 'unrelated input\n', 'unrelated root')
+        second = self.launch_writer(other, 'input-b', task_id='writer-b')
         self.wait_writer(second['id'])
         remote = self.peer_workspace / '.worktrees/feat-other'
-        (remote / 'other.txt').write_text('unrelated implementation\n')
-        git(remote, 'add', 'other.txt')
-        git(remote, 'commit', '-qm', 'unrelated implementation')
+        commit_file(remote, 'other.txt', 'unrelated implementation\n', 'unrelated implementation')
         original = self.peer('git-result', id='input-b')['result']
         forged = copy.deepcopy(original)
         receipt = forged['verification']
@@ -3009,19 +2970,13 @@ class LaneLoopbackContracts(unittest.TestCase):
         import hashlib
         import fabric_hosts as hosts
         git, _, local = self.writer_fixture()
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
-            prompt='fixture only', mode='worktree_write', worktree=str(local),
-            task_id='writer', operation_id='quarantine-writer')
+        launched = self.launch_writer(local, 'quarantine-writer')
         self.wait_writer(launched['id'])
         remote = self.peer_workspace / '.worktrees/feat-writer'
-        (remote / 'code.txt').write_text('approved implementation\n')
-        git(remote, 'add', 'code.txt')
-        git(remote, 'commit', '-qm', 'approved implementation')
+        commit_file(remote, 'code.txt', 'approved implementation\n', 'approved implementation')
         original = self.peer('git-result', id='quarantine-writer')['result']
         git(remote, 'checkout', '--orphan', 'hidden-root')
-        (remote / 'hidden.txt').write_text('unadvertised content\n')
-        git(remote, 'add', 'hidden.txt')
-        git(remote, 'commit', '-qm', 'unrelated hidden root')
+        commit_file(remote, 'hidden.txt', 'unadvertised content\n', 'unrelated hidden root')
         hidden = git(remote, 'rev-parse', 'HEAD')
         hidden_blob = git(remote, 'rev-parse', 'HEAD:hidden.txt')
         git(remote, 'checkout', 'feat/writer')

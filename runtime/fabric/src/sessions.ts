@@ -10,7 +10,8 @@ import { InputError, rejected, type DispatchInput } from "./execution-input.js";
 import { dispatchConfiguredProvider, rejectOwnSeatClaude } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider, type PinnedContinuation } from "./resume.js";
-import { runProcessAlive, statusRows } from "./run-registry.js";
+import { runProcessAlive } from "./run-registry.js";
+import { statusRows } from "./run-status.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
 

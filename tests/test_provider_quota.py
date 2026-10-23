@@ -922,12 +922,12 @@ def test_peer_snapshots_carry_only_sanitised_credits_resets_and_amounts(quota):
              'windows': [{'name': 'budget', 'used_percent': 5, 'used_amount': 'x', 'limit_amount': 250}],
              'usage_credits': [{'kind': 'credits', 'balance': 12, 'credential': TOKEN}, {'balance': 'NaN'}],
              'resets': {'available': 2, 'expires_at': [TOKEN, iso(NOW)], 'id': TOKEN}}
-    public = telemetry.public_snapshot(value)
+    public = telemetry.report_owner().public_snapshot(telemetry, value)
     assert TOKEN not in json.dumps(public)
     assert public['windows'] == [{'name': 'budget', 'used_percent': 5}]
     assert [row['balance'] for row in public['usage_credits']] == [12]
     assert public['resets'] == {'available': 2, 'expires_at': [iso(NOW)], 'source': 'provider'}
-    assert 'resets' not in telemetry.public_snapshot({**value, 'resets': {'available': 0}})
+    assert 'resets' not in telemetry.report_owner().public_snapshot(telemetry, {**value, 'resets': {'available': 0}})
 
 
 def test_manual_reset_credits_and_redeem_advice(quota, capsys):

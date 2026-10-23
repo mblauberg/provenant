@@ -40,10 +40,11 @@ def merge(telemetry, summaries, statuses, since):
             key = (host, group['source'], group['session'])
             sessions.setdefault(key, []).append(group)
     groups = [group for session in sessions.values() for group in session]
+    costs = telemetry.costs_owner()
     result = {'schema_version': 2, 'since': since, 'host': ', '.join(reports),
               'hosts': statuses, 'partial': any(row['status'] != 'ok' for row in statuses),
-              'usage': telemetry.finalise(telemetry.combine(groups, USAGE_KEYS), USAGE_KEYS),
-              'usage_per_day': telemetry.finalise(telemetry.combine(groups, DAY_KEYS), DAY_KEYS)}
+              'usage': costs.finalise(costs.combine(groups, USAGE_KEYS), USAGE_KEYS),
+              'usage_per_day': costs.finalise(costs.combine(groups, DAY_KEYS), DAY_KEYS)}
     # Keep outcome percentiles per host: averaging quantiles would misstate latency.
     for field in ('outcomes', 'lanes', 'attempts', 'limits_per_day', 'quota_observations', 'unattributed',
                   'last_limit_events', 'compactions_per_lane'):
@@ -70,11 +71,11 @@ def validate(telemetry, value, host):
     for group in value['session_usage']:
         if (not isinstance(group, dict) or group.get('host') != host
                 or any(not numeric(group.get(field)) or field != 'known_cost_usd' and group[field] != int(group[field])
-                       for field in telemetry.SUMMED)
+                       for field in telemetry.costs_owner().SUMMED)
                 or not isinstance(group.get('missing_token_fields'), dict)
                 or any(not numeric(group['missing_token_fields'].get(field))
                        or group['missing_token_fields'][field] != int(group['missing_token_fields'][field])
-                       for field in telemetry.TOKEN_FIELDS)
+                       for field in telemetry.costs_owner().TOKEN_FIELDS)
                 or not numeric(group.get('reported_cost_usd'), nullable=True)
                 or any(not isinstance(group.get(field), list) or not all(isinstance(item, str) for item in group[field])
                        for field in ('model_raw', 'billing'))
@@ -168,7 +169,7 @@ def validate_snapshots(telemetry, values, host):
 
 def collect(telemetry, db, since, selectors):
     hosts = hosts_owner()
-    local = telemetry.peer_summary(db, since)
+    local = telemetry.report_owner().peer_summary(telemetry, db, since)
     try:
         config = hosts.load_config()
         selected = list(dict.fromkeys([telemetry.host_id(), *config.peers] if selectors == ['all'] else selectors))
@@ -193,7 +194,7 @@ def collect(telemetry, db, since, selectors):
             value = response['result']
             validate(telemetry, value, host)
             validate_snapshots(telemetry, value.get('quota_snapshots', []), host)
-            value = {**value, 'quota_snapshots': [telemetry.public_snapshot(snapshot)
+            value = {**value, 'quota_snapshots': [telemetry.report_owner().public_snapshot(telemetry, snapshot)
                                                 for snapshot in value.get('quota_snapshots', [])]}
             # Validate the summable numeric contract before accepting a peer.
             merge(telemetry, [value], [], since)

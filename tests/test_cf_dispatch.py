@@ -574,17 +574,6 @@ def test_doctor_exits_cleanly():
     assert "PATH=" in result.stdout
 
 
-def test_missing_option_value_is_clean_error():
-    result = subprocess.run(
-        [str(SCRIPT), "--tool"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert result.returncode == 2
-    assert "unbound variable" not in result.stderr
-
-
 def test_missing_option_value_names_the_flag():
     result = subprocess.run(
         [str(SCRIPT), "--tool"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2518,7 +2507,6 @@ def test_non_git_fallback_routes_via_product_root_model_route():
 if __name__ == "__main__":
     test_help_exits_cleanly()
     test_doctor_exits_cleanly()
-    test_missing_option_value_is_clean_error()
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
     test_claude_oauth_fallback_uses_neutral_read_only_system_prompt()

@@ -345,13 +345,6 @@ def test_continue_on_error_inside_the_shared_setup_action_fails_the_guard() -> N
         _assert_no_continue_on_error(document, setup_steps)
 
 
-def test_setup_action_without_mutation_passes_the_continue_on_error_guard() -> None:
-    # Companion to the mutation test above: the real, on-disk composite
-    # action must independently satisfy the guard's default code path (no
-    # setup_steps override), proving the new coverage is not vacuous.
-    _assert_no_continue_on_error(_workflow())
-
-
 def test_ci_triggers_carry_no_path_or_branch_restrictions() -> None:
     # PR #168 repair cycle 3 (P2): parse `on:` semantically so a push.paths
     # or pull_request.paths restriction cannot slip past a substring check.

@@ -300,7 +300,7 @@ def reset_text(quota, resets):
 
 
 def render(quota, value, verbose=False):
-    table = quota['_telemetry']().table
+    table = quota['_telemetry']().report_owner().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
     rows = []
     for row in value['accounts']:

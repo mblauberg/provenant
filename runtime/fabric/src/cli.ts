@@ -21,8 +21,9 @@ import {
 } from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
 import {
-  federatedStatusRows as statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+ findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
+import { federatedStatusRows as statusRows, fabricStatus } from "./run-status.js";
 import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
 import { isLandingVerb, landingCommand, UsageError, validBranch, validRemote } from "./landing-cli.js";
@@ -228,7 +229,7 @@ if (command === "cancel" || command === "output") {
     const rest = argv.slice(1).filter((value) => !["--json", "--tail"].includes(value));
     if (rest.length !== 1 || rest[0]!.startsWith("--")) throw new Error("Pass exactly one lane ID");
     const { cancelConfiguredRun } = await import("./execution.js");
-    const { fabricOutput } = await import("./run-registry.js");
+    const { fabricOutput } = await import("./run-status.js");
     const result = command === "cancel"
       ? await cancelConfiguredRun(rest[0]!, who, reason, process.env, operationId)
       : await fabricOutput(who.project, { id: rest[0]!, part, offset: offset === undefined ? undefined : Number(offset),
