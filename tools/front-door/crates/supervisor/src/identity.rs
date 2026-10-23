@@ -246,19 +246,24 @@ impl GroupTermination {
         }
         match *self {
             Self::Ready => {
-                *self = Self::Grace { deadline_ms: now_ms.saturating_add(grace_ms) };
+                *self = Self::Grace {
+                    deadline_ms: now_ms.saturating_add(grace_ms),
+                };
                 GroupEffect::Signal(Signal::Terminate)
             }
             Self::Grace { deadline_ms } if now_ms >= deadline_ms => {
-                *self = Self::Confirm { deadline_ms: now_ms.saturating_add(2_000) };
+                *self = Self::Confirm {
+                    deadline_ms: now_ms.saturating_add(2_000),
+                };
                 GroupEffect::Signal(Signal::Kill)
             }
             Self::Confirm { deadline_ms } if now_ms >= deadline_ms => {
                 *self = Self::Done(GroupState::Fenced);
                 GroupEffect::Finished(GroupState::Fenced)
             }
-            Self::Grace { deadline_ms } | Self::Confirm { deadline_ms } =>
-                GroupEffect::ObserveAfter(50.min(deadline_ms.saturating_sub(now_ms))),
+            Self::Grace { deadline_ms } | Self::Confirm { deadline_ms } => {
+                GroupEffect::ObserveAfter(50.min(deadline_ms.saturating_sub(now_ms)))
+            }
             Self::Done(state) => GroupEffect::Finished(state),
         }
     }
@@ -266,10 +271,16 @@ impl GroupTermination {
 
 /// Registry and stamped status identities both count, deduplicated by PID/token,
 /// rather than start time (a failed record replacement can leave different stamps).
-pub fn run_owners(record: Option<ProcessIdentity>, stamped: Option<ProcessIdentity>) -> Vec<ProcessIdentity> {
+pub fn run_owners(
+    record: Option<ProcessIdentity>,
+    stamped: Option<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
     let mut owners: Vec<_> = record.into_iter().collect();
     if let Some(stamp) = stamped.filter(|stamp| stamp.pid > 0) {
-        if !owners.iter().any(|owner| owner.pid == stamp.pid && owner.token == stamp.token) {
+        if !owners
+            .iter()
+            .any(|owner| owner.pid == stamp.pid && owner.token == stamp.token)
+        {
             owners.push(stamp);
         }
     }
@@ -283,22 +294,47 @@ mod interface_tests {
     #[test]
     fn termination_rechecks_attribution_and_fences_unconfirmed_kill() {
         let mut state = GroupTermination::Ready;
-        assert_eq!(state.step(10, GroupState::Attributable, 100), GroupEffect::Signal(Signal::Terminate));
-        assert_eq!(state.step(109, GroupState::Attributable, 100), GroupEffect::ObserveAfter(1));
-        assert_eq!(state.step(110, GroupState::Attributable, 100), GroupEffect::Signal(Signal::Kill));
-        assert_eq!(state.step(2110, GroupState::Attributable, 100), GroupEffect::Finished(GroupState::Fenced));
+        assert_eq!(
+            state.step(10, GroupState::Attributable, 100),
+            GroupEffect::Signal(Signal::Terminate)
+        );
+        assert_eq!(
+            state.step(109, GroupState::Attributable, 100),
+            GroupEffect::ObserveAfter(1)
+        );
+        assert_eq!(
+            state.step(110, GroupState::Attributable, 100),
+            GroupEffect::Signal(Signal::Kill)
+        );
+        assert_eq!(
+            state.step(2110, GroupState::Attributable, 100),
+            GroupEffect::Finished(GroupState::Fenced)
+        );
         let mut state = GroupTermination::Ready;
         state.step(0, GroupState::Attributable, 100);
-        assert_eq!(state.step(100, GroupState::Fenced, 100), GroupEffect::Finished(GroupState::Fenced));
-        assert_eq!(state.step(200, GroupState::Attributable, 100), GroupEffect::Finished(GroupState::Fenced));
+        assert_eq!(
+            state.step(100, GroupState::Fenced, 100),
+            GroupEffect::Finished(GroupState::Fenced)
+        );
+        assert_eq!(
+            state.step(200, GroupState::Attributable, 100),
+            GroupEffect::Finished(GroupState::Fenced)
+        );
     }
 
     #[test]
     fn record_and_stamp_are_distinct_only_by_pid_and_token() {
-        let owner = ProcessIdentity { pid: 42, started_at: Some("old".into()), token: Some("a".into()) };
+        let owner = ProcessIdentity {
+            pid: 42,
+            started_at: Some("old".into()),
+            token: Some("a".into()),
+        };
         let mut stamp = owner.clone();
         stamp.started_at = None;
-        assert_eq!(run_owners(Some(owner.clone()), Some(stamp.clone())).len(), 1);
+        assert_eq!(
+            run_owners(Some(owner.clone()), Some(stamp.clone())).len(),
+            1
+        );
         stamp.token = Some("b".into());
         assert_eq!(run_owners(Some(owner), Some(stamp)).len(), 2);
         assert!(run_owners(None, None).is_empty());
