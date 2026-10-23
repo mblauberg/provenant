@@ -1097,7 +1097,7 @@ def _plan_dispatch(args: argparse.Namespace, custody=None) -> int | _DispatchPla
     args.original_prompt_file = original_prompt
     try:
         read_roots = [str(root) for root in getattr(args, "read_roots", None) or []]
-        protected = provider_exec.protected_paths(workspace, provider_cwd, args.worktree, read_roots)
+        protected = provider_exec.provider_confinement.protected_paths(workspace, provider_cwd, args.worktree, read_roots)
         if protected and (args.prompt_file is not None or args.add_dirs):
             task = {"id": args.task_id, "adapter": args.tool, "access_mode": args.access_mode,
                     "worktree": str(args.worktree) if args.worktree else None,
