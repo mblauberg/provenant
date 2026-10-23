@@ -110,7 +110,7 @@ requires caller edits in the same replacement lane, not an alias layer.
 | Local/remote fetch | Keep | Explicit verified copy of an allowlisted run artefact set | No whole-directory copy |
 | Single dispatch and batch | Merge | One submission containing a task list; run owns submission and admission limits | Scalar dispatch form removed |
 | Routing pools, councils, rotation and fallbacks in TS | Merge | `routing` resolves typed selections once; Fabric forwards the result | No Fabric-specific precedence |
-| Provider catalogue and cooldown reset | Cut from Fabric | Proposed `provenant routes models --adapter <id>` replaces live-ID discovery; routing/quota own administration | `fabric_adapters` removed |
+| Provider catalogue and cooldown reset | Cut from Fabric | `provenant route list --adapter <id>` replaces live-ID discovery; routing/quota own administration | `fabric_adapters` removed |
 | Dispatch route and authority validation | Merge | `run`, `routing` and `confinement` own it; Fabric validates envelope and project only | Strict typed inputs |
 | Native-seat provider bans | Cut | No family inferred from a seat; shared run policy controls permitted dispatch | Same-provider dispatch possible |
 | Named sessions | Cut | Only 2 sessions / 13 events ever recorded; native continuation stays in `resume` | Remove session table/tool/flags and F4 |
@@ -901,7 +901,7 @@ elapsed time. Installation and merging follow the repository workflow.
 Caller closure is part of F9/F10: edit skills and hook helpers to the new APIs,
 replace front-door help/routes, installer registrations, CI npm/gate invocations,
 MCP runbook and Fabric/hosts docs. Replace the `fabric_adapters` live-model
-callers with the proposed routing-owned `provenant routes models --adapter <id>`
+callers with the routing-owned `provenant route list --adapter <id>`
 command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
 `tests/test_runtime_architecture.py`, `tests/test_stale.py`, schema/layering tests,
 `tests/conftest.py` and mixed dispatch/provider/host identity tests lose only

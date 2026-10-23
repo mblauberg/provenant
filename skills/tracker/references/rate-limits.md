@@ -20,7 +20,7 @@ account's quota is blocked until the reset.
   limit, stop immediately. Report which call failed and the reset time from
   the response; do not retry, poll, or fall back to a workaround that spends
   the same budget a different way.
-- **Batch writes.** Where several edits are queued (steward mode), apply them
+- **Batch writes.** Where several edits are assigned (steward mode), apply them
   in one pass rather than round-tripping per item.
 
 A project with its own tracker module (a cached board snapshot, conditional

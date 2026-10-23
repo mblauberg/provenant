@@ -50,8 +50,6 @@ reference_invariants:
   - "source-anchoring"
   - "MANIFEST"
   - "FINAL_GATE"
-  - "Claude-only Workflow adapter"
-  - "saved-workflow conventions"
   - "paired-primary.md"
   - "FABRIC-ROUNDTRIP-UNAVAILABLE"
   - "herdr-panes.md"

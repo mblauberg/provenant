@@ -65,12 +65,12 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | records | Versioned serde records, canonical byte encoders, digest contracts | core |
 | config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
-| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy | core, records, config, supervisor's safe OS API |
-| providers | Adapter profiles, argv/environment builders, output classification and continuation | core, records, config, confinement |
-| quota | Windows, reset schedules, cooldowns and provider quota probes | core, records, config |
+| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
+| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota |
+| quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
 | telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
-| routing | Catalogue, preferences, live probes and route decisions | core, records, config, quota, providers |
-| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing, telemetry |
+| routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
 | fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
@@ -82,6 +82,8 @@ identity and process-level setup. `help` and root resolution stay cheap: no
 threads, no SQLite, no provider probes. Break cycles with typed events and
 decisions, never by importing `run` into `providers` or `routing`. The
 install digest covers all workspace source, manifests and the lockfile.
+CLI composes run's `AttemptReader` with telemetry's `stats`; run has no
+telemetry dependency. Their shared `AttemptFact` lives in records.
 
 ## R3. Typed errors in libraries, rendering at the edge
 

@@ -150,7 +150,6 @@ jobs:
               - 'skills/**'
               - 'tests/**'
               - 'tools/**'
-              - 'workflows/**'
               - '.gitignore'
               - '_typos.toml'
               - 'ACKNOWLEDGEMENTS.md'
@@ -243,18 +242,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history is load-bearing here, not incidental: the frozen
-          # eval-predecessor test resolves a pinned historical blob
-          # (`git show <commit>:docs/evals/...` in
-          # tests/test_skill_eval_fixtures.py) and the ui provenance tests
-          # diff working files against a pinned modification baseline
-          # (`git show <baseline>:skills/ui-ux-design/...` in
-          # tests/test_ui_ux_provenance_contract.py). A depth-1 checkout of
-          # this job was verified to fail exactly those four tests while
-          # 1891 others passed. This harness job uses fetch-depth 0 because
-          # PR-scoped timebomb fixture lint needs origin/main for its
-          # changed-context diff. Only the split-root job below, whose
-          # narrowed contract set is HEAD-local, checks out shallow.
+          # Full history supports the frozen eval-predecessor test's
+          # historical blob lookup in tests/test_skill_eval_fixtures.py.
+          # PR-scoped timebomb fixture lint also needs origin/main for its
+          # changed-context diff. The split-root job below checks out shallow
+          # because its narrowed contract set is HEAD-local.
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: $/.github/actions/setup-node-workspace

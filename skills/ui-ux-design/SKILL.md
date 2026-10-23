@@ -1,6 +1,6 @@
 ---
 name: ui-ux-design
-description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, design systems, and live iteration. Pair changes with implement. Source-diff review: code-review."
+description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, and design systems. Pair changes with implement. Source-diff review: code-review."
 ---
 
 # UI/UX design
@@ -19,9 +19,9 @@ an assigned report outside that tree. Load [review](references/review.md).
 **Design** covers directions and requested UI changes. Advice without source
 changes remains read-only. A request to build, redesign, fix, polish, or
 otherwise change the product uses `implement` as primary and this skill as its
-design companion. Live iteration belongs to that change branch; load
-[live](references/live.md). When review and changes are combined, keep
-implementation primary and perform a fresh read-only review afterwards. An
+design companion. Use the existing `playwright` skill for browser inspection
+and the target app's own dev server for preview. When review and changes are
+combined, keep implementation primary and perform a fresh read-only review afterwards. An
 explicit read-only constraint wins; otherwise ambiguous intent defaults to
 review.
 

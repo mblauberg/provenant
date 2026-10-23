@@ -284,6 +284,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args(argv)
+    try:
+        if not SOURCE.exists():
+            print(f"workflows skipped=source-absent source={SOURCE}")
+            return 0
+        if SOURCE.is_dir() and not any(SOURCE.iterdir()):
+            print(f"workflows skipped=source-empty source={SOURCE}")
+            return 0
+    except OSError as exc:
+        print(f"conflicting: {exc}", file=sys.stderr)
+        return 3
     if args.preflight:
         try:
             _preflight(args.target, reject_unmanaged=True)
