@@ -10,9 +10,17 @@ pub enum EventKind {
     TaskCreated,
     TaskClaimed,
     TaskUpdated,
+    TaskRenewed,
     TaskReleased,
     TaskFinished,
     Imported,
+    ClaimAcquired,
+    ClaimRenewed,
+    ClaimReleased,
+    LandingAcquired,
+    LandingRenewed,
+    LandingReleased,
+    PushChanged,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

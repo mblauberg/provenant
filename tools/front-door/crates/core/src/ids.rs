@@ -55,6 +55,7 @@ ids!(
     ActorId,
     RunId,
     TaskId,
+    ClaimId,
     MessageId,
     AttemptId,
     DeliveryId,

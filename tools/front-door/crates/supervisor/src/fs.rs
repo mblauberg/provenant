@@ -337,6 +337,13 @@ impl Directory {
             .dev();
         Ok(Self { file, device, path })
     }
+    /// Establish this held directory as a new filesystem-device boundary.
+    /// Call only after the caller has validated the configured root. Unlike
+    /// open_anchor, this consumes the existing handle without resolving a path
+    /// again; descendant operations retain the usual no-cross-device policy.
+    pub fn into_anchor(self) -> Result<Self> {
+        Self::from_file(self.file, self.path)
+    }
     pub fn metadata(&self) -> Result<Metadata> {
         self.file
             .metadata()
