@@ -403,6 +403,14 @@ version = "0.1.0"
 [[package]]
 name = "provenant-quota"
 version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-records"
