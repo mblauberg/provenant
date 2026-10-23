@@ -56,18 +56,36 @@ impl StartObservation<'_> {
     }
 }
 
-pub fn process_matches(pid: i64, recorded: Option<&str>, presence: Presence, start: StartObservation<'_>) -> bool {
+pub fn process_matches(
+    pid: i64,
+    recorded: Option<&str>,
+    presence: Presence,
+    start: StartObservation<'_>,
+) -> bool {
     pid > 1 && presence == Presence::Alive && recorded.is_some_and(|value| start.matches(value))
 }
 
-pub fn observed_alive(pid: i64, recorded: Option<&str>, presence: Presence, start: StartObservation<'_>) -> bool {
+pub fn observed_alive(
+    pid: i64,
+    recorded: Option<&str>,
+    presence: Presence,
+    start: StartObservation<'_>,
+) -> bool {
     if pid <= 0 || presence == Presence::Gone {
         return false;
     }
-    presence == Presence::Unknown || start.canonical.is_none() || recorded.is_none_or(|value| start.matches(value))
+    presence == Presence::Unknown
+        || start.canonical.is_none()
+        || recorded.is_none_or(|value| start.matches(value))
 }
 
-pub fn group_state(group: &RecordedGroup, self_pid: i64, members: Presence, leader: Presence, start: StartObservation<'_>) -> GroupState {
+pub fn group_state(
+    group: &RecordedGroup,
+    self_pid: i64,
+    members: Presence,
+    leader: Presence,
+    start: StartObservation<'_>,
+) -> GroupState {
     if group.pgid <= 0 || group.pgid != group.pid || group.pgid == self_pid {
         return GroupState::Fenced;
     }
@@ -86,7 +104,12 @@ pub fn group_state(group: &RecordedGroup, self_pid: i64, members: Presence, lead
 
 /// Validate the ps shim's result: '?' and other unreadable markers are unknown.
 pub fn started_at_output(text: &str) -> Option<&str> {
-    let value = text.trim();
+    let value = text.trim_matches(|ch: char| {
+        matches!(ch,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' |
+        '\u{3000}' | '\u{feff}')
+    });
     let tail = value.as_bytes().get(value.len().checked_sub(4)?..)?;
     tail.iter().all(u8::is_ascii_digit).then_some(value)
 }
@@ -98,7 +121,10 @@ mod tests {
     #[test]
     fn unavailable_identity_excludes_reaping_but_never_allows_signalling() {
         for presence in [Presence::Alive, Presence::Unknown] {
-            let start = StartObservation { canonical: None, legacy: Some("old") };
+            let start = StartObservation {
+                canonical: None,
+                legacy: Some("old"),
+            };
             assert!(observed_alive(42, Some("old"), presence, start));
             assert!(!process_matches(42, Some("old"), presence, start));
         }
@@ -106,28 +132,71 @@ mod tests {
 
     #[test]
     fn legacy_match_requires_an_available_canonical_identity() {
-        let start = StartObservation { canonical: Some("C time"), legacy: Some("local time") };
-        assert!(process_matches(42, Some("local time"), Presence::Alive, start));
-        assert!(!observed_alive(42, Some("different"), Presence::Alive, start));
+        let start = StartObservation {
+            canonical: Some("C time"),
+            legacy: Some("local time"),
+        };
+        assert!(process_matches(
+            42,
+            Some("local time"),
+            Presence::Alive,
+            start
+        ));
+        assert!(!observed_alive(
+            42,
+            Some("different"),
+            Presence::Alive,
+            start
+        ));
         assert!(!process_matches(1, Some("C time"), Presence::Alive, start));
         assert!(!observed_alive(42, None, Presence::Gone, start));
     }
 
     #[test]
     fn leaderless_group_remains_attributable_but_recycled_leader_is_exited() {
-        let group = RecordedGroup { pid: 42, pgid: 42, started_at: Some("before".into()) };
-        let start = StartObservation { canonical: Some("after"), legacy: None };
-        assert_eq!(group_state(&group, 100, Presence::Alive, Presence::Gone, start), GroupState::Attributable);
-        assert_eq!(group_state(&group, 100, Presence::Alive, Presence::Alive, start), GroupState::Exited);
-        assert_eq!(group_state(&group, 42, Presence::Gone, Presence::Gone, start), GroupState::Fenced);
-        assert_eq!(group_state(&group, 100, Presence::Unknown, Presence::Gone, start), GroupState::Fenced);
+        let group = RecordedGroup {
+            pid: 42,
+            pgid: 42,
+            started_at: Some("before".into()),
+        };
+        let start = StartObservation {
+            canonical: Some("after"),
+            legacy: None,
+        };
+        assert_eq!(
+            group_state(&group, 100, Presence::Alive, Presence::Gone, start),
+            GroupState::Attributable
+        );
+        assert_eq!(
+            group_state(&group, 100, Presence::Alive, Presence::Alive, start),
+            GroupState::Exited
+        );
+        assert_eq!(
+            group_state(&group, 42, Presence::Gone, Presence::Gone, start),
+            GroupState::Fenced
+        );
+        assert_eq!(
+            group_state(&group, 100, Presence::Unknown, Presence::Gone, start),
+            GroupState::Fenced
+        );
     }
 
     #[test]
     fn unreadable_start_and_absent_token_stay_absent() {
         assert_eq!(started_at_output("?\n"), None);
-        assert_eq!(started_at_output(" Mon Jan  1 00:00:00 2024\n"), Some("Mon Jan  1 00:00:00 2024"));
-        let identity = ProcessIdentity { pid: 42, started_at: None, token: None };
-        assert_eq!(serde_json::to_string(&identity).unwrap(), r#"{"pid":42,"startedAt":null}"#);
+        assert_eq!(started_at_output("\u{feff}2024\u{feff}"), Some("2024"));
+        assert_eq!(
+            started_at_output(" Mon Jan  1 00:00:00 2024\n"),
+            Some("Mon Jan  1 00:00:00 2024")
+        );
+        let identity = ProcessIdentity {
+            pid: 42,
+            started_at: None,
+            token: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&identity).unwrap(),
+            r#"{"pid":42,"startedAt":null}"#
+        );
     }
 }

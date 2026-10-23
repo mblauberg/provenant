@@ -41,7 +41,10 @@ pub struct CapturedOutput {
     pub truncated: bool,
 }
 
-pub fn read_bounded_output(spool: &mut (impl Read + Seek), limit: i64) -> Result<CapturedOutput, CaptureError> {
+pub fn read_bounded_output(
+    spool: &mut (impl Read + Seek),
+    limit: i64,
+) -> Result<CapturedOutput, CaptureError> {
     read_output(spool, limit.max(0) as u64).map_err(CaptureError::Read)
 }
 
@@ -53,7 +56,11 @@ fn read_output(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<Capture
     if !truncated {
         spool.take(bytes).read_to_end(&mut retained)?;
     } else {
-        let marker = if limit > MARKER.len() as u64 { MARKER } else { &[] };
+        let marker = if limit > MARKER.len() as u64 {
+            MARKER
+        } else {
+            &[]
+        };
         let available = limit - marker.len() as u64;
         let head = available / 2;
         let tail = available - head;
@@ -65,7 +72,11 @@ fn read_output(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<Capture
             spool.take(tail).read_to_end(&mut retained)?;
         }
     }
-    Ok(CapturedOutput { text: String::from_utf8_lossy(&retained).into_owned(), bytes, truncated })
+    Ok(CapturedOutput {
+        text: String::from_utf8_lossy(&retained).into_owned(),
+        bytes,
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -101,7 +112,9 @@ mod tests {
     #[test]
     fn utf8_replacement_occurs_after_the_byte_limit() {
         let view = read_bounded_output(&mut Cursor::new("λλ".as_bytes()), 2).unwrap();
-        assert_eq!(view.text, "��");
+        assert_eq!(view.text, "λ");
+        let one = read_bounded_output(&mut Cursor::new("λλ".as_bytes()), 1).unwrap();
+        assert_eq!(one.text, "�");
         assert_eq!(view.bytes, 4);
     }
 
@@ -109,19 +122,37 @@ mod tests {
     fn broken_spool_is_a_typed_failure() {
         struct Broken;
         impl Read for Broken {
-            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { Err(io::Error::other("lost spool")) }
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("lost spool"))
+            }
         }
         impl Seek for Broken {
-            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> { Err(io::Error::other("lost spool")) }
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+                Err(io::Error::other("lost spool"))
+            }
         }
-        assert!(matches!(read_bounded_output(&mut Broken, 1), Err(CaptureError::Read(_))));
+        assert!(matches!(
+            read_bounded_output(&mut Broken, 1),
+            Err(CaptureError::Read(_))
+        ));
     }
 
     #[test]
     fn result_record_keeps_null_streams_and_negative_signal_status() {
-        let value = BoundedProcessResult { returncode: -15, output: "OUTERR".into(), output_bytes: 6, output_truncated: false,
-            timed_out: false, elapsed_seconds: 1.0, stdout: None, stderr: None, stdout_bytes: None,
-            stderr_bytes: None, stdout_truncated: None, stderr_truncated: None };
+        let value = BoundedProcessResult {
+            returncode: -15,
+            output: "OUTERR".into(),
+            output_bytes: 6,
+            output_truncated: false,
+            timed_out: false,
+            elapsed_seconds: 1.0,
+            stdout: None,
+            stderr: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            stdout_truncated: None,
+            stderr_truncated: None,
+        };
         assert_eq!(value.terminating_signal(), Some(15));
         let json = serde_json::to_value(value).unwrap();
         assert!(json.get("stdout").unwrap().is_null());
@@ -131,13 +162,23 @@ mod tests {
     #[test]
     fn differential_capture_matches_python() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let Some(output) = crate::test_support::python(&root, r#"
+        let Some(output) = crate::test_support::python(
+            &root,
+            r#"
 import io, json
 from skills._shared.bounded_process import _read_bounded_output
 cases = [b'HEAD-' + b'x' * 4096 + b'-TAIL', b'', bytes([0xf0, 0x9f, 0x92, 0xa9, 0xff]), 'λλ'.encode()]
 print(json.dumps([_read_bounded_output(io.BytesIO(data), limit) for data in cases for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000]]))
-"#) else { return };
-        let cases = [ [b"HEAD-".as_slice(), &vec![b'x'; 4096], b"-TAIL"].concat(), vec![], vec![0xf0, 0x9f, 0x92, 0xa9, 0xff], "λλ".as_bytes().to_vec() ];
+"#,
+        ) else {
+            return;
+        };
+        let cases = [
+            [b"HEAD-".as_slice(), &vec![b'x'; 4096], b"-TAIL"].concat(),
+            vec![],
+            vec![0xf0, 0x9f, 0x92, 0xa9, 0xff],
+            "λλ".as_bytes().to_vec(),
+        ];
         let mut actual = Vec::new();
         for data in cases {
             for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000] {
