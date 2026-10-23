@@ -28,7 +28,7 @@ impl Context {
     }
 }
 pub fn words(text: &str) -> Vec<&str> {
-    text.split(|c: char| c.is_whitespace() || "_.:-".contains(c))
+    text.split(|c: char| python_whitespace(c) || "_.:-".contains(c))
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -40,7 +40,7 @@ fn upper_first(text: &str) -> String {
         .unwrap_or_default()
 }
 pub fn title_case(text: &str) -> String {
-    let text = text.trim();
+    let text = python_strip(text);
     if text.chars().any(char::is_uppercase) {
         text.into()
     } else {
@@ -53,7 +53,7 @@ pub fn title_case(text: &str) -> String {
 }
 pub fn sentence_case(text: &str) -> String {
     upper_first(&if text.chars().any(char::is_uppercase) {
-        text.trim().into()
+        python_strip(text).into()
     } else {
         words(text).join(" ")
     })
@@ -73,7 +73,7 @@ pub fn provider_name(name: &str) -> String {
 }
 pub fn plan_label(plan: Option<&str>) -> Option<String> {
     plan.filter(|p| !p.is_empty())
-        .map(|p| match p.trim().to_lowercase().as_str() {
+        .map(|p| match python_strip(p).to_lowercase().as_str() {
             "prolite" | "pro_lite" => "Pro Lite".into(),
             "pro_student" => "Pro (Student)".into(),
             _ => title_case(p),
@@ -106,19 +106,6 @@ pub fn window_labels(context: &Context) -> BTreeMap<String, String> {
         }
     }
     labels
-}
-// Python regex \d accepts decimal digits; str.isdigit also accepts these
-// non-decimal digit ranges (Unicode 16, the source interpreter's table).
-fn python_digit(c: char) -> bool {
-    c.is_ascii_digit()
-        || crate::time::decimal_digit(c).is_some()
-        || matches!(c as u32,
-        0x00b2..=0x00b3 | 0x00b9 | 0x1369..=0x1371 | 0x19da |
-        0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089 | 0x2460..=0x2468 |
-        0x2474..=0x247c | 0x2488..=0x2490 | 0x24ea | 0x24f5..=0x24fd |
-        0x24ff | 0x2776..=0x277e | 0x2780..=0x2788 | 0x278a..=0x2792 |
-        0x10a40..=0x10a43 | 0x10e60..=0x10e68 | 0x11052..=0x1105a |
-        0x1f100..=0x1f10a)
 }
 pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
     if let Some(label) = labels.get(&row.name).filter(|s| !s.is_empty()) {
@@ -160,7 +147,7 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
                 && lower.len() > 1
                 && lower[..lower.len() - 1]
                     .chars()
-                    .all(|c| c.is_ascii_digit() || crate::time::decimal_digit(c).is_some());
+                    .all(|c| c.is_ascii_digit() || crate::pending::decimal_digit(c).is_some());
             !LENGTH.contains(&lower.as_str()) && Some(*word) != row.pool.as_deref() && !digits_unit
         })
         .collect();
@@ -192,7 +179,7 @@ pub fn display_name(
 ) -> Option<String> {
     if let Some(named) = context.entries[provider][label]["display_name"]
         .as_str()
-        .map(str::trim)
+        .map(python_strip)
         .filter(|s| !s.is_empty())
     {
         return Some(named.chars().take(64).collect());

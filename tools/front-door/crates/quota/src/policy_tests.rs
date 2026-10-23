@@ -4,11 +4,7 @@ use jiff::{tz::TimeZone, Timestamp};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{path::Path, process::Command};
 
 const NOW: &str = "2026-10-23T06:00:00Z";
 fn now() -> Timestamp {
@@ -55,77 +51,23 @@ fn context() -> Context {
     }
 }
 fn supported_python_version(output: &str) -> bool {
-    let Some(version) = output.trim().strip_prefix("Python ") else {
-        return false;
-    };
-    let mut parts = version.split('.');
-    matches!((parts.next().and_then(|n| n.parse::<u32>().ok()), parts.next().and_then(|n| n.parse::<u32>().ok())),
-        (Some(3), Some(minor)) if minor >= 11)
-}
-fn python_interpreter() -> Option<&'static std::path::PathBuf> {
-    static PYTHON: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    let selected = PYTHON.get_or_init(|| {
-        let candidates = if let Some(path) = std::env::var_os("PROVENANT_PORT_PYTHON") {
-            vec![std::path::PathBuf::from(path)]
-        } else {
-            [
-                "python3",
-                "python3.14",
-                "python3.13",
-                "python3.12",
-                "python3.11",
-            ]
-            .into_iter()
-            .map(std::path::PathBuf::from)
-            .collect()
-        };
-        candidates.into_iter().find(|path| {
-            Command::new(path)
-                .arg("--version")
-                .output()
-                .is_ok_and(|out| {
-                    out.status.success()
-                        && supported_python_version(&String::from_utf8_lossy(&out.stdout))
-                })
-        })
-    });
-    if selected.is_none() {
-        let reason =
-            "differential oracle requires Python 3.11+; no supported interpreter was found";
-        assert!(
-            std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"),
-            "{reason}"
-        );
-        eprintln!("SKIP {reason}");
-    }
-    selected.as_ref()
+    crate::oracle::Interpreter::Python.supported_version(output)
 }
 fn python_available() -> bool {
-    python_interpreter().is_some()
+    crate::oracle::interpreter(crate::oracle::Interpreter::Python).is_some()
 }
 fn oracle<T: DeserializeOwned>(request: Value) -> T {
-    let mut child = Command::new(python_interpreter().unwrap())
-        .arg("-B")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/oracle.py"))
-        .env("TZ", "UTC")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(&request).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "oracle: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    decode_record(&output.stdout).unwrap()
+    crate::oracle::run(
+        crate::oracle::Interpreter::Python,
+        &[
+            "-B".as_ref(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/tests/oracle.py")
+                .as_os_str(),
+        ],
+        &request,
+    )
+    .unwrap()
 }
 /// Python supplies only dependencies outside this batch. Rust owns all display decisions.
 struct OraclePolicy {
@@ -826,16 +768,16 @@ fn schedule_configuration_precedence_and_validation() {
     let settings = json!({"schedule":{"min_interval_seconds":90,"jitter_fraction":5,"ttl_idle_seconds":999,"base_seconds":1},"backoff":{"base_seconds":60,"max_seconds":"x","min_interval_seconds":5},"providers":{"claude":{"ttl_idle_seconds":1200,"ttl_active_seconds":-1}}});
     let (config, mut notes) =
         resolve("claude", &json!({"ttl_idle_seconds":600}), &settings).unwrap();
-    assert_eq!(
-        (
-            config.ttl_idle_seconds.get(),
-            config.ttl_active_seconds.get(),
-            config.min_interval_seconds.get(),
-            config.jitter_fraction.get(),
-            config.max_seconds.get(),
-            config.base_seconds.get()
-        ),
-        (600.0, 300.0, 90.0, 0.1, 3600.0, 60.0)
+    assert_record_eq(
+        &json!([
+            config.ttl_idle_seconds,
+            config.ttl_active_seconds,
+            config.min_interval_seconds,
+            config.jitter_fraction,
+            config.max_seconds,
+            config.base_seconds
+        ]),
+        &json!([600, 300, 90, 0.1, 3600, 60]),
     );
     notes.sort();
     assert_eq!(
@@ -852,9 +794,9 @@ fn schedule_configuration_precedence_and_validation() {
         &json!({"schedule":{"min_interval_seconds":900,"max_interval_seconds":600}}),
     )
     .unwrap();
-    assert_eq!(
-        (c.min_interval_seconds.get(), c.max_interval_seconds.get()),
-        (60.0, 21600.0)
+    assert_record_eq(
+        &json!([c.min_interval_seconds, c.max_interval_seconds]),
+        &json!([60, 21600]),
     );
     assert_eq!(notes.len(), 1);
     for invalid in [json!(true), json!("3"), json!(0), json!(1.5)] {
@@ -908,7 +850,7 @@ fn time_boundaries_match_python_and_overflow_is_unset() {
 fn activity_reads_only_metadata_and_respects_identity_and_local_dates() {
     use crate::schedule::*;
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
+    let root = &temp.path().canonicalize().unwrap();
     let modified =
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(now().as_second() as u64 - 120);
     for path in [
@@ -1188,7 +1130,7 @@ fn review_regression_activity_uses_fromtimestamp_fraction_rounding() {
 fn review_regression_dangling_project_symlink_keeps_real_activity() {
     use crate::schedule::*;
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
+    let root = &temp.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("projects/real")).unwrap();
     let session = root.join("projects/real/s.jsonl");
     std::fs::write(&session, "").unwrap();
@@ -1308,7 +1250,8 @@ fn interpreter_version_and_required_differential_contract() {
     for (version, supported) in [
         ("Python 3.9.6", false),
         ("Python 3.10.16", false),
-        ("Python 3.11.0", true),
+        ("Python 3.11.0", false),
+        ("Python 3.12.0", true),
         ("Python 3.14.3\n", true),
         ("not Python", false),
     ] {
@@ -1339,9 +1282,9 @@ fn interpreter_version_and_required_differential_contract() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(diagnostic.contains("requires Python 3.11+"), "{diagnostic}");
+        assert!(diagnostic.contains("requires Python 3.12+"), "{diagnostic}");
         if required == "0" {
-            assert!(diagnostic.contains("SKIP"));
+            assert!(diagnostic.contains("skip:"));
         }
     }
 }
@@ -1532,10 +1475,8 @@ fn display_compares_and_labels_large_integer_windows_exactly() {
             .name,
         "second"
     );
-    let oversized: Value =
-        serde_json::from_str("{\"ttl_idle_seconds\":18446744073709551616}").unwrap();
     assert!(matches!(
-        crate::schedule::resolve("claude", &oversized, &Value::Null),
+        decode_record::<Value>(b"{\"ttl_idle_seconds\":18446744073709551616}"),
         Err(QuotaError::NumberOutOfRange)
     ));
 }

@@ -146,8 +146,6 @@ pub fn resolve(
     account: &Value,
     settings: &Value,
 ) -> Result<(Config, Vec<String>), QuotaError> {
-    crate::pending::check_numbers(account)?;
-    crate::pending::check_numbers(settings)?;
     let mut values =
         serde_json::to_value(Config::for_provider(provider)).map_err(QuotaError::Record)?;
     let mut notes = vec![];

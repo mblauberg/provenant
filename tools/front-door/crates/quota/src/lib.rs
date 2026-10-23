@@ -136,5 +136,7 @@ pub enum QuotaError {
 }
 
 #[cfg(test)]
+mod oracle;
+#[cfg(test)]
 mod policy_tests;
 pub mod schedule;

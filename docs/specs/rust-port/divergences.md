@@ -224,3 +224,30 @@ They form the current baseline; they are not newly discovered port mismatches.
   also failed before repair. Scheduling compares positive integer products in
   u128 and applies the configured cap before requiring the retained TTL to fit
   i64/u64. A Python float product that becomes infinity is likewise capped.
+
+### RP-5 / RP-6 follow-up: rulebook v4 boundary alignment
+
+- Rulebook version 4, R4/R9, from `origin/docs/porting-v4`. The prior
+  `arbitrary_precision` feature unified across the workspace and broke enum
+  decoding. Removed it; `pending::decode_record` checks raw integer tokens
+  before serde can turn an oversized integer into a float. Quoted numbers
+  and float tokens remain distinct; integer `-0` becomes `0` as in CPython.
+  Already-decoded `Value` inputs cannot recover their original token category;
+  callers must use the checked decoder at ingress.
+- Class: `improvement` for the deliberate i64/u64 refusal, as R4 requires.
+  Out-of-range integer tokens, including unknown fields, return typed
+  `NumberOutOfRange`. This does not enable the records crate's future codec.
+- Oracle selection now uses only `PROVENANT_PORT_PYTHON` (default `python3`,
+  >=3.12) or `PROVENANT_PORT_NODE` (default `node`, >=24). Missing/old
+  interpreters print `skip:` and fail with `PROVENANT_PORT_DIFF_REQUIRED=1`.
+  Temporary roots are canonicalised on macOS; record comparisons retain exact
+  numeric spelling, including config tests.
+- The sole float-second `from_timestamp` conversion now lives in `pending`,
+  marked for `provenant-core`. It splits integral/fractional seconds and
+  rounds half-even to microseconds, and refuses dates outside years 1..9999.
+  Duration addition retains Python's separate timedelta semantics.
+  Decimal-digit, digit and strip helpers are copied from main's CLI pending
+  module; whitespace extension remains beside those shared helpers.
+- Evidence: the 3.11-floor test and oversized-token test failed before the
+  repairs. New codec and fromtimestamp cases failed on integer `-0` becoming
+  `-0.0` and Jiff accepting year zero; both now pass against CPython.
