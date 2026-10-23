@@ -6,6 +6,8 @@ import sys
 
 root, unit = Path(sys.argv[1]), sys.argv[2]
 source = root / ("skills/autopilot/scripts/bootstrap-autopilot.py" if unit == "bootstrap" else f"skills/_shared/{unit}.py")
+if unit in {"git_evidence_packet", "git_evidence_header"}:
+    source = root / "skills/orchestrate/scripts/git_evidence_packet.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -21,7 +23,20 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "custody":
+    if unit == "git_evidence_packet":
+        scanner = module.PacketScanner(ValueError, case["limit"], validate_on_feed=case["validate"])
+        try:
+            for chunk in case["chunks"]:
+                scanner.feed(bytes(chunk))
+            results.append({"metadata": scanner.finish(), "status": scanner.has_status, "diff": scanner.has_diff})
+        except ValueError as error:
+            results.append({"error": str(error)})
+    elif unit == "git_evidence_header":
+        try:
+            results.append(module.validate_header(case))
+        except TypeError as error:
+            results.append(type_error(error))
+    elif unit == "custody":
         try:
             relative, target = module.contained_regular_path(Path(case["root"]), case["path"], "file")
             results.append({"relative": relative, "target": str(target)})
