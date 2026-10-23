@@ -1,6 +1,7 @@
 //! Inert argument and rendering boundaries. Command ownership has not switched.
 #![forbid(unsafe_code)]
 
+pub mod harness;
 pub mod install;
 
 /// Complete command result, kept separate from internal diagnostics.
