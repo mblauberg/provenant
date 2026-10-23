@@ -1,7 +1,6 @@
 use super::*;
 use serde_json::json;
 use std::path::Path;
-use std::process::Command;
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -101,14 +100,13 @@ fn cooldown_keys_are_collision_free_and_scope_specific() {
 fn differential_python_keys_and_terminal_statuses() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../skills/orchestrate/scripts/fabric_records.py");
-    let output=match Command::new("python3").args(["-c",r#"
+    let output=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
 import json,sys
 sys.path.insert(0,sys.argv[1]);import fabric_records as m
 scopes=[{}, {'account':None,'host':None},{'account':'a,b','host':'peer'},{'account':'é😀\x7f','host':'"\\\n'}]
 print(json.dumps({'keys':[m.cooldown_key('adäpter','model/é',s) for s in scopes],'statuses':sorted(m.TERMINAL_STATUSES)}))
 "#]).arg(path.parent().unwrap()).output() {
         Ok(output)=>output,
-        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{eprintln!("skipped: python3 is absent");return;},
         Err(error)=>panic!("cannot run Python oracle: {error}"),
     };
     assert!(
@@ -131,4 +129,39 @@ print(json.dumps({'keys':[m.cooldown_key('adäpter','model/é',s) for s in scope
     let mut statuses = TERMINAL_STATUSES.to_vec();
     statuses.sort();
     assert_eq!(json!(statuses), result["statuses"]);
+}
+
+#[test]
+fn cooldown_backoff_roundtrips_as_integer() {
+    let raw = br#"{"schema":"fabric.cooldowns.v1","cooldowns":{"key":{"adapter":"codex","model":"model","status":"rate_limited","cooling_until":"later","source_run":"run","recorded_at":"now","signature":"limit","backoff_seconds":30}}}"#;
+    let value = Cooldowns::decode(raw).unwrap();
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert!(encoded.contains("\"backoff_seconds\":30}"), "{encoded}");
+}
+
+#[test]
+fn fractional_cooldown_backoff_keeps_float_shape() {
+    let raw = br#"{"schema":"fabric.cooldowns.v1","cooldowns":{"key":{"adapter":"codex","model":"model","status":"rate_limited","cooling_until":"later","source_run":"run","recorded_at":"now","signature":"limit","backoff_seconds":30.5}}}"#;
+    let value = Cooldowns::decode(raw).unwrap();
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert_eq!(encoded.as_bytes(), raw);
+}
+
+#[test]
+fn joined_health_preserves_sparse_recent_rows() {
+    let raw = r#"{"adapter":"codex","model":"model","task_class":"ordinary","recent":[{"at":"2026-10-23T00:00:00Z","future":42}],"recent_failures":0,"rate_limits":0,"cooling_until":""}"#;
+    let value: ActiveRouteHealth =
+        serde_json::from_value(crate::checked_json::from_str(raw).unwrap()).unwrap();
+    let encoded: Value = serde_json::to_value(value).unwrap();
+    assert_eq!(encoded, serde_json::from_str::<Value>(raw).unwrap());
+}
+
+#[test]
+fn cooldown_projection_keeps_sparse_metadata() {
+    let raw = br#"{"schema":"fabric.cooldowns.v1","cooldowns":{"key":{"adapter":"codex","model":"model","cooling_until":"later","future":42}}}"#;
+    let value = Cooldowns::decode(raw).unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap(),
+        serde_json::from_slice::<Value>(raw).unwrap()
+    );
 }

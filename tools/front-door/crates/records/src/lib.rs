@@ -3,6 +3,8 @@
 
 pub mod attempt_evidence;
 pub mod attempt_storage;
+pub mod checked_json;
+pub use checked_json::{DecodeError, NumberOutOfRange};
 pub mod fabric_records;
 pub mod layout;
 mod pending;
@@ -18,3 +20,6 @@ pub fn digest_bytes(value: &[u8]) -> String {
             .collect::<String>()
     )
 }
+
+#[cfg(test)]
+mod oracle;

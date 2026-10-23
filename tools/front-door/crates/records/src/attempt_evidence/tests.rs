@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn fixture(run: &Path) -> (Value, BTreeMap<String, Vec<u8>>, Value) {
     let digest = digest_bytes(b"result\n");
@@ -410,7 +410,7 @@ fn output_paths_resolve_links_and_missing_components() {
 
 #[test]
 fn differential_python_success_matrix() {
-    let mut child = match Command::new("python3").args(["-c", r#"
+    let mut child = match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c", r#"
 import importlib.util,json,sys
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('attempt_evidence_oracle',sys.argv[1])
@@ -425,7 +425,6 @@ print(json.dumps(answers))
 "#]).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts/attempt_evidence.py"))
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {eprintln!("skipped: python3 is absent");return;},
         Err(error) => panic!("cannot start Python oracle: {error}"),
     };
     let run = tempfile::tempdir().unwrap();
@@ -461,9 +460,10 @@ print(json.dumps(answers))
 #[test]
 fn differential_python_non_strict_symlink_resolution() {
     use std::os::unix::fs::symlink;
-    let run = tempfile::tempdir().unwrap();
-    symlink("loop", run.path().join("loop")).unwrap();
-    std::fs::create_dir(run.path().join("real")).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().canonicalize().unwrap();
+    symlink("loop", run.as_path().join("loop")).unwrap();
+    std::fs::create_dir(run.as_path().join("real")).unwrap();
     for index in 0..50 {
         symlink(
             if index == 49 {
@@ -471,38 +471,39 @@ fn differential_python_non_strict_symlink_resolution() {
             } else {
                 format!("link{}", index + 1)
             },
-            run.path().join(format!("link{index}")),
+            run.as_path().join(format!("link{index}")),
         )
         .unwrap();
     }
     let paths = [
-        run.path().join("loop/result.md"),
-        run.path().join("link0/missing/../result.md"),
+        run.as_path().join("loop/result.md"),
+        run.as_path().join("link0/missing/../result.md"),
     ];
     let rust: Vec<_> = paths
         .iter()
         .map(|path| crate::pending::resolve(path).unwrap())
         .collect();
-    assert_eq!(rust[0], run.path().join("loop/result.md"));
-    assert_eq!(rust[1], run.path().join("real/result.md"));
-    let output = match Command::new("python3")
-        .args([
-            "-c",
-            r#"
+    assert_eq!(rust[0], run.as_path().join("loop/result.md"));
+    assert_eq!(rust[1], run.as_path().join("real/result.md"));
+    let output = match {
+        let Some(command) = crate::oracle::python() else {
+            return;
+        };
+        command
+    }
+    .args([
+        "-c",
+        r#"
 import json,sys
 from pathlib import Path
 if sys.version_info<(3,13): print('null')
 else: print(json.dumps([str(Path(p).resolve()) for p in sys.argv[1:]]))
 "#,
-        ])
-        .args(paths)
-        .output()
+    ])
+    .args(paths)
+    .output()
     {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipped: python3 is absent");
-            return;
-        }
         Err(error) => panic!("cannot run Python oracle: {error}"),
     };
     assert!(
@@ -514,7 +515,11 @@ else: print(json.dumps([str(Path(p).resolve()) for p in sys.argv[1:]]))
     if let Some(old) = old {
         assert_eq!(rust, old);
     } else {
-        eprintln!("skipped: non-strict loop semantics require Python >=3.13");
+        assert!(
+            std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"),
+            "required loop differential needs Python >=3.13"
+        );
+        eprintln!("skip: non-strict loop semantics require Python >=3.13");
     }
 }
 
@@ -545,16 +550,20 @@ fn differential_python_record_numeric_spelling() {
     let json = serde_json::to_string(&record).unwrap();
     let mut cases = Vec::new();
     let mut answers = Vec::new();
-    for number in ["0","-0","0.0","-0.0","1e400","false","999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"] {
-        let raw=json.replace("\"exit_code\":0",&format!("\"exit_code\":{number}"));
-        answers.push(validate_successful_attempt_json(run.path(),raw.as_bytes(),&payloads).err().map(|error|error.to_string()));
+    for number in ["0", "-0", "0.0", "-0.0", "1e400", "false"] {
+        let raw = json.replace("\"exit_code\":0", &format!("\"exit_code\":{number}"));
+        answers.push(
+            validate_successful_attempt_json(run.path(), raw.as_bytes(), &payloads)
+                .err()
+                .map(|error| error.to_string()),
+        );
         cases.push(json!({"run":run.path(),"record_json":raw,"payloads":payloads}));
     }
     assert!(answers[0].is_none() && answers[1].is_none());
     assert!(answers[2..].iter().all(Option::is_some));
     let oracle =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-    let mut child=match Command::new("python3").args(["-c",r#"
+    let mut child=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
 import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1]);import attempt_evidence as m
@@ -566,7 +575,6 @@ for case in json.load(sys.stdin):
 print(json.dumps(answers))
 "#]).arg(oracle).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(child)=>child,
-        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{eprintln!("skipped: python3 is absent");return;},
         Err(error)=>panic!("cannot run Python oracle: {error}"),
     };
     child
@@ -583,4 +591,40 @@ print(json.dumps(answers))
     );
     let old: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(answers, old);
+}
+
+#[test]
+fn raw_validation_refuses_out_of_range_integers_with_typed_cause() {
+    use std::error::Error;
+    let run = tempfile::tempdir().unwrap();
+    let (record, payloads, _) = fixture(run.path());
+    let raw = serde_json::to_string(&record).unwrap();
+    let raw = raw.replacen('{', "{\"ignored\":18446744073709551616,", 1);
+    let error =
+        validate_successful_attempt_json(run.path(), raw.as_bytes(), &payloads).unwrap_err();
+    let cause = error.source().unwrap().source().unwrap();
+    assert!(cause.downcast_ref::<crate::NumberOutOfRange>().is_some());
+}
+
+#[test]
+fn lone_surrogate_unknown_fields_are_typed_json_refusals() {
+    let run = tempfile::tempdir().unwrap();
+    let (record, payloads, _) = fixture(run.path());
+    let raw = serde_json::to_string(&record).unwrap();
+    for escape in [r"\ud800", r"\udfff"] {
+        let raw = raw.replacen('{', &format!("{{\"ignored\":\"{escape}\","), 1);
+        assert!(matches!(
+            validate_successful_attempt_json(run.path(), raw.as_bytes(), &payloads),
+            Err(AttemptEvidenceError::RecordJson(JsonCause::Json(_)))
+        ));
+    }
+    let Some(mut python) = crate::oracle::python() else {
+        return;
+    };
+    let output = python.args(["-c", r#"import json; assert ord(json.loads('"\\ud800"')) == 0xd800; assert ord(json.loads('"\\udfff"')) == 0xdfff"#]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

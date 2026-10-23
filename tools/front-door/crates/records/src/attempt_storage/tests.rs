@@ -289,10 +289,9 @@ fn prune_reports_no_bytes_freed_when_any_path_remains() {
 
 #[test]
 fn differential_python_allocations_and_pruning() {
-    use std::process::Command;
     let oracle = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../skills/orchestrate/scripts/attempt_storage.py");
-    let output = match Command::new("python3").args(["-c",r#"
+    let output = match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
 import importlib.util,json,os,stat,sys,tempfile
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('storage_oracle',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -310,7 +309,6 @@ with tempfile.TemporaryDirectory() as root:
  print(json.dumps({'tree':tree,'size':size,'freed':freed,'left':left,'exists':tmp.exists()}))
 "#]).arg(oracle).env_remove(KEEP_ENV).output() {
         Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {eprintln!("skipped: python3 is absent");return;},
         Err(error) => panic!("cannot run Python oracle: {error}"),
     };
     assert!(

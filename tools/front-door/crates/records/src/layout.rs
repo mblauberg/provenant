@@ -121,32 +121,6 @@ impl RunLayout {
             entropy[2]
         ))
     }
-    /// No-replace directory creation. The caller supplies UTC time and entropy;
-    /// no clock, environment or random source is hidden in the record crate.
-    pub fn create_run(
-        &self,
-        at: Timestamp,
-        kind: RunKind,
-        slug: &str,
-        entropy: [u8; 3],
-        owner: bool,
-    ) -> Result<PathBuf, LayoutError> {
-        let runs = self.runs();
-        std::fs::create_dir_all(&runs).map_err(|source| LayoutError::Io { path: runs, source })?;
-        let path = self.run_path(at, kind, slug, entropy);
-        std::fs::create_dir(&path).map_err(|source| LayoutError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        if owner {
-            let owner = path.join("_owner");
-            std::fs::create_dir(&owner).map_err(|source| LayoutError::Io {
-                path: owner,
-                source,
-            })?;
-        }
-        Ok(path)
-    }
 }
 
 pub fn sanitize_slug(slug: &str) -> String {
@@ -171,3 +145,23 @@ pub fn sanitize_slug(slug: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Python layout.py#unit-01 effects, to be implemented by the discovery/run owners.
+/// Optional cwd means the process cwd; paths have Python Path.resolve semantics.
+/// new_run_dir must mkdir(parents=True, exist_ok=False), then optional _owner.
+/// reap_orphans returns directory strings, and takes Unix float seconds.
+pub trait LayoutIo {
+    fn run_root(&self, cwd: Option<&Path>) -> Result<PathBuf, LayoutError>;
+    fn run_workspace(&self, path: &Path, cwd: Option<&Path>) -> Result<PathBuf, LayoutError>;
+    fn contains_run(&self, path: &Path, cwd: Option<&Path>) -> Result<bool, LayoutError>;
+    /// None selects Python defaults: kind="dispatch", slug="task", owner=false.
+    fn new_run_dir(
+        &self,
+        cwd: Option<&Path>,
+        kind: Option<&str>,
+        slug: Option<&str>,
+        owner: Option<bool>,
+    ) -> Result<PathBuf, LayoutError>;
+    fn reap_orphans(&self, cwd: Option<&Path>, at: Option<f64>)
+        -> Result<Vec<String>, LayoutError>;
+}

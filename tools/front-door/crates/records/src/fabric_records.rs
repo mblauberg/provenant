@@ -66,6 +66,8 @@ pub const TERMINAL_STATUSES: &[&str] = &[
 pub enum RecordError {
     #[error("invalid record JSON")]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Decode(#[from] crate::DecodeError),
     #[error("record I/O failed at {path}")]
     Io {
         path: std::path::PathBuf,
@@ -155,13 +157,17 @@ pub struct Cooldown {
     pub model: String,
     #[serde(flatten)]
     pub scope: Scope,
-    pub status: String,
-    pub cooling_until: String,
-    pub source_run: String,
-    pub recorded_at: String,
-    pub signature: String,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
-    pub backoff_seconds: Field<f64>,
+    pub status: Field<String>,
+    pub cooling_until: String,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub source_run: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub recorded_at: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub signature: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub backoff_seconds: Field<serde_json::Number>,
     #[serde(flatten)]
     pub retained: BTreeMap<String, Value>,
 }
@@ -201,13 +207,59 @@ pub struct RouteHealthDocument {
 }
 impl Cooldowns {
     pub fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
-        Ok(serde_json::from_slice(bytes)?)
+        Ok(serde_json::from_value(crate::checked_json::from_slice(
+            bytes,
+        )?)?)
     }
 }
 impl RouteHealthDocument {
     pub fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
-        Ok(serde_json::from_slice(bytes)?)
+        Ok(serde_json::from_value(crate::checked_json::from_slice(
+            bytes,
+        )?)?)
     }
+}
+
+/// Python policy APIs accept and return sparse row dictionaries. Full wire
+/// projections above describe current writers, while policy retains legacy rows.
+pub type RecordRow = BTreeMap<String, Value>;
+pub type CooldownRows = BTreeMap<String, RecordRow>;
+
+/// Python datetimes may carry a fixed offset or be naive. `Timestamp` alone
+/// would discard that distinction and the original offset of parse_time.
+#[derive(Clone, Debug)]
+pub enum RecordDateTime {
+    Naive(jiff::civil::DateTime),
+    Aware(jiff::Zoned),
+}
+
+/// Joined read_route_health result, distinct from a persisted route entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActiveRouteHealth {
+    pub adapter: String,
+    pub model: String,
+    pub task_class: String,
+    pub recent: Vec<RecordRow>,
+    pub recent_failures: u64,
+    pub rate_limits: u64,
+    pub cooling_until: String,
+}
+
+/// Implementation belongs to fabric_records.py#unit-01. JSON maps preserve
+/// sparse digest rows and mixed integer/float pacing values without coercion.
+pub trait FabricRecordPolicy {
+    fn timestamp(&self, value: &RecordDateTime) -> Result<String, RecordError>;
+    fn parse_time(&self, value: &str) -> Result<RecordDateTime, RecordError>;
+    fn cooldown_path(&self) -> std::path::PathBuf;
+    fn route_health_path(&self) -> std::path::PathBuf;
+    fn active_cooldowns(
+        &self,
+        values: &CooldownRows,
+        at: Option<&RecordDateTime>,
+        scopes: Option<&BTreeMap<String, Scope>>,
+    ) -> Result<CooldownRows, RecordError>;
+    fn render_digest(&self, row: &RecordRow) -> Result<String, RecordError>;
+    fn pacing_policy(&self) -> Result<BTreeMap<String, serde_json::Number>, RecordError>;
 }
 
 /// Store contract for later Fabric implementation units. Writes hold the
@@ -215,41 +267,46 @@ impl RouteHealthDocument {
 /// and the containing directory. Readers may fall back without lock acquisition
 /// but must not persist migration/pruning in that mode. Redirected stores and
 /// multiply-linked locks/indexes are refused. There is no path-based fallback.
+/// Python unit-02 calls: None selects ambient paths/time. Store implementation
+/// must retain Python's read fallback, row mutation, locking and publication.
 pub trait FabricRecordStore {
     fn read_cooldowns(
         &self,
-        path: &std::path::Path,
-        at: jiff::Timestamp,
-        scopes: &BTreeMap<String, Scope>,
-    ) -> Result<BTreeMap<String, Cooldown>, RecordError>;
+        path: Option<&std::path::Path>,
+        at: Option<&RecordDateTime>,
+        scopes: Option<&BTreeMap<String, Scope>>,
+    ) -> Result<CooldownRows, RecordError>;
     fn read_route_health(
         &self,
-        path: &std::path::Path,
-        cooldowns_path: &std::path::Path,
-        at: jiff::Timestamp,
-    ) -> Result<BTreeMap<String, RouteHealth>, RecordError>;
+        path: Option<&std::path::Path>,
+        cooldowns_path: Option<&std::path::Path>,
+        at: Option<&RecordDateTime>,
+    ) -> Result<BTreeMap<String, ActiveRouteHealth>, RecordError>;
     fn write_cooldown(
         &self,
-        path: &std::path::Path,
-        row: &mut AttemptRow,
-        at: jiff::Timestamp,
+        row: &mut RecordRow,
+        path: Option<&std::path::Path>,
+        at: Option<&RecordDateTime>,
     ) -> Result<(), RecordError>;
     fn write_route_health(
         &self,
-        path: &std::path::Path,
-        row: &AttemptRow,
-        at: jiff::Timestamp,
+        row: &RecordRow,
+        path: Option<&std::path::Path>,
+        at: Option<&RecordDateTime>,
     ) -> Result<(), RecordError>;
     fn clear_cooldowns(
         &self,
-        path: &std::path::Path,
         selector: Option<&str>,
+        path: Option<&std::path::Path>,
         account: Option<&str>,
-        at: jiff::Timestamp,
     ) -> Result<Vec<String>, RecordError>;
-    /// Index publication deduplicates by IndexEntry::key while holding its lock.
-    /// Custody and optional result hashing are completed before this boundary.
-    fn append_index(&self, path: &std::path::Path, entry: &IndexEntry) -> Result<(), RecordError>;
+    /// Includes index projection, run-local result hashing and key deduplication.
+    fn append_index(
+        &self,
+        row: &RecordRow,
+        run_dir: &std::path::Path,
+        root: Option<&std::path::Path>,
+    ) -> Result<(), RecordError>;
 }
 
 /// Python's compact ensure_ascii JSON string encoding, used in opaque keys.

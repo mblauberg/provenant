@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::Value;
-use std::process::Command;
 
 #[test]
 fn shared_layout_vectors_keep_one_worktree_root() {
@@ -74,7 +73,7 @@ fn names_use_explicit_utc_time_sanitized_slug_and_entropy() {
     );
 }
 #[test]
-fn invalid_kind_is_refused_before_directory_creation() {
+fn invalid_kind_is_refused() {
     assert_eq!(
         RunKind::try_from("other").unwrap_err().to_string(),
         "invalid run kind"
@@ -84,23 +83,6 @@ fn invalid_kind_is_refused_before_directory_creation() {
     ] {
         assert_eq!(RunKind::try_from(name).unwrap().as_str(), name);
     }
-}
-#[test]
-fn creates_owner_directory_and_refuses_collision() {
-    let root = tempfile::tempdir().unwrap();
-    let layout = RunLayout::from_resolved(root.path(), None);
-    let at = "2026-10-23T00:00:00Z".parse().unwrap();
-    let run = layout
-        .create_run(at, RunKind::Review, "test", [1, 2, 3], true)
-        .unwrap();
-    assert!(run.join("_owner").is_dir());
-    assert!(
-        matches!(layout.create_run(at,RunKind::Review,"test",[1,2,3],true),Err(LayoutError::Io {source,..}) if source.kind()==std::io::ErrorKind::AlreadyExists)
-    );
-    let run = layout
-        .create_run(at, RunKind::Review, "test", [1, 2, 4], false)
-        .unwrap();
-    assert!(!run.join("_owner").exists());
 }
 #[test]
 fn differential_python_slug_and_non_git_workspace() {
@@ -114,14 +96,13 @@ fn differential_python_slug_and_non_git_workspace() {
     let slugs = ["test lane", "é😀中文", "-..x__y..-", ".", &"a".repeat(80)];
     let oracle =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-    let output=match Command::new("python3").args(["-c",r#"
+    let output=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
 import json,re,sys
 sys.path.insert(0,sys.argv[1]);import layout
 slugs=json.loads(sys.argv[4])
 print(json.dumps({'slugs':[re.sub(r'[^a-zA-Z0-9._-]+','-',s).strip('-.')[:64] or 'task' for s in slugs],'workspace':str(layout.run_workspace(sys.argv[3],sys.argv[2])),'contains':layout.contains_run(sys.argv[3],sys.argv[2])}))
 "#]).arg(oracle).arg(&cwd).arg(&explicit).arg(serde_json::to_string(&slugs).unwrap()).output() {
         Ok(output)=>output,
-        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{eprintln!("skipped: python3 is absent");return;},
         Err(error)=>panic!("cannot run Python oracle: {error}"),
     };
     assert!(

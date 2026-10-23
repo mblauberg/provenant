@@ -58,6 +58,8 @@ pub enum JsonCause {
     Utf8(#[source] std::str::Utf8Error),
     #[error("invalid JSON syntax")]
     Json(#[source] serde_json::Error),
+    #[error("{0}")]
+    NumberOutOfRange(#[source] crate::NumberOutOfRange),
 }
 
 /// Validate original record JSON without losing Python's integer `-0` spelling.
@@ -71,7 +73,7 @@ pub fn validate_successful_attempt_json(
     let text = std::str::from_utf8(record_bytes)
         .map_err(|source| AttemptEvidenceError::RecordJson(JsonCause::Utf8(source)))?;
     let record = decode_validation_json(text)
-        .map_err(|source| AttemptEvidenceError::RecordJson(JsonCause::Json(source)))?;
+        .map_err(|source| AttemptEvidenceError::RecordJson(json_cause(source)))?;
     validate_successful_attempt(run_dir, &record, payloads)
 }
 
@@ -145,15 +147,17 @@ pub fn successful_adapter_error(
     None
 }
 
-// Python json.loads accepts nonfinite constants and numeric magnitudes beyond
-// f64. These can never satisfy any numeric success field; retain their shape as
-// null for validation, without rewriting retained evidence bytes.
-fn decode_validation_json(line: &str) -> Result<Value, serde_json::Error> {
-    if let Ok(value) = serde_json::from_str(line) {
-        if !line.contains("-0") {
-            return Ok(value);
-        }
+fn json_cause(error: crate::DecodeError) -> JsonCause {
+    match error {
+        crate::DecodeError::Json(error) => JsonCause::Json(error),
+        crate::DecodeError::NumberOutOfRange(error) => JsonCause::NumberOutOfRange(error),
     }
+}
+
+// Python accepts nonfinite floats; they cannot satisfy numeric success fields.
+// Only that validation projection maps them to null; integers use the shared
+// checked codec and are never rounded or silently discarded.
+fn decode_validation_json(line: &str) -> Result<Value, crate::DecodeError> {
     let mut normalized = String::with_capacity(line.len());
     let mut chars = line.char_indices().peekable();
     while let Some((start, ch)) = chars.next() {
@@ -187,7 +191,8 @@ fn decode_validation_json(line: &str) -> Result<Value, serde_json::Error> {
                 chars.next();
             }
             let token = &line[start..end];
-            let beyond_range = serde_json::from_str::<Value>(token).is_err()
+            let beyond_range = token.contains(['.', 'e', 'E'])
+                && serde_json::from_str::<Value>(token).is_err()
                 && serde_json::from_str::<serde::de::IgnoredAny>(token).is_ok();
             normalized.push_str(if token == "-0" {
                 "0"
@@ -198,7 +203,7 @@ fn decode_validation_json(line: &str) -> Result<Value, serde_json::Error> {
             });
         }
     }
-    serde_json::from_str(&normalized)
+    crate::checked_json::from_str(&normalized)
 }
 
 pub fn validate_successful_attempt(
@@ -237,14 +242,10 @@ pub fn validate_successful_attempt(
             '\n', '\r', '\u{000b}', '\u{000c}', '\u{001c}', '\u{001d}', '\u{001e}', '\u{0085}',
             '\u{2028}', '\u{2029}',
         ])
-        .rfind(|line| {
-            !line
-                .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{001f}')
-                .is_empty()
-        });
+        .rfind(|line| !pending::python_strip(line).is_empty());
     let adapter: Value = match last {
         Some(line) => {
-            decode_validation_json(line).map_err(|source| AdapterJson(JsonCause::Json(source)))?
+            decode_validation_json(line).map_err(|source| AdapterJson(json_cause(source)))?
         }
         None => Value::Null,
     };
