@@ -90,7 +90,7 @@ pub trait Lineage {
         run_dir: &Path,
         kind: RunKind,
         batch_child: bool,
-    ) -> Result<(), Error>;
+    ) -> Result<OwnerMode, Error>;
 
     fn acquire_owner_custody(&mut self, run_dir: &Path) -> Result<Self::Custody, Error>;
     fn record_owner(
@@ -127,6 +127,23 @@ pub trait Lineage {
     ) -> Result<Vec<ChildReport>, Error>;
 }
 
+/// The batch child must retain this decision until its execution custody step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerMode {
+    /// Normal direct or nested dispatch; acquire ordinary execution custody.
+    Direct,
+    /// The batch child is itself the owner and must acquire execution custody.
+    StandaloneBatchChild,
+    /// A verified batch parent lends custody; do not reacquire its held lock.
+    SharedBatchChild,
+}
+
+impl OwnerMode {
+    pub fn acquire_execution_custody(self) -> bool {
+        !matches!(self, Self::SharedBatchChild)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunKind {
     Dispatch,
@@ -141,13 +158,15 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
             let status = child
                 .fields
                 .get("status")
-                .and_then(serde_json::Value::as_str);
+                .unwrap_or(&serde_json::Value::Null);
             let reaped = child
                 .fields
                 .get("reaped")
                 .and_then(serde_json::Value::as_array);
             let has_reaped = reaped.is_some_and(|v| !v.is_empty());
-            if matches!(status, None | Some("running" | "ok" | "partial")) && !has_reaped {
+            if (status.is_null() || matches!(status.as_str(), Some("running" | "ok" | "partial")))
+                && !has_reaped
+            {
                 return None;
             }
             let task = child
@@ -158,16 +177,16 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
             let detail = if let Some(reaped) = reaped.filter(|v| !v.is_empty()) {
                 format!(
                     "{}; reaped {} leftover process(es)",
-                    status.unwrap_or("None"),
+                    python_string(status),
                     reaped.len()
                 )
             } else {
                 child
                     .fields
                     .get("error")
-                    .filter(|v| !v.is_null() && v.as_str() != Some(""))
+                    .filter(|v| crate::pending::json_truthy(v))
                     .map(python_string)
-                    .unwrap_or_else(|| status.unwrap_or("None").into())
+                    .unwrap_or_else(|| python_string(status))
             };
             Some(format!("child run {} task {task}: {detail}", child.run_id))
         })
@@ -347,5 +366,37 @@ print(json.dumps(rows))
             serde_json::to_value(actual).unwrap(),
             serde_json::from_slice::<Value>(&result.stdout).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn batch_owner_mode_preserves_execution_custody_decision() {
+        assert!(OwnerMode::StandaloneBatchChild.acquire_execution_custody());
+        assert!(!OwnerMode::SharedBatchChild.acquire_execution_custody());
+        assert!(OwnerMode::Direct.acquire_execution_custody());
+    }
+    #[test]
+    fn falsey_json_child_errors_fall_back_to_status() {
+        for error in [
+            json!(false),
+            json!(0),
+            json!(0.0),
+            json!(""),
+            json!([]),
+            json!({}),
+            json!(null),
+        ] {
+            let row: ChildReport =
+                serde_json::from_value(json!({"run_id":"x","status":"failed","error":error}))
+                    .unwrap();
+            assert_eq!(child_errors(&[row]), ["child run x task ?: failed"]);
+        }
+        let row: ChildReport =
+            serde_json::from_value(json!({"run_id":"x","status":false})).unwrap();
+        assert_eq!(child_errors(&[row]), ["child run x task ?: False"]);
     }
 }

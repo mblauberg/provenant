@@ -151,7 +151,7 @@ pub fn transition(
                     && v.get("from_holder").and_then(Value::as_str) == Some(current)
                     && v.get("to_holder").and_then(Value::as_str) == Some(request.holder)
                     && v.get("generation").and_then(Value::as_i64) == request.expected_generation
-                    && v.get("approved_by").is_some_and(truthy)
+                    && v.get("approved_by").is_some_and(pending::json_truthy)
             });
             if active
                 || current.is_empty()
@@ -200,17 +200,6 @@ pub fn transition(
         }
         .into(),
     })
-}
-
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(v) => *v,
-        Value::Number(v) => v.as_f64() != Some(0.0),
-        Value::String(v) => !v.is_empty(),
-        Value::Array(v) => !v.is_empty(),
-        Value::Object(v) => !v.is_empty(),
-    }
 }
 
 /// Hold the persistent sibling lock through read, policy evaluation and publication.

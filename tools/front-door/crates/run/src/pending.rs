@@ -1,5 +1,6 @@
 //! Temporary safe OS helpers until the supervisor exposes these contracts.
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -115,6 +116,7 @@ pub struct ParentAttempt {
     run_dir: std::path::PathBuf,
 }
 
+// port: belongs in provenant-records
 impl TryFrom<serde_json::Value> for ParentAttempt {
     type Error = &'static str;
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
@@ -156,6 +158,7 @@ impl TryFrom<serde_json::Value> for ParentAttempt {
     }
 }
 
+// port: belongs in provenant-records
 impl ParentAttempt {
     pub fn run_id(&self) -> &str {
         &self.run_id
@@ -242,4 +245,16 @@ pub(crate) fn publish_marker(path: &Path, wrapper_pid: u32, bytes: &[u8]) -> io:
         return Err(error);
     }
     Ok(())
+}
+
+// port: belongs in provenant-records
+pub(crate) fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(v) => *v,
+        Value::Number(v) => v.as_f64() != Some(0.0),
+        Value::String(v) => !v.is_empty(),
+        Value::Array(v) => !v.is_empty(),
+        Value::Object(v) => !v.is_empty(),
+    }
 }
