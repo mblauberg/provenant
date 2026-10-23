@@ -183,6 +183,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

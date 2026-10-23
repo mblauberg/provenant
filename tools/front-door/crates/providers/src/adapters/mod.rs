@@ -88,6 +88,7 @@ pub(super) fn profile(cli: &str, argv: Vec<String>, metadata: Metadata<'_>) -> A
 
 pub mod agy;
 pub mod claude;
+pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod kiro;
