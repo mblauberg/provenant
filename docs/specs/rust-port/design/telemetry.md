@@ -286,7 +286,7 @@ Proposed APIs, to settle with their owners before build:
 | Telemetry API | Caller/contract |
 |---|---|
 | `record_attempt(store, &AttemptFact) -> Result<WriteOutcome>` | Run, after durable terminal publication; bounded failure is diagnostic, never a stop reason. |
-| `ingest(store, AttemptRecordReader, now) -> IngestReport` | CLI; run supplies verified new-root records for repair. |
+| `ingest(store, AttemptRecordReader, now) -> Result<IngestReport>` | CLI; run supplies verified new-root records for repair. |
 | `stats(store, StatsQuery, &PriceTable) -> Result<StatsReport>` | CLI rendering; no SQLite access by skills. |
 | `sources(store) -> Result<SourceReport>` | CLI diagnostics, read-only. |
 | `import_legacy(store, VerifiedLegacyFile, deadline) -> Result<ImportReport>` | CLI's explicit one-shot import. |
