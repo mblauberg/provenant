@@ -54,3 +54,48 @@ pub(crate) fn atomic_write(destination: &Path, content: &[u8], prefix: &str) -> 
         "cannot allocate atomic-write temporary",
     ))
 }
+
+// port: belongs in provenant-records
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PathEncodingError {
+    #[error("product root cannot be represented as a JSON string")]
+    Unsupported,
+}
+
+// port: belongs in provenant-records
+/// Python json.dumps(str(path), ensure_ascii=True), including Unix surrogateescape.
+/// This path-only encoder is private until records supplies its OS-string codec.
+pub(crate) fn path_json(path: &Path) -> Result<String, PathEncodingError> {
+    #[cfg(not(unix))]
+    if path.to_str().is_none() {
+        return Err(PathEncodingError::Unsupported);
+    }
+    let mut output = String::from("\"");
+    for chunk in path.as_os_str().as_encoded_bytes().utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\u{8}' => output.push_str("\\b"),
+                '\u{c}' => output.push_str("\\f"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                '\u{20}'..='\u{7e}' => output.push(c),
+                _ => {
+                    for unit in c.encode_utf16(&mut [0; 2]) {
+                        use std::fmt::Write;
+                        write!(&mut output, "\\u{unit:04x}")
+                            .map_err(|_| PathEncodingError::Unsupported)?;
+                    }
+                }
+            }
+        }
+        for byte in chunk.invalid() {
+            use std::fmt::Write;
+            write!(&mut output, "\\udc{byte:02x}").map_err(|_| PathEncodingError::Unsupported)?;
+        }
+    }
+    output.push('"');
+    Ok(output)
+}

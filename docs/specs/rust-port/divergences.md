@@ -1136,3 +1136,21 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   integer ingress and generic JSONDecodeError diagnostics. Core cannot depend
   on records under R2; no checked codec is moved or copied by this repair.
   The unit remains partial and is excluded from `Units:`.
+
+### RP-1003 core-2 follow-up — native pointer writer bytes
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; rulebook v4; class `bug`
+  (partial repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Pointer writing now emits Python's ASCII JSON spelling for native paths,
+  including U+007F and Unix surrogateescape for invalid UTF-8 bytes. It never
+  converts a path through replacement characters. Publication policy is unchanged.
+- Evidence: exact path-wire differential over 260 native byte fixtures, plus
+  pointer-writer differential for a real non-UTF-8 directory when supported.
+  The pure byte fixtures always run even if the filesystem refuses that name.
+- Pending: the small private `pending::path_json` and its error type belong in
+  records, whose current API cannot represent surrogateescaped JSON paths.
+  No checked integer codec is moved or copied; R2 prohibits a core->records
+  dependency. `pending::atomic_write` continues awaiting supervisor publication.
+- Remaining: pointer loading for surrogateescaped paths, extended JSON in
+  ignored fields, and exact integer ingress. The retained ignored differential
+  still documents these reader gaps; the unit remains partial.

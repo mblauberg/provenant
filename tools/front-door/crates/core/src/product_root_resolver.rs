@@ -93,23 +93,9 @@ pub fn write_pointer_file(
         path: ignore,
         source,
     })?;
-    let record = ProductPointer {
-        schema_version: SCHEMA_VERSION,
-        product_root: product.to_str().ok_or(PointerError::Encoding)?.into(),
-    };
-    // Python json.dumps(sort_keys=True) uses ASCII escapes and spaces after separators.
-    let encoded = serde_json::to_string(&record.product_root)?;
-    let mut escaped = String::new();
-    for c in encoded.chars() {
-        if c.is_ascii() {
-            escaped.push(c);
-        } else {
-            for unit in c.encode_utf16(&mut [0; 2]).iter() {
-                use std::fmt::Write;
-                let _ = write!(escaped, "\\u{unit:04x}");
-            }
-        }
-    }
+    // Python's native path boundary uses surrogateescape on Unix, then an
+    // explicit ASCII JSON encoder. No lossy UTF-8 conversion is permitted.
+    let escaped = crate::pending::path_json(&product).map_err(|_| PointerError::Encoding)?;
     let content = format!("{{\"product_root\": {escaped}, \"schema_version\": 1}}\n");
     let pointer = parent.join("product-root.json");
     atomic_write(&pointer, content.as_bytes(), ".product-root.").map_err(|source| {
@@ -336,6 +322,74 @@ print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
         assert!(
             numeric_matches && path_matches,
             "numeric parity: {numeric_matches}; non-UTF-8 parity when supported: {path_matches}"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn path_wire_bytes_match_python_surrogateescape_and_ascii_escaping() {
+        let mut fixtures: Vec<Vec<u8>> = vec![
+            b"/a/\x7f\x08\x0c\t\n\r\"\\".to_vec(),
+            "/prød😀".as_bytes().to_vec(),
+            b"/p/\xed\xb2\x80".to_vec(),
+            b"/p/\xe2(\xa1".to_vec(),
+        ];
+        fixtures.extend((0..=255u8).map(|b| vec![b'/', b'p', b'/', b]));
+        let Some(expected) = crate::test_support::python_values(
+            r#"
+print(json.dumps([json.dumps(os.fsdecode(bytes(v))) for v in values]))
+"#,
+            &serde_json::json!(fixtures),
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = fixtures
+            .iter()
+            .map(|raw| {
+                crate::pending::path_json(Path::new(std::ffi::OsStr::from_bytes(raw))).unwrap()
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+    #[test]
+    fn pointer_writer_matches_python_for_non_utf8_native_paths_when_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"product-\xff"));
+        match fs::create_dir(&product) {
+            Ok(()) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
+                ) =>
+            {
+                eprintln!("skip: filesystem refuses non-UTF-8 filenames; path codec differential still runs");
+                return;
+            }
+            Err(e) => panic!("cannot create native-path fixture: {e}"),
+        }
+        let instance = dir.path().join("instance");
+        let Some(expected) = crate::test_support::python(
+            "scripts/lib/product_root_resolver.py",
+            r#"
+p,product=map(pathlib.Path,sys.argv[3:5])
+m.write_pointer_file(p,product)
+print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
+"#,
+            &[&instance, &product],
+        ) else {
+            return;
+        };
+        write_pointer_file(&instance, &product, &Homes::default()).unwrap();
+        assert_eq!(
+            serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap()),
+            expected
         );
     }
 }
