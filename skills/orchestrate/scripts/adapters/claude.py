@@ -15,6 +15,7 @@ def uses_api_key(route):
 
 
 def argv(p):
+    boundary = p["boundary_prompt"]
     command = [
         CLI,
         "-p",
@@ -41,8 +42,18 @@ def argv(p):
             "Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob",
         ]
     else:
-        command += ["--permission-mode", "default", "--tools", "Read,Grep,Glob"]
-    command += ["--system-prompt", p["boundary_prompt"]]
+        # Listing Bash exposes it; default mode still needs approval under -p.
+        # The lane's existing OS confinement keeps the shell read-only.
+        command += [
+            "--permission-mode", "default",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--allowedTools", "Bash",
+        ]
+        boundary = boundary.replace(
+            "Use file-reading tools only.",
+            "Shell commands that do not modify files are allowed.",
+        )
+    command += ["--system-prompt", boundary]
     for directory in p["applied"]["add_dirs"]:
         command += ["--add-dir", directory]
     if p["model"]:

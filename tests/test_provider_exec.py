@@ -778,7 +778,8 @@ def test_build_plan_defaults_cwd_to_the_workspace_root(monkeypatch, tmp_path):
     assert plan["cwd"] == str(root.resolve())
 
 
-def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monkeypatch, tmp_path):
+@pytest.mark.parametrize("adapter", ["agy", "claude"])
+def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monkeypatch, tmp_path, adapter):
     mod = supervisor()
     home = tmp_path / "home"
     workspace = home / "repo"
@@ -787,8 +788,10 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
     attempt.mkdir(parents=True)
     add_dir.mkdir()
     monkeypatch.setattr(mod.Path, "home", lambda: home)
-    monkeypatch.setattr(mod, "CONFINED_STATE", {"agy": {"read_write": ("state",), "read": ()}})
-    plan = {"adapter": "agy", "mode": "read_only", "workspace_root": str(workspace),
+    monkeypatch.setattr(mod, "CONFINED_STATE", {adapter: {
+        "home": ".claude", "read_write": ("state",), "read": (),
+    }})
+    plan = {"adapter": adapter, "mode": "read_only", "workspace_root": str(workspace),
             "cwd": str(workspace), "run_dir": str(attempt),
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
     profile = mod.os_confinement_profile(plan)
@@ -6686,11 +6689,18 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     if api_key:
         monkeypatch.setenv('ANTHROPIC_API_KEY', 'fixture-key')
-    plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
+    plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path,
+                                   workspace_root=tmp_path)
     assert ('--bare' if api_key else '--safe-mode') in plan['argv']
     assert '--strict-mcp-config' in plan['argv']
     assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
-    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob'
+    assert plan['argv'][plan['argv'].index('--permission-prompts') + 1] == 'none'
+    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob,Bash'
+    assert plan['argv'][plan['argv'].index('--allowedTools') + 1] == 'Bash'
+    boundary = plan['argv'][plan['argv'].index('--system-prompt') + 1]
+    assert 'Do not modify files or run commands that mutate state.' in boundary
+    assert 'Shell commands that do not modify files are allowed.' in boundary
+    assert 'Use file-reading tools only.' not in boundary
     assert 'fixture-key' not in ' '.join(plan['argv'])
 
 
@@ -7540,6 +7550,21 @@ pathlib.Path({str(out)!r}).write_text(json.dumps(result))
         "XDG_CACHE_HOME": str(cache),
     }
     assert not (cwd / ".pytest_cache").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_claude_read_only_shell_cannot_write_outside_the_attempt(monkeypatch, tmp_path):
+    attempt = tmp_path / "attempt"
+    cwd = tmp_path / "repo/runtime/fabric"
+    targets = [cwd / "shell-write", tmp_path / "outside-attempt"]
+    script = f"touch {shlex.quote(str(attempt / 'shell-write'))} || exit 1\n"
+    for target in targets:
+        script += f"if touch {shlex.quote(str(target))}; then exit 1; fi\n"
+    script += "echo READ_ONLY_SHELL_OK"
+    record, _, _, attempt = confined_read_only_attempt(monkeypatch, tmp_path, script)
+    assert record["status"] == "ok", record
+    assert (attempt / "shell-write").exists()
+    assert all(not target.exists() for target in targets)
 
 
 def test_tool_caches_override_inherited_locations(tmp_path, monkeypatch):
