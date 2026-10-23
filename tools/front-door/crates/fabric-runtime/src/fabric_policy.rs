@@ -229,7 +229,7 @@ mod tests {
         );
         assert_eq!(instruction_changes(root.path()), ("deny".into(), vec![]));
         let (paths, warnings) = secret_scan_exclude(root.path());
-        assert_eq!(paths, [root.path().join("allowed")]);
+        assert_eq!(paths, [fs::canonicalize(root.path()).unwrap().join("allowed")]);
         assert_eq!(warnings.len(), 3);
         write_policy(root.path(), r#"{"instruction_changes":null}"#);
         assert_eq!(instruction_changes(root.path()), ("quarantine".into(), vec![format!("{POLICY} instruction_changes must be quarantine, allow or deny; using quarantine")]));

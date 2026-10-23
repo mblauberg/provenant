@@ -255,7 +255,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let link = temp.path().join("dangling");
         symlink(temp.path().join("missing-target"), &link).unwrap();
-        assert_eq!(real_path(&link).unwrap(), link);
+        assert_eq!(real_path(&link).unwrap(), fs::canonicalize(temp.path()).unwrap().join("dangling"));
     }
 
     #[test]
