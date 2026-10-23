@@ -1,1 +1,12 @@
-//! Argument parsing and output and exit rendering for every command.
+//! Inert argument and rendering boundaries. Command ownership has not switched.
+#![forbid(unsafe_code)]
+
+pub mod install;
+
+/// Complete command result, kept separate from internal diagnostics.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: u8,
+}
