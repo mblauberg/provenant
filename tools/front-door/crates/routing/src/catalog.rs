@@ -27,7 +27,10 @@ pub fn model_slug_for_family(model: &str) -> String {
         slug = rest.to_owned();
     }
     for _ in 0..8 {
-        if let Some(prefix) = BROKER_PREFIXES.iter().find(|prefix| slug.starts_with(**prefix)) {
+        if let Some(prefix) = BROKER_PREFIXES
+            .iter()
+            .find(|prefix| slug.starts_with(**prefix))
+        {
             slug = slug[prefix.len()..].trim_start_matches('~').to_owned();
         } else {
             break;
@@ -57,7 +60,9 @@ pub fn matching_model_families(model: &str, catalog: &Value) -> Result<Vec<Strin
                 .get("family")
                 .and_then(Value::as_str)
                 .ok_or(CatalogError::InvalidPatternEntry)?;
-            if Regex::new(pattern)?.is_match(&candidate) && !matches.iter().any(|found| found == family) {
+            if Regex::new(pattern)?.is_match(&candidate)
+                && !matches.iter().any(|found| found == family)
+            {
                 matches.push(family.to_owned());
             }
         }
@@ -79,7 +84,10 @@ pub fn attribute_model_family(
         return Ok((Some(family), "slug-inferred".into()));
     }
     let lowered = model.trim().to_lowercase();
-    if BROKER_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
+    if BROKER_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
+    {
         if let Some(family) = endpoint_family {
             return Ok((Some(family.into()), "endpoint-profile-fallback".into()));
         }
@@ -132,7 +140,9 @@ pub fn capability_key_matches_model(
             return normalized_model == normalized_key;
         }
         return normalized_model.starts_with("claude-")
-            && normalized_model.split('-').any(|part| part == normalized_key);
+            && normalized_model
+                .split('-')
+                .any(|part| part == normalized_key);
     }
     normalized_model == normalized_key
 }
@@ -140,41 +150,66 @@ pub fn capability_key_matches_model(
 pub fn ultra_eligible_roles_are_valid(family_config: &Value) -> bool {
     family_config
         .get("ultra_eligible_roles")
-        .map_or(true, |roles| {
+        .is_none_or(|roles| {
             roles.as_array().is_some_and(|roles| {
                 roles.iter().all(|role| {
-                    role.as_str().is_some_and(|name| !name.trim().is_empty() && name == name.trim())
+                    role.as_str()
+                        .is_some_and(|name| !name.trim().is_empty() && name == name.trim())
                 })
             })
         })
 }
 
 pub fn risk_tier_override_is_well_formed(override_value: &Value) -> bool {
-    let Some(alias) = override_value.get("alias").and_then(Value::as_str) else { return false };
-    let Some(default_effort) = override_value.get("default_effort").and_then(Value::as_str) else { return false };
-    let Some(maximum_effort) = override_value.get("maximum_effort").and_then(Value::as_str) else { return false };
-    let Some(roles) = override_value.get("roles").and_then(Value::as_array) else { return false };
-    let Some(models) = override_value.get("models").and_then(Value::as_array) else { return false };
-    let (Some(default_index), Some(maximum_index)) = (EFFORTS.iter().position(|v| *v == default_effort), EFFORTS.iter().position(|v| *v == maximum_effort)) else { return false };
+    let Some(alias) = override_value.get("alias").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(default_effort) = override_value.get("default_effort").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(maximum_effort) = override_value.get("maximum_effort").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(roles) = override_value.get("roles").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(models) = override_value.get("models").and_then(Value::as_array) else {
+        return false;
+    };
+    let (Some(default_index), Some(maximum_index)) = (
+        EFFORTS.iter().position(|v| *v == default_effort),
+        EFFORTS.iter().position(|v| *v == maximum_effort),
+    ) else {
+        return false;
+    };
     let role_names: Option<Vec<_>> = roles.iter().map(Value::as_str).collect();
     let model = models.first().and_then(Value::as_str);
     ALIASES.contains(&alias)
         && default_index <= maximum_index
         && roles.len() == 2
         && role_names.as_ref().is_some_and(|names| {
-            names.iter().all(|name| !name.trim().is_empty() && *name == name.trim())
+            names
+                .iter()
+                .all(|name| !name.trim().is_empty() && *name == name.trim())
                 && names[0] != names[1]
         })
         && models.len() == 1
         && model.is_some_and(|name| !name.trim().is_empty() && name == name.trim())
 }
 
-pub fn family_alias_candidates(family_config: &Value, catalog: &Value, family: &str) -> BTreeSet<String> {
+pub fn family_alias_candidates(
+    family_config: &Value,
+    catalog: &Value,
+    family: &str,
+) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
     if let Some(aliases) = family_config.get("aliases").and_then(Value::as_object) {
         collect_string_arrays(aliases, &mut candidates);
     }
-    if let Some(overrides) = family_config.get("role_overrides").and_then(Value::as_object) {
+    if let Some(overrides) = family_config
+        .get("role_overrides")
+        .and_then(Value::as_object)
+    {
         for role_aliases in overrides.values().filter_map(Value::as_object) {
             collect_string_arrays(role_aliases, &mut candidates);
         }
@@ -183,14 +218,22 @@ pub fn family_alias_candidates(family_config: &Value, catalog: &Value, family: &
         .get("adapters")
         .and_then(Value::as_object)
         .map(|adapters| {
-            adapters.iter().filter_map(|(name, value)| {
-                (value.get("fixed_model_family").and_then(Value::as_str) == Some(family)).then_some(name.clone())
-            }).collect::<Vec<_>>()
+            adapters
+                .iter()
+                .filter_map(|(name, value)| {
+                    (value.get("fixed_model_family").and_then(Value::as_str) == Some(family))
+                        .then_some(name.clone())
+                })
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let initial: Vec<_> = candidates.iter().cloned().collect();
     for prefix in prefixes {
-        candidates.extend(initial.iter().map(|candidate| format!("{prefix}-{candidate}")));
+        candidates.extend(
+            initial
+                .iter()
+                .map(|candidate| format!("{prefix}-{candidate}")),
+        );
     }
     candidates
 }
@@ -202,13 +245,23 @@ fn collect_string_arrays(table: &Map<String, Value>, out: &mut BTreeSet<String>)
 }
 
 pub fn risk_tier_overrides_are_valid(family: &str, family_config: &Value, catalog: &Value) -> bool {
-    let Some(config) = family_config.as_object() else { return false };
-    let Some(overrides) = config.get("risk_tier_overrides") else { return true };
-    let Some(overrides) = overrides.as_object() else { return false };
-    if overrides.is_empty() { return true; }
+    let Some(config) = family_config.as_object() else {
+        return false;
+    };
+    let Some(overrides) = config.get("risk_tier_overrides") else {
+        return true;
+    };
+    let Some(overrides) = overrides.as_object() else {
+        return false;
+    };
+    if overrides.is_empty() {
+        return true;
+    }
     let candidates = family_alias_candidates(family_config, catalog, family);
     for override_value in overrides.values() {
-        if !risk_tier_override_is_well_formed(override_value) { return false; }
+        if !risk_tier_override_is_well_formed(override_value) {
+            return false;
+        }
         let occupant = override_value["models"][0].as_str().unwrap_or_default();
         if ALIASES.contains(&occupant)
             || infer_family(occupant, catalog).ok().flatten().is_none()
@@ -217,20 +270,34 @@ pub fn risk_tier_overrides_are_valid(family: &str, family_config: &Value, catalo
                     || model_has_alias(occupant, candidate)
                     || risk_tier_override_reserves_model(candidate, occupant)
             })
-        { return false; }
+        {
+            return false;
+        }
     }
     true
 }
 
 pub fn override_scan_families(model: &str, catalog: &Value) -> HashMap<String, Value> {
-    let Some(families) = catalog.get("families").and_then(Value::as_object) else { return HashMap::new() };
-    let family = if model.is_empty() { None } else { infer_family(model, catalog).ok().flatten() };
+    let Some(families) = catalog.get("families").and_then(Value::as_object) else {
+        return HashMap::new();
+    };
+    let family = if model.is_empty() {
+        None
+    } else {
+        infer_family(model, catalog).ok().flatten()
+    };
     if let Some(name) = family {
-        if let Some(config) = families.get(&name).filter(|value| value.as_object().is_some_and(|map| !map.is_empty())) {
+        if let Some(config) = families
+            .get(&name)
+            .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+        {
             return HashMap::from([(name, config.clone())]);
         }
     }
-    families.iter().map(|(name, value)| (name.clone(), value.clone())).collect()
+    families
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -239,7 +306,7 @@ mod tests {
 
     use super::{
         attribute_model_family, capability_key_matches_model, family_is_assurance_eligible,
-        model_slug_for_family, matching_model_families, risk_tier_override_is_well_formed,
+        matching_model_families, model_slug_for_family, risk_tier_override_is_well_formed,
     };
 
     #[test]
@@ -248,15 +315,25 @@ mod tests {
             {"pattern": "deepseek", "family": "deepseek"},
             {"pattern": "kimi", "family": "moonshot"}
         ]});
-        assert_eq!(model_slug_for_family("~openrouter/moonshotai/kimi-k2"), "moonshotai/kimi-k2");
-        assert_eq!(matching_model_families("openrouter/moonshotai/kimi-k2", &catalog).unwrap(), ["moonshot"]);
-        assert_eq!(attribute_model_family("opencode/deepseek-v3", &catalog, None).unwrap(), (Some("deepseek".into()), "slug-inferred".into()));
+        assert_eq!(
+            model_slug_for_family("~openrouter/moonshotai/kimi-k2"),
+            "moonshotai/kimi-k2"
+        );
+        assert_eq!(
+            matching_model_families("openrouter/moonshotai/kimi-k2", &catalog).unwrap(),
+            ["moonshot"]
+        );
+        assert_eq!(
+            attribute_model_family("opencode/deepseek-v3", &catalog, None).unwrap(),
+            (Some("deepseek".into()), "slug-inferred".into())
+        );
     }
 
     #[test]
     fn broker_fallback_is_not_assurance_eligible() {
         let catalog = json!({"model_patterns": []});
-        let (family, source) = attribute_model_family("openrouter/stealth/model", &catalog, None).unwrap();
+        let (family, source) =
+            attribute_model_family("openrouter/stealth/model", &catalog, None).unwrap();
         assert_eq!(family.as_deref(), Some("generic-open"));
         assert_eq!(source, "broker-default");
         assert!(!family_is_assurance_eligible(family.as_deref(), &source));
@@ -266,8 +343,57 @@ mod tests {
     fn effort_override_shape_and_claude_capability_binding_are_checked() {
         let override_value = json!({"alias":"principal","default_effort":"high","maximum_effort":"ultra","roles":["lead","orchestrator"],"models":["claude-opus-4"]});
         assert!(risk_tier_override_is_well_formed(&override_value));
-        assert!(!risk_tier_override_is_well_formed(&json!({"alias":"principal","default_effort":"ultra","maximum_effort":"high","roles":["lead","orchestrator"],"models":["claude-opus-4"]})));
-        assert!(capability_key_matches_model("claude", "opus", "claude-opus-4-1", true));
-        assert!(!capability_key_matches_model("codex", "gpt-5", "gpt-5.6", false));
+        assert!(!risk_tier_override_is_well_formed(
+            &json!({"alias":"principal","default_effort":"ultra","maximum_effort":"high","roles":["lead","orchestrator"],"models":["claude-opus-4"]})
+        ));
+        assert!(capability_key_matches_model(
+            "claude",
+            "opus",
+            "claude-opus-4-1",
+            true
+        ));
+        assert!(!capability_key_matches_model(
+            "codex", "gpt-5", "gpt-5.6", false
+        ));
+    }
+
+    #[test]
+    fn family_matching_matches_the_python_oracle_when_available() {
+        use std::path::Path;
+        use std::process::Command;
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = manifest.join("../../../../scripts/model_route_catalog.py");
+        let fixture = json!({"catalog":{"model_patterns":[
+            {"pattern":"deepseek","family":"deepseek"},
+            {"pattern":"kimi","family":"moonshot"}
+        ]},"models":["opencode/deepseek-v3","openrouter/moonshotai/kimi-k2","openrouter/stealth/model"]});
+        let code = "import importlib.util,json,sys; p=sys.argv[1]; s=importlib.util.spec_from_file_location('model_route_catalog',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.loads(sys.argv[2]); print(json.dumps([list(m.matching_model_families(x,d['catalog'])) for x in d['models']]))";
+        let output = match Command::new("python3")
+            .args([
+                "-c",
+                code,
+                source.to_str().unwrap_or_default(),
+                &fixture.to_string(),
+            ])
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return,
+        };
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        let catalog = &fixture["catalog"];
+        let actual: Vec<Vec<String>> = fixture["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| matching_model_families(model.as_str().unwrap(), catalog).unwrap())
+            .collect();
+        assert_eq!(actual, expected);
     }
 }
