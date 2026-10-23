@@ -117,6 +117,12 @@ pub trait FrameSink: Send + Sync {
 pub struct FilterError;
 pub trait CaptureFilter {
     fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError>;
+
+    /// Flush bytes held until the end of the stream. Filters without buffered
+    /// state can keep the default implementation.
+    fn finish(&mut self) -> Result<Vec<u8>, FilterError> {
+        Ok(Vec::new())
+    }
 }
 pub struct ExecOptions<'a> {
     pub argv: &'a [OsString],

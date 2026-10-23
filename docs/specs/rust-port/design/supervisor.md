@@ -238,7 +238,9 @@ and protected instructions immutable. The task's network policy never blocks the
 selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads
 and private scratch. Browser/Postgres IPC is explicitly granted.
 
-Provider profiles contain fixture-proven runtime-state/authentication exceptions;
+The providers owner loads and verifies profile fixtures, then constructs the typed
+profile data consumed by confinement. Provider profiles contain fixture-proven
+runtime-state/authentication exceptions;
 only the selected account mechanism and own continuation transcript are allowed.
 No unrelated credential homes or other sessions. Compose provider-native
 controls with macOS sandbox-exec when needed; unsupported/nested confinement
@@ -641,11 +643,16 @@ copies into the owners above; delete their old modules and parity-only tests.
 R0 also removes their oracle generators/golden judges with those subjects;
 CLI owns shared port-tooling deletion. No schema/Unicode emulation is retained.
 
-Budget **+4,000 net Rust lines including new tests** after reuse; expected net
-across Python/TS/Rust is therefore **-7,659 lines or better**, before mixed-file
-and further Rust-emulation savings. This is an estimate,
-not a test quota; every build PR reports measured `Net lines:` and explains
-growth. Do not double-count shared-file totals as this area's savings.
+Measured S1-S3: **+19,155 net Rust lines including tests**: S1
+**+2,564** (#1370), S2 **+6,248** (#1379), S3 **+10,343** against main
+`90c4a1affdd86997ded4b0541a4c2c8d74eda82f`. S3's library and config binding
+contain **11,084 Rust lines including tests**, above the roughly 6,000-line
+target. The chair accepts this size after the shared-helper and dead-code
+cuts: no behaviour-preserving route reaches 6,000 while retaining confinement's
+hostile-filesystem and escape coverage. The original +4,000 estimate omitted
+much of the native custody and permission coverage, while last-importer gates
+defer Python deletion savings. Every build PR reports measured `Net lines:`;
+do not double-count shared-file totals as this area's savings.
 No build step installs the binary, reads old state, adds a selector, or leaves a
 Python/TS adapter. Each step removes its source, subject tests, dead helpers and
 inert emulation in the same PR; still-Python callers wait for their owning Rust
@@ -659,7 +666,7 @@ coupled run controls/facade steps 4+5; no adapters are added while waiting.
 | --- | --- |
 | S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and `SafeFs`. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, `execve_strict` and supervisor `clap`. Old Python leaves remain with their old subjects. Explicit S2 exemptions in `legacy_lane`: census-based numeric-PID kills in `group.rs` and Python start-string emulation (`files.rs::canonical_start`, `fixtures.rs` `localtime_r`/`strftime`). |
 | S2. Provider custody | Move S2 machine/census/capture; land guardian handoff, persistent reservation, scratch settlement and exit publication. Rebuild custody tests before deleting conformance subjects. Replace the S1-exempt numeric-PID census kills and remove `canonical_start` plus fixture `localtime_r`/`strftime` start-string emulation here. Run owns old launch/control caller removal in R4+R5. |
-| S3. Permissions, evidence and worktrees | Land backend trait/SBPL, redactor, Git/output custody, quarantine, tip verification and create/list/remove with merged pruning. Delete confinement emulation and obsolete Rust command copies; surviving Python helpers wait for R4+R5's last importer. CLI updates hooks/skills to frozen commands. |
+| S3. Permissions, evidence and worktrees | Land the confinement library: backend trait/SBPL, redactor, Git/output custody, quarantine, tip verification and create/list/remove with merged pruning. Config binds a random host-local project ID under lock. Delete confinement emulation and obsolete Rust command copies; surviving Python helpers wait for R4+R5's last importer. CLI step 4 (area bindings) wires worktree/cleanup onto the frozen Clap model and updates hooks/skills; S3 leaves the existing command and hook in place. |
 | R4+R5. Run controls/facade deletion PR | Run's steps 4+5 remove provider/control/finaliser importers with their owners; delete each leaf and subject tests only when its matrix gate is met. Run cuts scaffold and git_evidence_packet; Fabric/cli/workflow delete/count their own files. No tests of deleted subjects survive and no Python bridge lands. |
 
 Direct production importers/callers of counted leaves are listed below;

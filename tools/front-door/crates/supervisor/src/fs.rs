@@ -64,6 +64,24 @@ pub enum FsError {
 }
 pub type Result<T> = std::result::Result<T, FsError>;
 
+/// Resolve trusted path aliases at setup. This is a read-only name binding,
+/// never mutation authority; retain and revalidate held handles afterwards.
+pub fn canonicalize(path: &Path) -> Result<PathBuf> {
+    os::canonicalize(path).map_err(error("canonicalize", path))
+}
+
+/// Owner identity for validating private state directories. No process-control
+/// or filesystem capability is implied by this observation.
+pub fn effective_uid() -> u32 {
+    os::effective_uid()
+}
+
+impl provenant_core::PathResolver for LocalFs {
+    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+        os::resolve_existing_ancestor(path)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockRefusal {
     AnchorOwner,
@@ -918,9 +936,14 @@ impl Seek for FileHandle {
     }
 }
 
+/// Supply host-local identity entropy from the operating system.
+pub fn entropy_128() -> Result<[u8; 16]> {
+    os::entropy::<16>().map_err(error("getentropy", Path::new("<identity entropy>")))
+}
+
 /// OS entropy, no global counter or clock; callers use exclusive creation too.
 pub fn temporary_name() -> Result<OsString> {
-    let bytes = os::entropy().map_err(error("getentropy", Path::new("<temporary name>")))?;
+    let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
     let mut name = String::from(".provenant-staging.");
     for byte in bytes {
         name.push_str(&format!("{byte:02x}"));

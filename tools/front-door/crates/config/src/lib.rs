@@ -9,6 +9,7 @@ mod domains;
 mod loader;
 mod managed;
 mod presets;
+mod project_binding;
 mod release;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -18,6 +19,7 @@ mod tests;
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
 pub use loader::{check_config, config_show, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
+pub use project_binding::{ProjectBinding, ProjectLocation, bind_project};
 pub use provenant_records::Finding;
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -64,6 +66,14 @@ pub enum ConfigError {
     },
     #[error("finding limit must be between 1 and 100")]
     InvalidLimit,
+    #[error("project location must be an absolute canonical directory path")]
+    InvalidProjectLocation,
+    #[error("project binding state is invalid")]
+    InvalidProjectBinding,
+    #[error("project binding lock budget is invalid")]
+    ProjectBindingBudget,
+    #[error(transparent)]
+    ProjectBindingFilesystem(#[from] provenant_supervisor::fs::FsError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

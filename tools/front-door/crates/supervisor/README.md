@@ -35,10 +35,8 @@ preserves existing bytes. A successful rename followed by failed sync returns
 `Publication::VisibleDurabilityUnconfirmed`; callers retain their custody and
 retry durability rather than overwrite the visible record.
 
-`utility::run_utility` accepts closed Git and gh read operations with validated
-IDs, a repository directory, pinned executable identities and a private home.
-It builds fixed arguments and a complete sanitised environment, stops on output
-limits, and refuses truncated or incomplete evidence. Confinement supplies its policy facade in S3.
+Confinement owns the closed Git/gh utility policy, repository verification and
+sanitised environment. It executes through this crate's bounded `Executor`.
 
 The dev-only `fixture` feature supplies self-re-exec scenarios for the
 `harness = false` process target. A self dev-dependency enables it for crate

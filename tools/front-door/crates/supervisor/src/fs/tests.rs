@@ -1312,3 +1312,66 @@ fn a_handle_reached_through_a_followed_link_never_reanchors() {
     let direct = root.open_directory(OsStr::new("directory")).unwrap();
     direct.into_anchor().unwrap();
 }
+
+#[test]
+fn root_binding_resolves_aliases_and_missing_suffix_without_creation() {
+    use provenant_core::PathResolver;
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, temp.path().join("alias")).unwrap();
+    let missing = temp.path().join("alias/fresh/state");
+    let expected = std::fs::canonicalize(&real).unwrap().join("fresh/state");
+    assert_eq!(
+        LocalFs.resolve_existing_ancestor(&missing).unwrap(),
+        expected
+    );
+    assert!(!real.join("fresh").exists());
+    std::fs::write(real.join("file"), b"not a directory").unwrap();
+    assert!(
+        LocalFs
+            .resolve_existing_ancestor(&real.join("file/state"))
+            .is_err()
+    );
+}
+
+#[test]
+fn trait_cross_directory_rename_preserves_open_inode_and_refuses_collision() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("source")).unwrap();
+    std::fs::create_dir(temp.path().join("archive")).unwrap();
+    std::fs::write(temp.path().join("source/file"), b"observed").unwrap();
+    std::fs::write(temp.path().join("archive/occupied"), b"retained").unwrap();
+    let source: Box<dyn SafeDir> = LocalFs.open_anchor(&temp.path().join("source")).unwrap();
+    let archive: Box<dyn SafeDir> = LocalFs.open_anchor(&temp.path().join("archive")).unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path().join("source/file"))
+        .unwrap();
+    assert!(
+        source
+            .rename_noreplace_to(OsStr::new("file"), archive.as_ref(), OsStr::new("occupied"))
+            .is_err()
+    );
+    source
+        .rename_noreplace_to(OsStr::new("file"), archive.as_ref(), OsStr::new("saved"))
+        .unwrap();
+    writer.write_all(b" later").unwrap();
+    assert_eq!(
+        {
+            let mut bytes = Vec::new();
+            archive
+                .open_read(OsStr::new("saved"))
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        },
+        b"observed later"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("archive/occupied")).unwrap(),
+        b"retained"
+    );
+    assert!(!temp.path().join("source/file").exists());
+}

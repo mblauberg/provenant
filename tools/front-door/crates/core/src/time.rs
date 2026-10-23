@@ -167,6 +167,13 @@ pub struct WaitBudget {
     deadline: Deadline,
 }
 impl WaitBudget {
+    /// One immediate attempt, with no retry wait. Used for writer probes while
+    /// holding repository metadata exclusion; never wait on a later lock.
+    pub const fn nonblocking(now: MonoTime) -> Self {
+        Self {
+            deadline: Deadline::at(now),
+        }
+    }
     pub fn new(
         now: MonoTime,
         duration: DurationMicros,

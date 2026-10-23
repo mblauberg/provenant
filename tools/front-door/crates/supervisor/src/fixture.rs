@@ -951,6 +951,29 @@ pub fn acquire_writer(
     )
 }
 
+/// Fixture-only writer acquisition with a caller-created, verified binding.
+/// This keeps tests on the real reservation and recovery path while injecting
+/// only the recorded boot identity needed in sandboxed environments.
+#[doc(hidden)]
+pub fn acquire_writer_with_binding(
+    directory: crate::fs::Directory,
+    scope: crate::custody::Scope,
+    binding: crate::custody::WriterBinding,
+    budget: provenant_core::WaitBudget,
+    cancel: &provenant_core::CancelToken,
+    clock: &dyn provenant_core::Clock,
+) -> crate::custody::Result<crate::custody::WriterLease> {
+    crate::custody::acquire_writer_with_observer(
+        directory,
+        scope,
+        binding,
+        budget,
+        cancel,
+        clock,
+        &RecordedBootObserver,
+    )
+}
+
 pub fn recovery_observation(recovery: &crate::custody::Recovery) -> crate::custody::RecoveryState {
     recovery.observe_with(&RecordedBootObserver)
 }

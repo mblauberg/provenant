@@ -20,7 +20,6 @@ pub mod fixture;
 mod guardian;
 pub mod machine;
 pub mod scratch;
-pub mod utility;
 
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
