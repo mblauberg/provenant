@@ -55,21 +55,55 @@ impl CanonicalV1 {
             return Err(CanonicalError::InvalidKind);
         }
         let canonical = Self::bytes(value)?;
-        let mut digest = Sha256::new();
-        digest.update(b"provenant-record\0");
-        digest.update(kind.as_bytes());
-        digest.update(b"\0");
-        digest.update(schema_version.to_string().as_bytes());
-        digest.update(b"\0");
-        digest.update(canonical);
-        let bytes: [u8; 32] = digest.finalize().into();
-        Ok(provenant_core::Digest::from_bytes(bytes))
+        record_digest(kind, schema_version, &canonical)
     }
 
     /// Hash exact file bytes. This digest has a distinct wire type in records
     /// even though it uses the same SHA-256 primitive.
     pub fn file_digest(bytes: &[u8]) -> FileDigest {
         FileDigest(Sha256::digest(bytes).into())
+    }
+}
+
+/// SHA-256 over the versioned domain separator and already-canonical bytes.
+pub fn record_digest(
+    kind: &str,
+    schema_version: u64,
+    canonical_bytes: &[u8],
+) -> Result<provenant_core::Digest, CanonicalError> {
+    if kind.is_empty() || kind.as_bytes().contains(&0) {
+        return Err(CanonicalError::InvalidKind);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"provenant-record\0");
+    digest.update(kind.as_bytes());
+    digest.update(b"\0");
+    digest.update(schema_version.to_string().as_bytes());
+    digest.update(b"\0");
+    digest.update(canonical_bytes);
+    let bytes: [u8; 32] = digest.finalize().into();
+    Ok(provenant_core::Digest::from_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{record_digest, CanonicalV1};
+    use serde_json::json;
+
+    #[test]
+    fn record_digest_uses_exact_domain_framing_and_canonical_input_bytes() {
+        let canonical = br#"{"a":1}"#;
+        let digest = record_digest("attempt", 1, canonical).expect("record digest");
+        assert_eq!(
+            digest.to_string(),
+            "sha256:90932cf36a28f4b07774b6fd79c078f609f79933354730c18ae02aba0cd81f09"
+        );
+        assert_eq!(
+            CanonicalV1::record_digest("attempt", 1, &json!({"a": 1})).expect("typed digest"),
+            digest
+        );
+        assert!(record_digest("", 1, canonical).is_err());
+        assert!(record_digest("attempt\0extra", 1, canonical).is_err());
     }
 }
 
@@ -359,7 +393,8 @@ struct SequenceBuilder {
 impl SequenceBuilder {
     fn push<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), CanonicalError> {
         let depth = self.depth.saturating_add(1);
-        self.values.push(value.serialize(ValueSerializer { depth })?);
+        self.values
+            .push(value.serialize(ValueSerializer { depth })?);
         Ok(())
     }
 
@@ -372,10 +407,7 @@ impl SerializeSeq for SequenceBuilder {
     type Ok = CanonicalValue;
     type Error = CanonicalError;
 
-    fn serialize_element<T: ?Sized + Serialize>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), Self::Error> {
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.push(value)
     }
 
@@ -388,10 +420,7 @@ impl SerializeTuple for SequenceBuilder {
     type Ok = CanonicalValue;
     type Error = CanonicalError;
 
-    fn serialize_element<T: ?Sized + Serialize>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), Self::Error> {
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.push(value)
     }
 
@@ -404,10 +433,7 @@ impl SerializeTupleStruct for SequenceBuilder {
     type Ok = CanonicalValue;
     type Error = CanonicalError;
 
-    fn serialize_field<T: ?Sized + Serialize>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), Self::Error> {
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.push(value)
     }
 
@@ -425,10 +451,7 @@ impl SerializeTupleVariant for TupleVariantBuilder {
     type Ok = CanonicalValue;
     type Error = CanonicalError;
 
-    fn serialize_field<T: ?Sized + Serialize>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), Self::Error> {
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.sequence.push(value)
     }
 
@@ -458,7 +481,6 @@ impl MappingBuilder {
         }
         Ok(())
     }
-
 }
 
 impl SerializeMap for MappingBuilder {
@@ -473,10 +495,7 @@ impl SerializeMap for MappingBuilder {
         Ok(())
     }
 
-    fn serialize_value<T: ?Sized + Serialize>(
-        &mut self,
-        value: &T,
-    ) -> Result<(), Self::Error> {
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         let key = self.pending_key.take().ok_or(CanonicalError::InvalidMap)?;
         self.insert_value(key, value)
     }
@@ -669,17 +688,11 @@ impl Serializer for KeySerializer {
         value.serialize(self)
     }
 
-    fn serialize_seq(
-        self,
-        _len: Option<usize>,
-    ) -> Result<Self::SerializeSeq, Self::Error> {
+    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Err(CanonicalError::Serialize)
     }
 
-    fn serialize_tuple(
-        self,
-        _len: usize,
-    ) -> Result<Self::SerializeTuple, Self::Error> {
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         Err(CanonicalError::Serialize)
     }
 
@@ -701,10 +714,7 @@ impl Serializer for KeySerializer {
         Err(CanonicalError::Serialize)
     }
 
-    fn serialize_map(
-        self,
-        _len: Option<usize>,
-    ) -> Result<Self::SerializeMap, Self::Error> {
+    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Err(CanonicalError::Serialize)
     }
 

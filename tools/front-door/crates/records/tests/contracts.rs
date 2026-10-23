@@ -29,8 +29,8 @@ fn bounded_decode_accepts_v1_and_preserves_unsigned_integers() {
 
 #[test]
 fn bounded_decode_normalizes_negative_zero_to_an_integer() {
-    let decoded: serde_json::Value = decode(Cursor::new(b"-0"), Limits::default())
-        .expect("negative zero is an integer token");
+    let decoded: serde_json::Value =
+        decode(Cursor::new(b"-0"), Limits::default()).expect("negative zero is an integer token");
     let number = decoded.as_number().expect("number");
     assert_eq!(number.as_i64(), Some(0));
     assert!(!number.is_f64());
@@ -55,6 +55,18 @@ fn bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow
             "range",
         ),
         (
+            b"{\"schema_version\":1,\"count\":-9223372036854775809}".as_slice(),
+            "range",
+        ),
+        (
+            b"{\"schema_version\":1,\"x\":1e400}".as_slice(),
+            "nonfinite",
+        ),
+        (
+            br#"{"schema_version":1,"schema\u005fversion":1}"#.as_slice(),
+            "duplicate",
+        ),
+        (
             b"{\"schema_version\":1,\"count\":1,\"x\":\"\xff\"}".as_slice(),
             "utf8",
         ),
@@ -65,10 +77,36 @@ fn bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow
             "duplicate" => assert!(matches!(error, DecodeError::DuplicateMember { .. })),
             "trailing" => assert!(matches!(error, DecodeError::TrailingInput { .. })),
             "range" => assert!(matches!(error, DecodeError::IntegerOutOfRange { .. })),
+            "nonfinite" => assert!(matches!(error, DecodeError::NonFinite { .. })),
             "utf8" => assert!(matches!(error, DecodeError::InvalidUtf8 { .. })),
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn typed_decode_errors_do_not_disclose_rejected_values() {
+    #[derive(Debug, Deserialize)]
+    enum State {
+        Ready,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecordWithState {
+        #[serde(rename = "schema_version")]
+        _schema_version: u64,
+        #[serde(rename = "state")]
+        _state: State,
+    }
+
+    let error = decode_v1::<RecordWithState, _>(
+        Cursor::new(br#"{"schema_version":1,"state":"TOP_SECRET_VALUE"}"#),
+        Limits::default(),
+    )
+    .expect_err("unknown enum variant");
+    assert!(!error.to_string().contains("TOP_SECRET_VALUE"));
+    assert!(!format!("{error:?}").contains("TOP_SECRET_VALUE"));
 }
 
 #[test]
@@ -91,6 +129,16 @@ fn bounded_decode_enforces_byte_depth_member_and_version_limits() {
         Err(DecodeError::DepthExceeded { .. })
     ));
 
+    let hostile_depth = Limits {
+        max_depth: usize::MAX,
+        ..Limits::default()
+    };
+    let deeply_nested = format!("{}0{}", "[".repeat(70), "]".repeat(70));
+    assert!(matches!(
+        decode::<serde_json::Value, _>(Cursor::new(deeply_nested.as_bytes()), hostile_depth),
+        Err(DecodeError::DepthExceeded { limit: 64, .. })
+    ));
+
     let too_many = Limits {
         max_members: 2,
         ..Limits::default()
@@ -106,6 +154,19 @@ fn bounded_decode_enforces_byte_depth_member_and_version_limits() {
             Limits::default()
         ),
         Err(DecodeError::UnsupportedVersion { found: 2, .. })
+    ));
+    let error = decode_v1::<serde_json::Value, _>(
+        Cursor::new(b"{\n  \"description\":\"schema_version\",\n  \"schema_version\":2\n}"),
+        Limits::default(),
+    )
+    .expect_err("unsupported top-level version");
+    assert!(matches!(
+        error,
+        DecodeError::UnsupportedVersion {
+            line: 3,
+            found: 2,
+            ..
+        }
     ));
 }
 
@@ -142,6 +203,18 @@ fn canonical_v1_rejects_float_values() {
         CanonicalV1::bytes(&json!({"price": 1.5})),
         Err(CanonicalError::Float)
     ));
+    assert!(matches!(
+        CanonicalV1::bytes(&f64::NAN),
+        Err(CanonicalError::Float)
+    ));
+    assert!(matches!(
+        CanonicalV1::bytes(&f64::INFINITY),
+        Err(CanonicalError::Float)
+    ));
+    assert!(matches!(
+        CanonicalV1::bytes(&u128::MAX),
+        Err(CanonicalError::IntegerOutOfRange)
+    ));
 }
 
 #[test]
@@ -151,34 +224,73 @@ fn yaml_subset_parses_frontmatter_and_sidecars_and_refuses_ambiguous_values() {
     assert!(matches!(parsed.value, YamlValue::Mapping(_)));
     assert!(parse_sidecar("name: example\nmetadata:\n  auto: true\n").is_ok());
 
-    let plain_comment = parse_sidecar("Don't: quote # this is a comment\n").expect("plain apostrophe");
+    let plain_comment =
+        parse_sidecar("Don't: quote # this is a comment\n").expect("plain apostrophe");
     let YamlValue::Mapping(plain_comment) = plain_comment.value else {
         panic!("mapping expected");
     };
-    assert_eq!(plain_comment.get("Don't").and_then(|entry| match &entry.value {
-        YamlValue::String(value) => Some(value.as_str()),
-        _ => None,
-    }), Some("quote"));
+    assert_eq!(
+        plain_comment
+            .get("Don't")
+            .and_then(|entry| match &entry.value {
+                YamlValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }),
+        Some("quote")
+    );
 
-    let quoted_hash = parse_sidecar("description: \"keep # this\" # comment\n")
-        .expect("quoted hash is data");
+    let quoted_hash =
+        parse_sidecar("description: \"keep # this\" # comment\n").expect("quoted hash is data");
     let YamlValue::Mapping(quoted_hash) = quoted_hash.value else {
         panic!("mapping expected");
     };
-    assert_eq!(quoted_hash.get("description").and_then(|entry| match &entry.value {
-        YamlValue::String(value) => Some(value.as_str()),
-        _ => None,
-    }), Some("keep # this"));
+    assert_eq!(
+        quoted_hash
+            .get("description")
+            .and_then(|entry| match &entry.value {
+                YamlValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }),
+        Some("keep # this")
+    );
 
     let folded = parse_sidecar("description: >\n  first\n    code\n  last\n")
         .expect("folded scalar with an indented line");
     let YamlValue::Mapping(folded) = folded.value else {
         panic!("mapping expected");
     };
-    assert_eq!(folded.get("description").and_then(|entry| match &entry.value {
-        YamlValue::String(value) => Some(value.as_str()),
-        _ => None,
-    }), Some("first\n  code\nlast\n"));
+    assert_eq!(
+        folded
+            .get("description")
+            .and_then(|entry| match &entry.value {
+                YamlValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }),
+        Some("first\n  code\nlast\n")
+    );
+
+    for (source, expected) in [
+        ("x: >\n  first\n\n  last\n", "first\nlast\n"),
+        ("x: >\n\n  first\n  last\n", "\nfirst last\n"),
+        ("x: >\n  first\n\n\n  last\n", "first\n\nlast\n"),
+        (
+            "x: >\n  first\n    code\n\n  last\n",
+            "first\n  code\n\nlast\n",
+        ),
+        ("x: >-\n  first\n\n", "first"),
+    ] {
+        let parsed = parse_sidecar(source).expect("folded blank-line scalar");
+        let YamlValue::Mapping(mapping) = parsed.value else {
+            panic!("mapping expected");
+        };
+        assert_eq!(
+            mapping.get("x").and_then(|entry| match &entry.value {
+                YamlValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }),
+            Some(expected)
+        );
+    }
 
     for invalid in [
         "name: example\nname: duplicate\n",
@@ -222,12 +334,21 @@ fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
         serde_json::to_string(&utf8).expect("path wire"),
         r#"{"encoding":"utf8","path":"artifacts/result.md"}"#
     );
-    assert_eq!(utf8.to_relative_path().expect("relative path").as_path(), std::path::Path::new("artifacts/result.md"));
+    assert_eq!(
+        utf8.to_relative_path().expect("relative path").as_path(),
+        std::path::Path::new("artifacts/result.md")
+    );
 
     let escaped = PathWire::Utf8("../outside".to_owned());
-    assert!(matches!(escaped.to_relative_path(), Err(PathWireError::Relative(_))));
+    assert!(matches!(
+        escaped.to_relative_path(),
+        Err(PathWireError::Relative(_))
+    ));
     let malformed_hex = PathWire::NativeBytes("GG".to_owned());
-    assert!(matches!(malformed_hex.to_relative_path(), Err(PathWireError::InvalidHex)));
+    assert!(matches!(
+        malformed_hex.to_relative_path(),
+        Err(PathWireError::InvalidHex)
+    ));
 
     #[cfg(unix)]
     {
@@ -235,7 +356,13 @@ fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
         let native = std::ffi::OsStr::from_bytes(b"artifact/\xff");
         let relative = provenant_core::RelativePath::parse(native).expect("contained native path");
         let encoded = PathWire::from_relative(&relative).expect("native encoding");
-        assert_eq!(encoded, PathWire::NativeBytes("61727469666163742fff".to_owned()));
-        assert_eq!(encoded.to_relative_path().expect("native path roundtrip"), relative);
+        assert_eq!(
+            encoded,
+            PathWire::NativeBytes("61727469666163742fff".to_owned())
+        );
+        assert_eq!(
+            encoded.to_relative_path().expect("native path roundtrip"),
+            relative
+        );
     }
 }

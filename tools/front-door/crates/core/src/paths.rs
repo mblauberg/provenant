@@ -41,7 +41,7 @@ pub(crate) fn has_dot_or_nul(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     bytes.contains(&0)
         || bytes
-            .split(|b| *b == b'/')
+            .split(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'))
             .any(|part| part == b"." || part == b"..")
 }
 
@@ -65,6 +65,18 @@ mod tests {
                 RelativePath::parse(native).unwrap().as_path().as_os_str(),
                 native
             );
+            assert!(RelativePath::parse(r"a\.\b").is_ok());
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn windows_separators_cannot_hide_dot_components() {
+        for bad in [r"a\.\b", r"a\..\b", r".\a"] {
+            assert!(RelativePath::parse(bad).is_err());
         }
     }
 }

@@ -287,10 +287,18 @@ mod tests {
             .is_err());
         assert!(WaitBudget::cli(now, 0).is_err());
         assert!(WaitBudget::mcp(now, 0).is_err());
-        assert!(WaitBudget::new(now, DurationMicros::from_micros(999_999), WaitTransport::Mcp).is_err());
+        assert!(WaitBudget::new(
+            now,
+            DurationMicros::from_micros(999_999),
+            WaitTransport::Mcp
+        )
+        .is_err());
         let wait = WaitBudget::mcp(now, 1).unwrap();
         assert!(wait.deadline().is_expired(MonoTime::from_micros(1_000_010)));
-        assert_eq!(wait.remaining(MonoTime::from_micros(1_000_011)), DurationMicros::ZERO);
+        assert_eq!(
+            wait.remaining(MonoTime::from_micros(1_000_011)),
+            DurationMicros::ZERO
+        );
     }
     #[test]
     fn test_clock_advances_atomically_and_wall_adjustments_do_not_extend_waits() {

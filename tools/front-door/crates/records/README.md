@@ -3,6 +3,7 @@
 Shared durable-record boundaries for the Rust port:
 
 - bounded, duplicate-safe JSON decoding and strict schema-version-one headers;
+- bounded JSONC tokenization with original source spans;
 - `CanonicalV1` JSON bytes plus separate record and raw-file SHA-256 digests;
 - tagged durable paths and a fail-closed YAML subset for skill frontmatter and
   agent sidecars;

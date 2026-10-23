@@ -1,6 +1,11 @@
-use serde::{de::{DeserializeOwned, Error as _}, Deserialize, Deserializer, Serialize};
+use serde::{
+    de::{DeserializeOwned, Error as _},
+    Deserialize, Deserializer, Serialize,
+};
 use std::io::Read;
 use thiserror::Error;
+
+const ABSOLUTE_MAX_DEPTH: usize = 64;
 
 /// Input bounds for one JSON document. Defaults are for general records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,10 +128,7 @@ pub enum DecodeError {
         column: usize,
     },
     #[error("JSON value does not match its record type at line {line}, column {column}")]
-    Typed {
-        line: usize,
-        column: usize,
-    },
+    Typed { line: usize, column: usize },
 }
 
 #[derive(Debug, Error)]
@@ -141,8 +143,8 @@ where
     R: Read,
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
-    let negative_zeroes = validate_document(&bytes, limits)?;
-    normalize_negative_zeroes(&mut bytes, &negative_zeroes);
+    let facts = validate_document(&bytes, limits)?;
+    normalize_negative_zeroes(&mut bytes, &facts.negative_zeroes);
     serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
         line: source.line(),
         column: source.column(),
@@ -156,14 +158,13 @@ where
     R: Read,
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
-    let negative_zeroes = validate_document(&bytes, limits)?;
-    normalize_negative_zeroes(&mut bytes, &negative_zeroes);
-    let header_value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|source| {
-        DecodeError::Typed {
+    let facts = validate_document(&bytes, limits)?;
+    normalize_negative_zeroes(&mut bytes, &facts.negative_zeroes);
+    let header_value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
             line: source.line(),
             column: source.column(),
-        }
-    })?;
+        })?;
     let Some(object) = header_value.as_object() else {
         return Err(DecodeError::MissingVersion { line: 1, column: 1 });
     };
@@ -171,11 +172,15 @@ where
         return Err(DecodeError::MissingVersion { line: 1, column: 1 });
     };
     let Some(version) = version_value.as_u64() else {
-        let (line, column) = find_member_position(&bytes, b"schema_version");
+        let (line, column) = facts
+            .schema_version_offset
+            .map_or((1, 1), |offset| location(&bytes, offset));
         return Err(DecodeError::InvalidVersion { line, column });
     };
     if version != 1 {
-        let (line, column) = find_member_position(&bytes, b"schema_version");
+        let (line, column) = facts
+            .schema_version_offset
+            .map_or((1, 1), |offset| location(&bytes, offset));
         return Err(DecodeError::UnsupportedVersion {
             found: version,
             line,
@@ -203,7 +208,12 @@ fn read_bounded<R: Read>(reader: R, limit: u64) -> Result<Vec<u8>, DecodeError> 
     Ok(bytes)
 }
 
-fn validate_document(input: &[u8], limits: Limits) -> Result<Vec<usize>, DecodeError> {
+struct ValidationFacts {
+    negative_zeroes: Vec<usize>,
+    schema_version_offset: Option<usize>,
+}
+
+fn validate_document(input: &[u8], limits: Limits) -> Result<ValidationFacts, DecodeError> {
     if let Err(error) = std::str::from_utf8(input) {
         let (line, column) = location(input, error.valid_up_to());
         return Err(DecodeError::InvalidUtf8 { line, column });
@@ -212,8 +222,12 @@ fn validate_document(input: &[u8], limits: Limits) -> Result<Vec<usize>, DecodeE
         input,
         offset: 0,
         members: 0,
-        limits,
+        limits: Limits {
+            max_depth: limits.max_depth.min(ABSOLUTE_MAX_DEPTH),
+            ..limits
+        },
         negative_zeroes: Vec::new(),
+        schema_version_offset: None,
     };
     parser.space();
     parser.value(0)?;
@@ -222,7 +236,10 @@ fn validate_document(input: &[u8], limits: Limits) -> Result<Vec<usize>, DecodeE
         let (line, column) = location(input, parser.offset);
         return Err(DecodeError::TrailingInput { line, column });
     }
-    Ok(parser.negative_zeroes)
+    Ok(ValidationFacts {
+        negative_zeroes: parser.negative_zeroes,
+        schema_version_offset: parser.schema_version_offset,
+    })
 }
 
 fn normalize_negative_zeroes(input: &mut [u8], positions: &[usize]) {
@@ -248,6 +265,7 @@ struct JsonValidator<'a> {
     members: usize,
     limits: Limits,
     negative_zeroes: Vec<usize>,
+    schema_version_offset: Option<usize>,
 }
 
 impl JsonValidator<'_> {
@@ -282,6 +300,9 @@ impl JsonValidator<'_> {
             }
             let key_offset = self.offset;
             let key = self.string()?;
+            if depth == 0 && key == "schema_version" {
+                self.schema_version_offset = Some(key_offset);
+            }
             if !keys.insert(key) {
                 let (line, column) = location(self.input, key_offset);
                 return Err(DecodeError::DuplicateMember { line, column });
@@ -493,15 +514,4 @@ fn location(input: &[u8], offset: usize) -> (usize, usize) {
         }
     }
     (line, column)
-}
-
-fn find_member_position(input: &[u8], name: &[u8]) -> (usize, usize) {
-    let mut needle = Vec::with_capacity(name.len().saturating_add(2));
-    needle.push(b'"');
-    needle.extend_from_slice(name);
-    needle.push(b'"');
-    input
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map_or((1, 1), |offset| location(input, offset))
 }

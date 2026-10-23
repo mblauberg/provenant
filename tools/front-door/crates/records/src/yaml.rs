@@ -701,25 +701,36 @@ impl<'a> Parser<'a> {
             self.index += 1;
         }
         let mut output = String::new();
-        for (index, (line, more_indented)) in content.iter().enumerate() {
-            if index > 0 {
-                let (previous, previous_more_indented) = content
-                    .get(index - 1)
-                    .map_or(("", false), |(previous, indented)| {
-                        (previous.as_str(), *indented)
-                    });
-                if folded
-                    && !previous.is_empty()
-                    && !line.is_empty()
-                    && !previous_more_indented
-                    && !more_indented
+        let mut content_index = 0usize;
+        while let Some((line, more_indented)) = content.get(content_index) {
+            if line.is_empty() {
+                let mut blank_lines = 0usize;
+                while content
+                    .get(content_index)
+                    .is_some_and(|(text, _)| text.is_empty())
                 {
-                    output.push(' ');
-                } else {
+                    blank_lines = blank_lines.saturating_add(1);
+                    content_index = content_index.saturating_add(1);
+                }
+                for _ in 0..blank_lines {
                     output.push('\n');
                 }
+                continue;
             }
+
             output.push_str(line);
+            let next = content.get(content_index.saturating_add(1));
+            if let Some((next_line, next_more_indented)) = next {
+                if !folded || *more_indented || *next_more_indented {
+                    output.push('\n');
+                } else if next_line.is_empty() {
+                    // The blank-line run supplies its own break. A folded
+                    // normal line before a blank is one output newline.
+                } else {
+                    output.push(' ');
+                }
+            }
+            content_index = content_index.saturating_add(1);
         }
         if strip {
             while output.ends_with('\n') {
@@ -987,9 +998,7 @@ fn strip_comment(text: &str) -> &str {
         if !flow_sequence && !quoted_scalar {
             if byte == b'#'
                 && position > 0
-                && bytes
-                    .get(position - 1)
-                    .is_some_and(u8::is_ascii_whitespace)
+                && bytes.get(position - 1).is_some_and(u8::is_ascii_whitespace)
             {
                 return text.get(..position).map_or("", |value| value);
             }
