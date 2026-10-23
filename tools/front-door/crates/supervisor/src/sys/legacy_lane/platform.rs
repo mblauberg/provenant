@@ -588,13 +588,14 @@ pub fn write_event(fd: RawFd, line: &[u8]) -> usize {
                 // SAFETY: fcntl reads flags from the borrowed descriptor and
                 // does not retain pointers.
                 let capacity = unsafe { libc::fcntl(fd, libc::F_GETPIPE_SZ) };
+                if capacity < 0 {
+                    return 0;
+                }
                 let mut used = 0i32;
                 // SAFETY: used is live writable integer storage for FIONREAD;
                 // ioctl retains no pointer and fd remains borrowed.
-                if capacity < 0
-                    || unsafe { libc::ioctl(fd, libc::FIONREAD, &mut used) } != 0
-                    || (capacity.saturating_sub(used) as usize) < line.len()
-                {
+                let queried = unsafe { libc::ioctl(fd, libc::FIONREAD, &mut used) };
+                if queried != 0 || (capacity.saturating_sub(used) as usize) < line.len() {
                     return 0;
                 }
             }

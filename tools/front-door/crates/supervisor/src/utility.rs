@@ -606,7 +606,7 @@ mod tests {
             }
             Self {
                 repo: RepoDir::new(repo_path).unwrap(),
-                home_path: home_path.clone(),
+                home_path: fs::canonicalize(&home_path).unwrap(),
                 bin_path: fs::canonicalize(&bin_path).unwrap(),
                 runtime: UtilityRuntime::new(bin_path.join("git"), bin_path.join("gh"), home_path)
                     .unwrap(),

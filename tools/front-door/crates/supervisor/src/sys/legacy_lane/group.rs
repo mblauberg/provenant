@@ -241,7 +241,14 @@ impl ProviderGroup {
             return false;
         }
         #[cfg(target_os = "linux")]
-        let (pid, status) = (info.si_pid(), info.si_status());
+        let (pid, status) = {
+            // SAFETY: info was zeroed and waitid either left it zeroed (WNOHANG,
+            // no event) or filled a SIGCHLD record, so the pid field is set.
+            let pid = unsafe { info.si_pid() };
+            // SAFETY: as above, the SIGCHLD status field is initialised.
+            let status = unsafe { info.si_status() };
+            (pid, status)
+        };
         #[cfg(target_os = "macos")]
         let (pid, status) = (info.si_pid, info.si_status);
         if pid == self.pid {
