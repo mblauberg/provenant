@@ -18,10 +18,10 @@ from types import SimpleNamespace
 import pytest
 
 import quota_display
+from tests.support.quota import NOW, configure, quota, snapshot as build_snapshot, window
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 WEEK = 7 * 24 * 60
 TOKEN = 'SECRET-TOKEN-VALUE'
 
@@ -33,45 +33,12 @@ def load(name, path):
     return module
 
 
-@pytest.fixture
-def quota(tmp_path, monkeypatch):
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
-        monkeypatch.delenv(name, raising=False)
-    module = load('provider_quota_under_test', ROOT / 'scripts/provider_quota.py')
-
-    def refuse(*args, **kwargs):
-        raise AssertionError('tests never reach a real provider, CLI or credential store')
-    for name in ('run_process', 'open_process', 'urlopen', 'executable'):
-        monkeypatch.setattr(module, name, refuse)
-    monkeypatch.setattr(module, 'telemetry_host', lambda: 'studio')
-    return module
-
-
-def configure(tmp_path, value):
-    path = tmp_path / 'home/.agents/config/telemetry.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value))
-
-
 def iso(moment):
     return moment.isoformat().replace('+00:00', 'Z')
 
 
-def window(used, minutes, reset_in=None, name='seven_day'):
-    return {'name': name, 'raw_kind': name, 'used_percent': used, 'window_minutes': minutes,
-            'reset_at': iso(NOW + reset_in) if reset_in is not None else None}
-
-
 def snapshot(quota, provider='codex', windows=(), observed=NOW, account='default', host='studio', **extra):
-    value = {'schema': quota.SCHEMA, 'provider': provider, 'account': account, 'plan': None, 'host': host,
-             'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
-             'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
-             'windows': [quota.normalise_window(row) for row in windows], **extra}
+    value = build_snapshot(quota, provider, windows, observed, account, host, **extra)
     if account == 'default' and quota.provider(provider):
         quota.provider(provider).default_identity().mkdir(parents=True, exist_ok=True)
     configured = next((row for row in quota.accounts() if (row.provider, row.label) == (provider, account)), None)
@@ -332,20 +299,24 @@ def claude_limit(kind, group, percent, resets_at, active=True, scope=None):
 
 
 def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, monkeypatch):
-    # The live anese and pro shapes from 2026-10-22: `limits` repeat named windows without a length.
-    budget = {'utilization': 54.51754, 'resets_at': '2026-11-05T07:59:00+00:00', 'limit_dollars': 250,
+    # Live anese and pro shapes: `limits` repeat named windows without a length.
+    session_reset, weekly_reset, budget_reset, pro_reset = (iso(NOW + timedelta(hours=3)),
+                                                              iso(NOW + timedelta(days=6)),
+                                                              iso(NOW + timedelta(days=14)),
+                                                              iso(NOW + timedelta(days=3)))
+    budget = {'utilization': 54.51754, 'resets_at': budget_reset, 'limit_dollars': 250,
               'used_dollars': 136.29385, 'remaining_dollars': 113.70615}
-    anese = {'five_hour': {'utilization': 10.0, 'resets_at': '2026-10-22T15:00:00.280268+00:00'},
-             'seven_day': {'utilization': 3.0, 'resets_at': '2026-10-28T10:00:00.280288+00:00'},
+    anese = {'five_hour': {'utilization': 10.0, 'resets_at': session_reset},
+             'seven_day': {'utilization': 3.0, 'resets_at': weekly_reset},
              'iguana_necktie': budget, 'seven_day_opus': None,
-             'limits': [claude_limit('session', 'session', 10, '2026-10-22T15:00:00.280268+00:00'),
-                        claude_limit('weekly_all', 'weekly', 3, '2026-10-28T10:00:00.280288+00:00', active=False),
-                        claude_limit('weekly_scoped', 'weekly', 0, '2026-10-28T10:00:00+00:00', active=False,
+             'limits': [claude_limit('session', 'session', 10, session_reset),
+                        claude_limit('weekly_all', 'weekly', 3, weekly_reset, active=False),
+                        claude_limit('weekly_scoped', 'weekly', 0, weekly_reset, active=False,
                                      scope={'model': {'id': 'fable', 'display_name': 'Fable'}, 'surface': None})]}
     pro = {'five_hour': {'utilization': 0.0, 'resets_at': None},
-           'seven_day': {'utilization': 48.0, 'resets_at': '2026-10-25T19:59:59.866880+00:00'},
+           'seven_day': {'utilization': 48.0, 'resets_at': pro_reset},
            'limits': [claude_limit('session', 'session', 0, None, active=False),
-                      claude_limit('weekly_all', 'weekly', 48, '2026-10-25T19:59:59.866880+00:00')]}
+                      claude_limit('weekly_all', 'weekly', 48, pro_reset)]}
     claude = quota.provider('claude')
     lengths = {name: {row['name']: row['window_minutes'] for row in claude.parse(payload)['windows']}
                for name, payload in (('anese', anese), ('pro', pro))}
@@ -358,7 +329,7 @@ def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, mo
     states = {row['account']: row['state'] for row in quota_display.report(vars(quota), values, NOW)['accounts']}
     assert states == {'anese': 'reserve', 'pro': 'reserve'}
     # An entry that repeats no named window keeps no length, is shown, and never sets state.
-    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, '2026-10-26T00:00:00+00:00')]}
+    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, iso(NOW + timedelta(days=4)))]}
     row = next(row for row in claude.parse(unmatched)['windows'] if row['name'] == 'weekly_all:1')
     assert row['window_minutes'] is None and row['advisory'] is True
     replies['pro'] = unmatched
@@ -611,15 +582,15 @@ AGY_USAGE = {'conversation_id': '', 'status': 'SUCCESS', 'response': '...', 'com
     'description': 'Within each group, models share a weekly limit and a 5-hour limit.',
     'groups': [{'name': 'Gemini Models', 'description': 'Models within this group: Gemini Flash, Gemini Pro', 'buckets': [
                    {'id': 'gemini-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
-                    'remaining_fraction': 0, 'reset_time': '2026-10-24T04:01:07Z'},
+                    'remaining_fraction': 0, 'reset_time': iso(NOW + timedelta(days=2))},
                    {'id': 'gemini-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h', 'disabled': True,
                     'remaining_fraction': 1}]},
                {'name': 'Claude and GPT models', 'description': 'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
                 'buckets': [
                    {'id': '3p-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
-                    'remaining_fraction': 0.9330692291259766, 'reset_time': '2026-10-28T15:50:17Z'},
+                    'remaining_fraction': 0.9330692291259766, 'reset_time': iso(NOW + timedelta(days=6))},
                    {'id': '3p-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h',
-                    'remaining_fraction': 0.8661383986473083, 'reset_time': '2026-10-22T13:40:59Z'}]}]}}}
+                    'remaining_fraction': 0.8661383986473083, 'reset_time': iso(NOW + timedelta(hours=2))}]}]}}}
 AGY_EMAIL = 'second.account@example.com'
 
 
@@ -662,14 +633,15 @@ def test_agy_usage_reports_each_pool_window_and_skips_disabled_buckets(quota):
     assert [(row['name'], row['raw_kind'], row['used_percent'], row['window_minutes']) for row in rows] == [
         ('gemini.weekly', 'gemini-weekly', 100, WEEK), ('claude.weekly', '3p-weekly', 6.69, WEEK),
         ('claude.5h', '3p-5h', 13.39, 300)]
-    assert rows[0]['reset_at'] == '2026-10-24T04:01:07Z'
+    assert rows[0]['reset_at'] == iso(NOW + timedelta(days=2))
     assert parsed['unreported'] == ['gemini.5h']
 
 
 @pytest.mark.parametrize('fraction', [True, False, -0.1, 1.5, 10 ** 400, float('nan'), '0.5', None])
 def test_agy_invalid_remaining_fractions_are_unreported_never_0_or_100_percent(quota, fraction):
     payload = {'command': {'data': {'groups': [{'name': 'Claude and GPT models', 'buckets': [
-        {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction, 'reset_time': '2026-10-28T15:50:17Z'}]}]}}}
+        {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction,
+         'reset_time': iso(NOW + timedelta(days=6))}]}]}}}
     assert quota.provider('agy').parse(payload, NOW) == {'windows': [], 'unreported': ['claude.weekly']}
 
 
@@ -994,9 +966,11 @@ def test_peer_readings_of_one_account_keep_the_freshest(quota):
 
 def test_reserve_snapshot_lifts_a_stale_claude_usage_cooldown(quota):
     cooldowns = {'claude/*': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': '*', 'status': 'usage_limited',
-                              'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'},
+                              'recorded_at': iso(NOW - timedelta(hours=1)),
+                              'cooling_until': iso(NOW + timedelta(hours=10))},
                  'claude/opus': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': 'opus', 'status': 'rate_limited',
-                                 'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'}}
+                                 'recorded_at': iso(NOW - timedelta(hours=1)),
+                                 'cooling_until': iso(NOW + timedelta(hours=10))}}
     snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2), 'five_hour'), window(20, WEEK, timedelta(days=4))],
              observed=NOW - timedelta(minutes=5))
     assert quota.route_states(NOW)['claude']['state'] == 'reserve'
@@ -1034,7 +1008,7 @@ def test_exhausted_opencode_go_window_cools_only_go_models_not_free_zen_models(q
 
 
 def test_both_claude_accounts_exhausted_block_routing_until_reset_then_lift(quota, tmp_path):
-    reset = datetime(2026, 10, 28, 22, 0, tzinfo=UTC)  # Thursday 08:00 AEST
+    reset = NOW + timedelta(days=6, hours=10)
     configure(tmp_path, {'accounts': {'claude': {'max-a': {'identity_dir': '~/.claude'},
                                                  'max-b': {'identity_dir': '~/.claude-b'}}}})
     for label, active in (('max-a', True), ('max-b', False)):
@@ -1955,7 +1929,7 @@ def test_codex_reports_its_usage_credit_balance_for_the_series(quota):
 
 @pytest.mark.parametrize('scale', [1, 1000])
 def test_claude_limit_with_a_numeric_reset_still_matches_the_window_it_repeats(quota, scale):
-    reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+    reset = NOW + timedelta(days=5)
     payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
                'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp() * scale)]}
     rows = {row['name']: row for row in quota.provider('claude').parse(payload)['windows']}
@@ -1972,7 +1946,7 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
     monkeypatch.delitem(sys.modules, 'quota_schedule', raising=False)
     try:
         claude = load('claude_alone', ROOT / 'scripts/quota_providers/claude.py')
-        reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+        reset = NOW + timedelta(days=5)
         payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
                    'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp())]}
         rows = {row['name']: row for row in claude.parse(payload)['windows']}

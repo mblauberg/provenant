@@ -2,7 +2,6 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 import contextlib
-import importlib.util
 import io
 import itertools
 import json
@@ -14,6 +13,7 @@ import types
 from unittest.mock import patch
 
 import pytest
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,27 +32,23 @@ def environment(tmp_path):
 
 
 def cli(tmp_path, *args, scripts_path=True):
-    spec = importlib.util.spec_from_file_location('telemetry_cli_under_test', ROOT / 'scripts/telemetry.py')
-    assert spec is not None and spec.loader is not None
-    telemetry = importlib.util.module_from_spec(spec)
     arguments = list(args[1:] if args and args[0] == 'telemetry' else args)
     stdout, stderr = io.StringIO(), io.StringIO()
     original_cwd = Path.cwd()
-    previous_module = sys.modules.get(spec.name)
+    previous_module = sys.modules.get('telemetry_cli_under_test')
     try:
         os.chdir(tmp_path)
         with patch.dict(os.environ, environment(tmp_path)), \
                 patch.object(sys, 'path', ([str(ROOT / 'scripts'), *sys.path] if scripts_path else
                                            [path for path in sys.path if path != str(ROOT / 'scripts')])), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            sys.modules[spec.name] = telemetry
-            spec.loader.exec_module(telemetry)
+            telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_cli_under_test', register=True)
             code = telemetry.main(arguments)
     finally:
         if previous_module is None:
-            sys.modules.pop(spec.name, None)
+            sys.modules.pop('telemetry_cli_under_test', None)
         else:
-            sys.modules[spec.name] = previous_module
+            sys.modules['telemetry_cli_under_test'] = previous_module
         os.chdir(original_cwd)
     return subprocess.CompletedProcess([str(ROOT / 'scripts/provenant'), *args], code,
                                         stdout.getvalue(), stderr.getvalue())
@@ -183,9 +179,7 @@ def test_concurrent_stats_auto_ingest_skips_a_held_lock_without_losing_rows(tmp_
 def test_read_only_connection_restores_the_query_lock_wait_after_opening(tmp_path):
     receipt(tmp_path, 'opened', status='ok', ended_at=datetime.now(UTC).isoformat())
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    spec = importlib.util.spec_from_file_location('telemetry_readonly_under_test', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_readonly_under_test')
     with patch.dict(os.environ, environment(tmp_path)):
         db = telemetry.connect(readonly=True)
     try:
@@ -276,9 +270,7 @@ def test_delivery_receipt_fields_migration_rereads_unchanged_receipts(tmp_path):
 def test_ingest_owner_ignores_cwd_module_shadowing(tmp_path):
     shadow = tmp_path / 'telemetry_ingest.py'
     shadow.write_text('raise AssertionError("cwd module was imported")\n')
-    spec = importlib.util.spec_from_file_location('telemetry_owner_path_test', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_owner_path_test')
     original_cwd = Path.cwd()
     telemetry.ingest_owner.cache_clear()
     try:
@@ -332,10 +324,7 @@ def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_field
             {'id': 'review-b', 'role': 'targeted', 'status': 'failed', 'provider_family': 'openai',
              'model': 'gpt-review', 'lenses': ['privacy']}],
     })
-    shape_spec = importlib.util.spec_from_file_location(
-        'delivery_run_shape_test', ROOT / 'skills/deliver/scripts/delivery_run_shape.py')
-    shape = importlib.util.module_from_spec(shape_spec)
-    shape_spec.loader.exec_module(shape)
+    shape = load_script(ROOT / 'skills/deliver/scripts/delivery_run_shape.py', 'delivery_run_shape_test')
     assert shape.shape_errors(receipt_data) == []
     write_json(run / 'RUN.json', receipt_data)
     result = cli(tmp_path, 'telemetry', 'ingest')
@@ -380,27 +369,24 @@ def test_query_reports_schema_version_mismatch(tmp_path, version, message):
     assert result.stderr.strip() == message
 
 
-def test_query_reports_missing_ledger_without_creating_it(tmp_path):
+@pytest.mark.parametrize('create_ledger, expected_tables', [(False, None), (True, [])],
+                         ids=['missing-ledger', 'uninitialised-ledger'])
+def test_query_reports_missing_or_uninitialised_ledger_without_creating_schema(tmp_path, create_ledger,
+                                                                              expected_tables):
     (tmp_path / 'state').mkdir()
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    if create_ledger:
+        with sqlite3.connect(ledger):
+            pass
     result = cli(tmp_path, 'telemetry', 'sources', '--json')
     assert result.returncode == 0, result.stderr
     assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
     assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
-    assert not (tmp_path / 'state/telemetry.sqlite3').exists()
-
-
-def test_query_reports_uninitialised_ledger_without_creating_schema(tmp_path):
-    state = tmp_path / 'state'
-    state.mkdir()
-    ledger = state / 'telemetry.sqlite3'
-    with sqlite3.connect(ledger):
-        pass
-    result = cli(tmp_path, 'telemetry', 'sources', '--json')
-    assert result.returncode == 0, result.stderr
-    assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
-    assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
-    with sqlite3.connect(ledger) as db:
-        assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
+    if expected_tables is None:
+        assert not ledger.exists()
+    else:
+        with sqlite3.connect(ledger) as db:
+            assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == expected_tables
 
 
 def test_delivery_sidecars_ingest_repair_transitions_and_finding_lineage(tmp_path):
@@ -1372,10 +1358,7 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
 
 
 def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location('telemetry_host_precedence', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_precedence')
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
     monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'runner-ci')
@@ -1443,13 +1426,10 @@ else:
 ''')
     shim.chmod(0o755)
     # Use the real aggregate encoder, then represent another host with the same session ID.
-    import importlib.util
     # The in-process encoder reads host id and quota snapshots from the environment: isolate it from the real ~/.agents.
     for key, value in environment(tmp_path).items():
         monkeypatch.setenv(key, value)
-    spec = importlib.util.spec_from_file_location('telemetry_host_test', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_test')
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         db.row_factory = sqlite3.Row
         summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
@@ -1474,14 +1454,8 @@ else:
 
 
 def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_path, monkeypatch):
-    import importlib.util
-    def load(name, filename):
-        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    telemetry = load('merge_telemetry_test', 'telemetry.py')
-    federation = load('merge_federation_test', 'telemetry_hosts.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'merge_telemetry_test')
+    federation = load_script(ROOT / 'scripts/telemetry_hosts.py', 'merge_federation_test')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     with telemetry.connect() as db:
         first = telemetry.report_owner().peer_summary(telemetry, db, host='studio')
@@ -1497,14 +1471,8 @@ def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_pa
 
 
 def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, monkeypatch):
-    import importlib.util
-    def load(name, filename):
-        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    telemetry = load('bad_peer_telemetry', 'telemetry.py')
-    federation = load('bad_peer_federation', 'telemetry_hosts.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'bad_peer_telemetry')
+    federation = load_script(ROOT / 'scripts/telemetry_hosts.py', 'bad_peer_federation')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     with telemetry.connect() as db:
         good = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
@@ -1904,7 +1872,7 @@ def filtering_gh(tmp_path, pulls):
     return bin_dir
 
 
-def hourly_pulls(count, start='2026-09-01T00:00:00'):
+def hourly_pulls(count, start='2026-09-01T00:00:00'):  # timebomb: allow sync reads SYNC_FLOOR..now, a past date never expires
     from datetime import datetime, timedelta
     first = datetime.fromisoformat(start)
     return [pull(1 + index, (first + timedelta(hours=index)).isoformat() + 'Z') for index in range(count)]
@@ -1933,14 +1901,8 @@ def test_changes_sync_splits_full_pages_and_finds_later_merges(tmp_path):
 
 def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
     """Regression: a sweep stopped by the query cap or a gh failure resumes without losing PRs."""
-    import importlib.util
-    def load(name, filename):
-        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    telemetry = load('sync_telemetry_test', 'telemetry.py')
-    owner = load('sync_changes_test', 'telemetry_changes.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'sync_telemetry_test')
+    owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'sync_changes_test')
     monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
     monkeypatch.setattr(owner, 'SYNC_PAGES', 2)
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
@@ -1993,22 +1955,11 @@ def test_rendered_reports_fit_four_kilobytes_of_utf8(tmp_path):
 
 
 def test_fit_keeps_whole_lines_within_the_byte_budget():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location('fit_changes_test', ROOT / 'scripts/telemetry_changes.py')
-    owner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(owner)
+    owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'fit_changes_test')
     assert owner.fit(['short', 'lines']) == 'short\nlines'
     text = owner.fit([f'{index} ' + '🚀' * 200 for index in range(10)])
     assert len(text.encode()) <= owner.BUDGET and text.endswith('lines omitted to fit 4 KB; use --json')
     assert all(line.startswith(str(index)) for index, line in enumerate(text.splitlines()[:-1]))
-
-
-def load_script(name, filename):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def use_environment(tmp_path, monkeypatch):
@@ -2024,8 +1975,8 @@ def test_peer_outcomes_carry_latency_samples_and_old_peers_still_validate(tmp_pa
     receipt(tmp_path, 'timed', 1, status='ok', started_at='2026-10-21T00:59:00Z',
             provenance=route('codex', 'gpt-6.1-sol'))
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    telemetry = load_script('peer_outcome_telemetry', 'telemetry.py')
-    hosts = load_script('peer_outcome_hosts', 'telemetry_hosts.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'peer_outcome_telemetry')
+    hosts = load_script(ROOT / 'scripts/telemetry_hosts.py', 'peer_outcome_hosts')
     with telemetry.connect() as db:
         summary = telemetry.report_owner().peer_summary(telemetry, db, host='peer')
     assert summary['outcomes'] and summary['outcomes'][0]['latency_samples'] == 1
@@ -2064,8 +2015,8 @@ def test_ledgers_backfilled_before_session_events_get_them_once(tmp_path):
 def test_saturated_one_second_ranges_page_further_and_stay_marked_incomplete(tmp_path, monkeypatch):
     """Regression: more merges in one second than a page holds must not be silently dropped."""
     use_environment(tmp_path, monkeypatch)
-    telemetry = load_script('saturated_telemetry', 'telemetry.py')
-    owner = load_script('saturated_changes', 'telemetry_changes.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'saturated_telemetry')
+    owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'saturated_changes')
     monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
     same = [pull(700 + index, '2026-10-05T12:00:00Z', f'Batch {index}') for index in range(7)]
     bin_dir = filtering_gh(tmp_path, [*same, *hourly_pulls(3)])
@@ -2088,7 +2039,7 @@ def test_saturated_one_second_ranges_page_further_and_stay_marked_incomplete(tmp
 
 def test_fit_keeps_whole_long_lines_that_fit():
     """Regression: a line that fits is never clipped; lines that do not are counted, not cut."""
-    owner = load_script('fit_whole_changes', 'telemetry_changes.py')
+    owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'fit_whole_changes')
     long = 'x' * 1500
     assert owner.fit(['head', long, 'tail']) == f'head\n{long}\ntail'
     text = owner.fit(['head', 'y' * 5000, 'tail'])
@@ -2140,8 +2091,8 @@ def test_upgrade_reconciles_events_from_relabelled_and_mixed_namespaces(tmp_path
 def test_a_full_two_second_range_splits_before_it_is_called_saturated(tmp_path, monkeypatch):
     """Regression: [T, T+1s] holds two timestamps; split it before reading deeper or warning."""
     use_environment(tmp_path, monkeypatch)
-    telemetry = load_script('two_second_telemetry', 'telemetry.py')
-    owner = load_script('two_second_changes', 'telemetry_changes.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'two_second_telemetry')
+    owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'two_second_changes')
     monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
     monkeypatch.setattr(owner, 'SEARCH_LIMIT', 6)
     pulls = [pull(800 + index, f'2026-10-05T12:00:0{index % 2}Z', f'Burst {index}') for index in range(8)]
@@ -2400,13 +2351,10 @@ def test_a_message_in_several_identity_dirs_keeps_one_owner_across_ingest_and_re
 
 def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path, monkeypatch):
     home = tmp_path / 'home'
-    import importlib.util
     for name, value in environment(tmp_path).items():
         monkeypatch.setenv(name, value)
     monkeypatch.chdir(tmp_path)
-    spec = importlib.util.spec_from_file_location('telemetry_swap_test', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_swap_test')
     transcript = home / '.claude/projects/repo/s.jsonl'
     jsonl(transcript, claude_turn('s', 'real'))
     database = home / '.local/share/opencode/opencode.db'
@@ -2478,7 +2426,7 @@ def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(
     """Raw-hostname and 'local' rows from earlier versions read as this host; the ledger keeps them."""
     use_environment(tmp_path, monkeypatch)
     monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'Anes-MacBook-Pro.local')
-    telemetry = load_script('telemetry_host_aliases', 'telemetry.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_aliases')
     session = tmp_path / 'home/.claude/projects/repo/session.jsonl'
     def message(name):
         return {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
@@ -2512,7 +2460,7 @@ def test_long_lived_telemetry_refreshes_peer_aliases_after_hosts_config_changes(
     monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'Box.local')
     config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
     write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {}})
-    telemetry = load_script('telemetry_live_peer_aliases', 'telemetry.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_live_peer_aliases')
     jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
           {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
            'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10}}})
@@ -2552,7 +2500,7 @@ def test_stats_hosts_all_with_no_peers_stays_local_and_never_reaches_ssh(tmp_pat
                                 env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
         report = json.loads(result.stdout)
-        expected = 'solo' if setup else load_script('telemetry_zero_peer', 'host_identity.py').host_id(config)
+        expected = 'solo' if setup else load_script(ROOT / 'scripts/host_identity.py', 'telemetry_zero_peer').host_id(config)
         assert report['partial'] is False
         assert report['hosts'] == [{'host': expected, 'status': 'ok'}]
         assert report['usage'][0]['input_tokens'] == 7
@@ -2567,7 +2515,7 @@ def test_stats_hosts_all_merges_three_hosts(tmp_path, monkeypatch):
         'b': {'ssh_destination': 'b'}, 'c': {'ssh_destination': 'c'}}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     use_environment(tmp_path, monkeypatch)
-    telemetry = load_script('telemetry_three_hosts', 'telemetry.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_three_hosts')
     shim = tmp_path / 'ssh-fixture'
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         db.row_factory = sqlite3.Row
@@ -2603,7 +2551,7 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
     jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
           {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
            'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
-    telemetry = load_script('telemetry_rename_box', 'telemetry.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_rename_box')
     with telemetry.connect() as db:
         telemetry.ingest_owner().ingest(telemetry, db)
     database = tmp_path / 'state/telemetry.sqlite3'
@@ -2617,7 +2565,7 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
         before = {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables}
     assert len(before['usage']) == 2
     write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {'box': {'ssh_destination': 'box'}}})
-    telemetry = load_script('telemetry_rename_studio', 'telemetry.py')
+    telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_rename_studio')
     with telemetry.connect() as db:
         telemetry.ingest_owner().ingest(telemetry, db)
         db.row_factory = sqlite3.Row
@@ -2754,12 +2702,9 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
 
 
 def load_telemetry(tmp_path, monkeypatch):
-    import importlib.util
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
-    spec = importlib.util.spec_from_file_location('telemetry_golden', ROOT / 'scripts/telemetry.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_golden')
     # The oracle runs against the module's own helpers.
     costs, report = module.costs_owner(), module.report_owner()
     names = {**vars(module), 'itertools': itertools, 'timedelta': timedelta,
@@ -2833,9 +2778,7 @@ def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
 
 def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
     telemetry = load_telemetry(tmp_path, monkeypatch)
-    spec = importlib.util.spec_from_file_location('telemetry_hosts_golden', ROOT / 'scripts/telemetry_hosts.py')
-    hosts = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(hosts)
+    hosts = load_script(ROOT / 'scripts/telemetry_hosts.py', 'telemetry_hosts_golden')
     def group(session):
         row = telemetry.costs_owner().unit(telemetry, {'adapter': 'codex', 'provider': 'openai', 'model': 'gpt-5.5', 'day': '2026-10-21',
                               'account': None, 'input_tokens': 1, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
