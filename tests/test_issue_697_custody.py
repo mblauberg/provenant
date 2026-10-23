@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import json
 import shutil
@@ -11,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
@@ -19,11 +19,7 @@ FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 
 
 def load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(path, name)
 
 
 def make_run(tmp_path: Path) -> Path:

@@ -1,7 +1,10 @@
 import json
-from pathlib import Path
-import subprocess
+import os
 import re
+import subprocess
+from pathlib import Path
+
+from tests.support.git import git
 
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
@@ -25,7 +28,7 @@ def test_default_run_name_and_owner_directory(tmp_path):
 def test_linked_worktree_shares_run_root(tmp_path):
     primary = tmp_path / "repo"
     primary.mkdir()
-    subprocess.run(["git", "init", str(primary)], check=True, capture_output=True)
+    git(Path.cwd(), "init", str(primary), env=os.environ)
     subprocess.run(
         [
             "git",
@@ -44,19 +47,17 @@ def test_linked_worktree_shares_run_root(tmp_path):
         capture_output=True,
     )
     linked = tmp_path / "lane"
-    subprocess.run(
-        ["git", "-C", str(primary), "worktree", "add", "-b", "lane", str(linked)],
-        check=True,
-        capture_output=True,
-    )
+    git(primary, "worktree", "add", "-b", "lane", str(linked), env=os.environ)
     result = subprocess.run([str(INIT)], cwd=linked, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert Path(result.stdout.strip()).parent == primary / ".agent-run/runs"
 
 
 def test_orphan_reaping_uses_shared_root_and_leaves_live_receipts(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
 
     old = tmp_path / ".agent-run/runs/20260920-0000-dispatch-orphan-abcdef"
     old.mkdir(parents=True)
@@ -100,8 +101,10 @@ def test_shared_layout_vectors_and_symlinked_cwd(tmp_path, monkeypatch):
 
 
 def test_orphan_reaping_does_not_close_a_live_unindexed_provider(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
 
     run = tmp_path / ".agent-run/runs/20260920-0000-dispatch-live-abcdef"
     run.mkdir(parents=True)
@@ -129,8 +132,10 @@ def test_nested_non_git_cwd_accepts_explicit_workspace_run(tmp_path):
 
 
 def test_stale_batch_with_provider_record_still_checks_every_attempt(tmp_path):
+    import os
+    import time
+
     from skills.orchestrate.scripts import layout
-    import os, time
     run = tmp_path / '.agent-run/runs/stale-batch'
     run.mkdir(parents=True)
     receipt = run / 'RUN_RECEIPT.json'

@@ -1,15 +1,15 @@
 import copy
 import hashlib
-import importlib.util
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
@@ -21,11 +21,7 @@ AUTHORITY_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "authority-envelope-v2"
 
 
 def load_validator():
-    spec = importlib.util.spec_from_file_location("validate_delivery", VALIDATOR_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
+    return load_script(VALIDATOR_PATH, "validate_delivery")
 
 
 def fixture(profile="software", workspace_root=None, **materialise_kwargs):
@@ -40,11 +36,7 @@ def fixture(profile="software", workspace_root=None, **materialise_kwargs):
 
 
 def load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
+    return load_script(path, name)
 
 
 def delivery_authority_fixture():
