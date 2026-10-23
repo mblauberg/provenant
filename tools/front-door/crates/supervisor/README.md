@@ -1,54 +1,60 @@
-# Supervisor port slice
+# Supervisor port
 
-Rulebook: `docs/specs/rust-port/PORTING.md`, version 2.
+Rulebook: `docs/specs/rust-port/PORTING.md` v3 (PR #1294).
 Author route supplied by the lane contract: `codex/gpt-6.1-sol@high`.
-Oracle and original policy-test revision:
-`5c48d4e5567c4801b072bbf88203e88822079ab1`.
-Main integrated after PR #1289:
-`e897b10d58b27a46544969594eed08a5ed64c72c`.
-The six source units and their policy tests are unchanged between those revisions.
+Source and policy-test oracle: `e897b10d58b27a46544969594eed08a5ed64c72c`;
+these six sources are unchanged in integrated main
+`50972eb5c1d8e208a28c0ef6d11ab0dd5e522814`.
+Differential interpreter: Python 3.14.8, Unicode 16.0.0.
+Toolchain: pinned Rust 1.94.1.
 
-This is an inert partial port. No command imports this crate yet. No lifecycle
-owner, signal sender, process observer, retained-state writer or compatibility
-fallback is installed here. Existing Python, TypeScript and front-door callers
-remain the owners. The graph is unchanged.
+The crate is inert. Existing Python, TypeScript and front-door callers retain
+command ownership. The utility runner is separate from S2 provider supervision;
+its private child handle can signal only the session it created. Provider
+custody, receipt publication and registry integration stay with their owners.
 
-## Delivered and remaining
+## Unit scope
 
-| Unit | Delivered | Remaining before full-unit acceptance |
+| Unit | Implementation | Remaining integration or partial scope |
 | --- | --- | --- |
-| `runtime/fabric/src/process-identity.ts#interface` | Serde identity/group/outcome types; explicit observation values; strict match, conservative liveness and group attribution policies | S2 observer/cyclic owner interface agreement; registry/owner identities and termination effects; J2 and lane acceptance |
-| `skills/_shared/bounded_process.py#unit-01` | Bounded file-backed capture; result fields and signal-status convention | S2-owned spawn/session/pass-fd/cleanup loop, merged/separated spool setup, CLI argument errors; J1/J2/lane judges |
-| `skills/orchestrate/scripts/process_info.py#unit-01` | Process records, Linux stat decoder, lossless Darwin argv decoder, shell quoting, CPU/elapsed formatting | Linux tree traversal, native Darwin libproc/sysctl/task observations, tty names, boot/timebase/local clock adapters; numeric range completion |
-| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup | Replace root binary's unsafe calls, remove its copies and prove root/exec parity; outside this lane's write scope |
-| `skills/orchestrate/scripts/process_info.py#unit-02` | Eight-column fallback ps decoder and complete ProcessInfo field representation | Native process/census/start-time observation, bounded fallback commands, census errors and explicit-clock construction |
-| `skills/orchestrate/scripts/bin/ps#unit-01` | BSD/POSIX option forms, selection, layouts, columns, header suppression and syntax error values | Unbounded/Unicode PID integers; process selection/deduplication/sorting, unreadable/sysctl rows, visibility, locale/padding, rendering, stderr/exit/SIGPIPE edge |
+| `runtime/fabric/src/process-identity.ts#interface` | Serde identity/group/outcome types; strict identity match, conservative liveness, attribution, owner-stamp deduplication; explicit stop reasons and a sans-IO group termination interface | The cyclic Fabric registry and S2 effect adapters use these values in later units; this interface does no retained-state I/O |
+| `skills/_shared/bounded_process.py#unit-01` | File-backed merged/separated capture, independent stream bounds, timeout and post-exit group cleanup, strict spawn/PATH/environment/pass-fd handling, negative signal status, one-line argument errors | Unrestricted process-group conformance on Linux/macOS remains required; no provider owner is installed |
+| `skills/orchestrate/scripts/process_info.py#unit-01` | Process records, Linux stat/task-tree/boot observations, Darwin libproc/sysctl/Mach observations, tty names, OS argv, shell quoting, canonical local dates and Python finite-float duration formatting | Private pure compatibility helpers await the core integration pass; retained JSON encoding of surrogate-containing OS text is deliberately not claimed |
+| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup, with process fixtures | Partial: root binary still contains its original unsafe calls. Replacing/removing those calls is outside this lane's write scope and would be integration/cut-over |
+| `skills/orchestrate/scripts/process_info.py#unit-02` | Native process/census/start-time observation with explicit clocks; bounded system-ps fallbacks, required identity, process disappearance and census failures | Partial: fallback output has a 1 MiB bound and typed timeout/I/O errors; exact Python fallback refusal/exception rendering needs integration (RP-1302) |
+| `skills/orchestrate/scripts/bin/ps#unit-01` | BSD/POSIX option forms and integer parsing, selection/deduplication/sort, layouts/headers, tty filtering, unreadable/sysctl rows, Unicode visibility, locale/padding, stderr/exit values and quiet broken-pipe writing | CLI owns locale input and SIGPIPE disposition; process-census error rendering inherits the partial observation adapter. No executable is added |
 
-No unit is claimed fully ported. No `pending` items were needed: the delivered
-modules depend only on the standard library and allowlisted workspace crates.
-No intentional behavior changes are proposed. The bounded numeric portions
-are incomplete, tracked as open mismatches in `divergences.md`.
+`pending` holds only private pure helpers marked `port: belongs in
+provenant-core`: Python whitespace, Unicode 16 decimal/printability tables,
+integer PID tokens and exact finite-float integer/division formatting. Main's
+similar CLI helpers are private and supervisor must not import the CLI crate.
+No additional direct dependencies or workspace features were added.
 
-## Evidence and gates
+No intentional command behavior change is accepted here. RP-1301 records the
+fixed numeric mismatch; RP-1302 records the remaining fallback refusal domain.
+OS argv remains lossless until the JSON edge; ps visibility renders invalid
+bytes as Python surrogate escapes. Generic serde emission of non-UTF-8 process
+text returns an error rather than silently replacing it.
 
-Rust tests compare Python capture (36 fixtures), duration/quoting (37 values)
-Linux stat rows (4 fixtures), and ps parsing (18 argument cases) against the source oracle. They skip with a
-diagnostic only when `python3` is absent; oracle failures fail the test. No
-volatile fields are stripped. Fixture cases use explicit time values and no
-sleep assertions. OS tests cover access, NUL refusal, ENOEXEC without shell
-fallback, successful process replacement, exact environment and account lookup.
-The exec success fixture runs in a child test process and is reaped by its
-parent; no provider is run or signalled.
+## Evidence and cut-over gates
 
-J1's `tests/golden` runner was absent at integration. J2's schemas arrived with
-main; `schemas/README.md` does not map these transient data values to a schema.
-The existing S2 implementation still lives in the binary's `src/lane` modules;
-it has not exposed the observer/custody library contract this slice needs.
-This PR does not claim black-box, mutant, lane-conformance, Linux execution or
-cross-family acceptance. The chair owns the missing independent judge coverage
-and cross-family review before full-unit completion or command cut-over.
+Rust policy tests use explicit time values and fixtures; no sleep is an
+assertion. Differential fixtures compare capture (36 inputs), runner records
+(5 cases, with only measured elapsed seconds excluded), duration/quoting
+(37 values), large durations (20 values), Linux stat rows (4 cases), ps parsing
+(18 cases), visibility/large PIDs, canonical dates, locale padding and native
+identity at the same PID. Python absence skips a differential with a diagnostic;
+source failures fail it. UTF-8, unknown identity, syscall errors, inherited fds,
+process replacement and bounded child reaping have direct Rust coverage.
 
-Locally use the pinned toolchain and two build jobs:
+The writer sandbox denies group signalling and executing setuid system ps.
+It does not prove descendant cleanup, full fallback execution, unrestricted
+platform conformance, J1 mutant coverage, J2 schema coverage, J3 transcripts or
+cross-family acceptance. Those remain cut-over gates under rulebook v3; they
+are not reasons to stop an inert port. The chair owns cross-family review.
+A native source-parity review is required before this lane opens its PR.
+
+Run the targeted checks with the pinned toolchain and two jobs:
 
 ```sh
 cd tools/front-door
@@ -57,8 +63,6 @@ cargo clippy -j 2 -p provenant-supervisor --all-targets -- -D warnings
 cargo test -j 2 -p provenant-supervisor
 ```
 
-The sandbox cannot write the default Cargo registry cache. This lane used an
-isolated `CARGO_HOME=/private/tmp/provenant-supervisor-cargo`; dependencies and
-the lockfile still come from the workspace allowlist. Full checks run in CI.
-The installed Provenant root was observed at `/Users/mikey/Repos/provenant`;
-this mutable checkout was not used as an immutable oracle or modified by the lane.
+A sandbox that cannot write Cargo's registry can use an isolated `CARGO_HOME`.
+Full checks and the remaining platform matrix run in CI; no live provider is
+needed. Consult the PR for exact-head counts and review evidence.

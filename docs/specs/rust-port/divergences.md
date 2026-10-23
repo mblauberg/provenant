@@ -110,3 +110,34 @@ fixtures now compare the former counterexamples against Python 3.14.8,
 including `f64::MAX`, without normalising any result. The open numeric-domain
 limitation above is superseded by this repair. Independent judge coverage
 remains a cut-over requirement under rulebook v3.
+
+## RP-1302 - Bounded supervisor ps fallback and typed failures
+
+- **Unit / rules:** `skills/orchestrate/scripts/process_info.py#unit-02`;
+  rulebook v3. The dependent ps port retains this partial error domain.
+- **Class:** `library`; incomplete refusal/exception compatibility, not an
+  accepted command change.
+- **Reproducer:** The Python `_ps_processes` subprocess capture is unbounded.
+  The inert Rust observation adapter refuses stdout or stderr over 1 MiB,
+  and returns typed timeout/I/O/decode errors. In particular, its timeout
+  display is currently `ps census failed: process timed out`, rather than
+  Python's `TimeoutExpired` command/timeout detail. No normaliser is used.
+- **Compared revisions:** Unchanged Python source at
+  `e897b10d58b27a46544969594eed08a5ed64c72c`, integrated main
+  `50972eb5c1d8e208a28c0ef6d11ab0dd5e522814`; adapter introduced in
+  `6f150b1c`. No command imports the Rust crate, so no binary equivalence
+  or external refusal change is claimed.
+- **Expected / actual:** Outputs within the implemented domain are decoded
+  strictly with universal newline handling. Oversize output and timeout
+  errors differ as above; generic serde process text also refuses surrogate
+  bytes rather than inventing a UTF-8 value. Native OS/ps text preserves those
+  bytes separately up to its explicit record edge.
+- **Evidence:** Translated Rust policy tests, pure fixture differentials and
+  native identity comparisons cover the implemented path. The local sandbox
+  denies setuid system ps execution, so full fallback conformance is deferred.
+- **Disposition:** Open for the affected observation/error boundary; full
+  unit-02 parity is not claimed. No improvement or Python-bug exception has
+  been approved. Other inert units proceed under R10.3/R11 v3.
+- **Follow-up:** Agree the bounded refusal and complete edge error/OS-text
+  encoding with the CLI/record owners before cut-over; add independent J1/J2
+  failure cases and unrestricted Linux/macOS subprocess conformance.
