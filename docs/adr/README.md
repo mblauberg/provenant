@@ -40,5 +40,4 @@ historical evidence; the current Fabric owner is
 | [0025](0025-broker-upstream-family-attribution.md) | Broker upstream family attribution for multi-family pipes | Accepted |
 | [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate Fabric across the user's own hosts over SSH | Accepted |
 | [0027](0027-rust-front-door.md) | Replace the two-layer Python front door with one Rust binary | Accepted |
-| [0028](0028-rust-port-dependencies.md) | Port the whole project to Rust with a small crate allowlist | Accepted; landing method superseded by ADR 0029 |
-| [0029](0029-rust-rewrite-in-one-pass.md) | Rewrite in Rust in one pass, with no transition period | Accepted |
+| [0028](0028-rust-port-dependencies.md) | Port the whole project to Rust with a small crate allowlist | Accepted |

@@ -1,118 +1,116 @@
-# Rewrite lane briefs
+# Port lane brief
 
-Chairs fill the placeholders and dispatch the text below a brief's `---` as
-the lane prompt. Design lanes run read-only apart from their design doc;
-build lanes write in their own worktree.
-
-## Design brief
-
-Placeholders: `AREA`, `DOC`, `CRATES`, `SOURCE`, `EXTRA`.
+Chairs fill `CRATE`, `BRANCH`, `UNITS` and `EXTRA`, then dispatch this text as
+the lane prompt. `UNITS` comes from `python3 docs/specs/rust-port/ready.py
+CRATE 12`. Every self-check item below was a blocking review finding in batch 1.
 
 ---
 
-Task: write the design for the AREA area of Provenant's Rust rewrite, in
-`DOC`. The design covers the crates CRATES. Provenant is being redesigned and
-rewritten in Rust in one pass. The Python and TypeScript sources are source
-material for what the product does, not a specification. The user wants a
-smaller, better product.
-
-Read first, in full: `docs/specs/rust-port/PORTING.md` (version 7; R0 and R1
-first), `docs/specs/rust-port/README.md` and
-`docs/adr/0028-rust-port-dependencies.md` (dependency list). Then read the old
-source for this area: SOURCE. Read the existing Rust in the listed crates,
-which earlier inert ports wrote; it is source material, and its Python
-emulation is not.
-
-Establish real use before keeping a feature: find its callers in skills,
-hooks, scripts, docs and `tools/front-door/src`, and check
-`~/.claude/projects` and `~/.codex/sessions` transcripts for actual
-invocations (commands run, not files edited). Never open credential files,
-`~/.ssh`, `~/.aws`, `~/.kube` or `~/.secrets`.
-
-EXTRA
-
-The design doc states, briefly and concretely:
-1. What the area is for, in a paragraph.
-2. Features kept, and features dropped with the evidence for each drop.
-3. Its command subtree and any MCP tools: verbs, flags, output (human and
-   `--json`), exit codes. Mark it as a proposal for the command-tree freeze
-   in `design/cli.md`.
-4. The data model: records, files and layout under the new state root, with
-   versioning and which writes must be atomic.
-5. The crate API other areas call, and the API it needs from other areas.
-6. External contracts it touches (provider wire forms, hook protocols,
-   `SKILL.md`, MCP, Git) and the recorded fixtures that test them.
-7. The test plan: unit, integration and process tests, per PORTING.md R9.
-8. The deletion list: every Python and TS file, test and helper the build
-   removes, with line counts, and the expected net line change.
-9. Build order: PR-sized steps, each landing Rust and deleting what it
-   replaces.
-
-Keep it to what a build lane needs; no history of the old design. Open a PR
-to main titled `docs(rust-rewrite): AREA design` containing only `DOC`. Do not
-arm auto-merge.
-
-## Build brief
-
-Placeholders: `CRATE`, `BRANCH`, `DESIGN`, `STEP`, `EXTRA`.
-
----
-
-Task: build step STEP of the accepted design `DESIGN` in the Rust crate
-`provenant-CRATE` (`tools/front-door/crates/CRATE/`), and delete the Python
-and TypeScript it replaces in the same PR. This is Provenant's one-pass Rust
-rewrite under PORTING.md version 7: no transition adapters, no parity with
-the old implementation, no Python or V8 emulation.
+Task: port the units below into the Rust crate `provenant-CRATE`
+(`tools/front-door/crates/CRATE/`). This is one batch of the whole-project Rust
+port. The user has accepted the plan: land through continuous PRs to main, port
+Fabric's TypeScript runtime as well, and use a small crate allowlist.
 
 You are in your own worktree on branch `BRANCH`, started from `origin/main`.
 If main moves while you work, merge `origin/main` in; never rebase.
 
-Read first, in full: `docs/specs/rust-port/PORTING.md`, `DESIGN` and
-`docs/adr/0028-rust-port-dependencies.md` (dependency list). Read the crate's
-current `src/`: reuse what is good, delete what emulates Python or V8.
+Read first, in full: `docs/adr/0028-rust-port-dependencies.md` and
+`docs/specs/rust-port/PORTING.md` (version 5, the rulebook). Skim
+`docs/specs/rust-port/README.md` and the graph entries for your units in
+`docs/specs/rust-port/graph.json`. Read the crate's current `src/` and
+`README.md` or `PORT_STATUS.md`: partial units from batch 1 continue from there.
+
+Units, in dependency order:
+
+UNITS
 
 EXTRA
 
 How to work:
-1. Implement the step as the design specifies: typed errors with thiserror,
-   serde records, traits only at real seams, data tables for variants, no
-   global mutable state. If the design is wrong or silent on something that
-   matters, make the smallest sound choice, note it in the PR, and propose
-   the design fix.
-2. Test the new design (PORTING.md R9). External contracts use recorded
-   fixtures of the other tool's real behaviour.
-3. Delete the Python/TS this step replaces, its tests and helpers left with
-   no caller. Update in-repo callers that still exist. A caller whose owner
-   is not yet rewritten keeps calling the old path; if this step removes
-   that path, delete the caller's tests and note the break in the PR.
-4. Do not touch the primary checkout, the stable install or the old state
-   roots. Never read credentials.
 
-Write scope: the crate, the binary's wiring for this step's verbs, the files
-you delete with their tests, callers you update, and `Cargo.lock`. Not CI
-workflows or other crates, except a small API the design assigns to this
-step.
-
-Checks in `tools/front-door`: `cargo fmt --all`,
-`cargo clippy -p provenant-CRATE --all-targets -- -D warnings` and
-`cargo test -p provenant-CRATE`, plus remaining Python or TS tests for any
-caller you edited. Heavy suites run in CI.
-
-Before opening the PR, have one native subagent review the diff assuming it
-is wrong. Leave no rebase, cherry-pick or merge in progress. Open a PR to main
-titled `rewrite(CRATE): <step>`; do not arm auto-merge. The body states the
-design step, `Deleted:` with files and line counts, `Net lines:` across
-Python, TS and Rust, design deviations, and anything left for a later step.
+- Write scope: only `tools/front-door/crates/CRATE/**`, that crate's
+  `Cargo.toml` (dependencies from `[workspace.dependencies]` only, as
+  `{ workspace = true }`), appends to `docs/specs/rust-port/divergences.md`
+  and `ported.txt`, and a regenerated `Cargo.lock`. Do not edit other crates,
+  the root binary, Python or TypeScript sources, CI or the graph.
+- Depend on other crates directly: internal crates are workspace
+  dependencies (`provenant-core = { workspace = true }`), limited to the edges
+  PORTING.md R2 allows; `tests/test_rust_port_layering.py` enforces them. Use
+  the shared owners on main, including `provenant_core::py`,
+  `provenant_records::checked_json` and the supervisor's safe filesystem API,
+  and delete this crate's `pending` copies they replace. Only when the owner
+  has no such API on main yet, define a minimal private version in `pending`,
+  mark each item `// port: belongs in provenant-<crate>`, and list it in the
+  PR.
+- Refactor as you go, not line for line. Keep every observable behaviour
+  (outputs, record fields, errors, exit codes and effects) and use idiomatic
+  Rust: typed errors (thiserror), serde records, no global mutable state, no
+  copied test seams. Record every intended behaviour change in
+  `divergences.md` with its class.
+- Tests: translate the Python/TypeScript tests that assert policy for these
+  units into Rust tests in the crate. Skip tests of internal seams. Add
+  differential tests that run the Python or TS implementation on the same
+  fixtures. Oracles use `PROVENANT_PORT_PYTHON` / `PROVENANT_PORT_NODE`, run
+  Python with `-I` and an explicit environment, print `skip:` when the
+  interpreter is absent, and fail when `PROVENANT_PORT_DIFF_REQUIRED=1`. Use
+  fixtures and explicit clocks; no sleeps as assertions.
+- Nothing calls these crates yet. Do not switch any command over and do not
+  delete Python or TS sources.
+- One logical commit per unit, with the unit id in the commit body.
+- Port as many units as you can in this lane; this is a large batch on
+  purpose. Do not stop after the first finished unit: keep going until every
+  listed unit is fully ported or blocked by a named missing API on main. If a
+  unit is too big, port a coherent part and note what remains. Do not stop
+  the batch for one unit.
+- Design for extension. Put a trait at each seam where the source already
+  varies (adapters, providers, stores, hosts), and describe per-variant
+  behaviour in data tables with one source of truth, so a new variant is a
+  table row plus a small impl rather than another branch in a central
+  match.
+- Checks in `tools/front-door`: `cargo fmt --all`,
+  `cargo clippy -p provenant-CRATE --all-targets -- -D warnings`,
+  `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-CRATE`. Use the
+  pinned toolchain (`~/.cargo/bin/cargo` if cargo is not on PATH).
+- Before opening the PR, have one native subagent review the diff against the
+  source, assuming the port is wrong. Fix what it finds.
+- Leave no rebase, cherry-pick or merge in progress.
+- Open a PR to main titled `port(CRATE): <short summary>`. Do not arm
+  auto-merge: the chair arms it after the cross-family review. In the body, a line
+  `Units: <id>, <id>, ...` lists only fully ported units; then partial and
+  skipped units with reasons, `pending` items, divergences and test counts.
+  Also append the fully ported ids to `docs/specs/rust-port/ported.txt`.
 
 Self-check before review:
-- Integers are `i64`/`u64`, never `f64`; no epsilon comparisons.
-- No panics on malformed input (slicing, `unwrap`, indexing).
+
+- `Units:` lists only units with every function, branch and error path
+  ported. A `#interface` unit is the typed contract for a source cycle; its
+  types must match the source's real input and output shapes, with no
+  invented fields or variants.
+- Python semantics, not Rust defaults: truthiness (empty str, 0, 0.0, [], {}
+  and None are falsy), `str()`/`repr()` (True, None, single quotes, repr
+  escapes), `str.strip` (also strips U+001C to U+001F), `==` across int, float
+  and bool, dict insertion order (no HashMap or BTreeMap where order is
+  observable), and a null key present versus absent.
+- Integers are i64/u64, never f64; out-of-range is a typed
+  `NumberOutOfRange`. Compare exactly, with no epsilon. Float-second
+  timestamps use the one CPython-compatible helper owned by `provenant-core`.
+- No panics on malformed input (slicing, unwrap, index): return what Python
+  returns or a typed error.
 - Bounded waits only; never an unbounded `wait()` on a child.
-- No `unsafe` outside `supervisor::sys`; no `Command::new` outside supervisor.
-- Serde wire forms for external contracts match the recorded fixtures.
-- Tests cover failure and edge cases, not only the happy path.
-- No in-repo caller points at a deleted path: grep for the module name,
-  script path and any `python3 -m` form.
-- macOS: compare canonicalised temporary paths (`/var` links to
-  `/private/var`). Repo fixtures use
-  `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..."))`.
+- Wire forms: serde enums serialise exactly like the source JSON, with no
+  externally tagged wrappers.
+- Differential tests cover failure and edge cases, not only the happy path.
+- macOS: `/var` is a symlink to `/private/var`. Compare canonicalised tempdir
+  paths. The full Rust test job runs on Linux; the macOS release-build smoke
+  job does not run tests. A sandboxed `TMPDIR` can hide this locally.
+- Repo-file fixtures use `include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+  "/..."))`. Deep relative `include_str!` paths can resolve through the
+  primary checkout because worktrees nest under `.worktrees/`, then fail in CI.
+- Regex classes differ: Rust `\s` excludes U+001C to U+001F, which Python's
+  `\s` matches, and Rust `\w` differs from Python's on combining marks. Port
+  Python patterns with explicit classes from `provenant_core::py`.
+- Fractional-second UTC offsets differ across CPython point releases. Use
+  the core `py` fromisoformat helper, which probes the interpreter, rather
+  than fixed oracle fixtures.
+- CI runs a static security check: no `exec`/`eval` of source text in Python
+  fixture generators; import modules instead.

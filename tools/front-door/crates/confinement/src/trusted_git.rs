@@ -224,7 +224,13 @@ fn check_ref_format(reference: &str) -> Result<bool, GitLocationError> {
             result => {
                 // Always reap this owned parser, including the wait-error path.
                 let _ = child.kill();
-                let _ = child.wait();
+                let reap_deadline = Instant::now() + Duration::from_secs(1);
+                while Instant::now() < reap_deadline {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
                 return Err(io_error(
                     Path::new("git"),
                     match result {

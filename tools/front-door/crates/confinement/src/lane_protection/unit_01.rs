@@ -1,6 +1,6 @@
 //! Lane release input validation and stable diagnostic rendering.
 use super::*;
-use crate::pending::python_repr;
+use provenant_core::py::python_repr;
 
 pub fn is_full_sha(value: &str) -> bool {
     matches!(value.len(), 40 | 64)

@@ -457,6 +457,9 @@ dependencies = [
 name = "provenant-confinement"
 version = "0.1.0"
 dependencies = [
+ "provenant-core",
+ "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "sha2",
@@ -532,6 +535,7 @@ name = "provenant-records"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "provenant-core",
  "serde",
  "serde_json",
  "sha2",
@@ -557,6 +561,9 @@ name = "provenant-run"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "provenant-core",
+ "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "tempfile",
@@ -567,6 +574,7 @@ dependencies = [
 name = "provenant-supervisor"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "jiff",
  "libc",
  "provenant-core",

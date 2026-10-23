@@ -1,4 +1,5 @@
 use super::*;
+use crate::oracle::CommandOutput;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::unix::process::ExitStatusExt;
@@ -235,21 +236,32 @@ impl SessionWorker for FixtureWorker {
     fn pid(&self) -> u32 {
         self.0.id()
     }
-    fn wait(&mut self) -> io::Result<WorkerExit> {
-        let status = self.0.wait()?;
+    fn wait_for(&mut self, timeout: std::time::Duration) -> io::Result<Option<WorkerExit>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.0.try_wait()? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::yield_now();
+        };
         match (status.code(), status.signal()) {
-            (Some(code), _) => Ok(WorkerExit::Exited(code)),
-            (_, Some(signal)) => Ok(WorkerExit::Signalled(signal)),
+            (Some(code), _) => Ok(Some(WorkerExit::Exited(code))),
+            (_, Some(signal)) => Ok(Some(WorkerExit::Signalled(signal))),
             _ => Err(io::Error::other("missing exit status")),
         }
     }
-    fn terminate_and_wait(&mut self) -> io::Result<()> {
+    fn terminate_and_wait(&mut self, timeout: std::time::Duration) -> io::Result<()> {
         // An unreaped owned child retains its PID; this fixture cannot target a
         // recycled process. Production signalling belongs to supervisor::sys.
         let signal = Command::new("/bin/kill")
             .args(["-TERM", &self.0.id().to_string()])
-            .output()?;
-        self.0.wait()?;
+            .bounded_output()?;
+        if self.wait_for(timeout)?.is_none() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         if !signal.status.success() && !signal.stderr.ends_with(b"No such process\n") {
             return Err(io::Error::other("fixture SIGTERM failed"));
         }
@@ -260,7 +272,7 @@ impl Drop for FixtureWorker {
     fn drop(&mut self) {
         // Ensure a failed fixture assertion cannot leave an unreaped child.
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.wait_for(std::time::Duration::from_secs(1));
     }
 }
 impl SessionHost for FixtureHost {
@@ -461,6 +473,16 @@ fn differential_python_validation_matrix() {
         .join("../../../../skills/orchestrate/scripts/run_worker_detached.py");
     let fixtures = [
         complete(),
+        Evidence {
+            wrapper: Some("١٢٣\n".into()),
+            worker: Some("²\n".into()),
+            done: Some("wrapper_pid=١٢٣\nworker_pid=²\nexit=7\n".into()),
+            ..complete()
+        },
+        Evidence {
+            done: Some("wrapper_pid=999999\nworker_pid=888888\nexit=٧\n".into()),
+            ..complete()
+        },
         Evidence::default(),
         Evidence {
             directory_age_seconds: Some(2.0),
@@ -502,7 +524,10 @@ fn differential_python_validation_matrix() {
             }
         }
         let age = fixture.directory_age_seconds.unwrap_or(60.0);
-        let result = Command::new("python3").args(["-c", r#"
+        let Some(mut python) = crate::oracle::python() else {
+            return;
+        };
+        let result = python.args(["-c", r#"
 import importlib.util,sys,os,time
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('helper',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -511,7 +536,7 @@ m.process_exists=lambda pid:False
 m.time.time=lambda:1000000000.0
 os.utime(sys.argv[2],(1000000000.0-float(sys.argv[3]),)*2)
 raise SystemExit(m.validate_run(Path(sys.argv[2])))
-"#]).arg(&helper).arg(&dir).arg(age.to_string()).output();
+"#]).arg(&helper).arg(&dir).arg(age.to_string()).bounded_output();
         let result = match result {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 eprintln!("SKIP: python3 absent");
@@ -657,4 +682,68 @@ fn pid_publication_failure_sends_sigterm_to_owned_worker() {
     assert!(matches!(error, Error::WorkerPid { cleanup: None, .. }));
     assert_eq!(fs::read_to_string(marker).unwrap(), "term");
     assert!(!run.join("done").exists());
+}
+
+#[test]
+fn undecodable_evidence_retains_typed_encoding_cause() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("wrapper.pid"), [255, 10]).unwrap();
+    assert!(matches!(
+        validate_run(root.path(), SystemTime::now(), &mut Probe::default()),
+        Err(Error::Encoding { .. })
+    ));
+}
+
+#[test]
+fn unicode_digit_table_matches_python_for_every_scalar() {
+    let Some(mut python) = crate::oracle::python() else {
+        return;
+    };
+    let output = python
+        .args([
+            "-c",
+            "import json; print(json.dumps([i for i in range(0x110000) if chr(i).isdigit()]))",
+        ])
+        .bounded_output()
+        .unwrap();
+    assert!(output.status.success());
+    let expected: Vec<u32> = serde_json::from_slice(&output.stdout).unwrap();
+    let actual: Vec<_> = (0..=0x10ffff)
+        .filter(|&i| char::from_u32(i).is_some_and(|c| digits(&c.to_string())))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn later_undecodable_files_do_not_mask_earlier_pid_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("wrapper.pid"), "bad\n").unwrap();
+    fs::write(root.path().join("worker.pid"), [255, 10]).unwrap();
+    fs::write(root.path().join("done"), [255]).unwrap();
+    assert!(matches!(
+        validate_run(root.path(), SystemTime::now(), &mut Probe::default()),
+        Err(Error::Evidence(EvidenceError::InvalidWrapper))
+    ));
+    fs::write(root.path().join("wrapper.pid"), "999999\n").unwrap();
+    fs::remove_file(root.path().join("worker.pid")).unwrap();
+    assert!(matches!(
+        validate_run(root.path(), SystemTime::now(), &mut Probe::default()),
+        Err(Error::Evidence(EvidenceError::MissingWorker))
+    ));
+}
+
+#[test]
+fn startup_grace_uses_python_float_epoch_subtraction() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let root = tempfile::tempdir().unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    File::open(root.path())
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let now = modified + Duration::new(2, 1);
+    assert!(matches!(
+        validate_run(root.path(), now, &mut Probe::default()),
+        Ok(Validation::Starting)
+    ));
 }

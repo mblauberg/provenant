@@ -1,6 +1,6 @@
 # Supervisor and confinement
 
-Proposal for chair acceptance under [PORTING.md v7](../PORTING.md).
+Proposal for chair acceptance under [PORTING.md v7](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md).
 Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
 `1b3d48e4c549811ce3636edc30b047f36fd24ada`; also reuse the bounded OS APIs in
 [PR #1348](https://github.com/mblauberg/provenant/pull/1348), with the corrections
@@ -443,7 +443,7 @@ baseline: they are required build inputs, not evidence already collected.
 
 ## Tests and acceptance
 
-Follow [R9](../PORTING.md#r9-tests-prove-the-new-design): beside-module unit tests
+Follow [R9](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md#r9-tests-prove-the-new-design): beside-module unit tests
 use explicit clocks and injected observations. Cover transitions/idempotence,
 natural-exit precedence, unknown identities, failed signals, stale generations,
 registration versus publication, integer/size bounds, secret chunk splits,

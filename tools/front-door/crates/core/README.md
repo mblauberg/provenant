@@ -43,6 +43,24 @@ helpers, plus PR #1298's exact truth/equality contracts. ISO parsing also covers
 the Unicode separator/week-date gaps in that PR. Other crates keep their pending
 copies until their owners migrate them.
 
+## Port status
+
+- `roots`: product/skills-root policy and the `scripts/lib/roots.py` re-export
+  contract, with explicit environment/home/install observations.
+- `host_identity`, `jsonc`, `product_root_resolver`: partial ports; see the
+  retained RP-1001/RP-1002/RP-1003 gaps in `divergences.md`. No cut-over claim.
+- Host byte inputs support UTF-8/16/32 BOM and null-byte detection;
+  `slug_value` also accepts JSON-shaped non-string inputs. Extended JSON remains pending.
+- JSONC unterminated-comment diagnostics match Python; generic JSON errors,
+  exact integer ingress, extended values and input map order remain pending.
+- Pointer writing preserves Unix surrogateescape and Python ASCII JSON bytes;
+  pointer loading still awaits the extended JSON/path representation.
+- `PointerWriter`: publication is supplied by supervisor at composition time;
+  the std atomic-write backend is compiled only for tests.
+- `pending::path_json` / `PathEncodingError`: private native-path encoder owned
+  by records; main has no surrogateescaped path codec, and R2 forbids core from
+  depending on records.
+
 ## Verification
 
 Run from `tools/front-door`:

@@ -100,15 +100,18 @@ fn cooldown_keys_are_collision_free_and_scope_specific() {
 fn differential_python_keys_and_terminal_statuses() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../skills/orchestrate/scripts/fabric_records.py");
-    let output=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command.args(["-c",r#"
 import json,sys
 sys.path.insert(0,sys.argv[1]);import fabric_records as m
 scopes=[{}, {'account':None,'host':None},{'account':'a,b','host':'peer'},{'account':'é😀\x7f','host':'"\\\n'}]
 print(json.dumps({'keys':[m.cooldown_key('adäpter','model/é',s) for s in scopes],'statuses':sorted(m.TERMINAL_STATUSES)}))
-"#]).arg(path.parent().unwrap()).output() {
-        Ok(output)=>output,
-        Err(error)=>panic!("cannot run Python oracle: {error}"),
-    };
+"#]).arg(path.parent().unwrap());
+    let output = crate::oracle::run(&mut command)
+        .unwrap_or_else(|error| panic!("cannot run Python oracle: {error}"));
     assert!(
         output.status.success(),
         "{}",
