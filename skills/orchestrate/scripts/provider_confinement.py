@@ -204,6 +204,14 @@ def _fabric_hosts_owner():
         spec.loader.exec_module(module)
     return sys.modules[name]
 
+def _jsonc_loads(text):
+    # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
+    spec = importlib.util.spec_from_file_location(
+        "provenant_jsonc", Path(__file__).resolve().parents[3] / "scripts/lib/jsonc.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_jsonc(text)[0]
+
 def _opencode_configured_instructions(home, config_home):
     # Absolute `instructions` entries in the global OpenCode config, such as the harness constitution in
     # the product checkout. OpenCode fails to start when one is denied, whatever the lane's cwd.
@@ -211,8 +219,7 @@ def _opencode_configured_instructions(home, config_home):
     for config in (config_home / "opencode/opencode.json", config_home / "opencode/opencode.jsonc",
                    home / ".opencode/opencode.json", home / ".opencode/opencode.jsonc"):
         try:
-            # JSONC is rejected by the stdlib parser until the Rust config owner lands.
-            entries = json.loads(config.read_text(encoding="utf-8")).get("instructions", [])
+            entries = _jsonc_loads(config.read_text(encoding="utf-8")).get("instructions", [])
         except (OSError, ValueError, AttributeError):
             continue
         for entry in entries if isinstance(entries, list) else []:

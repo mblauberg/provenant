@@ -54,7 +54,7 @@ lightens the threat model.
 
 ## Decision
 
-Adopt **Option B**, kept thin. Formalize the correlated-response + hash-bound
+Adopt **Option B**, kept thin. Formalise the correlated-response + hash-bound
 artifact pattern that r1 and r2 already used into a single first-class
 `task.complete-with-reply` completion path, bound to a typed correlated receipt,
 reachable under the existing bootstrap authority. Do **not** add `task.claim` to

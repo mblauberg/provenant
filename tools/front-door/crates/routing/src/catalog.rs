@@ -346,9 +346,11 @@ mod tests {
     #[test]
     fn empty_models_do_not_read_model_patterns() {
         for model in ["", " ", "\u{1c}\u{1f}"] {
-            assert!(matching_model_families(model, &json!({}))
-                .unwrap()
-                .is_empty());
+            assert!(
+                matching_model_families(model, &json!({}))
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 
@@ -477,8 +479,11 @@ mod tests {
         }
         let fixture = json!(fixtures);
         let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
-            "import importlib.util,json,pathlib,sys; p=pathlib.Path('scripts/model_route_catalog.py').resolve(); s=importlib.util.spec_from_file_location('catalog',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); data=json.load(sys.stdin); print(json.dumps([m.matching_model_families(d['model'],d['catalog']) for d in data]))", &fixture
-        ) else { return; };
+            "import importlib.util,json,pathlib,sys; p=pathlib.Path('scripts/model_route_catalog.py').resolve(); s=importlib.util.spec_from_file_location('catalog',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); data=json.load(sys.stdin); print(json.dumps([m.matching_model_families(d['model'],d['catalog']) for d in data]))",
+            &fixture,
+        ) else {
+            return;
+        };
         let actual: Vec<Vec<String>> = fixtures
             .iter()
             .map(|d| matching_model_families(d["model"].as_str().unwrap(), &d["catalog"]).unwrap())

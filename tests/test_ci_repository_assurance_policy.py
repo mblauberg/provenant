@@ -70,6 +70,8 @@ JOB_PERMISSIONS = {
     "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
     "rust-macos-release": {"contents": "read"},
+    "rust-dependencies": {"contents": "read"},
+    "generic-checks": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -326,6 +328,7 @@ def test_lane_conformance_runs_serially_on_linux_and_macos_for_lane_changes() ->
         "tests/support/fake_cli.py",
         "tests/support/git.py",
         "config/model-routing.json",
+        "scripts/lib/jsonc.py",
         "scripts/fabric_hosts.py",
         "tests/cf_dispatch_support.py",
         "tests/conftest.py",
@@ -350,7 +353,7 @@ def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> Non
     job = _job(document, "rust-macos-release")
     assert job["needs"] == "detect-changes"
     assert job["if"] == _job(document, "rust")["if"]
-    assert job["runs-on"] == "macos-latest"
+    assert job["runs-on"] == "macos-15"
     patterns = _flatten_patterns(_change_filters(document)["rust"])
     assert any(_matches_filter("tools/front-door/crates/cli/src/lib.rs", p) for p in patterns)
     builds = [step for step in _steps(job) if "cargo build" in str(step.get("run", ""))]

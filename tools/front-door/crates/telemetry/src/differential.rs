@@ -1,6 +1,6 @@
 //! Independent Python oracle on isolated fixtures. No installed command or live ledger is used.
-use crate::{costs, delivery, ingest, report, Numeric, Usage};
-use serde_json::{json, Value};
+use crate::{Numeric, Usage, costs, delivery, ingest, report};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::Write,
@@ -112,11 +112,10 @@ fn required_oracles_refuse_missing_or_old_interpreters() {
         interpreter_version(&PYTHON, missing),
         false
     ));
-    assert!(std::panic::catch_unwind(|| oracle_available(
-        interpreter_version(&PYTHON, missing),
-        true
-    ))
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(|| oracle_available(interpreter_version(&PYTHON, missing), true))
+            .is_err()
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -125,11 +124,13 @@ fn required_oracles_refuse_missing_or_old_interpreters() {
         std::fs::write(&program, "#!/bin/sh\nprintf '3 9\\n'\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(interpreter_version(&PYTHON, program.as_os_str()).is_err());
-        assert!(std::panic::catch_unwind(|| oracle_available(
-            interpreter_version(&PYTHON, program.as_os_str()),
-            true
-        ))
-        .is_err());
+        assert!(
+            std::panic::catch_unwind(|| oracle_available(
+                interpreter_version(&PYTHON, program.as_os_str()),
+                true
+            ))
+            .is_err()
+        );
         for (interpreter, version, accepted) in [
             (&PYTHON, "3 11", false),
             (&PYTHON, "3 12", true),
@@ -221,7 +222,9 @@ fn costs_and_outcomes_match_python() {
         ..costs::Prices::default()
     };
     let input = json!({"rows":rows,"prices":prices.models});
-    let source=format!("{LOAD}\nreport=load('telemetry_report')\nprint(json.dumps({{'groups':costs.aggregate(t,input['rows'],('adapter','model'),input['prices']), 'outcomes':report.outcomes(input['rows'],t,costs,input['prices'],{{}})}}))");
+    let source = format!(
+        "{LOAD}\nreport=load('telemetry_report')\nprint(json.dumps({{'groups':costs.aggregate(t,input['rows'],('adapter','model'),input['prices']), 'outcomes':report.outcomes(input['rows'],t,costs,input['prices'],{{}})}}))"
+    );
     let Some(expected) = python(&source, &input) else {
         return;
     };
@@ -341,7 +344,9 @@ print(json.dumps(captured))
 #[test]
 fn sidecar_repairs_match_python_including_unicode_hashes() {
     let input = json!({"rows":[{"cycle":1,"failing_before":["é","a","a"],"at":"2026-01-01"},{"cycle":2,"failing_before":[],"at":"2026-01-02"}],"receipt":{"repair_cycles":2,"delivery_acceptance":{"basis":"user"}}});
-    let source=format!("{LOAD}\nimport tempfile\nd=load('telemetry_delivery');events=[];updates=[]\nt.put_event=lambda db,kind,stamp,ref,**kw:events.append({{'kind':kind,'ts':stamp,'source_ref':ref,'attrs':kw['attrs']}})\nclass DB:\n def execute(self,q,args):updates.append([args[1],args[2],json.loads(args[0])])\nwith tempfile.TemporaryDirectory() as tmp:\n path=Path(tmp)/'repairs.jsonl';(path.parent/'RUN.json').write_text(json.dumps(input['receipt']));state={{}}\n for i,row in enumerate(input['rows']):d.record(t,DB(),row,state,path,i)\n for row in events:row['source_ref']=row['source_ref'].split('#')[-1]\n for row in updates:row[1]=row[1].split('#')[-1]\n print(json.dumps({{'events':events,'updates':updates}}))");
+    let source = format!(
+        "{LOAD}\nimport tempfile\nd=load('telemetry_delivery');events=[];updates=[]\nt.put_event=lambda db,kind,stamp,ref,**kw:events.append({{'kind':kind,'ts':stamp,'source_ref':ref,'attrs':kw['attrs']}})\nclass DB:\n def execute(self,q,args):updates.append([args[1],args[2],json.loads(args[0])])\nwith tempfile.TemporaryDirectory() as tmp:\n path=Path(tmp)/'repairs.jsonl';(path.parent/'RUN.json').write_text(json.dumps(input['receipt']));state={{}}\n for i,row in enumerate(input['rows']):d.record(t,DB(),row,state,path,i)\n for row in events:row['source_ref']=row['source_ref'].split('#')[-1]\n for row in updates:row[1]=row[1].split('#')[-1]\n print(json.dumps({{'events':events,'updates':updates}}))"
+    );
     let Some(expected) = python(&source, &input) else {
         return;
     };
@@ -377,7 +382,7 @@ fn numeric_boundaries_and_python_float_hash_spelling() {
         -0.0,
         "é\u{007f}😀"
     ]);
-    let source="import sys,json,hashlib\nv=json.load(sys.stdin)\nprint(json.dumps(hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest()))";
+    let source = "import sys,json,hashlib\nv=json.load(sys.stdin)\nprint(json.dumps(hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest()))";
     if let Some(expected) = python(source, &values) {
         assert_eq!(
             crate::pending::identity(values.as_array().unwrap()),
@@ -485,7 +490,9 @@ fn unicode_model_attribution_matches_python() {
         "model-١٢٨k",
         "\u{345}"
     ]);
-    let source = format!("{LOAD}\nprint(json.dumps([costs.normalise_model('a',None,m,input['adapters']) for m in input['models']]))");
+    let source = format!(
+        "{LOAD}\nprint(json.dumps([costs.normalise_model('a',None,m,input['adapters']) for m in input['models']]))"
+    );
     let Some(expected) = python(&source, &json!({"adapters":adapters,"models":models})) else {
         return;
     };
@@ -509,7 +516,12 @@ fn letter_classification_matches_python_over_all_code_points() {
             crate::pending::python_alpha(c.encode_utf8(&mut bytes))
         })
         .collect();
-    let Some(expected) = python("import sys,json,hashlib; json.load(sys.stdin); print(json.dumps(hashlib.sha256(''.join(chr(c) for c in range(0x110000) if chr(c).isalpha()).encode()).hexdigest()))", &Value::Null) else { return; };
+    let Some(expected) = python(
+        "import sys,json,hashlib; json.load(sys.stdin); print(json.dumps(hashlib.sha256(''.join(chr(c) for c in range(0x110000) if chr(c).isalpha()).encode()).hexdigest()))",
+        &Value::Null,
+    ) else {
+        return;
+    };
     assert_eq!(
         crate::pending::hex(&Sha256::digest(letters.as_bytes())),
         expected.as_str().unwrap()
@@ -561,7 +573,9 @@ fn table_trailing_whitespace_matches_python() {
     let rows: Vec<Vec<String>> = (0x1c..=0x1f)
         .map(|c| vec![format!("value{}", char::from_u32(c).unwrap())])
         .collect();
-    let source = format!("{LOAD}\nreport=load('telemetry_report')\nprint(json.dumps(report.table(input['headers'], input['rows'])))");
+    let source = format!(
+        "{LOAD}\nreport=load('telemetry_report')\nprint(json.dumps(report.table(input['headers'], input['rows'])))"
+    );
     let Some(expected) = python(&source, &json!({"headers":headers,"rows":rows})) else {
         return;
     };
@@ -581,7 +595,9 @@ fn stats_renderer_matches_python() {
     });
     for detail in [false, true] {
         let input = json!({"report":report,"detail":detail});
-        let source = format!("{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\nout=io.StringIO()\nwith contextlib.redirect_stdout(out): report.render_stats(t,input['report'],input['detail'])\nprint(json.dumps(out.getvalue()))");
+        let source = format!(
+            "{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\nout=io.StringIO()\nwith contextlib.redirect_stdout(out): report.render_stats(t,input['report'],input['detail'])\nprint(json.dumps(out.getvalue()))"
+        );
         let Some(expected) = python(&source, &input) else {
             return;
         };

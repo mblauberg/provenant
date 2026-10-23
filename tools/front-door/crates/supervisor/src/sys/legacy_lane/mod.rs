@@ -12,7 +12,7 @@ use group::ProviderGroup;
 use observer::{Lines, Observer};
 use platform::Reactor;
 use spec::Spec;
-use state::{step, Action, Event, Phase, State, StopReason};
+use state::{Action, Event, Phase, State, StopReason, step};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Read};
@@ -351,10 +351,22 @@ pub fn run(args: &[OsString]) -> u8 {
                                 }
                                 Action::Observe => {
                                     let alive = !group.observed_exit();
-                                    let w=format!(concat!("{{\"schema\":\"fabric.watchdog.v1\",\"checked_at\":{},\"pid\":{},\"process_alive\":{},",
-                                        "\"silent_seconds\":{},\"last_event_at\":{},\"last_output_at\":{},\"last_worktree_write_at\":{},\"worktree_scan_complete\":{}}}\n"),
-                                        files::quote(&files::timestamp()),group.pid,alive,last_output.elapsed().as_secs_f64(),
-                                        files::nullable(last_event_at.as_deref()),files::nullable(last_output_at.as_deref()),files::nullable(workspace.as_ref().and_then(|w|w.latest.as_deref())),workspace.as_ref().is_some_and(|w|w.scan_complete()));
+                                    let w = format!(
+                                        concat!(
+                                            "{{\"schema\":\"fabric.watchdog.v1\",\"checked_at\":{},\"pid\":{},\"process_alive\":{},",
+                                            "\"silent_seconds\":{},\"last_event_at\":{},\"last_output_at\":{},\"last_worktree_write_at\":{},\"worktree_scan_complete\":{}}}\n"
+                                        ),
+                                        files::quote(&files::timestamp()),
+                                        group.pid,
+                                        alive,
+                                        last_output.elapsed().as_secs_f64(),
+                                        files::nullable(last_event_at.as_deref()),
+                                        files::nullable(last_output_at.as_deref()),
+                                        files::nullable(
+                                            workspace.as_ref().and_then(|w| w.latest.as_deref())
+                                        ),
+                                        workspace.as_ref().is_some_and(|w| w.scan_complete())
+                                    );
                                     io.result(
                                         "watchdog",
                                         attempt.atomic("watchdog.json", w.as_bytes(), false),
@@ -373,7 +385,16 @@ pub fn run(args: &[OsString]) -> u8 {
                             record.progress = files::timestamp();
                         }
                         cpu = new_cpu;
-                        let live=format!("{{\"schema\":\"provenant.lane.supervisor.v1\",\"pid\":{},\"pgid\":{},\"started_at\":{},\"last_progress_at\":{},\"run_token\":{},\"descendants\":{},\"descendants_truncated\":{}}}\n",group.pid,group.pid,files::quote(&started),files::quote(&record.progress),files::quote(&spec.token),group.census_json(),group.census_omitted());
+                        let live = format!(
+                            "{{\"schema\":\"provenant.lane.supervisor.v1\",\"pid\":{},\"pgid\":{},\"started_at\":{},\"last_progress_at\":{},\"run_token\":{},\"descendants\":{},\"descendants_truncated\":{}}}\n",
+                            group.pid,
+                            group.pid,
+                            files::quote(&started),
+                            files::quote(&record.progress),
+                            files::quote(&spec.token),
+                            group.census_json(),
+                            group.census_omitted()
+                        );
                         io.result(
                             "supervisor",
                             attempt.atomic("supervisor.json", live.as_bytes(), false),
@@ -479,3 +500,7 @@ pub fn run(args: &[OsString]) -> u8 {
     output.finish(Duration::from_millis(50));
     status
 }
+
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod fixtures;

@@ -10,7 +10,9 @@ use thiserror::Error;
 pub enum RunRootError {
     #[error("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path")]
     ProductRootRelative,
-    #[error("fixture run refused: {0} is not under an acceptable temp root ({1}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)")]
+    #[error(
+        "fixture run refused: {0} is not under an acceptable temp root ({1}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)"
+    )]
     FixtureRefused(String, String),
     #[error("could not resolve path: {0}")]
     Resolve(String),
@@ -47,7 +49,7 @@ pub fn product_root(
 ) -> Result<PathBuf, RunRootError> {
     let path = match configured {
         Some(value) if !Path::new(value).is_absolute() => {
-            return Err(RunRootError::ProductRootRelative)
+            return Err(RunRootError::ProductRootRelative);
         }
         Some(value) => PathBuf::from(value),
         None => default_root.to_path_buf(),
@@ -220,13 +222,15 @@ mod tests {
             None,
         );
         assert!(under_temp.is_ok(), "{under_temp:?}");
-        assert!(assert_fixture_run_root(
-            Path::new("/repo/.agent-run/scratch/run/.agent-run"),
-            &route,
-            temp.path(),
-            None
-        )
-        .is_ok());
+        assert!(
+            assert_fixture_run_root(
+                Path::new("/repo/.agent-run/scratch/run/.agent-run"),
+                &route,
+                temp.path(),
+                None
+            )
+            .is_ok()
+        );
         assert!(matches!(
             assert_fixture_run_root(Path::new("/repo/.agent-run"), &route, temp.path(), None),
             Err(RunRootError::FixtureRefused(..))

@@ -90,7 +90,7 @@ pub trait ExecutionFacade {
         observer: &mut dyn LaunchObserver,
     ) -> Result<BTreeMap<String, Value>, ExecutionError>;
     fn cancel(&mut self, request: CancelRequest)
-        -> Result<BTreeMap<String, Value>, ExecutionError>;
+    -> Result<BTreeMap<String, Value>, ExecutionError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

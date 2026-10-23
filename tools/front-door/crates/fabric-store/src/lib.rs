@@ -1,4 +1,10 @@
 //! Inert Fabric SQLite owner. Connections stay on their creating thread.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 mod diagnostics;
@@ -11,7 +17,7 @@ mod tasks;
 pub use diagnostics::*;
 pub use landing::*;
 pub use messages::*;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 pub use sessions::*;
 use std::{

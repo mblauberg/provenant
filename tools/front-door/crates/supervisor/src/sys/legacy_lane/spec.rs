@@ -1,4 +1,6 @@
-use crate::json::{self, Value};
+#![forbid(unsafe_code)]
+
+use crate::legacy_json::{self as json, Value};
 use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
 
@@ -167,9 +169,11 @@ mod tests {
     }
     #[test]
     fn unknown_major_rejected_before_fields() {
-        assert!(Spec::parse(r#"{"schema":"provenant.lane.launch.v2"}"#)
-            .unwrap_err()
-            .contains("unsupported"));
+        assert!(
+            Spec::parse(r#"{"schema":"provenant.lane.launch.v2"}"#)
+                .unwrap_err()
+                .contains("unsupported")
+        );
     }
     #[test]
     fn capture_paths_cannot_escape() {
