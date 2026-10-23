@@ -182,9 +182,22 @@ pub fn render_removals(report: &RemovalReport, prune: bool) -> CommandOutput {
     out
 }
 
-pub fn render_error(error: &impl std::fmt::Display) -> CommandOutput {
+pub fn render_operational_error(error: &impl std::fmt::Display) -> CommandOutput {
     CommandOutput {
         stderr: format!("provenant clean: {error}\n"),
+        exit_code: 2,
+        ..Default::default()
+    }
+}
+
+/// Parser usage is supplied by the edge presentation owner. The missing-selector
+/// refusal is operational text in Python; the other request failures are parser errors.
+pub fn render_request_error(error: &RequestError, program: &str, usage: &str) -> CommandOutput {
+    if *error == RequestError::MissingSelector {
+        return render_operational_error(error);
+    }
+    CommandOutput {
+        stderr: format!("{usage}{program}: error: {error}\n"),
         exit_code: 2,
         ..Default::default()
     }
@@ -277,6 +290,40 @@ mod tests {
             render_removals(&report, true).stdout,
             "removed a\nskipped b: keep:active\n"
         );
-        assert_eq!(render_error(&RequestError::MissingSelector).exit_code, 2);
+        assert_eq!(
+            render_request_error(&RequestError::MissingSelector, "clean.py", "usage\n").exit_code,
+            2
+        );
+    }
+    #[test]
+    fn invalid_request_error_classes_match_python_streams_and_exit_codes() {
+        use serde_json::json;
+        let cases = [
+            vec!["--apply"],
+            vec!["--prune-merged", "--include", "runs", "--branch", "x"],
+            vec!["--branch", "x"],
+            vec!["--prune-merged"],
+        ];
+        let Some(expected): Option<Vec<(String,String,u8)>> = crate::oracle::python(
+            "import json,subprocess,sys; print(json.dumps([(r.stdout,r.stderr,r.returncode) for a in json.load(sys.stdin) for r in [subprocess.run([sys.executable,'scripts/clean.py',*a],capture_output=True,text=True)]]))", &json!(cases)
+        ) else { return; };
+        for (argv, (stdout, stderr, exit_code)) in cases.iter().zip(expected) {
+            let error = args(argv).request("/r".into()).unwrap_err();
+            // Usage is an explicit parser-owned input. This tests renderer classification,
+            // stdout/stderr framing and exit status, not deferred help layout generation.
+            let usage = if error == RequestError::MissingSelector {
+                ""
+            } else {
+                &stderr[..stderr.rfind("clean.py: error:").unwrap()]
+            };
+            assert_eq!(
+                render_request_error(&error, "clean.py", usage),
+                CommandOutput {
+                    stdout,
+                    stderr,
+                    exit_code
+                }
+            );
+        }
     }
 }
