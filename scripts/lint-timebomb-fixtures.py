@@ -28,6 +28,10 @@ def _functions(node: ast.AST):
         yield from _functions(child)
 
 
+def _start(function: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    return min([function.lineno, *(item.lineno for item in function.decorator_list)])
+
+
 def _assigned_names(tree: ast.AST, line: int) -> set[str]:
     assignments = [
         node for node in ast.walk(tree)
@@ -62,6 +66,10 @@ def _loaded_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         node.id for node in names
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
     }
+    attributes = {
+        node.attr for node in names
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+    }
     local = {
         node.id for node in names
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
@@ -81,7 +89,7 @@ def _loaded_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     global_names = {
         name for node in names if isinstance(node, ast.Global) for name in node.names
     }
-    return loaded - (local - global_names)
+    return (loaded - (local - global_names)) | attributes
 
 
 def scan_file(path: Path) -> list[tuple[int, str]]:
@@ -137,14 +145,17 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
             continue
         containing = [
             function for function in functions
-            if function.lineno <= node.lineno <= (function.end_lineno or function.lineno)
+            if _start(function) <= node.lineno <= (function.end_lineno or function.lineno)
         ]
         if containing:
             function = min(containing, key=lambda item: (item.end_lineno or item.lineno) - item.lineno)
             has_window = function.name in window_functions or function.name in referenced_helpers
         else:
             fixture_names = _assigned_names(tree, node.lineno)
-            has_window = bool(fixture_names & active_names)
+            # Unassigned module-level dates keep the file-wide fallback.
+            has_window = (
+                bool(fixture_names & active_names) if fixture_names else bool(window_functions)
+            )
         line = lines[node.lineno - 1]
         if has_window and "timebomb: allow" not in line:
             findings.append((node.lineno, value))
@@ -210,9 +221,9 @@ def _context_changed(path: Path, line: int, added_lines: set[int]) -> bool:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         spans = [
-            (node.lineno, node.end_lineno or node.lineno)
+            (_start(node), node.end_lineno or node.lineno)
             for node in functions
-            if node.lineno <= line <= (node.end_lineno or node.lineno)
+            if _start(node) <= line <= (node.end_lineno or node.lineno)
         ]
         if not spans:
             if line in added_lines:

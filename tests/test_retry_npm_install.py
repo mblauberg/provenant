@@ -76,4 +76,5 @@ def test_recognizes_specific_service_unavailable_signatures():
     assert module.RETRYABLE.search("npm error 503 Service Unavailable")
     assert module.RETRYABLE.search("npm error code E503")
     assert module.RETRYABLE.search("npm error status 503")
+    assert module.RETRYABLE.search("npm http fetch GET 503 https://registry.npmjs.org/x")
     assert not module.RETRYABLE.search("npm error package version 1.503.0")

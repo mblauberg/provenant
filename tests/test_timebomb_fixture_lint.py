@@ -97,6 +97,33 @@ def test_finds_module_fixture_when_test_context_uses_now(tmp_path):
     assert module._context_changed(path, 1, {3})
 
 
+def test_finds_parametrized_date_on_now_relative_test(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'import pytest\n'
+        '@pytest.mark.parametrize("stamp", ["2026-05-05"])\n'
+        'def test_window(stamp):\n'
+        '    assert datetime.now() > parse(stamp)\n',
+        encoding="utf-8",
+    )
+    assert module.scan_file(path) == [(2, "2026-05-05")]
+    assert module._context_changed(path, 2, {4})
+
+
+def test_finds_class_attribute_fixture_read_through_self(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'class TestWindow:\n'
+        '    DATA = "2026-02-02"\n'
+        '    def test_window(self):\n'
+        '        assert datetime.now() > parse(self.DATA)\n',
+        encoding="utf-8",
+    )
+    assert module.scan_file(path) == [(2, "2026-02-02")]
+
+
 def test_ignores_module_fixture_unused_by_now_relative_test(tmp_path):
     module = load_module()
     path = tmp_path / "test_fixture.py"

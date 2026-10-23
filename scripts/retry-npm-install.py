@@ -14,7 +14,7 @@ import time
 RETRYABLE = re.compile(
     r"(?:npm\s+(?:ERR!|error)\s+code\s+ECONNRESET"
     r"|npm\s+(?:ERR!|error)[^\n]*(?:503 Service Unavailable|\bE503\b|status 503)"
-    r"|npm\s+http\s+fetch[^\n]*(?:503 Service Unavailable|\bE503\b|status 503))",
+    r"|npm\s+http\s+fetch[^\n]*(?:503 Service Unavailable|\bE503\b|status 503|\bGET\s+503\b))",
     re.IGNORECASE,
 )
 DELAYS = (2, 4)
@@ -23,7 +23,7 @@ MAX_OUTPUT_TAIL = 64 * 1024
 
 def _run_with_live_output(command: list[str]) -> tuple[int, str]:
     process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1,
     )
     tail: deque[str] = deque()
     tail_size = 0
