@@ -539,9 +539,9 @@ supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
    git links/commands and Herdr preservation assertions. No old-root reader.
 4. **Area bindings.** Connect run/route, worktree/cleanup, Fabric/MCP, telemetry
    and workflow in owner slices with caller updates and subject/test deletions.
-   The missing execution-route design must settle the classifier and route
-   flag gate before freeze/utility deletion; supervisor must settle worktree
-   flags. No placeholder success or compatibility dispatcher ships.
+   Execution-route settles classifier removal and route flags for utility
+   deletion; supervisor must settle worktree flags before parser freeze.
+   No placeholder success or compatibility dispatcher ships.
 5. **Final CI/cut-over gate.** Replace custody invariants before deleting
    `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
    `tests/test_record_schemas.py` with their subjects. Remove their judge CI
