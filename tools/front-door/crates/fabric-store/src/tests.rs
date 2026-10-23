@@ -712,3 +712,49 @@ fn persisted_fractional_session_counters_and_pid_are_refused() {
             .unwrap();
     }
 }
+
+#[test]
+fn landing_wait_uses_integer_deadlines_and_checked_ceil_milliseconds() {
+    use std::sync::Arc;
+    struct Time(Arc<TimeCell>);
+    impl Clock for Time {
+        fn now_ms(&self) -> i64 {
+            self.0.get()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let time = Arc::new(TimeCell::new(1000));
+    let store = Store::open(&dir.path().join("db"), 5000, Time(time.clone())).unwrap();
+    for (start, seconds, expected) in [
+        (1000, 0.003, 3),
+        (1000, 0.005, 5),
+        (1000, 0.0001, 1),
+        (1000, 0.0011, 2),
+        (9_007_199_254_740_993, 0.001, 1),
+    ] {
+        time.set(start);
+        store
+            .wait_landing(
+                "p",
+                seconds,
+                1,
+                || false,
+                |d| time.set(time.get() + d.as_millis() as i64),
+            )
+            .unwrap();
+        assert_eq!(time.get(), start + expected);
+    }
+    for (start, seconds) in [
+        (i64::MAX, 0.001),
+        (i64::MIN, -0.001),
+        (0, f64::MAX),
+        (0, -f64::MAX),
+        (0, 9_223_372_036_854_776.0),
+    ] {
+        time.set(start);
+        assert!(matches!(
+            store.wait_landing("p", seconds, 1, || false, |_| panic!("invalid deadline")),
+            Err(Error::NumberOutOfRange)
+        ));
+    }
+}

@@ -1789,3 +1789,26 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   is also refused even when numerically integral. The regression persists 2.5
   in each field separately and checks both session read APIs and the exact
   failing column. No migration or live-data rewrite is performed.
+
+### RP-FS3-004 amendment: chair decision on wait deadlines (PR #1332 repair 7)
+
+- Supersedes the original exception for wait deadline arithmetic. The chair
+  rejected f64 deadlines: for an integer clock, `now < deadline` is equivalent
+  to `now < ceil(deadline)`. Rust now performs the source's fractional Number
+  multiplication `seconds * 1000` once at the input boundary, takes its exact
+  ceiling, checks the exclusive +2^63 and inclusive -2^63 bounds, then converts
+  to i64 milliseconds. No clock sample or deadline is converted to f64.
+  Checked integer addition refuses deadline overflow; i128 subtraction handles
+  the full difference between two i64 clock samples. Poll delays and the
+  independent one-hour budget use integer milliseconds too.
+- The remaining f64 sites are the genuinely fractional source wait-seconds
+  input and its multiplication/ceiling conversion; legacy ECMAScript
+  String/Number parsing, spelling and terminal-notice attempts; SQLite REAL
+  binding of those Numbers; and comparisons of terminal/observed attempts
+  (including `LaneAttempt`). Their fractional values, NaN/infinities or
+  ECMAScript spelling/coercion are observable source behaviour. None licenses
+  f64 for retained integer IDs, generations, timestamps or session records.
+- Regression evidence covers fractional millisecond ceilings, exact 3/5 ms
+  products, clocks above 2^53, positive/negative deadline overflow and the
+  rounded i64 upper boundary. RP-FS3-001/005's finite/range refusals and
+  independent poll ceiling remain intentional improvements.

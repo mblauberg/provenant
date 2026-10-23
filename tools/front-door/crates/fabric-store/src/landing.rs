@@ -110,16 +110,25 @@ impl Store {
         mut aborted: impl FnMut() -> bool,
         mut wait: impl FnMut(Duration),
     ) -> Result<LandingWait> {
-        if !seconds.is_finite() || seconds * 1000.0 > i64::MAX as f64 {
+        // Preserve the source Number multiplication at the fractional-input
+        // boundary, then ceil exactly before any clock/deadline arithmetic.
+        let milliseconds = (seconds * 1000.0).ceil();
+        // 2^63 is exactly representable; i64::MAX as f64 rounds up to it.
+        const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+        if !milliseconds.is_finite() || !(-LIMIT..LIMIT).contains(&milliseconds) {
             return Err(Error::NumberOutOfRange);
         }
+        let milliseconds = milliseconds as i64;
         let key =
             |lease: &Option<LandingLease>| lease.as_ref().map(|l| (l.holder.clone(), l.generation));
         let start = key(&self.landing_lease(project, self.now())?);
-        let deadline = self.now() as f64 + seconds * 1000.0;
+        let deadline = self
+            .now()
+            .checked_add(milliseconds)
+            .ok_or(Error::NumberOutOfRange)?;
         // Independent of the injected clock and wait callback. This also bounds
         // frozen/backwards clocks and callbacks which return without waiting.
-        let budget_ms = (seconds * 1000.0).clamp(0.0, 3_600_000.0).ceil() as u64;
+        let budget_ms = milliseconds.clamp(0, 3_600_000) as u64;
         let mut waited_ms = 0_u64;
         loop {
             let lease = self.landing_lease(project, self.now())?;
@@ -129,8 +138,8 @@ impl Store {
                     lease,
                 });
             }
-            let remaining = deadline - self.now() as f64;
-            if remaining <= 0.0 || aborted() || waited_ms >= budget_ms {
+            let remaining = i128::from(deadline) - i128::from(self.now());
+            if remaining <= 0 || aborted() || waited_ms >= budget_ms {
                 return Ok(LandingWait {
                     changed: false,
                     lease,
@@ -138,7 +147,7 @@ impl Store {
             }
             let delay = poll_ms
                 .max(1)
-                .min(remaining.max(1.0) as u64)
+                .min(remaining.min(i128::from(u64::MAX)) as u64)
                 .min(budget_ms - waited_ms);
             waited_ms += delay;
             wait(Duration::from_millis(delay));
