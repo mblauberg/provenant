@@ -61,6 +61,12 @@ pub enum Error {
     Completion(#[source] io::Error),
     #[error("worker launch or wait failed: {0}")]
     Worker(#[source] io::Error),
+    #[error("completion evidence is not UTF-8: {path}")]
+    Encoding {
+        path: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
     #[error(transparent)]
     Evidence(#[from] EvidenceError),
 }
@@ -199,7 +205,7 @@ pub fn single_value(text: &str) -> Option<String> {
 }
 
 fn digits(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+    pending::python_isdigit(value)
 }
 
 pub fn validate(
@@ -237,10 +243,10 @@ pub fn validate(
         }
         return Err(EvidenceError::MissingMarker);
     }
-    if !done
-        .split('\n')
-        .any(|line| line.strip_prefix("exit=").is_some_and(digits))
-    {
+    if !done.split('\n').any(|line| {
+        line.strip_prefix("exit=")
+            .is_some_and(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+    }) {
         return Err(EvidenceError::InvalidExit);
     }
     let mut wrappers = Vec::new();
@@ -288,29 +294,70 @@ pub fn validate_run(
     run_dir: &Path,
     now: SystemTime,
     probe: &mut impl ProcessProbe,
-) -> Result<Validation, EvidenceError> {
-    let read = |name| {
-        pending::read_bounded(&run_dir.join(name), 1024 * 1024)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
+) -> Result<Validation, Error> {
+    let read = |name| -> Result<Option<String>, Error> {
+        let path = run_dir.join(name);
+        match pending::read_bounded(&path, 1024 * 1024) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|source| Error::Encoding { path, source }),
+            Err(_) => Ok(None),
+        }
     };
-    let done_meta = fs::metadata(run_dir.join("done")).ok();
-    let age = fs::metadata(run_dir)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|modified| now.duration_since(modified).ok())
-        .map(|age| age.as_secs_f64());
+    // Read lazily, in the source's refusal order. In particular an invalid
+    // worker/done file cannot mask an invalid or absent wrapper PID.
+    let wrapper = read("wrapper.pid")?;
+    let wrapper_value = wrapper.as_deref().and_then(single_value);
+    if wrapper_value.as_deref().is_none_or(|value| !digits(value)) {
+        let age = if wrapper_value.is_none() {
+            fs::metadata(run_dir)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|modified| pending::epoch_seconds(now) - pending::epoch_seconds(modified))
+        } else {
+            None
+        };
+        return validate(
+            &Evidence {
+                wrapper,
+                done_exists: run_dir.join("done").exists(),
+                directory_age_seconds: age,
+                ..Evidence::default()
+            },
+            probe,
+        )
+        .map_err(Error::Evidence);
+    }
+    let worker = read("worker.pid")?;
+    if worker.as_deref().and_then(single_value).is_none() {
+        if wrapper_value
+            .as_deref()
+            .is_some_and(|pid| probe.process_exists(pid))
+            && fs::metadata(run_dir.join("done"))
+                .map(|m| m.len() == 0)
+                .unwrap_or(true)
+        {
+            return Ok(Validation::Starting);
+        }
+        return Err(EvidenceError::MissingWorker.into());
+    }
+    if worker
+        .as_deref()
+        .and_then(single_value)
+        .is_some_and(|pid| !digits(&pid))
+    {
+        return Err(EvidenceError::InvalidWorker.into());
+    }
     validate(
         &Evidence {
-            wrapper: read("wrapper.pid"),
-            worker: read("worker.pid"),
-            done: read("done"),
-            done_exists: run_dir.join("done").exists(),
-            done_size: done_meta.map(|m| m.len()),
-            directory_age_seconds: age,
+            wrapper,
+            worker,
+            done: read("done")?,
+            ..Evidence::default()
         },
         probe,
     )
+    .map_err(Error::Evidence)
 }
 
 /// Run to completion in the foreground; the safe supervisor adapter owns the worker.
@@ -385,10 +432,22 @@ pub fn execute(
         wrapper_pid,
         format!("{worker_pid}\n").as_bytes(),
     ) {
-        let cleanup = worker.terminate_and_wait().err();
+        let cleanup = worker
+            .terminate_and_wait(std::time::Duration::from_secs(5))
+            .err();
         return Err(Error::WorkerPid { source, cleanup });
     }
-    let exit_status = match worker.wait().map_err(Error::Worker)? {
+    // Each observation is bounded; the source imposes no execution deadline.
+    // Silence never changes this loop into a stop request.
+    let exit = loop {
+        if let Some(exit) = worker
+            .wait_for(std::time::Duration::from_secs(1))
+            .map_err(Error::Worker)?
+        {
+            break exit;
+        }
+    };
+    let exit_status = match exit {
         WorkerExit::Exited(code) => code,
         WorkerExit::Signalled(signal) => 128 + signal,
     };

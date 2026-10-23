@@ -18,12 +18,20 @@ impl<T> Field<T> {
     pub fn is_missing(&self) -> bool {
         matches!(self, Self::Missing)
     }
+    pub fn as_ref(&self) -> Option<&T> {
+        self.value()
+    }
     pub fn value(&self) -> Option<&T> {
         if let Self::Value(value) = self {
             Some(value)
         } else {
             None
         }
+    }
+}
+impl<T> From<Option<T>> for Field<T> {
+    fn from(value: Option<T>) -> Self {
+        value.map_or(Self::Null, Self::Value)
     }
 }
 impl<T: Serialize> Serialize for Field<T> {

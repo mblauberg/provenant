@@ -155,8 +155,10 @@ def product_template(tmp_path_factory) -> Path:
         ROOT,
         template,
         symlinks=True,
+        # Cargo's in-tree `target` is build output: copying it into every test
+        # product exhausted the CI runner's /tmp quota.
         ignore=shutil.ignore_patterns(
-            ".git", ".agent-run", "node_modules", ".venv", "installation.json"
+            ".git", ".agent-run", "node_modules", ".venv", "installation.json", "target"
         ),
     )
     return template
