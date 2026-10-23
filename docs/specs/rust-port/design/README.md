@@ -1,0 +1,21 @@
+# Rewrite design docs
+
+One accepted design per area of the [Rust rewrite](../README.md). Each doc
+lands here after its cross-family council.
+
+## Cross-area decisions
+
+The chairs settle these once. Area docs cite this table, not each other, and
+a revision that disagrees proposes a change here first.
+
+| Topic | Decision | Detail owner |
+|---|---|---|
+| State root | Default `~/.local/share/provenant/v1`; `--state-dir ABS` overrides `PROVENANT_STATE_DIR`. No fallback to any old root, and a root inside an old root is refused. | state |
+| Layout | One state root per host, not per project. Run owns `runs/<RunId>/` and its store at the top level; Fabric owns `fabric/`; install owns `install/` and `releases/`. `ProjectId` is host-local and recorded on each run; fabric-runtime owns the cross-host project key used by federation. | state, with each area's subtree |
+| Command contract | `design/cli.md`'s JSON envelope (`schema_version`, `command`, `status`, `data`, `error`), its 1 MiB result cap and its exit codes: 0 ok, 1 failed, refused or findings, 2 invalid input or version, 3 cannot proceed (setup, I/O, contention), 124 wait deadline, 130 cancelled. There is no exit 4: partial coverage and input-required are reported in `data`. A wait that ends because its condition was met, including `InputRequired`, exits 0. | cli |
+| Config | One user-owned `config.toml` under the state root. Compiled presets and bundled data (prices, catalogue, adapter table) ship as TOML assets. No profile layering, project overlays, per-knob environment variables or profile mutation verbs; `config show` and `config check` remain, plus an optional `profile =` key. | state |
+| Records | Stored records are typed serde models with versioned headers. Fact types that only edge code builds are `Serialize` only. | each area |
+| Telemetry | No ledger. `telemetry stats` reduces run's terminal records with the price table. The old ledger is neither imported nor deleted; its history stays on disk for the old install. The OTel collector retires at cut-over. | telemetry |
+| Import | Read-only, one shot, at cut-over: open and blocked Fabric tasks and unacknowledged requests from the last 14 days. Nothing else. | fabric |
+| Installer | `install [--dry-run]`, `check`, `remove`; re-applying `install` is the recovery path. Rollback reinstalls the `pre-rust-rewrite` tag. Cut-over replaces or removes the old install's harness entries (hooks, skill and workflow links, MCP entries, instruction links) from a compiled list matched by exact command or link target under `--legacy-checkout ABS`, reading links with `readlink` only. It prints every harness-config change before applying it. | state |
+| Dependencies | `rusqlite` may serve run's store as well as Fabric's. `toml_edit` gains its `serde` feature for typed config (PORTING.md R6). | chairs |
