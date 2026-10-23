@@ -12,6 +12,7 @@ pub mod ingest_store;
 mod pending;
 pub use pending::{decode_json, Numeric};
 pub mod report;
+pub mod stats;
 
 pub use pending::{Event, Observation, Usage};
 use serde::{Deserialize, Serialize};
