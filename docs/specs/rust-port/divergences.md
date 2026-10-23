@@ -65,3 +65,23 @@ They form the current baseline; they are not newly discovered port mismatches.
   and descriptor policy, not session isolation or wrapper-death survival.
   The production supervisor adapter and surviving OS conformance remain
   before cut-over. This does not approve a boundary change.
+
+### RP-RUN-3 — native review corrections (fixed)
+
+- Units: `skills/orchestrate/scripts/run_lineage.py#interface`,
+  `skills/orchestrate/scripts/run_worker_detached.py#unit-01`; rulebook v2
+  with the v3/PR #1294 inert-crate gate override.
+- Class: `bug`. Oracle: `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Reproducer: a failed child's `error: false` incorrectly printed `False`
+  instead of falling back to `failed`; the first ownership interface lost
+  Python's standalone batch-child result; the test worker cleanup sent
+  SIGKILL although Python requests SIGTERM after a PID publication failure.
+- Expected/actual: preserve JSON truthiness for the child error fallback,
+  retain standalone/shared execution-custody decisions, and send SIGTERM
+  only to the owned worker before reaping it.
+- Evidence: native source review; explicit falsey error and custody-mode
+  regression fixtures; a FIFO-synchronised SIGTERM trap fixture. Source
+  `tests/test_lease.py` and `tests/test_worker_completion_guidance.py`: 14 pass.
+- Disposition: fixed in `ba8fdbea` and `5cddf0af`; independent repair review
+  found no remaining high-confidence issue. Pending production OS behaviour
+  and the RP-RUN-1/RP-RUN-2 compatibility limits remain open.
