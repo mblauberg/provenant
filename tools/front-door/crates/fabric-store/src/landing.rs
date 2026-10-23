@@ -81,6 +81,11 @@ impl Store {
             |lease: &Option<LandingLease>| lease.as_ref().map(|l| (l.holder.clone(), l.generation));
         let start = key(&self.landing_lease(project, self.now())?);
         let deadline = self.now() as f64 + seconds * 1000.0;
+        // Independent of the injected clock and wait callback. This also bounds
+        // frozen/backwards clocks and callbacks which return without waiting.
+        let budget_ms = (seconds * 1000.0).clamp(0.0, 3_600_000.0).ceil() as u64;
+        let wall_deadline = Instant::now() + Duration::from_millis(budget_ms);
+        let mut waited_ms = 0_u64;
         loop {
             let lease = self.landing_lease(project, self.now())?;
             if key(&lease) != start {
@@ -90,15 +95,15 @@ impl Store {
                 });
             }
             let remaining = deadline - self.now() as f64;
-            if remaining <= 0.0 || aborted() {
+            if remaining <= 0.0 || aborted() || waited_ms >= budget_ms || Instant::now() >= wall_deadline {
                 return Ok(LandingWait {
                     changed: false,
                     lease,
                 });
             }
-            wait(Duration::from_millis(
-                poll_ms.max(1).min(remaining.max(1.0) as u64),
-            ));
+            let delay = poll_ms.max(1).min(remaining.max(1.0) as u64).min(budget_ms - waited_ms);
+            waited_ms += delay;
+            wait(Duration::from_millis(delay));
         }
     }
     pub fn acquire_landing(

@@ -1375,3 +1375,11 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   i64/u64. Python values use `provenant_core::py`; its Python number and
   whitespace semantics must not replace ECMAScript semantics. Checked JSON
   integer decoding belongs to `provenant_records::checked_json`.
+
+## RP-FS3-005: clock-independent landing wait ceiling (improvement)
+
+- Review repair 8. `wait_landing` has both a monotonic deadline and a cumulative
+  poll budget, capped at one hour. A frozen/backwards injected clock or a wait
+  callback returning immediately cannot cause an unbounded loop. Each callback
+  must itself honour its duration/cancellation contract; the store cannot
+  pre-empt arbitrary caller code. Normal finite waits preserve source results.

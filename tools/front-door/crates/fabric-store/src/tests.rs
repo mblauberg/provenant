@@ -451,3 +451,16 @@ fn panicking_push_clears_its_hold_and_preserves_the_lease() {
     assert!(store.landing_lease("p", 1000).unwrap().unwrap().pushing_until_ms.is_none());
     assert!(store.try_release_landing(&who, "s", 1, Some(1000)).unwrap().released());
 }
+
+#[test]
+fn landing_wait_is_bounded_when_the_clock_is_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let mut polls = 0;
+    let result = store.wait_landing("p", 0.005, 1, || false, |_| { polls += 1; }).unwrap();
+    assert!(!result.changed);
+    assert!(polls <= 5);
+    for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+        assert!(matches!(store.wait_landing("p", seconds, 1, || false, |_| {}), Err(Error::NumberOutOfRange)));
+    }
+}
