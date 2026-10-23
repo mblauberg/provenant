@@ -108,7 +108,4 @@ pub(crate) trait StorageFs {
     fn rmdir(&self, parent: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<()>;
 }
 
-// port: belongs in provenant-core
-pub(crate) fn python_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
-}
+pub(crate) use provenant_core::py::python_strip;

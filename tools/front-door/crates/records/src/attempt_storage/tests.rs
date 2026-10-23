@@ -291,7 +291,11 @@ fn prune_reports_no_bytes_freed_when_any_path_remains() {
 fn differential_python_allocations_and_pruning() {
     let oracle = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../skills/orchestrate/scripts/attempt_storage.py");
-    let output = match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command.args(["-c",r#"
 import importlib.util,json,os,stat,sys,tempfile
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('storage_oracle',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -307,10 +311,9 @@ with tempfile.TemporaryDirectory() as root:
   return d
  tree=snap(root);size=m.tree_bytes(tmp);freed,left=m.prune_private_tmp(root,root/'run/attempt','ok')
  print(json.dumps({'tree':tree,'size':size,'freed':freed,'left':left,'exists':tmp.exists()}))
-"#]).arg(oracle).env_remove(KEEP_ENV).output() {
-        Ok(output) => output,
-        Err(error) => panic!("cannot run Python oracle: {error}"),
-    };
+"#]).arg(oracle).env_remove(KEEP_ENV);
+    let output = crate::oracle::run(&mut command)
+        .unwrap_or_else(|error| panic!("cannot run Python oracle: {error}"));
     assert!(
         output.status.success(),
         "{}",

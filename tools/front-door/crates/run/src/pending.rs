@@ -1,10 +1,8 @@
 //! Temporary safe OS helpers until the supervisor exposes these contracts.
 #[path = "python_unicode.rs"]
 mod python_unicode;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 
 // port: belongs in provenant-supervisor
@@ -40,151 +38,6 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
 }
 
 // port: belongs in provenant-supervisor
-pub(crate) fn publish_lease(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::create_dir_all(parent(path))?;
-    // create_new gives independent calls distinct temporary files without global state.
-    for serial in 0..1024 {
-        let mut name = std::ffi::OsString::from(".");
-        name.push(
-            path.file_name()
-                .ok_or_else(|| io::Error::other("missing lease filename"))?,
-        );
-        name.push(format!(".{}.{serial}", std::process::id()));
-        let temp = parent(path).join(name);
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let result = (|| {
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp, path)
-        })();
-        let cleanup = fs::remove_file(&temp);
-        return match (result, cleanup) {
-            (Err(e), _) => Err(e),
-            (Ok(()), Err(e)) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "lease temporary files exhausted",
-    ))
-}
-
-// port: belongs in provenant-records
-pub(crate) fn ascii_json(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        if c.is_ascii() {
-            out.push(c);
-        } else {
-            for unit in c.encode_utf16(&mut [0; 2]) {
-                out.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    out
-}
-
-// port: belongs in provenant-records
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Lease {
-    pub schema_version: u8,
-    pub status: String,
-    pub holder: String,
-    pub previous_holder: String,
-    pub generation: i64,
-    pub updated_at: String,
-    pub expires_at: String,
-    pub handoff_evidence: String,
-}
-
-// port: belongs in provenant-records
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "serde_json::Value")]
-pub struct ParentAttempt {
-    run_id: String,
-    task_id: String,
-    attempt: u64,
-    run_dir: std::path::PathBuf,
-}
-
-// port: belongs in provenant-records
-impl TryFrom<serde_json::Value> for ParentAttempt {
-    type Error = &'static str;
-    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
-        let run_id = value
-            .get("run_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or("invalid parent run id")?;
-        let task_id = value
-            .get("task_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| {
-                let bytes = s.as_bytes();
-                !bytes.is_empty()
-                    && bytes.len() <= 64
-                    && bytes[0].is_ascii_alphanumeric()
-                    && bytes
-                        .iter()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(b))
-            })
-            .ok_or("invalid parent task id")?;
-        let attempt = value
-            .get("attempt")
-            .and_then(serde_json::Value::as_u64)
-            .filter(|n| *n > 0)
-            .ok_or("invalid parent attempt")?;
-        let run_dir = value
-            .get("run_dir")
-            .and_then(serde_json::Value::as_str)
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .ok_or("invalid parent run directory")?;
-        Ok(Self {
-            run_id: run_id.into(),
-            task_id: task_id.into(),
-            attempt,
-            run_dir,
-        })
-    }
-}
-
-// port: belongs in provenant-records
-impl ParentAttempt {
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-    pub fn task_id(&self) -> &str {
-        &self.task_id
-    }
-    pub fn attempt(&self) -> u64 {
-        self.attempt
-    }
-    pub fn run_dir(&self) -> &Path {
-        &self.run_dir
-    }
-}
-
-// port: belongs in provenant-records
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChildReport {
-    pub run_id: String,
-    #[serde(flatten)]
-    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-// port: belongs in provenant-supervisor
 /// A custody capability owns its lock and cannot be constructed from a recorded PID.
 /// Implementations must retain it through publication and terminal cleanup.
 pub trait OwnerCustody: std::fmt::Debug {}
@@ -206,11 +59,13 @@ pub enum WorkerExit {
 /// The handle owns only the worker it launched, including reaping responsibility.
 pub trait SessionWorker {
     fn pid(&self) -> u32;
-    fn wait(&mut self) -> io::Result<WorkerExit>;
+    /// Observe for at most `timeout`, retaining custody on timeout. A quiet worker
+    /// stays live; this poll never authorizes signalling or loses its handle.
+    fn wait_for(&mut self, timeout: std::time::Duration) -> io::Result<Option<WorkerExit>>;
     /// Used only if the worker PID cannot be persisted, matching the old wrapper.
     /// Send SIGTERM to this owned worker (not SIGKILL or its process group), then
     /// wait and reap it. An already-exited worker is still reaped successfully.
-    fn terminate_and_wait(&mut self) -> io::Result<()>;
+    fn terminate_and_wait(&mut self, timeout: std::time::Duration) -> io::Result<()>;
 }
 
 // port: belongs in provenant-supervisor
@@ -251,49 +106,41 @@ pub(crate) fn publish_marker(path: &Path, wrapper_pid: u32, bytes: &[u8]) -> io:
     Ok(())
 }
 
-// port: belongs in provenant-records
-pub(crate) fn json_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(v) => *v,
-        Value::Number(v) => v.as_f64() != Some(0.0),
-        Value::String(v) => !v.is_empty(),
-        Value::Array(v) => !v.is_empty(),
-        Value::Object(v) => !v.is_empty(),
-    }
+// port: belongs in provenant-core
+pub(crate) fn python_isdigit(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(python_unicode::isdigit)
 }
 
 // port: belongs in provenant-core
-pub(crate) fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::from(quote);
-    for c in text.chars() {
-        match c {
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c == quote => {
-                result.push('\\');
-                result.push(c);
-            }
-            c if !python_unicode::printable(c) => {
-                let code = u32::from(c);
-                if code < 256 {
-                    result.push_str(&format!("\\x{code:02x}"));
-                } else if code <= 0xffff {
-                    result.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    result.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            c => result.push(c),
+// Unicode 16.0 decimal-zero code points, generated from Python's unicodedata.
+const DECIMAL_ZEROES: &[u32] = &[
+    0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+    0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+    0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
+    0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0,
+    0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+    0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8,
+    0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
+
+// Match Python int()'s Unicode Nd digit conversion. Superscript digits, for
+// example, satisfy str.isdigit() but are not valid integer-string digits.
+// port: belongs in provenant-core
+pub(crate) fn python_decimal_digit(character: char) -> Option<u8> {
+    let codepoint = u32::from(character);
+    DECIMAL_ZEROES.iter().find_map(|zero| {
+        if codepoint >= *zero && codepoint < *zero + 10 {
+            Some((codepoint - *zero) as u8)
+        } else {
+            None
         }
+    })
+}
+
+// port: belongs in provenant-core
+pub(crate) fn epoch_seconds(time: std::time::SystemTime) -> f64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64(),
+        Err(error) => -error.duration().as_secs_f64(),
     }
-    result.push(quote);
-    result
 }

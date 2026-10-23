@@ -410,7 +410,11 @@ fn output_paths_resolve_links_and_missing_components() {
 
 #[test]
 fn differential_python_success_matrix() {
-    let mut child = match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c", r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command.args(["-c", r#"
 import importlib.util,json,sys
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('attempt_evidence_oracle',sys.argv[1])
@@ -423,10 +427,9 @@ for case in json.load(sys.stdin):
  except m.AttemptEvidenceError as error: answers.append(str(error))
 print(json.dumps(answers))
 "#]).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts/attempt_evidence.py"))
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-        Ok(child) => child,
-        Err(error) => panic!("cannot start Python oracle: {error}"),
-    };
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = crate::oracle::spawn(&mut command)
+        .unwrap_or_else(|error| panic!("cannot start Python oracle: {error}"));
     let run = tempfile::tempdir().unwrap();
     let mut cases = Vec::new();
     let mut answers = Vec::new();
@@ -440,13 +443,17 @@ print(json.dumps(answers))
         );
         cases.push(json!({"run": run.path(), "record": record, "payloads": payloads}));
     }
-    child
+    let write_result = child
+        .child_mut()
         .stdin
         .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&cases).unwrap())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
+        .expect("Python oracle stdin was not piped")
+        .write_all(&serde_json::to_vec(&cases).unwrap());
+    if let Err(error) = write_result {
+        let _ = child.wait();
+        panic!("cannot send cases to Python oracle: {error}");
+    }
+    let output = child.wait().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -485,27 +492,23 @@ fn differential_python_non_strict_symlink_resolution() {
         .collect();
     assert_eq!(rust[0], run.as_path().join("loop/result.md"));
     assert_eq!(rust[1], run.as_path().join("real/result.md"));
-    let output = match {
-        let Some(command) = crate::oracle::python() else {
-            return;
-        };
-        command
-    }
-    .args([
-        "-c",
-        r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command
+        .args([
+            "-c",
+            r#"
 import json,sys
 from pathlib import Path
 if sys.version_info<(3,13): print('null')
 else: print(json.dumps([str(Path(p).resolve()) for p in sys.argv[1:]]))
 "#,
-    ])
-    .args(paths)
-    .output()
-    {
-        Ok(output) => output,
-        Err(error) => panic!("cannot run Python oracle: {error}"),
-    };
+        ])
+        .args(paths);
+    let output = crate::oracle::run(&mut command)
+        .unwrap_or_else(|error| panic!("cannot run Python oracle: {error}"));
     assert!(
         output.status.success(),
         "{}",
@@ -563,7 +566,11 @@ fn differential_python_record_numeric_spelling() {
     assert!(answers[2..].iter().all(Option::is_some));
     let oracle =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-    let mut child=match { let Some(command) = crate::oracle::python() else { return }; command }.args(["-c",r#"
+    let mut command = match crate::oracle::python() {
+        Some(command) => command,
+        None => return,
+    };
+    command.args(["-c",r#"
 import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1]);import attempt_evidence as m
@@ -573,17 +580,20 @@ for case in json.load(sys.stdin):
   m.validate_successful_attempt(Path(case['run']),json.loads(case['record_json']),{k:bytes(v) for k,v in case['payloads'].items()});answers.append(None)
  except m.AttemptEvidenceError as e: answers.append(str(e))
 print(json.dumps(answers))
-"#]).arg(oracle).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-        Ok(child)=>child,
-        Err(error)=>panic!("cannot run Python oracle: {error}"),
-    };
-    child
+"#]).arg(oracle).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = crate::oracle::spawn(&mut command)
+        .unwrap_or_else(|error| panic!("cannot run Python oracle: {error}"));
+    let write_result = child
+        .child_mut()
         .stdin
         .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&cases).unwrap())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
+        .expect("Python oracle stdin was not piped")
+        .write_all(&serde_json::to_vec(&cases).unwrap());
+    if let Err(error) = write_result {
+        let _ = child.wait();
+        panic!("cannot send cases to Python oracle: {error}");
+    }
+    let output = child.wait().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -621,7 +631,7 @@ fn lone_surrogate_unknown_fields_are_typed_json_refusals() {
     let Some(mut python) = crate::oracle::python() else {
         return;
     };
-    let output = python.args(["-c", r#"import json; assert ord(json.loads('"\\ud800"')) == 0xd800; assert ord(json.loads('"\\udfff"')) == 0xdfff"#]).output().unwrap();
+    let output = crate::oracle::run(python.args(["-c", r#"import json; assert ord(json.loads('"\\ud800"')) == 0xd800; assert ord(json.loads('"\\udfff"')) == 0xdfff"#])).unwrap();
     assert!(
         output.status.success(),
         "{}",
