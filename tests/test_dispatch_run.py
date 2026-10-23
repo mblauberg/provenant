@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
@@ -101,13 +103,6 @@ def make_run(tmp_path: Path, name: str) -> Path:
     return Path(
         subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip()
     ).resolve()
-
-
-def disable_memory_admission_floor(workspace: Path) -> None:
-    """Keep process contract tests independent of host memory probes."""
-    policy = workspace / ".agents/fabric-policy.json"
-    policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
 
 
 def load_dispatch_module():
@@ -2002,9 +1997,11 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
+        if [ "$1" = "--help" ]; then exit 0; fi
         if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         printf '%s\n' "$$" > "$PROBE_PID_PATH"
@@ -3789,25 +3786,6 @@ else:
     # The provider tmp lives inside its attempt and is pruned once the attempt is terminal.
     assert scratch.is_relative_to(run_dir.resolve()) and not scratch.exists()
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'ok'
-
-
-def real_owner_fixture(tmp_path, monkeypatch, code):
-    """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
-    disable_memory_admission_floor(tmp_path)
-    bindir = tmp_path / 'provider-bin'
-    bindir.mkdir()
-    write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
-    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
-    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
-    monkeypatch.delenv('PROVENANT_RUN_TOKEN', raising=False)
-    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
-    prompt = tmp_path / 'caller-prompt.md'
-    prompt.write_text('hello')
-    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
-               '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
-    return run, prompt, command
 
 
 @pytest.mark.parametrize("floor,free,mode,blocked", [
@@ -7072,3 +7050,24 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
             "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
     assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
     assert 'escalated_from' not in rows[2]
+
+
+@pytest.mark.parametrize("check", ["passed", "invalid", "unavailable"])
+def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
+    module = load_dispatch_module()
+    run = make_run(tmp_path, "run")
+    args = SimpleNamespace(tool="agy", alias="", model="fixture", effort="",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    status = "model_unavailable" if check == "invalid" else "ok"
+    legacy = {"started_at": "2026-10-23T00:00:00Z", "finished_at": "2026-10-23T00:00:01Z",
+              "outcome": status, "status": status, "result": None,
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    fields = {"model_check": check, "model_check_detail": "listing evidence",
+              "model_changes": [{"from": "fixture", "to": "other"},
+                                {"from": "other", "to": "fixture"}]}
+    row = module.terminal_contract(args, run, legacy, {"status": status, **fields}, 1,
+                                   run / "tasks/task-1/attempt-001")
+    module.publish_contract(run, row)
+    saved = json.loads((run / row["paths"]["receipt"]).read_text())
+    for key, value in fields.items():
+        assert saved[key] == value

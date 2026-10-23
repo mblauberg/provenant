@@ -10,7 +10,7 @@ import { z } from "zod";
 import { toolSchemas } from "../src/tool-schemas.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute, routeArguments } from "../src/execution-input.js";
-import { batchDefaults, mergeBatchTask } from "../src/execution.js";
+import { batchDefaults, mergeBatchTask } from "../src/batch-execution.js";
 import { inheritedDeliveryRunId } from "../src/resume.js";
 import { expandPools, rotateOverrideFromKnobs } from "../src/pools.js";
 import { scratchRoot } from "./helpers/temp-root.js";

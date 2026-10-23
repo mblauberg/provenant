@@ -25,6 +25,7 @@ const DETAILS: &[(&str, &str)] = &[
     ("peer", include_str!("help/peer.txt")),
     ("lanes", include_str!("help/lanes.txt")),
     ("events", include_str!("help/events.txt")),
+    ("graph", include_str!("help/graph.txt")),
     ("telemetry", include_str!("help/telemetry.txt")),
     ("stats", include_str!("help/stats.txt")),
     ("retro", include_str!("help/retro.txt")),

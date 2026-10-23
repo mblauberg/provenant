@@ -10,12 +10,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
-import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
+import { dispatchConfiguredProvider, hostOwnersInThemselves } from "../execution.js";
+import { cancelConfiguredRun } from "../batch-execution.js";
+import { productRoot } from "../run-root.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
-import {
-  listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
-  signalRecordedGroup, type RecordedGroup,
-} from "../run-registry.js";
+import { listRecordedRuns, readOwnerRecord } from "../run-registry.js";
+import { observedAlive, processStartedAt, runProcessAlive, signalRecordedGroup, type RecordedGroup } from "../process-identity.js";
 import { statusRows } from "../run-status.js";
 import { Store } from "../store.js";
 import { readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";

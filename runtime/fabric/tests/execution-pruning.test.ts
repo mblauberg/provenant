@@ -11,13 +11,13 @@ import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execu
 import {
   DEFAULT_RETENTION_HOURS,
   OWNER_RECORD_NAME,
-  processStartedAt,
   pruneDispatchRuns,
   retentionHours,
-  reapOrphanedRuns,
 } from "../src/run-registry.js";
+import { processStartedAt, reapOrphanedRuns } from "../src/process-identity.js";
 import { fabricStatus } from "../src/run-status.js";
 import * as runRegistry from "../src/run-registry.js";
+import * as processIdentity from "../src/process-identity.js";
 import type { Identity } from "../src/identity.js";
 import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
 import { scratchRoot } from "./helpers/temp-root.js";
@@ -134,7 +134,7 @@ afterEach(async () => {
 
 describe("run directory pruning", () => {
   it("refuses fixture dispatch before reaping or pruning the run root", async () => {
-    const reap = vi.spyOn(runRegistry, "reapOrphanedRuns");
+    const reap = vi.spyOn(processIdentity, "reapOrphanedRuns");
     const prune = vi.spyOn(runRegistry, "pruneDispatchRuns");
     const outsideTempWorkspace = mkdtempSync(join(repositoryRoot, ".fixture-refusal-"));
     try {

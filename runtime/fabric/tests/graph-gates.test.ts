@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { launchGate, readGateExit } from "../src/graph/gates.js";
-import { processStartedAt, signalRecordedGroup } from "../src/run-registry.js";
+import { processStartedAt, signalRecordedGroup } from "../src/process-identity.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const tsxLoader = createRequire(import.meta.url).resolve("tsx");

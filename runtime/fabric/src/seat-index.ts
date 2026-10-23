@@ -3,7 +3,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, st
 import { dirname, join } from "node:path";
 
 import { databasePath } from "./identity.js";
-import { processMatches, processStartedAt } from "./run-registry.js";
+import { processMatches, processStartedAt } from "./process-identity.js";
 
 /**
  * A seat is the client process an MCP server acts for (its parent: claude,

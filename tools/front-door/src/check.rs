@@ -1,7 +1,6 @@
-//! `check` custody. Choosing which registered checkout's checker to run, and
-//! the stale-checkout advisory, stay in Python behind
-//! `<root>/scripts/check_target.py` for now: that selection is a safety gate
-//! and is ported separately, once measured.
+//! `check` custody. Choosing which registered checkout's checker to run stays
+//! in Python behind `<root>/scripts/check_target.py`; the Rust front door owns
+//! the stale-checkout advisory.
 
 use crate::exec::REPAIR;
 use crate::resolve::{self, Settings, FABRIC_MCP};
@@ -36,7 +35,7 @@ pub fn parse_selection(output: Vec<u8>) -> Option<Selection> {
 }
 
 /// Run the helper from the local checkout, or the resolved product root, and
-/// return its selection. Its stderr (refusals, stale warnings) passes through.
+/// return its selection. Its stderr (refusals) passes through.
 /// `Err(None)` means the helper already explained itself.
 pub fn select(settings: &Settings) -> Result<Selection, Option<String>> {
     let local = resolve::local_root().filter(|root| {

@@ -28,11 +28,8 @@ import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
   OWNER_RECORD_NAME,
-  processMatches,
-  processStartedAt,
-  reapOrphanedRuns,
-  terminateRecordedRun,
 } from "../src/run-registry.js";
+import { processMatches, processStartedAt, reapOrphanedRuns, terminateRecordedRun } from "../src/process-identity.js";
 import { fabricStatus, fabricOutput } from "../src/run-status.js";
 import type { Identity } from "../src/identity.js";
 import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
@@ -2456,7 +2453,7 @@ it('keeps non-Git cwd dispatches in the caller run root', async () => {
 });
 
 it('terminalises a stopped v1 run before removing its owner record', async () => {
- const {terminateRecordedRun}=await import('../src/run-registry.js');
+ const {terminateRecordedRun}=await import('../src/process-identity.js');
  const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-stopped-abcdef');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
@@ -2503,7 +2500,7 @@ it('paginates UTF-8 without replacement characters and reads bounded live tails'
 });
 
 it('retains custody when a live owner has no verifiable start identity', async () => {
- const {terminateRecordedRun}=await import('../src/run-registry.js');
+ const {terminateRecordedRun}=await import('../src/process-identity.js');
  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});
  spawnedPids.push(child.pid!);
  const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-unverified-abcdef');mkdirSync(dir,{recursive:true});
@@ -2515,7 +2512,8 @@ it('retains custody when a live owner has no verifiable start identity', async (
 });
 
 it('binds termination writes to the discovered run directory', async () => {
- const {findRecordedRun,terminateRecordedRun}=await import('../src/run-registry.js');
+ const {findRecordedRun}=await import('../src/run-registry.js');
+ const {terminateRecordedRun}=await import('../src/process-identity.js');
  const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-forged-abcdef'),outside=join(workspace,'outside');
  mkdirSync(dir,{recursive:true});mkdirSync(outside);
  const target=join(outside,'dispatch-status.json');writeFileSync(target,'untouched');

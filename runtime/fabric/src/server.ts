@@ -6,19 +6,14 @@ import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
 import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
-import { reapAttemptRuns } from "./run-registry.js";
+import { reapAttemptRuns } from "./process-identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-status.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
-import {
-  cancelConfiguredRun,
-  dispatchConfiguredBatch,
-  dispatchConfiguredProvider,
-  MAX_EXECUTION_WAIT_SECONDS,
-  releaseActiveExecutions,
-} from "./execution.js";
+import { dispatchConfiguredProvider, MAX_EXECUTION_WAIT_SECONDS, releaseActiveExecutions } from "./execution.js";
+import { cancelConfiguredRun, dispatchConfiguredBatch } from "./batch-execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
 import { canonicalMode, editDistance, rejected, ACCESS_MODES } from "./execution-input.js";

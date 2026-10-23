@@ -12,36 +12,21 @@ import pytest
 from parity_support import (
     IMPL,
     REPAIR,
+    PYTHON_OWNERS,
+    PYTHON_ALIASES,
+    PYTHON_PREFIXED,
     sha256,
 )
 
 # (argv prefix, owner path, owner argv prefix). The caller's remaining
 # arguments follow the prefix in both columns.
 VERBS = [
-    ("route", "scripts/model-route", []),
-    ("routes", "scripts/model-route", ["routes"]),
-    ("capabilities", "skills/orchestrate/scripts/capabilities.py", []),
-    ("worktree", "scripts/worktree", []),
-    ("clean", "scripts/clean.py", []),
-    ("reap", "scripts/reap.py", []),
-    ("pr", "scripts/provenant-pr", []),
-    ("check", "scripts/check-harness", []),
-    ("gate", "scripts/gate", []),
-    ("telemetry", "scripts/provenant-telemetry", []),
-    ("stats", "scripts/provenant-telemetry", ["stats"]),
-    ("retro", "scripts/provenant-telemetry", ["retro"]),
-    ("quota", "scripts/provenant-quota", []),
-    ("profile", "scripts/provenant-profile", []),
-    ("fabric", "runtime/fabric/bin/fabric", []),
-    ("lanes", "runtime/fabric/bin/fabric", ["lanes"]),
-    ("events", "runtime/fabric/bin/fabric", ["events"]),
-    ("hosts", "scripts/fabric-hosts", ["hosts"]),
-    ("peer", "scripts/fabric-hosts", ["peer"]),
-    ("dispatch", "skills/orchestrate/scripts/dispatch_run.py", []),
-    ("batch", "skills/orchestrate/scripts/batch_run.py", []),
-    ("run", "skills/orchestrate/scripts/run_controls.py", []),
-    ("lint", "scripts/provenant_lint.py", []),
-]
+    (verb, owner, [verb] if verb in PYTHON_PREFIXED else [])
+    for verb, owner in PYTHON_OWNERS.items()
+] + [
+    (verb, PYTHON_OWNERS["fabric"], [verb]) for verb in sorted(PYTHON_ALIASES)
+] + [("routes", PYTHON_OWNERS["route"], ["routes"])]
+
 
 AWKWARD = [
     "",

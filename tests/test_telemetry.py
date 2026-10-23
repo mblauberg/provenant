@@ -2108,7 +2108,7 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
         link.replace(path)
     monkeypatch.setattr(telemetry, 'native_paths', lambda source: discovered.get(source, {}))
     db = telemetry.connect()
-    telemetry.ingest(db)
+    telemetry.ingest_owner().ingest(telemetry, db)
     assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 0
     assert {row['source']: row['status'] for row in db.execute(
         "SELECT source, status FROM sources WHERE source IN ('claude','opencode')")} == {
@@ -2116,7 +2116,7 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
     # A plain file of another inode under the discovered name is refused too.
     transcript.unlink()
     jsonl(transcript, claude_turn('s', 'REPLACED'))
-    telemetry.ingest(db)
+    telemetry.ingest_owner().ingest(telemetry, db)
     assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
 
 
@@ -2165,7 +2165,7 @@ def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(
                 'message': {'id': name, 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}}
     jsonl(session, message('raw'), message('fallback'))
     with telemetry.connect() as db:
-        telemetry.ingest(db)
+        telemetry.ingest_owner().ingest(telemetry, db)
     database = tmp_path / 'state/telemetry.sqlite3'
     # Stand in for rows written by earlier versions: the raw hostname, and fabric's old 'local'.
     with sqlite3.connect(database) as db:
@@ -2175,7 +2175,7 @@ def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(
         db.execute("UPDATE meta SET value='Anes-MacBook-Pro.local' WHERE key='host_id'")
     jsonl(session, message('slug'))
     with telemetry.connect() as db:
-        telemetry.ingest(db)
+        telemetry.ingest_owner().ingest(telemetry, db)
         db.row_factory = sqlite3.Row
         report = telemetry.report_owner().stats(telemetry, db, summary=True)
     with sqlite3.connect(database) as db:
@@ -2197,7 +2197,7 @@ def test_long_lived_telemetry_refreshes_peer_aliases_after_hosts_config_changes(
           {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
            'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10}}})
     with telemetry.connect() as db:
-        telemetry.ingest(db)
+        telemetry.ingest_owner().ingest(telemetry, db)
         db.execute("UPDATE usage SET host='box'")
         db.execute("UPDATE usage_files SET host='box'")
         db.row_factory = sqlite3.Row
@@ -2285,7 +2285,7 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
            'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
     telemetry = load_script('telemetry_rename_box', 'telemetry.py')
     with telemetry.connect() as db:
-        telemetry.ingest(db)
+        telemetry.ingest_owner().ingest(telemetry, db)
     database = tmp_path / 'state/telemetry.sqlite3'
     tables = ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events')
     with sqlite3.connect(database) as db:
@@ -2299,7 +2299,7 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
     write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {'box': {'ssh_destination': 'box'}}})
     telemetry = load_script('telemetry_rename_studio', 'telemetry.py')
     with telemetry.connect() as db:
-        telemetry.ingest(db)
+        telemetry.ingest_owner().ingest(telemetry, db)
         db.row_factory = sqlite3.Row
         report = telemetry.report_owner().stats(telemetry, db, summary=True)
     assert telemetry.same_host('box') == 'box'

@@ -755,10 +755,15 @@ def test_batch_signal_handler_is_reentrant_while_state_lock_is_held():
 def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'external-batch-cancel')
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir(exist_ok=True)
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
     bin_dir = fake_bin(tmp_path)
     provider_pid = tmp_path / 'provider.pid'
     launches = tmp_path / 'launches'
     fake_codex(bin_dir, f"""
+        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
+        if [ "$1" = "--help" ]; then exit 0; fi
         printf '%s\\n' "$1" >> "{launches}"
         printf '%s' "$$" > "{provider_pid}"
         sleep 30

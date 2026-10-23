@@ -1,3 +1,7 @@
+import { batchDefaults, mergeBatchTask, dispatchConfiguredBatchUnchecked } from "./batch-execution.js";
+// Kept for the Rust supervisor inventory tests, whose imports stay frozen.
+export { dispatchConfiguredBatch, cancelConfiguredRun } from "./batch-execution.js";
+import { canonical, productRoot, executableOwner, assertFixtureRunRoot } from "./run-root.js";
 import {
   normaliseRoute,
   namesExplicitRoute,
@@ -17,7 +21,6 @@ import {
   type DispatchInput,
   type BatchInput,
   type BatchTaskInput,
-  type DispatchDefaults,
 } from "./execution-input.js";
 export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
@@ -26,46 +29,38 @@ import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompl
 import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  accessSync,
   appendFileSync,
   closeSync,
-  constants,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   existsSync,
   readFileSync,
-  realpathSync,
   renameSync,
   statSync,
   rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
-import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
+import { catalogueSnapshot } from "./catalogue.js";
 import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
-  findRecordedRun,
   readOwnerRecord,
-  processStartedAt,
-  processMatches,
   pruneDispatchRuns,
-  reapOrphanedRuns,
   readProviderRecord,
-  terminateRecordedRun,
   writeOwnerRecord,
   type OwnerRecord,
   type RecordedRun,
 } from "./run-registry.js";
-import { fabricStatus, statusRows } from "./run-status.js";
+import { processStartedAt, processMatches, reapOrphanedRuns, terminateRecordedRun } from "./process-identity.js";
+import { statusRows } from "./run-status.js";
 
 import { laneTaskId, Store } from "./store.js";
 import { digest } from "./surface.js";
@@ -95,7 +90,7 @@ interface CancelSpec {
   env: NodeJS.ProcessEnv;
 }
 
-const activeOwners = new Set<StartedOwner>();
+export const activeOwners = new Set<StartedOwner>();
 
 /**
  * Whether new owners are recorded as their own host. The reaper stops a run
@@ -149,99 +144,6 @@ export function releaseActiveExecutions(): void {
     started.child.unref();
   }
   activeOwners.clear();
-}
-
-function canonical(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return resolve(path);
-  }
-}
-
-export function productRoot(env: NodeJS.ProcessEnv): string {
-  const configured = env.AGENT_FABRIC_PRODUCT_ROOT;
-  if (configured !== undefined && !isAbsolute(configured)) {
-    throw new Error("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path");
-  }
-  return canonical(configured ?? resolve(import.meta.dirname, "../../.."));
-}
-
-export function executableOwner(root: string, relativePath: string): string {
-  const path = join(root, relativePath);
-  let metadata;
-  try {
-    metadata = lstatSync(path);
-    accessSync(path, constants.X_OK);
-  } catch {
-    throw new Error(`execution owner is unavailable: ${path}`);
-  }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`execution owner must be a regular local file: ${path}`);
-  }
-  return path;
-}
-
-function realPath(path: string): string {
-  const absolute = resolve(path);
-  let candidate = absolute;
-  const missing: string[] = [];
-  while (true) {
-    try {
-      return resolve(realpathSync.native(candidate), ...missing);
-    } catch {
-      const parent = dirname(candidate);
-      if (parent === candidate) return absolute;
-      missing.unshift(basename(candidate));
-      candidate = parent;
-    }
-  }
-}
-
-/**
- * Fixture attempts are test scaffolding. They may only land in a run root under
- * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
- * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
- */
-/**
- * The one rule for a fixture temp root, shared with the test helpers that pick
- * one. It protects live run roots: refuse a root inside a git work tree (which
- * covers a checkout's own .agent-run) and a run tree itself (`.agent-run` or
- * `.agent-run/runs`). An isolated directory outside git is fine even when it
- * sits below a lane's .agent-run, because the fixture's run root must then
- * resolve inside that directory.
- */
-export function acceptableFixtureTempRoot(root: string): boolean {
-  const real = realPath(root);
-  if (basename(real) === ".agent-run" || (basename(real) === "runs" && basename(dirname(real)) === ".agent-run")) return false;
-  for (let dir = real; ; dir = dirname(dir)) {
-    if (existsSync(join(dir, ".git"))) return false;
-    if (dirname(dir) === dir) return true;
-  }
-}
-
-export function assertFixtureRunRoot(
-  agentRun: string,
-  routes: readonly { model?: unknown; cli_version?: unknown }[],
-  temp: string = tmpdir(),
-): void {
-  if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
-  const root = realPath(agentRun);
-  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a git work tree.
-  const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
-  const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
-  const acceptableTempRoots = tempRoots.filter(acceptableFixtureTempRoot);
-  const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
-  if (underTemp || underScratch(root)) return;
-  throw new Error(
-    `fixture run refused: ${root} is not under an acceptable temp root (${acceptableTempRoots.join(" or ")}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)`,
-  );
-}
-
-/** True when root sits strictly inside a `.agent-run/scratch` directory, which `provenant clean` expires. */
-function underScratch(root: string): boolean {
-  const parts = root.split(sep);
-  return parts.some((part, index) => part === ".agent-run" && parts[index + 1] === "scratch" && index + 2 < parts.length);
 }
 
 function createRunDirectory(identity: Identity, kind: "dispatch" | "batch", routes: readonly { model?: unknown; cli_version?: unknown }[]): string {
@@ -301,7 +203,7 @@ async function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): Prom
   }
 }
 
-async function initialiseRun(
+export async function initialiseRun(
   identity: Identity,
   env: NodeJS.ProcessEnv,
   root: string,
@@ -642,7 +544,7 @@ async function terminateStartedRun(started: StartedOwner, terminalStatus: "inter
   }
 }
 
-async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
+export async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
   if (started.cancellation !== undefined) return await started.cancellation;
   started.cancellation = (async () => {
     const deadline = Date.now() + 5_000;
@@ -720,7 +622,7 @@ export async function observeOwner(
   });
 }
 
-function running(
+export function running(
   started: StartedOwner,
   kind: "dispatch" | "batch",
   identity: Identity,
@@ -915,201 +817,13 @@ async function dispatchConfiguredProviderUnchecked(
 }
 
 /** A native-model warning gets its own line ahead of the ordinary notes, which share one. */
-function withWarnings(result: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+export function withWarnings(result: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
   if (!warnings.length) return result;
   const native = [...new Set(warnings.filter((warning) => warning.startsWith("NATIVE: ")))];
   const rest = [...new Set(warnings.filter((warning) => !warning.startsWith("NATIVE: ")))];
   return { ...result, warnings: [...native, ...((result.warnings as string[] | undefined) ?? []),
     ...(rest.length ? [`warning: ${rest.join("; ")}`] : [])] };
 }
-
-/** Marks a batch task whose caller named its route (a task, a batch default or `models`), before pool expansion. */
-const OWN_SEAT_GUARD = "_own_seat_guard";
-
-function normaliseTask(
-  task: BatchTaskInput,
-  index: number,
-  identity: Identity,
-  catalogue: CatalogueSnapshot,
-  defaults: DispatchDefaults = {},
-): Record<string, unknown> {
-  const { [OWN_SEAT_GUARD]: ownSeatGuard, ...plain } = task as BatchTaskInput & { [OWN_SEAT_GUARD]?: boolean };
-  task = plain;
-  const initialRoute = normaliseRoute(task, identity, catalogue, ownSeatGuard === true);
-  task = { ...task, mode: initialRoute.access_mode };
-  validatePrompt(task.prompt, task.prompt_file);
-  const providerIdentity = workingIdentity(task, identity);
-  task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
-  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue, ownSeatGuard === true), defaults);
-  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
-  const roots = readRoots(identity, task.cwd, task.prompt_file);
-  if (roots.length) route.read_roots = roots;
-  return {
-    id: task.id ?? `task-${index + 1}`,
-    ...(task.prompt === undefined ? { prompt_file: ownerPromptPath(identity, task.prompt_file!) } : { prompt: task.prompt }),
-    timeout: timeoutSeconds(task.timeout_seconds ?? defaults.timeout_seconds, task.mode),
-    ...route,
-  };
-}
-
-export function batchDefaults(input: BatchInput): Record<string, any> {
-  return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", "delivery_run_id", "knobs", ...POOL_FIELDS].includes(key))));
-}
-
-export function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
-  const task = withoutEmptySelectors(input);
-  // A task's selector replaces a default pool; its pool replaces a default selector.
-  const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
-    : task.alias !== undefined || task.model !== undefined
-      ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
-      : defaults;
-  return { ...own, ...task, id: task.id ?? `task-${index + 1}` };
-}
-
-async function dispatchConfiguredBatchUnchecked(
-  input: BatchInput,
-  identity: Identity,
-  signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env,
-  launch: LaunchObserver = {},
-): Promise<Record<string, unknown>> {
-  if (input.tasks.length < 1 || input.tasks.length > 64)
-    throw new InputError("invalid_input", "tasks must contain 1-64 items");
-  if (input.concurrency !== undefined && (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 8)) {
-    throw new InputError("invalid_input", "concurrency must be an integer from 1 to 8");
-  }
-  if (!Number.isInteger(input.wait_seconds ?? 0) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
-    throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
-  }
-  const callStarted = Date.now();
-  const root = productRoot(env);
-  const catalogue = catalogueSnapshot(root, env);
-  const policy = dispatchDefaults(identity.cwd);
-  const errors: Record<string, unknown>[] = [];
-  const defaults = batchDefaults(input);
-  let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
-    const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
-    if (taskError) {
-      errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
-      return [];
-    }
-    return [mergeBatchTask(defaults, task, index)];
-  });
-  const poolWarnings: string[] = [];
-  merged = merged.map((task) => {
-    // Never trust the field from the caller: it is recomputed here and only ever set by this function.
-    const marked = { ...task, [OWN_SEAT_GUARD]: !launch.continuation &&
-      (namesExplicitRoute(task) || task.models !== undefined || launch.guardedCouncil === true) };
-    const preferred = nativeFirst(marked, identity);
-    poolWarnings.push(...preferred.warnings);
-    return preferred.task;
-  });
-  let councils = false;
-  if (merged.some(usesPool)) {
-    const expanded = await expandPools(merged, await pythonOwner(root, env), root, identity, env, signal);
-    errors.push(...expanded.errors);
-    poolWarnings.push(...expanded.warnings);
-    merged = expanded.tasks;
-    councils = expanded.council;
-    if (merged.length > 64) throw new InputError("invalid_input", "tasks must contain 1-64 items after councils expand");
-  }
-  // Size the default after councils expand, so a nested council does not run serially; an explicit limit stands.
-  const concurrency = input.concurrency ?? Math.max(1, Math.min(councils ? 8 : 4, merged.length));
-  const tasks = merged.flatMap((task, index) => {
-    try {
-      return [normaliseTask(task, index, identity, catalogue, policy.defaults)];
-    } catch (error) {
-      errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
-      return [];
-    }
-  });
-  if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
-  assertFixtureRunRoot(runRoot(identity.cwd), tasks);
-  const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
-  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  const python = await pythonOwner(root, env);
-  let checked = await preflight(
-    python,
-    executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"),
-    tasks,
-    identity,
-    env,
-    signal,
-  );
-  signal.throwIfAborted();
-  if (checked.status === "rejected") {
-    const preflightErrors = Array.isArray(checked.errors) ? checked.errors as Record<string, unknown>[] : [];
-    errors.push(...preflightErrors);
-    const rejectedIds = new Set(preflightErrors.map((error) => String(error.task_id)));
-    tasks.splice(0, tasks.length, ...tasks.filter((task) => !rejectedIds.has(String(task.id))));
-    if (!preflightErrors.length || tasks.length === 0)
-      return { status: "rejected", error: checked.error, fix: checked.fix,
-        tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
-    checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
-    if (checked.status === "rejected") return rejected(new InputError(String(checked.error ?? "preflight_unavailable"), String(checked.fix ?? "Check task preflight inputs.")));
-  }
-  const runDir = await initialiseRun(identity, env, root, signal, "batch", tasks);
-  if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
-  signal.throwIfAborted();
-  const manifestPath = stagingPath(runDir, "task-manifest.json");
-  writeFileSync(
-    manifestPath,
-    JSON.stringify(
-      {
-        schema_version: 1,
-        tasks: tasks.map((task) => task.model === undefined ? task : Object.fromEntries(
-          Object.entries(task).filter(([key]) => key !== "alias"))),
-      },
-      null,
-      2,
-    ) + "\n",
-    { flag: "wx", mode: 0o600 },
-  );
-  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1, runDir });
-  const started = startOwner(
-    python,
-    [owner, "--run-dir", runDir, "--manifest", manifestPath, "--concurrency", String(concurrency)],
-    identity,
-    env,
-    runDir,
-    {
-      command: python,
-      args: [controls, "cancel", "--run-dir", runDir, "--batch-id", FIRST_BATCH_ID, "--wait-seconds", "5"],
-      targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
-      cwd: identity.cwd,
-      env,
-    },
-    {
-      kind: "batch",
-      identifier: FIRST_BATCH_ID,
-      routes: checked.routes,
-      taskIds: tasks.map((task) => String(task.id)),
-      // A writer works in its worktree, a reader in its cwd; either names the lane's project.
-      cwdProjects: Object.fromEntries(tasks.flatMap((task) => {
-        const directory = task.cwd ?? task.worktree;
-        return typeof directory === "string" ? [[String(task.id), projectRoot(directory, env)]] : [];
-      })),
-      timeout: Math.max(...tasks.map((task) => Number(task.timeout))),
-    },
-    [manifestPath],
-  );
-  const completion = await observeOwner(
-    started,
-    Math.max(0, Math.min(input.wait_seconds ?? 0, Math.floor(55 - (Date.now() - callStarted) / 1000))),
-    signal,
-  );
-  const result = completion === undefined
-    ? running(started, "batch", identity, FIRST_BATCH_ID)
-    : compactBatch(started, completion);
-  const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
-  const warnings = [...policy.warnings, ...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
-  return withWarnings({
-    ...result,
-    ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),
-  }, warnings);
-}
-
 
 /**
  * The own-seat guard runs on the initiating side before any placement, so a request for the seat's own Claude model
@@ -1145,7 +859,7 @@ export function rejectOwnSeatClaude(input: Record<string, any>, identity: Identi
   }
 }
 
-function rejectNestedSandboxDispatch(env: NodeJS.ProcessEnv): void {
+export function rejectNestedSandboxDispatch(env: NodeJS.ProcessEnv): void {
   if (env.CODEX_SANDBOX && env.PROVENANT_PARENT_ATTEMPT) {
     throw new InputError("nested_dispatch_unavailable",
       "Nested Fabric dispatch is unavailable inside a sandboxed Codex lane; dispatch reviewers from the chair.");
@@ -1178,126 +892,4 @@ export async function dispatchConfiguredProvider(
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);
   }
-}
-
-export async function dispatchConfiguredBatch(
-  input: BatchInput,
-  identity: Identity,
-  signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env,
-  launch: LaunchObserver = {},
-): Promise<Record<string, unknown>> {
-  try {
-    try {
-      rejectNestedSandboxDispatch(env);
-      rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
-    } catch (error) {
-      // Refused before placement: every task of the batch is reported, as for any rejected batch.
-      const refusal = rejected(error);
-      return { ...refusal, tasks: (input.tasks ?? []).map((task, index) => ({ ...refusal, task_id: task.id ?? `task-${index + 1}`, state: "terminal" })) };
-    }
-    const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as unknown as Record<string, unknown>, signal);
-    if (remote) return remote;
-    const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
-    const result = await dispatchConfiguredBatchUnchecked(input, identity, signal, localEnv, launch);
-    return input.placement_fallback ? { ...result, placement_fallback: input.placement_fallback,
-      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}${input.placement_fallback.detail ? `: ${input.placement_fallback.detail}` : ""}`] } : result;
-  } catch (error) {
-    if (signal.aborted && !(error instanceof InputError)) throw error;
-    return rejected(error);
-  }
-}
-
-/**
- * A task of a running batch, named by its own id: cancelling it must not stop
- * its siblings. The owner honours a per-attempt marker that run_controls writes.
- */
-async function cancelBatchTask(
-  target: Record<string, any>,
-  identity: Identity,
-  env: NodeJS.ProcessEnv,
-): Promise<Record<string, unknown> | undefined> {
-  // The row's own attempt is the current one (a queued resume announces attempt N before its history has it).
-  const attempt = Number(target.attempt ?? target.attempts?.at(-1)?.attempt);
-  if (!Number.isSafeInteger(attempt) || attempt < 1)
-    return { status: "rejected", error: "task_not_started",
-      fix: `Task ${target.task_id} has not started; cancel the whole batch with its run id ${target.run_id}.` };
-  const attemptId = `attempt-${String(attempt).padStart(3, "0")}`;
-  if (!["tasks", "dispatch/tasks"].some((tree) => existsSync(join(String(target.run_dir), tree, String(target.task_id), attemptId))))
-    return { status: "rejected", error: "attempt_not_started",
-      fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
-  const root = productRoot(env);
-  const python = await pythonOwner(root, env);
-  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  try {
-    await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
-      "--attempt-id", attemptId, "--wait-seconds", "5"], {
-      cwd: dirname(runRoot(identity.cwd)), env: pythonOwnerEnvironment(env), timeout: 10_000, maxBuffer: 64 * 1024,
-    });
-  } catch {
-    return { status: "rejected", error: "cancel_unconfirmed",
-      fix: `Task ${target.task_id} did not confirm cancellation; check fabric_status, or cancel the batch with ${target.run_id}.` };
-  }
-  return undefined;
-}
-
-export async function cancelConfiguredRun(
-  id: string,
-  identity: Identity,
-  reason?: string,
-  env: NodeJS.ProcessEnv = process.env,
-  operationId?: string,
-): Promise<Record<string, unknown>> {
-  const request = { id, reason, operation_id: operationId };
-  const remote = await federatedLane("cancel", identity.cwd, request);
-  if (remote) return remote;
-  id = request.id;
-  const rows = await statusRows(identity.cwd, [id]);
-  if (!rows.runs) return rows;
-  // A task id names that task alone, whatever the metadata says; only a run or batch id reaches
-  // the whole-run path below. run_controls resolves the task's own scope.
-  const task = rows.runs.find((row) => row.task_id === id && row.run_id !== id);
-  if (task) {
-    if (task.state === "terminal") return rows;
-    const failure = await cancelBatchTask(task, identity, env);
-    return failure ?? { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
-  }
-  // A manifest task with no published attempt resolves to a legacy run row; it is still a task.
-  const unresolved = rows.runs.find((row) => {
-    if (row.run_id === id || row.task_id === id || typeof row.run_dir !== "string") return false;
-    try {
-      const metadata = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8"));
-      return Array.isArray(metadata.task_ids) && metadata.batch_id && metadata.task_ids.includes(id);
-    } catch { return false; }
-  });
-  if (unresolved)
-    return { status: "rejected", error: "task_not_started",
-      fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
-  // Only a positively matched run or batch identifier may stop a whole run; an unmatched id is never widened.
-  const row = rows.runs.find((r) => [r.run_id, r.batch_id, r.run_dir, typeof r.run_dir === "string" ? basename(r.run_dir) : undefined].includes(id));
-  if (!row)
-    return { status: "rejected", error: "run_not_matched",
-      fix: `${id} matches no run or batch id; pass the run id from fabric_status, or a task id whose batch has started.` };
-  if (rows.runs.every((row) => row.state === "terminal")) return rows;
-  const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
-  if (started) {
-    await requestOwnerCancellation(started);
-    await observeOwner(started, 5, new AbortController().signal);
-  } else {
-    const recorded = findRecordedRun(identity.cwd, row.run_dir);
-    if (!recorded)
-      return {
-        status: "rejected",
-        error: "owner_unavailable",
-        fix: "Inspect the retained owner record before cancellation.",
-      };
-    const outcome = await terminateRecordedRun(recorded, undefined, "cancelled");
-    if (outcome.reason === "still running")
-      return {
-        status: "rejected",
-        error: "cancel_unconfirmed",
-        fix: "Inspect owner/provider liveness; cancellation was not confirmed.",
-      };
-  }
-  return { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
 }
