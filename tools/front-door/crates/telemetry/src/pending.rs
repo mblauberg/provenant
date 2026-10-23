@@ -108,3 +108,11 @@ pub fn identity(values: &[Value]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(python_json(&Value::Array(values.to_vec())).as_bytes()))
 }
+
+// port: belongs in provenant-core
+pub fn iso(value:jiff::Timestamp)->String {
+    let utc=value.to_zoned(jiff::tz::TimeZone::UTC);
+    let base=utc.strftime("%Y-%m-%dT%H:%M:%S").to_string();
+    let micros=value.subsec_nanosecond()/1000;
+    if micros==0 {format!("{base}Z")} else {format!("{base}.{micros:06}Z")}
+}
