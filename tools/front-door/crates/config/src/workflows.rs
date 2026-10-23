@@ -70,24 +70,40 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
             schema_version: Value::from(1),
             owner: "agent-harness".into(),
             surface: "claude-workflows".into(),
-            target_root: pending::path_text(&pending::resolve(target)?)?,
+            target_root: pending::path_text(&crate::resolve(target)?)?,
             managed: BTreeMap::new(),
             extra: BTreeMap::from([("updated_at".into(), Value::from(now))]),
         });
     }
-    let value = pending::read_json(&path, "installation manifest is unreadable")?;
+    let bytes = fs::read(&path).map_err(|source| crate::Error::Read {
+        context: "installation manifest is unreadable",
+        path: path.clone(),
+        source,
+    })?;
+    let original = crate::ordered::decode(&bytes, "installation manifest is unreadable", &path)?;
+    let value = original.value();
     let valid_header = value.is_object()
         && pending::schema_one(&value["schema_version"])
         && value["owner"] == "agent-harness"
         && value["surface"] == "claude-workflows"
         && value["target_root"].as_str()
-            == Some(pending::path_text(&pending::resolve(target)?)?.as_str())
+            == Some(pending::path_text(&crate::resolve(target)?)?.as_str())
         && value["managed"].is_object();
     if !valid_header {
         return Err(invalid("workflow installation manifest is invalid"));
     }
     if let Some(entries) = value["managed"].as_object() {
-        for (name, value) in entries {
+        for (name, value) in crate::ordered::entries(entries, original.get("managed")) {
+            if value.as_object().is_none_or(|v| {
+                v.len() != 4
+                    || !["owner", "source_target", "source_sha256", "installed_at"]
+                        .iter()
+                        .all(|k| v.contains_key(*k))
+            }) {
+                return Err(invalid(format!(
+                    "workflow installation manifest entry is invalid: {name}"
+                )));
+            }
             let entry: Entry = serde_json::from_value(value.clone()).map_err(|_| {
                 invalid(format!(
                     "workflow installation manifest entry is invalid: {name}"
@@ -109,7 +125,7 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
 
 fn write(target: &Path, manifest: &mut Manifest, now: &str) -> Result<()> {
     manifest.extra.insert("updated_at".into(), now.into());
-    pending::atomic_write(
+    crate::filesystem::atomic_write(
         &manifest_path(target),
         ".workflows-installation.",
         &pending::json_bytes(manifest)?,
@@ -136,7 +152,7 @@ fn sources(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
         if !valid_name(name) || path.is_symlink() || !path.is_file() {
             return Err(invalid("source contains an invalid workflow"));
         }
-        paths.insert(name.into(), pending::resolve(&path)?);
+        paths.insert(name.into(), crate::resolve(&path)?);
     }
     if paths.is_empty() {
         return Err(invalid("source contains an invalid workflow"));
@@ -146,9 +162,9 @@ fn sources(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
 
 fn same_link(destination: &Path, source: &Path) -> bool {
     destination.is_symlink()
-        && pending::resolve(destination)
+        && crate::resolve(destination)
             .ok()
-            .zip(pending::resolve(source).ok())
+            .zip(crate::resolve(source).ok())
             .is_some_and(|(a, b)| a == b)
 }
 
@@ -171,7 +187,7 @@ fn state(destination: &Path, source: &Path, entry: Option<&Entry>) -> Result<Sta
     };
     if same_link(destination, source) {
         return Ok(
-            if pending::resolve(Path::new(&entry.source_target))? == pending::resolve(source)?
+            if crate::resolve(Path::new(&entry.source_target))? == crate::resolve(source)?
                 && entry.source_sha256 == sha(source)?
             {
                 State::Managed
@@ -215,7 +231,7 @@ pub fn preflight(source: &Path, target: &Path, reject_unmanaged: bool, now: &str
         }
         return Err(invalid("target must not be a non-canonical symlink"));
     }
-    let target = pending::resolve(target)?;
+    let target = crate::resolve(target)?;
     let sources = sources(source)?;
     let manifest = load(&target, now)?;
     let mut conflicts = Vec::new();
@@ -260,7 +276,7 @@ pub struct CommandResult {
 /// Caller handles the canonical-directory-link fast path before invoking this.
 pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
     preflight(source, target, false, now)?;
-    let target = pending::resolve(target)?;
+    let target = crate::resolve(target)?;
     let sources = sources(source)?;
     let mut manifest = load(&target, now)?;
     let states = sources
@@ -289,7 +305,7 @@ pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
     let mut linked = 0;
     for (name, source) in &sources {
         if matches!(states[name], State::Missing | State::Stale) {
-            pending::replace_link(&target.join(name), source)?;
+            crate::filesystem::replace_link(&target.join(name), source)?;
             manifest.managed.insert(name.clone(), entry(source, now)?);
             linked += 1;
         }
@@ -571,5 +587,42 @@ mod tests {
                 serde_json::json!([result.exit_code, result.stdout, result.stderr])
             );
         }
+    }
+}
+
+#[derive(Debug, clap::Parser)]
+#[command(name = "install-workflows")]
+pub struct Arguments {
+    #[arg(long)]
+    pub target: PathBuf,
+    #[arg(long)]
+    pub preflight: bool,
+}
+impl Arguments {
+    pub fn run(&self, source: &Path, now: &str) -> CommandResult {
+        run(source, &self.target, self.preflight, now)
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn invalid_receipt_uses_first_inserted_entry_not_alphabetical_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("workflows");
+        let value=format!("{{\"schema_version\":1,\"owner\":\"agent-harness\",\"surface\":\"claude-workflows\",\"target_root\":{},\"managed\":{{\"z.js\":{{}},\"a.js\":{{}}}}}}",serde_json::to_string(&target).unwrap());
+        fs::write(manifest_path(&target), value).unwrap();
+        let Some(old) = crate::oracle::python(
+            "scripts/install-workflows",
+            "try: m._load_manifest(p)\nexcept m.InstallError as e: print(str(e))",
+            &target,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            format!("{}\n", load(&target, "NOW").unwrap_err()).as_bytes(),
+            old
+        );
     }
 }

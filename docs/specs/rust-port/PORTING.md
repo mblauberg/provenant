@@ -73,7 +73,7 @@ dependencies and commit one `Cargo.lock`.
 |---|---|---|
 | core | Pure IDs, roots, paths, clocks as values, shared enums | None |
 | records | Versioned serde records, canonical byte encoders, digest contracts | core |
-| config | Config loading/precedence, profiles, installation and managed-file rules | core, records |
+| config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy | core, records, config, supervisor's safe OS API |
 | providers | Adapter profiles, argv/environment builders, output classification and continuation | core, records, config, confinement |

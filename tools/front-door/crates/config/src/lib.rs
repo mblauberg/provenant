@@ -4,19 +4,37 @@
 pub mod codex;
 pub mod command;
 
+mod filesystem;
 pub mod front_door;
+pub mod installation;
 pub mod instance;
 pub mod managed_skills;
 pub mod manifest;
+#[path = "pending/ordered.rs"]
+mod ordered;
+pub use ordered::OrderedMap;
 mod pending;
-mod python_unicode;
+pub mod profile_command;
+pub mod profiles;
 pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    NumberOutOfRange(#[from] provenant_records::checked_json::NumberOutOfRange),
+    #[error("{message}")]
+    ProfileNumberOutOfRange {
+        #[source]
+        source: provenant_records::checked_json::NumberOutOfRange,
+        message: String,
+    },
+    #[error(transparent)]
+    Path(#[from] provenant_core::paths::PathError),
+    #[error("cargo is not on PATH (looked in ~/.cargo/bin too)")]
+    CargoUnavailable,
     #[error("{message}")]
     Invalid { message: String },
-    #[error("{path}: {source}")]
+    #[error("{}", python_io(path, source))]
     Io {
         path: std::path::PathBuf,
         #[source]
@@ -29,7 +47,7 @@ pub enum Error {
     },
     #[error("record codec integration is pending: {feature}")]
     PendingRecord { feature: &'static str },
-    #[error("{context}: {path}: {source}")]
+    #[error("{context}: {}", python_io(path, source))]
     Read {
         context: &'static str,
         path: std::path::PathBuf,
@@ -42,6 +60,13 @@ pub enum Error {
         path: std::path::PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+    #[error("{context}: {source}")]
+    CheckedJson {
+        context: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: provenant_records::checked_json::DecodeError,
     },
     #[error("Codex config is invalid TOML: {0}")]
     Toml(#[from] toml_edit::TomlError),
@@ -78,3 +103,21 @@ fn io(path: &std::path::Path, source: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod oracle;
+
+fn resolve(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    Ok(provenant_core::paths::resolve(path)?)
+}
+
+fn python_io(path: &std::path::Path, source: &std::io::Error) -> String {
+    if let Some(code) = source.raw_os_error() {
+        let native = source.to_string();
+        let suffix = format!(" (os error {code})");
+        let message = native.strip_suffix(&suffix).unwrap_or(&native);
+        format!(
+            "[Errno {code}] {message}: {}",
+            provenant_core::py::python_repr(&path.to_string_lossy())
+        )
+    } else {
+        source.to_string()
+    }
+}

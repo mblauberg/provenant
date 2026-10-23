@@ -1,127 +1,20 @@
 //! Temporary shared primitives until their owners land on main.
-use crate::{io, Result};
-use std::{
-    fs,
-    io::Write,
-    path::{Component, Path, PathBuf},
-};
-
-// port: belongs in provenant-core
-pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().map_err(|e| io(path, e))?.join(path)
-    };
-    resolve_inner(&absolute, 0)
-}
-
-// port: belongs in provenant-core
-fn resolve_inner(path: &Path, depth: usize) -> Result<PathBuf> {
-    if depth > 40 {
-        return Err(crate::invalid(format!("symlink loop: {}", path.display())));
-    }
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::CurDir => {}
-            other => {
-                result.push(other.as_os_str());
-                match fs::symlink_metadata(&result) {
-                    Ok(meta) if meta.is_symlink() => {
-                        let link = fs::read_link(&result).map_err(|e| io(&result, e))?;
-                        let target = if link.is_absolute() {
-                            link
-                        } else {
-                            result.parent().unwrap_or(Path::new("/")).join(link)
-                        };
-                        result = resolve_inner(&target, depth + 1)?;
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(io(&result, e)),
-                }
-            }
-        }
-    }
-    Ok(result)
-}
-
-// port: belongs in provenant-supervisor
-// Safe std-only staging. Create-new prevents clobbering another staging file.
-pub(crate) fn atomic_write(path: &Path, prefix: &str, bytes: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-    for sequence in 0..1024 {
-        let temp = parent.join(format!("{prefix}{}.{sequence}.tmp", std::process::id()));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io(&temp, e)),
-        };
-        let result = (|| {
-            file.write_all(bytes).map_err(|e| io(&temp, e))?;
-            file.sync_all().map_err(|e| io(&temp, e))?;
-            drop(file);
-            fs::rename(&temp, path).map_err(|e| io(path, e))
-        })();
-        let cleanup = fs::remove_file(&temp);
-        result?;
-        if let Err(e) = cleanup {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(io(&temp, e));
-            }
-        }
-        return Ok(());
-    }
-    Err(crate::invalid(
-        "could not reserve an installation staging file",
-    ))
-}
-
-// port: belongs in provenant-supervisor
-pub(crate) fn replace_link(destination: &Path, source: &Path) -> Result<()> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    for sequence in 0..1024 {
-        let temp = parent.join(format!(".workflow.{}.{sequence}.tmp", std::process::id()));
-        match std::os::unix::fs::symlink(source, &temp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io(&temp, e)),
-        }
-        let result = fs::rename(&temp, destination).map_err(|e| io(destination, e));
-        let cleanup = fs::remove_file(&temp);
-        result?;
-        if let Err(e) = cleanup {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(io(&temp, e));
-            }
-        }
-        return Ok(());
-    }
-    Err(crate::invalid("could not reserve a workflow staging link"))
-}
+use crate::Result;
+use serde_json::Value;
+use std::path::Path;
 
 // port: belongs in provenant-records
 pub(crate) fn json_bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let value = serde_json::to_value(record).map_err(|e| crate::invalid(e.to_string()))?;
-    let mut output = String::new();
-    encode_json(&value, 0, &mut output)?;
-    output.push('\n');
-    Ok(output.into_bytes())
+    Ok(format!(
+        "{}\n",
+        crate::ordered::dumps(&crate::ordered::Json::from_value(value), true, true)?
+    )
+    .into_bytes())
 }
 
 // port: belongs in provenant-records
-fn json_string(value: &str) -> Result<String> {
+pub(crate) fn json_string(value: &str) -> Result<String> {
     let text = serde_json::to_string(value).map_err(|e| crate::invalid(e.to_string()))?;
     let mut output = String::new();
     for c in text.chars() {
@@ -138,67 +31,6 @@ fn json_string(value: &str) -> Result<String> {
 }
 
 // port: belongs in provenant-records
-fn encode_json(value: &serde_json::Value, depth: usize, output: &mut String) -> Result<()> {
-    use serde_json::Value;
-    let indent = "  ".repeat(depth);
-    match value {
-        Value::Array(items) if !items.is_empty() => {
-            output.push_str("[\n");
-            for (index, value) in items.iter().enumerate() {
-                output.push_str(&indent);
-                output.push_str("  ");
-                encode_json(value, depth + 1, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&indent);
-            output.push(']');
-        }
-        Value::Object(items) if !items.is_empty() => {
-            output.push_str("{\n");
-            for (index, (key, value)) in items.iter().enumerate() {
-                output.push_str(&indent);
-                output.push_str("  ");
-                output.push_str(&json_string(key)?);
-                output.push_str(": ");
-                encode_json(value, depth + 1, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&indent);
-            output.push('}');
-        }
-        Value::String(s) => output.push_str(&json_string(s)?),
-        Value::Number(n) if n.is_f64() => {
-            if let Some(value) = n.as_f64() {
-                let abs = value.abs();
-                if abs != 0.0 && !(1e-4..1e16).contains(&abs) {
-                    let scientific = format!("{value:e}");
-                    if let Some((mantissa, exponent)) = scientific.split_once('e') {
-                        let exponent: i32 = exponent
-                            .parse()
-                            .map_err(|e: std::num::ParseIntError| crate::invalid(e.to_string()))?;
-                        output.push_str(&format!("{mantissa}e{exponent:+03}"));
-                    }
-                } else {
-                    let decimal = value.to_string();
-                    output.push_str(&decimal);
-                    if !decimal.contains('.') {
-                        output.push_str(".0");
-                    }
-                }
-            }
-        }
-        _ => output.push_str(&value.to_string()),
-    }
-    Ok(())
-}
-
-// port: belongs in provenant-records
 pub(crate) fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
@@ -209,7 +41,7 @@ pub(crate) fn path_text(path: &Path) -> Result<String> {
 
 // port: belongs in provenant-records
 pub(crate) fn schema_one(value: &serde_json::Value) -> bool {
-    value == &serde_json::Value::Bool(true) || value.as_f64() == Some(1.0)
+    provenant_core::py::python_json_eq(value, &serde_json::json!(1))
 }
 
 // port: belongs in provenant-records
@@ -224,59 +56,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
             ]
         })
         .collect()
-}
-
-// port: belongs in provenant-records
-pub(crate) fn read_json(path: &Path, context: &'static str) -> Result<serde_json::Value> {
-    let bytes = fs::read(path).map_err(|source| crate::Error::Read {
-        context,
-        path: path.into(),
-        source,
-    })?;
-    // serde_json's default number model would silently round larger Python ints.
-    // Refuse them until the records owner supplies its lossless wire codec.
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-        } else if byte == b'"' {
-            quoted = true;
-        } else if byte.is_ascii_digit() || byte == b'-' {
-            let start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_digit()
-                    || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
-            {
-                index += 1;
-            }
-            let token = &bytes[start..index];
-            if !token.iter().any(|b| matches!(b, b'.' | b'e' | b'E')) {
-                if let Ok(text) = std::str::from_utf8(token) {
-                    if text.parse::<i64>().is_err() && text.parse::<u64>().is_err() {
-                        return Err(crate::Error::PendingRecord {
-                            feature: "arbitrary-precision integer encoding",
-                        });
-                    }
-                }
-            }
-            continue;
-        }
-        index += 1;
-    }
-    serde_json::from_slice(&bytes).map_err(|source| crate::Error::Json {
-        context,
-        path: path.into(),
-        source,
-    })
 }
 
 // port: belongs in provenant-core
@@ -302,9 +81,72 @@ pub(crate) fn path_sort_key(name: &std::ffi::OsStr) -> Vec<u32> {
     result
 }
 
+// port: belongs in provenant-core
+pub(crate) fn parse_int(text: &str) -> Result<Option<Value>> {
+    let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, text.strip_prefix('+').unwrap_or(text))
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return Ok(None);
+    }
+    let mut ascii = String::new();
+    if negative {
+        ascii.push('-');
+    }
+    let mut digit_count = 0;
+    // CPython's default decimal conversion limit excludes signs and underscores.
+    // Runtime interpreter overrides remain a pending host/codec limitation.
+    // Python int accepts Unicode decimal digits and single underscores.
+    for c in digits.chars() {
+        if c == '_' {
+            continue;
+        }
+        let code = c as u32;
+        let Some(digit) = DECIMAL_STARTS
+            .iter()
+            .find_map(|start| code.checked_sub(*start).filter(|v| *v < 10))
+        else {
+            return Ok(None);
+        };
+        digit_count += 1;
+        if digit_count > 4300 {
+            return Ok(None);
+        }
+        ascii.push(char::from(b'0' + digit as u8));
+    }
+    if let Ok(v) = ascii.parse::<i64>() {
+        Ok(Some(Value::from(v)))
+    } else if let Ok(v) = ascii.parse::<u64>() {
+        Ok(Some(Value::from(v)))
+    } else {
+        Err(provenant_records::checked_json::NumberOutOfRange { value: ascii }.into())
+    }
+}
+// Unicode 16 Nd starts, including the five mathematical digit sets.
+// port: belongs in provenant-core
+const DECIMAL_STARTS: &[u32] = &[
+    0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+    0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+    0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
+    0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0,
+    0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+    0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8,
+    0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    fn read_json(path: &Path, _context: &str) -> crate::Result<serde_json::Value> {
+        Ok(crate::ordered::decode(&fs::read(path).unwrap(), "test", path)?.value())
+    }
     #[test]
     fn python_json_bytes_cover_float_thresholds_and_ascii_escaping() {
         let dir = tempfile::tempdir().unwrap();
@@ -327,7 +169,10 @@ mod tests {
         fs::write(&path, b"{\"n\": 18446744073709551616}").unwrap();
         assert!(matches!(
             read_json(&path, "unreadable"),
-            Err(crate::Error::PendingRecord { .. })
+            Err(crate::Error::CheckedJson {
+                source: provenant_records::checked_json::DecodeError::NumberOutOfRange(_),
+                ..
+            })
         ));
         fs::write(
             &path,
@@ -340,9 +185,33 @@ mod tests {
         );
     }
     #[test]
+    fn profile_integer_overflow_is_typed_instead_of_becoming_a_string() {
+        for text in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "１８４４６７４４０７３７０９５５１６１６",
+        ] {
+            assert!(matches!(
+                parse_int(text),
+                Err(crate::Error::NumberOutOfRange(_))
+            ));
+        }
+        assert_eq!(
+            parse_int("18446744073709551615").unwrap(),
+            Some(Value::from(u64::MAX))
+        );
+        assert_eq!(
+            parse_int("-9223372036854775808").unwrap(),
+            Some(Value::from(i64::MIN))
+        );
+        assert_eq!(parse_int("12__3").unwrap(), None);
+        assert_eq!(parse_int(&"0".repeat(5000)).unwrap(), None);
+    }
+    #[test]
     fn non_utf8_paths_never_silently_change_the_receipt() {
         use std::os::unix::ffi::OsStringExt;
-        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
+        let path =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
         assert!(matches!(
             path_text(&path),
             Err(crate::Error::PendingRecord { .. })
