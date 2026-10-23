@@ -52,8 +52,8 @@ impl From<CommandOutput> for CommandBytes {
 
 pub mod public_release;
 
+pub mod worktree;
+
 pub mod reap;
 
 pub mod timebomb;
-
-pub mod worktree;
