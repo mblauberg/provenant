@@ -83,7 +83,14 @@ export function watchdogStatus(row: Record<string, any>): string {
   const observation = row.watchdog;
   if (!observation || typeof observation.silent_seconds !== "number" ||
       !Number.isFinite(observation.silent_seconds) || typeof observation.process_alive !== "boolean") return "";
-  return ` · watchdog: silent ${Math.round(observation.silent_seconds)}s; ${observation.process_alive ? "alive" : "dead"} at ${observation.checked_at}`;
+  // Re-render the stamp so a forged watchdog.json can't put raw text in the terminal.
+  const checked = Date.parse(String(observation.checked_at));
+  if (!Number.isFinite(checked)) return "";
+  const at = new Date(checked).toISOString();
+  const silent = Math.round(observation.silent_seconds);
+  // Nothing rewrites the observation once the lane ends, so a finished row shows it as history.
+  if ((row.status ?? row.state) !== "running") return ` · last watchdog: silent ${silent}s at ${at}`;
+  return ` · watchdog: silent ${silent}s; ${observation.process_alive ? "alive" : "dead"} at ${at}`;
 }
 /** Keep the default structured reply as small as its text digest. */
 export function runView(value: Record<string, any>, detail = "brief"): Record<string, any> {

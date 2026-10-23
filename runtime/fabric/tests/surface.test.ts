@@ -19,9 +19,19 @@ const fixturePidLogs = new Set<string>();
 const fixtureRoots = new Set<string>();
 it("renders a retained watchdog once through terminal brief and aggregate digests", async () => {
   const { digest, runView } = await import("../src/surface.js");
+  const checked = new Date().toISOString();
   const view = runView({ runs: [{ state: "terminal", status: "failed", id: "silent",
-    watchdog: { silent_seconds: 301, process_alive: true, checked_at: "2026-10-23T00:00:00Z" } }] });
-  expect(digest(view).match(/watchdog: silent 301s; alive/gu)).toHaveLength(1);
+    watchdog: { silent_seconds: 301, process_alive: true, checked_at: checked } }] });
+  expect(digest(view).match(/last watchdog: silent 301s at /gu)).toHaveLength(1);
+  expect(digest(view)).not.toContain("alive");
+});
+
+it("re-renders a forged watchdog stamp instead of printing it raw", async () => {
+  const { watchdogStatus } = await import("../src/surface.js");
+  const line = watchdogStatus({ status: "running", id: "silent",
+    watchdog: { silent_seconds: 301, process_alive: true, checked_at: "Oct 23 2026 (\u001b[2J)" } });
+  expect(line).toMatch(/^ · watchdog: silent 301s; alive at \d{4}-\d{2}-\d{2}T[\d:.]+Z$/u);
+  expect(line).not.toContain("\u001b");
 });
 
 it("accepts delivery_run_id in dispatch and batch schemas and the CLI flag", () => {

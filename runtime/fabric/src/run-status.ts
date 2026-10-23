@@ -17,6 +17,8 @@ import { liveness, observedAlive, reapAttemptRuns, runOwners, type ProcessIdenti
 
 const execFileAsync = promisify(execFile);
 
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+
 function readWatchdog(runDir: string, value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "string" || isAbsolute(value)) return undefined;
   let path: string;
@@ -38,7 +40,7 @@ function readWatchdog(runDir: string, value: unknown): Record<string, unknown> |
   const record = readJson(path);
   return record?.schema === "fabric.watchdog.v1" && typeof record.process_alive === "boolean" &&
     typeof record.silent_seconds === "number" && Number.isFinite(record.silent_seconds) && record.silent_seconds >= 0 &&
-    typeof record.checked_at === "string" && Number.isFinite(Date.parse(record.checked_at))
+    typeof record.checked_at === "string" && ISO_STAMP.test(record.checked_at) && Number.isFinite(Date.parse(record.checked_at))
     ? record : undefined;
 }
 
