@@ -1106,3 +1106,19 @@ The source revision above is unchanged; CLI rendering remains an edge task.
 - Disposition: source compatibility gathered into `provenant_core::py`;
   other crates' copies remain for their owners to migrate. Checked JSON stays
   in records. JSONC/host/pointer representation gaps remain separately open.
+
+### RP-1001 core-2 follow-up — byte encodings and slug inputs
+
+- Unit: `scripts/host_identity.py#unit-01`; rulebook v4; class `bug` (partial
+  repair, no intentional behavior change). Source/oracle `7475ff01` unchanged
+  at main `cc02dde4`; route `codex/gpt-6.1-sol@high`.
+- `configured` and lenient `peer_ids` now use Python's BOM and null-byte sniffing
+  for UTF-8/16/32, including BOM-less UTF-16/32. Decode errors preserve typed
+  causes and the source's stable `InvalidHost` message.
+- `slug_value` applies the shared Python truth/str helpers for JSON-shaped
+  inputs; the hostname observation API continues taking a string value.
+- Evidence: exact Python differential over eight valid byte encodings and
+  eight malformed/shape/duplicate cases, plus thirteen permissive slug inputs.
+- Remaining: nonfinite/overflow values and lone surrogate JSON strings (and
+  raw surrogate-pass byte decoding). The existing failing parity reproducer
+  remains ignored; this unit is still partial. No codec was moved from records.

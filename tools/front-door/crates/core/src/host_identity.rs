@@ -29,11 +29,80 @@ pub enum InvalidHost {
     Encoding {
         path: PathBuf,
         #[source]
-        source: std::string::FromUtf8Error,
+        source: HostEncodingError,
     },
     #[error("local_host must be 1-63 lowercase letters, digits and hyphens")]
     Name,
 }
+/// Byte decoding failures retain their cause without exposing configuration data.
+#[derive(Debug, Error)]
+pub enum HostEncodingError {
+    #[error("invalid UTF-8")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("invalid UTF-16")]
+    Utf16(#[from] std::string::FromUtf16Error),
+    #[error("invalid UTF-32 code point")]
+    Utf32(#[from] std::char::CharTryFromError),
+    #[error("truncated UTF-{bits} code unit")]
+    Truncated { bits: u8 },
+}
+
+// Python json.loads(bytes) sniffs UTF-8/16/32 even without a BOM.
+fn decode_bytes(raw: &[u8]) -> Result<String, HostEncodingError> {
+    let (raw, width, little) = if let Some(s) = raw.strip_prefix(&[0, 0, 0xfe, 0xff]) {
+        (s, 4, false)
+    } else if let Some(s) = raw.strip_prefix(&[0xff, 0xfe, 0, 0]) {
+        (s, 4, true)
+    } else if let Some(s) = raw.strip_prefix(&[0xfe, 0xff]) {
+        (s, 2, false)
+    } else if let Some(s) = raw.strip_prefix(&[0xff, 0xfe]) {
+        (s, 2, true)
+    } else if let Some(s) = raw.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        (s, 1, false)
+    } else if raw.len() >= 4 && raw[0] == 0 {
+        (raw, if raw[1] == 0 { 4 } else { 2 }, false)
+    } else if raw.len() >= 4 && raw[1] == 0 {
+        (raw, if raw[2] != 0 || raw[3] != 0 { 2 } else { 4 }, true)
+    } else if raw.len() == 2 && raw[0] == 0 {
+        (raw, 2, false)
+    } else if raw.len() == 2 && raw[1] == 0 {
+        (raw, 2, true)
+    } else {
+        (raw, 1, false)
+    };
+    if width == 1 {
+        return Ok(String::from_utf8(raw.to_vec())?);
+    }
+    if raw.len() % width != 0 {
+        return Err(HostEncodingError::Truncated {
+            bits: (width * 8) as u8,
+        });
+    }
+    if width == 2 {
+        let units: Vec<_> = raw
+            .chunks_exact(2)
+            .map(|b| {
+                if little {
+                    u16::from_le_bytes([b[0], b[1]])
+                } else {
+                    u16::from_be_bytes([b[0], b[1]])
+                }
+            })
+            .collect();
+        return Ok(String::from_utf16(&units)?);
+    }
+    let mut text = String::new();
+    for b in raw.chunks_exact(4) {
+        let value = if little {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        };
+        text.push(char::try_from(value)?);
+    }
+    Ok(text)
+}
+
 impl InvalidHost {
     pub fn code(&self) -> &'static str {
         "invalid_config"
@@ -82,6 +151,17 @@ pub fn slug(raw: &str) -> String {
     }
 }
 
+/// Python's permissive slug input boundary for checked JSON values. Dictionary
+/// rendering follows the value's existing iteration order; callers retaining raw
+/// Python dictionaries must preserve that order before constructing this value.
+pub fn slug_value(value: &Value) -> String {
+    if crate::py::python_truth(value) {
+        slug(&crate::py::python_str(value))
+    } else {
+        slug("")
+    }
+}
+
 pub fn configured(path: &Path) -> Result<Option<String>, InvalidHost> {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -93,7 +173,7 @@ pub fn configured(path: &Path) -> Result<Option<String>, InvalidHost> {
             })
         }
     };
-    let text = String::from_utf8(raw).map_err(|source| InvalidHost::Encoding {
+    let text = decode_bytes(&raw).map_err(|source| InvalidHost::Encoding {
         path: path.into(),
         source,
     })?;
@@ -124,7 +204,8 @@ pub fn host_id(path: &Path, hostname: &str) -> String {
 pub fn peer_ids(path: &Path) -> BTreeSet<String> {
     fs::read(path)
         .ok()
-        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|raw| decode_bytes(&raw).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|v| {
             v.get("peers")
                 .and_then(Value::as_object)
@@ -328,5 +409,59 @@ print(json.dumps(results))
             expected.push(fixture[1].clone());
         }
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    #[test]
+    fn python_bytes_encoding_detection_and_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.json");
+        let Some(fixtures) = crate::test_support::python(
+            "scripts/host_identity.py",
+            r#"
+p=pathlib.Path(sys.argv[3]); results=[]
+text='{"local_host":"studio","peers":{"box":{}},"extra":"é😀"}'
+raws=[text.encode(e) for e in ['utf-8','utf-8-sig','utf-16','utf-16-le','utf-16-be','utf-32','utf-32-le','utf-32-be']]
+raws += [b'\xff', b'\xff\xfe{', b'\x00\x00\xfe\xff\x00', b'[]', b'{}', b'{"local_host":"studio","x":1,"x":2}',b'\x00"',b'"\x00']
+for raw in raws:
+    p.write_bytes(raw)
+    try: result=m.configured(p)
+    except m.InvalidHost as e: result={'error':str(e)}
+    results.append([list(raw),result,sorted(m.peer_ids(p))])
+print(json.dumps(results))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        for fixture in fixtures.as_array().unwrap() {
+            let bytes: Vec<u8> = serde_json::from_value(fixture[0].clone()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            let actual = match configured(&path) {
+                Ok(v) => serde_json::json!(v),
+                Err(e) => serde_json::json!({"error":e.to_string()}),
+            };
+            assert_eq!(actual, fixture[1], "{}", fixture[0]);
+            assert_eq!(serde_json::json!(peer_ids(&path)), fixture[2]);
+        }
+    }
+    #[test]
+    fn permissive_slug_boundary_uses_python_strings_and_truth() {
+        let values =
+            serde_json::json!([null,false,true,0,0.0,1,1.5,-1,[],{},[true],{"A":"B"},"İßK" ]);
+        let Some(expected) = crate::test_support::python(
+            "scripts/host_identity.py",
+            r#"
+print(json.dumps([m.slug(v) for v in [None,False,True,0,0.0,1,1.5,-1,[],{},[True],{'A':'B'},'İßK']]))
+"#,
+            &[],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = values.as_array().unwrap().iter().map(slug_value).collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }
