@@ -475,6 +475,7 @@ name = "provenant-fabric-runtime"
 version = "0.1.0"
 dependencies = [
  "provenant-core",
+ "provenant-records",
  "serde",
  "serde_json",
  "sha2",

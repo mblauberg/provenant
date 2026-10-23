@@ -110,7 +110,8 @@ pub(crate) fn field(
             // The selected field is interpreted separately. Unsupported scalar
             // encodings count as an invalid value here, never a file failure.
             let raw = &text[index..end];
-            let value = crate::pending::checked_json(raw).unwrap_or(Value::Null);
+            let value =
+                provenant_records::checked_json::from_str(&grammar(raw)).unwrap_or(Value::Null);
             result.insert(selected.into(), value);
         }
         index = end;

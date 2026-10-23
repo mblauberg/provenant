@@ -70,7 +70,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
             return (vec![], warnings);
         }
     };
-    let Ok(root) = crate::pending::resolve_path(workspace_root) else {
+    let Ok(root) = provenant_core::paths::resolve(workspace_root) else {
         warnings.push(format!("{POLICY} is unreadable; using defaults"));
         return (vec![], warnings);
     };
@@ -91,7 +91,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
             ));
             continue;
         }
-        let candidate = match crate::pending::resolve_path(&root.join(path)) {
+        let candidate = match provenant_core::paths::resolve(&root.join(path)) {
             Ok(candidate) => candidate,
             Err(_) => {
                 warnings.push(format!("{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {}", provenant_core::py::python_value_repr(entry)));
