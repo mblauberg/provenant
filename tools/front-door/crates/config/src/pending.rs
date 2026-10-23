@@ -1,9 +1,6 @@
 //! Temporary shared primitives until their owners land on main.
-use crate::{io, Result};
-use std::{
-    fs,
-    path::Path,
-};
+use crate::Result;
+use std::{fs, path::Path};
 
 // port: belongs in provenant-records
 pub(crate) fn json_bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
@@ -15,7 +12,7 @@ pub(crate) fn json_bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
 }
 
 // port: belongs in provenant-records
-fn json_string(value: &str) -> Result<String> {
+pub(crate) fn json_string(value: &str) -> Result<String> {
     let text = serde_json::to_string(value).map_err(|e| crate::invalid(e.to_string()))?;
     let mut output = String::new();
     for c in text.chars() {
@@ -127,10 +124,12 @@ pub(crate) fn read_json(path: &Path, context: &'static str) -> Result<serde_json
         path: path.into(),
         source,
     })?;
-    provenant_records::checked_json::from_slice(&bytes).map_err(|source| crate::Error::CheckedJson {
-        context,
-        path: path.into(),
-        source,
+    provenant_records::checked_json::from_slice(&bytes).map_err(|source| {
+        crate::Error::CheckedJson {
+            context,
+            path: path.into(),
+            source,
+        }
     })
 }
 
@@ -182,7 +181,10 @@ mod tests {
         fs::write(&path, b"{\"n\": 18446744073709551616}").unwrap();
         assert!(matches!(
             read_json(&path, "unreadable"),
-            Err(crate::Error::CheckedJson { source: provenant_records::checked_json::DecodeError::NumberOutOfRange(_), .. })
+            Err(crate::Error::CheckedJson {
+                source: provenant_records::checked_json::DecodeError::NumberOutOfRange(_),
+                ..
+            })
         ));
         fs::write(
             &path,
@@ -197,7 +199,8 @@ mod tests {
     #[test]
     fn non_utf8_paths_never_silently_change_the_receipt() {
         use std::os::unix::ffi::OsStringExt;
-        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
+        let path =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
         assert!(matches!(
             path_text(&path),
             Err(crate::Error::PendingRecord { .. })

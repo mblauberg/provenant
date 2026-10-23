@@ -142,8 +142,7 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
             "installation manifest is invalid or not owned by agent-harness",
         ));
     }
-    if value["target_root"].as_str()
-        != Some(pending::path_text(&crate::resolve(target)?)?.as_str())
+    if value["target_root"].as_str() != Some(pending::path_text(&crate::resolve(target)?)?.as_str())
     {
         return Err(invalid(
             "installation manifest belongs to a different target root",

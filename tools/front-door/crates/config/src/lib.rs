@@ -4,12 +4,14 @@
 pub mod codex;
 pub mod command;
 
+mod filesystem;
 pub mod front_door;
 pub mod instance;
 pub mod managed_skills;
 pub mod manifest;
+mod ordered;
 mod pending;
-mod filesystem;
+pub mod profiles;
 pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
