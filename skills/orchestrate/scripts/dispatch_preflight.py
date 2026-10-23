@@ -274,7 +274,7 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
         )
         # credential_path resolves the whole path, so a link into a store is refused too.
         if (sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth
-                or provider_exec.credential_path(prompt_source)):
+                or provider_exec.provider_confinement.credential_path(prompt_source)):
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
             prompt_bytes = _read_prompt_once(prompt_root, prompt_source, max_bytes=max_bytes)
@@ -360,7 +360,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError("sandbox_forbidden","A read-only run requires a read-only sandbox.")
                 if "network" in task and type(task["network"]) is not bool:
                     raise PreflightError("network_invalid","Pass network true or false.")
-                if any(provider_exec.credential_path(path) for path in task.get("add_dirs",[])):
+                if any(provider_exec.provider_confinement.credential_path(path) for path in task.get("add_dirs",[])):
                     raise PreflightError("credential_or_auth_store_denied","Additional directories must exclude credential stores.")
                 if (task.get("prompt") is None) == (task.get("prompt_file") is None):
                     raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
@@ -372,7 +372,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 if not isinstance(read_roots, list) or not all(
                         isinstance(root, str) and Path(root).is_absolute() for root in read_roots):
                     raise PreflightError("read_roots_invalid", "Pass read_roots as a list of absolute directories.")
-                if any(provider_exec.credential_path(root) for root in read_roots):
+                if any(provider_exec.provider_confinement.credential_path(root) for root in read_roots):
                     raise PreflightError("credential_or_auth_store_denied", "Read roots must exclude credential stores.")
                 read_roots = [str(Path(root).resolve()) for root in read_roots]
                 if "confidential" in task and type(task["confidential"]) is not bool:
@@ -505,11 +505,11 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                                 break
                     if risk:
                         raise PreflightError("confidential_route", risk)
-                protected = provider_exec.check_protected_inputs(
+                protected = provider_exec.provider_confinement.check_protected_inputs(
                     route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
                     worktree=worktree if mode == "worktree_write" else None,
                     prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []), read_roots=read_roots)
-                if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
+                if protected and (adapter == "codex" or not provider_exec.provider_confinement._sandbox_exec_path()):
                     raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
                 if task.get("prompt_file") is not None:
                     read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
