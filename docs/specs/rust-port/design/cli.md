@@ -48,36 +48,34 @@ provenant
   help [COMMAND…]
   root
   config show
-  install [--dry-run] [--legacy-checkout ABS]
+  install
   uninstall
   route list | resolve
   dispatch
-  lanes [--wait]
-  output
-  cancel
-  resume
+  lanes [--wait SECONDS]
+  output ATTEMPT
+  cancel TARGET
+  resume ATTEMPT
   reconcile
-  fabric …                                [messages/tasks/identity/peers/MCP]
+  fabric …                                [fabric-runtime clap subtree]
     mcp
   telemetry stats
   quota show | tick
-  worktree create NAME [--base REV] [--repo ABS]
-  worktree list [--repo ABS]
-  worktree remove NAME | --merged --integration REF [--branch NAME… | --since OID]
-  workflow …                              [workflow freeze gate]
+  worktree create BRANCH [--base REV]
+  worktree list
+  worktree remove NAME | --merged --integration REF (--branch NAME… | --since OID)
+  workflow …                              [workflow clap subtree]
   check config | install | harness | release
-  check writing PATHS… [--profile PROFILE]
+  check writing PATHS… [--rules general|academic|legal]
   hook claude pre-tool-use | pre-compact | compact
   hook git pre-push REMOTE LOCATION
-  internal supervise                      [hidden; guardian handshake only]
+  internal supervise                      [hidden; launch handshake only]
 ```
 
-state.md owns the flags of `root`, `install`, `uninstall` and `check install`;
-this tree lists only their verbs.
-
-The run grammar below is canonical even where area proposals still disagree.
-Other reserved leaves need owner request types, flags and bounds reconciled
-here before their parser lands; reservations do not authorise old verbs.
+The [reconciled leaf grammar](#reconciled-leaf-grammar) freezes every leaf's
+positionals, flags, bounds and owner request, including state's install
+leaves. Owner designs use the same spellings; no reservation remains open, and
+none authorises an old verb. `fabric …` and `workflow …` are the boundary only.
 Neither `workflow hook` nor `workflow lint` exists. MCP tools belong to
 `fabric-mcp`; CLI adds none. Both edges call typed library operations, never
 parse each other's output. The binary calls `fabric-mcp` directly for
@@ -105,8 +103,8 @@ Unknown/duplicate singleton/conflicting options fail. Only explicitly marked
 selectors repeat. Durations/counts are bounded integers; IDs are newtypes;
 paths stay `OsString` until a record requires text. Every wait requires an
 explicit budget: CLI 1–14400 seconds, MCP 1–55 seconds. Omitting a command's
-wait option means no wait; zero is not a wait budget. `lanes --wait` requires
-`--timeout SECONDS`; each `--wait SECONDS` elsewhere supplies its own budget.
+wait option means no wait; zero is not a wait budget. Every wait is spelt
+`--wait SECONDS`, which supplies its own budget; no `--timeout` reader flag.
 Expiry never cancels underlying work. A wait condition is satisfied by terminal
 or `InputRequired` state; that wait exits 0, with the observed outcome in data.
 
@@ -127,41 +125,35 @@ the recorded acceptance/outcome (or current in-progress receipt) without
 repeating effects; a different request is invalid/2. This covers lost replies
 and concurrent duplicate submissions, including resume.
 
-`TARGET` is an exact `RUN[/TASK[/ATTEMPT]]`; commands that require an attempt
-reject shorter targets. IDs are opaque typed values. Ambiguous names fail
-with candidate IDs; never pick the newest match. For `lanes`, no selectors means
-the current agent's lanes in the selected project, excluding caller and
-ancestors. `reconcile` has the project scope below and requires matching caller
-authority; it does not inherit lane-selection defaults.
+`TARGET` is an exact `RUN[/TASK[/ATTEMPT]]`; `ATTEMPT` is the full
+three-part form, and commands taking it reject shorter targets. IDs are opaque
+typed values. Ambiguous names fail with candidate IDs; never pick the newest
+match. For `lanes`, no selectors means the current agent's lanes in the
+selected project, excluding caller and ancestors. `reconcile` has the project
+scope below and requires matching caller authority; it does not inherit
+lane-selection defaults. Flags and bounds are in the reconciled table below.
 
-| Verb | Flags and behaviour |
+| Verb | Behaviour |
 | --- | --- |
-| `dispatch` | Exactly one of `--prompt-file PATH`, `--prompt-stdin`, `--manifest PATH`; required `--operation-id ID`; optional `--task-id ID`, `--delivery-id ID`, `--host HOST`, `--wait SECONDS`. Manifest-only `--concurrency N` defaults to 4, range 1–8; manifest has 1–64 independent typed tasks, unique IDs and one host. Single-prompt route/access flags below conflict with manifest task fields; `--task-id` is single-task only. Prompt/manifest input is at most 1 MiB. Acceptance returns IDs, exact route, state and artifact references after commit. |
-| `lanes` | Repeatable `--id TARGET`, `--all`, `--limit N` (1–100, default 50), `--cursor TOKEN`, `--summary`, `--wait`, `--timeout SECONDS`, `--condition any\|all` (default any). Without wait, list active plus five recent terminal lanes; `--all` includes retained terminal lanes. Timeout/condition require wait. Wait snapshots selected active/queued lanes plus unseen terminal/attention revisions at entry; later launches belong to the next wait. Empty selection succeeds immediately. No cursor while waiting. |
-| `output TARGET` | Exact attempt; `--part result\|prompt\|stderr\|events` (default result), mutually exclusive `--offset N` (default 0) and `--tail N` (1–500), `--max-bytes N` (1–65536, default 65536). Return byte offset, next offset, EOF, encoding and completeness; every unread byte remains accessible. Prompt reads require dispatch-equivalent project authority. |
-| `cancel TARGET` | Required `--operation-id ID`; optional `--reason TEXT` (at most 256 bytes), `--wait SECONDS`. Scoped request returns requested/already-terminal/unobservable and custody observation. Acknowledgement is not process exit. No sibling or chair cancellation. |
-| `resume TARGET` | Exact attempt and required `--operation-id ID`; optional one of `--prompt-file PATH` or `--prompt-stdin`, and `--wait SECONDS`. Input-required continuation or terminal continuation creates a new immutable attempt with prior-attempt reference and the exact retained provider handle/route. Missing continuation capability or conflicting active writer refuses. New prompt is required for a terminal continuation. No automatic writer replay or mutable completed receipt. |
-| `reconcile` | Repeatable `--id RUN`, required `--operation-id ID`; otherwise selected project's recoverable runs. Ask run to recover queued/orphaned scheduler work idempotently; report repaired/unchanged/refused items. No healthy-provider signal, inferred completion or released custody without owner evidence. |
+| `dispatch` | One prompt or a manifest of 1–64 independent typed tasks with unique IDs and one host. Acceptance returns IDs, exact route, state and artifact references after commit. |
+| `lanes` | Without wait, list active plus five recent terminal lanes; `--all` includes retained terminal lanes. Wait snapshots selected active/queued lanes plus unseen terminal/attention revisions at entry; later launches belong to the next wait. Empty selection succeeds immediately. |
+| `output ATTEMPT` | Return byte offset, next offset, EOF, encoding and completeness; every unread byte remains accessible. Prompt reads require dispatch-equivalent project authority. |
+| `cancel TARGET` | Scoped request returns requested/already-terminal/unobservable and custody observation. Acknowledgement is not process exit. No sibling or chair cancellation. |
+| `resume ATTEMPT` | Input-required or terminal continuation creates a new immutable attempt with prior-attempt reference and the exact retained provider handle, route and access. Missing continuation capability or a conflicting active writer refuses. A fresh turn or new route is a new `dispatch`. No automatic writer replay or mutable completed receipt. |
+| `reconcile` | Ask run to recover queued/orphaned scheduler work idempotently for the selected runs, or the selected project's recoverable runs; report repaired/unchanged/refused items. No healthy-provider signal, inferred completion or released custody without owner evidence. |
 
-Single-prompt dispatch takes exactly one `--model ADAPTER/ID` or `--route NAME`,
-plus optional `--effort VALUE`. Routing owns eligibility; providers detect the
-account label and run records it. Confidentiality is always on, without a flag.
-Workflow owns assurance policy; no account pin, intent, reviewer, risk-tier,
-orchestrator-family, native-seat or classification selector is exposed here.
-The [execution-route design](execution-route.md#resolution-and-command-contract)
-freezes the same route inputs for `route resolve`, plus `route list` and
-`quota show|tick` flags/results. Tick remains because the live quota-menubar
-LaunchAgent calls it (QuotaModel.swift:123).
-Access flags: `--mode read-only|worktree-write` (default read-only),
-`--worktree PATH` required for a writer, repeatable `--read-root PATH` and
-`--write-root PATH`, `--network on|off`, repeatable `--capability NAME`;
-`--fallback none|ADAPTER/ID[,ADAPTER/ID]` defaults to none; the explicit list
-has at most two alternatives and is read-only only. No fallback pool exists.
-The selected project supplies cwd. No raw provider argv or permission bypass.
-Confinement proves authority and rejects overlapping canonical writer scopes
-before admission. A manifest is strict versioned JSON with typed route/access
-fields per task, inline prompt or prompt-file reference and optional delivery
-ID; run/records own its schema. Facts are `Serialize` only and built at edges.
+Single-prompt dispatch names its route on the command line. Routing owns
+eligibility; providers detect the account label and run records it.
+Confidentiality is always on, without a flag. Workflow owns assurance policy;
+no account pin, intent, reviewer, risk-tier, orchestrator-family, native-seat
+or classification selector is exposed here. `route resolve` takes the same
+route inputs. Tick remains because the live quota-menubar LaunchAgent calls it
+(QuotaModel.swift:123). No fallback pool exists. The selected project supplies
+cwd. No raw provider argv or permission bypass. Confinement proves authority
+and rejects overlapping canonical writer scopes before admission. A manifest is
+strict versioned JSON with typed route/access fields per task, inline prompt
+or prompt-file reference and optional delivery ID; run/records own its schema.
+Facts are `Serialize` only and built at edges.
 
 Unreachable hosts remain unknown and cannot satisfy an all-lanes wait.
 Cancelling a wait ends only that reader. Seen revisions advance only for rows
@@ -169,6 +161,60 @@ successfully delivered; pagination/oversize never acknowledges unseen rows.
 Run's cancel, resume, read_output and export APIs take `&ExecutionContext`;
 event reads use cursors. No separate public status/wait/retry/batch tree is
 needed: lanes, output, resume and manifest dispatch cover those operations.
+
+### Reconciled leaf grammar
+
+This table is the step 1 parser freeze. Global options, `--help` and the
+envelope apply to every row unless stated. `…` marks a repeatable flag or
+positional; nothing else repeats. `SECONDS` waits are 1–14400 and
+satisfied as the run grammar states. Two shorthands recur:
+
+- `ROUTE` = `(--model ADAPTER/ID | --route NAME) [--effort VALUE]
+  [--fallback ADAPTER/ID[,ADAPTER/ID]]`, mapping to routing's `RouteRequest`.
+  Omitted fallback is `Fallback::None`; the list holds at most two distinct
+  models and conflicts with a writer.
+- `ACCESS` = `[--mode read-only|worktree-write] [--worktree PATH]
+  [--read-root PATH…] [--network on|off] [--capability NAME…]`, mapping to
+  the task's `Authority`. Mode defaults to read-only and network to off.
+  `--worktree` is required with, and only valid for, `worktree-write`. At most
+  32 read roots and 16 capabilities.
+
+| Leaf | Grammar | Owner request type | Bounds, conflicts and reason |
+| --- | --- | --- | --- |
+| `help` | `help [COMMAND…]` | records `HelpCatalog` | Pure; no root, SQLite, threads or probes. |
+| `root` | `root` | core `Roots` plus config installation identity | No flags. Reports asset root, state directory, selected project and installation together; state's `--kind` is dropped because `--json` already separates fields and global `--project` selects. |
+| `config show` | `config show` | config `load` → `ResolvedConfig` | No flags; secrets redacted. |
+| `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
+| `uninstall` | `uninstall --harness NAME…` | config `uninstall` | At least one harness; unchanged owned entries only. |
+| `route list` | `route list [--adapter ADAPTER]` | routing `RouteListQuery { adapter }` | Unpaged bounded catalogue; no probe. |
+| `route resolve` | `route resolve ROUTE` | routing `RouteRequest` with a read-only `RoutingContext` | Pure; no admission or state write. |
+| `quota show` | `quota show [--adapter ADAPTER]` | quota `QuotaQuery { adapter }` | No refresh. `--adapter` replaces quota's `--provider`, matching `route list`: one adapter key, one spelling. |
+| `quota tick` | `quota tick [--adapter ADAPTER] [--trigger timer\|panel\|manual\|wake\|power] [--power ac\|battery\|low]` | quota `QuotaTick { adapter, trigger, power }` | Defaults manual and ac; owner wall budget at most 55 s, no wait flag. The Swift app's `quota forget` and bare `quota` calls retire at cut-over. |
+| `dispatch` | `dispatch (--prompt-file PATH \| --prompt-stdin \| --manifest PATH) --operation-id ID [--task-id ID] [--delivery-id ID] [ROUTE] [ACCESS] [--provider-timeout SECONDS] [--concurrency N] [--host HOST] [--wait SECONDS]` | run `submit(Submission { tasks: [TaskRequest], concurrency }, OperationKey, …)`; `TaskRequest { id, prompt, route, access, timeout, delivery_id }`; `--host` is Fabric placement | Input at most 1 MiB. A single prompt requires `ROUTE`; manifest conflicts with `--task-id`, `--delivery-id`, `ROUTE`, `ACCESS` and `--provider-timeout`, which are per-task fields. `--concurrency` is manifest-only, 1–8, default 4. `--provider-timeout` is the provider runtime budget, 1–14400, default 3600 read-only and 10800 writer; run's `--timeout` is renamed so `timeout` never means a reader wait, and `--admission-timeout` is dropped because no request field carries it. `--write-root` is dropped: confinement grants writes only to the verified worktree. Wait uses `All` over the receipt's attempts. |
+| `lanes` | `lanes [--id TARGET…] [--all] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | run `query(RunQuery)` or `wait(RunQuery, WaitBudget, …)`; `RunQuery { ids, states, cursor, limit, condition }` | At most 100 IDs; `--all` conflicts with `--id`. Limit 1–100, default 50. `--cursor` conflicts with `--wait`; condition defaults to any and requires wait. `--wait SECONDS` replaces `--wait --timeout` so every wait has one spelling. `--summary` and lane tails are dropped: no request field; `output` reads bytes. |
+| `output` | `output ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` | run `read_output(AttemptRef, ArtifactPart, ByteRange)`; `ByteRange { start: Offset(u64) \| TailLines(u16), max_bytes }` | Part defaults to result; offset defaults to 0; tail is 1–500 lines with no default, so a bare read starts at byte 0 rather than run's 40-line clip. Max bytes 1–65536, default 65536. |
+| `cancel` | `cancel TARGET --operation-id ID [--reason TEXT] [--wait SECONDS]` | run `cancel(AttemptRef, OperationKey, CancelReason, …)` | Reason UTF-8, at most 256 bytes. Aggregate targets expand to exact attempts. |
+| `resume` | `resume ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | run `resume(ResumeRequest { target, prompt, expected_generation: 0 }, OperationKey, …)` | Prompt required, at most 1 MiB, matching Fabric's non-optional `prompt`. No `ROUTE`/`ACCESS`: run's fresh mode is dropped for Fabric's fixed-route request. The edge sends generation 0, so an attempt continues once; continue the newest attempt in a chain. |
+| `reconcile` | `reconcile [--id RUN…] [--abandon-uncertain]` | run `recover(ProjectId, OperationId)`; with the flag, `reconcile(ProjectId, OperationId, ReconcileDecision::AbandonUncertain)` | At most 100 IDs; the edge maps each run to its operation. `--abandon-uncertain` requires at least one `--id`. No `--operation-id` or budget flag: the owner API takes neither, and recovery is idempotent. |
+| `fabric …` | Fabric's own clap subtree, mounted unchanged | fabric-runtime and fabric-mcp requests | Fabric freezes its leaves. CLI supplies only globals, envelope, exits and help catalogue entries; the mount lands with Fabric's crate, never as a forwarding route. |
+| `telemetry stats` | `telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail]` | telemetry `stats(facts, &PriceTable, StatsWindow { since, until, detail })` | Dates mean midnight UTC; timestamps need an offset; `since < until`. |
+| `worktree create` | `worktree create BRANCH [--base REV]` | confinement `worktrees::create(WorktreeCreate { branch, base })` | Creates `.worktrees/<BRANCH with / as ->`. An existing branch with `--base` is invalid; a new branch's base defaults to the project's `HEAD`, pinned and returned. `--repo` is dropped for global `--project`. |
+| `worktree list` | `worktree list` | confinement `worktrees::list(VerifiedRepo)` | Unpaged bounded list; no `--repo`. |
+| `worktree remove` | `worktree remove NAME` \| `worktree remove --merged --integration REF (--branch NAME… \| --since OID)` | confinement `worktrees::remove(WorktreeRemove::Name \| Merged { integration, scope })` | NAME conflicts with `--merged`. Scope is required, as supervisor states, rather than cli's optional scope. At most 100 branches. REF is pinned once. No force. |
+| `workflow …` | Workflow's own clap subtree, mounted unchanged | workflow requests | As for `fabric …`. |
+| `check config` | `check config [--limit N] [--cursor TOKEN]` | config validation | All checks: limit 1–100, default 50. |
+| `check install` | `check install [--source ABS] [--limit N] [--cursor TOKEN]` | config `check_install` | `--source` is a staged release, as for `install`, not a source checkout; one spelling, one meaning. |
+| `check harness` | `check harness [--limit N] [--cursor TOKEN]` | cli `HarnessCheck` over a verified project | Tracked inputs only. |
+| `check release` | `check release [--base OID --head OID] [--limit N] [--cursor TOKEN]` | cli `ReleaseCheck { range: Option<(GitOid, GitOid)> }` | Both range flags or neither. |
+| `check writing` | `check writing PATHS… [--rules general\|academic\|legal] [--limit N] [--cursor TOKEN]` | workflow writing matcher | 1–256 paths; rules default general. Workflow's `--rules` replaces `--profile`, which collided with config's `profile`. |
+| `hook claude …` | `hook claude pre-tool-use \| pre-compact \| compact` | `HookSpec` handler | No flags; `--json` refused before stdin. |
+| `hook git pre-push` | `hook git pre-push REMOTE LOCATION` | `HookSpec` handler | No flags; `--json` refused. |
+| `internal supervise` | `internal supervise` | supervisor launch handshake | Hidden from help; no arguments; `--json` refused. Run's scheduler and attempt guardian both enter here; the handshake names the role. |
+
+No `clean` verb exists: guardian settlement and `reconcile` recovery delete
+disposable scratch, and history stays retained. No utility, classifier or
+routing-hook leaf exists, so step 1 does not wait on execution-route's step 3
+deletion of their Python.
 
 ### Results, exits and size limits
 
@@ -206,7 +252,7 @@ the tool result without ending the server.
 | Result shape | Bound and oversize action |
 | --- | --- |
 | Any ordinary result, human or JSON | At most 1 MiB of encoded result bytes, including envelope/LF for JSON. Buffer/size-check before stdout. Any result exceeding this fails with `error`/3 (`RESULT_TOO_LARGE`) and a bounded pointer to an owner-published file or a paged-read command. Never silently truncate or rerun a mutation. |
-| Lists/check findings | Page to fit the same cap with `next_cursor` and total/coverage data. Checks retain exit 1 if any finding exists, including on later pages. If even one item cannot fit, fail as above with a file/paged-read pointer. |
+| Lists/check findings | Leaves with `--cursor` page to fit the same cap with `next_cursor` and total/coverage data; unpaged owner-bounded lists fail as above. Checks retain exit 1 if any finding exists, including on later pages. If even one item cannot fit, fail as above with a file/paged-read pointer. |
 | Output/artifact reads | Explicit byte/line window above, with next offset and EOF; this is a requested slice, never silent clipping. A non-list result over 1 MiB still fails with 3. |
 
 The library publishes artifacts before returning references. Where a result
@@ -316,9 +362,9 @@ and native alternates. Missing/truncated objects, unreadable/bounded-out files
 or non-UTF-8 content never yield a clean result. One byte-rule registry;
 prefilters must prove a superset.
 
-`check writing PATHS… [--profile PROFILE]` calls workflow's data-driven writing
-rules beside each `SKILL.md`, reuses `Finding` and exits 1 on findings. PROFILE
-selects writing rules, not a config overlay. There is no `provenant lint`.
+`check writing PATHS… [--rules general|academic|legal]` calls workflow's
+data-driven writing rules beside each `SKILL.md`, reuses `Finding` and exits 1
+on findings. There is no `provenant lint`.
 Date lint is a workspace test over Rust `#[test]` sources (ADR 0028 decision 7),
 with injected clocks or a local `timebomb: allow REASON` for deliberate dates;
 no `check dates`, Python AST or JS matching.
@@ -355,7 +401,7 @@ for config's installer; config never imports cli.
 | Roots, project selection, install identity/assets, managed registrations | core/records/config (state) |
 | Safe bounded process/FS APIs, custody, cancellation, trusted Git/worktrees | supervisor/confinement; no cli `Command::new`, raw descriptors or unsafe |
 | Atomic admission/registry, attempts, waits, continuation, output and evidence packet | run; `AttemptReader::attempt(AttemptId) -> AttemptFact` and `attempts(filter)` carry all terminal/route/reviewer/output facts workflow needs; the CLI composes `attempts()` with `stats(facts, &PriceTable, window)` and adds the active count from `snapshot` |
-| Route listing/resolution and quota show/tick | routing/providers/quota; the execution-route design owns flags, typed requests and results |
+| Route listing/resolution and quota show/tick | routing/providers/quota; the execution-route design owns typed requests and results, and the reconciled table freezes their flags |
 | Terminal-record reduction with bundled prices | telemetry; `telemetry stats`, no ledger |
 | Identity, federation, coordination and MCP lifecycle | fabric-runtime/fabric-mcp |
 | Writing/check/review policy and new-root session checkpoints | workflow |
@@ -522,9 +568,9 @@ Recount the actual diff in each PR; budget growth needs an explanation.
 
 ## Build order
 
-Before step 1 freezes the full parser, the chair reconciles reserved owner
-grammars, including execution-route's classifier removal/route inputs and
-supervisor's worktree flags. No parser freeze proceeds on unresolved reservations.
+The [reconciled leaf grammar](#reconciled-leaf-grammar) settles every owner
+grammar, including execution-route's classifier removal and route inputs and
+supervisor's worktree flags. Step 1 freezes the parser from that table.
 
 1. **Parser and rig.** Land the frozen Clap model, exhaustive composition,
    renderer/exit/oversize contract and isolated shared rig. Delete the shell
@@ -545,9 +591,8 @@ supervisor's worktree flags. No parser freeze proceeds on unresolved reservation
    git links/commands and Herdr preservation assertions. No old-root reader.
 4. **Area bindings.** Connect run/route, worktree/cleanup, Fabric/MCP, telemetry
    and workflow in owner slices with caller updates and subject/test deletions.
-   Execution-route settles classifier removal and route flags for utility
-   deletion; supervisor.md settles the worktree flags above.
-   No placeholder success or compatibility dispatcher ships.
+   Execution-route's step 3 still gates utility deletion; its flags and the
+   worktree flags are already frozen. No placeholder success or compatibility dispatcher ships.
 5. **Final CI/cut-over gate.** Replace custody invariants before deleting
    `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
    `tests/test_record_schemas.py` with their subjects. Remove their judge CI

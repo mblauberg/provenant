@@ -69,7 +69,7 @@ reserve process identity. Repository hooks and skills move to the frozen tree.
 | Python observer process, opaque staged bundles, duplicate canonical/legacy attempt files and digest sidecars | These are internal seams in `provider_exec.py`, `dispatch_run.py`, `run_lineage.py` and `lane/observer.rs`. All owners become Rust; Run's decoder sends typed events and records supplies one canonical terminal record. Retain the publication invariant, delete the transport. |
 | `Drop`-driven provider stopping and unbounded cleanup loops | `lane/group.rs` stops and polls in `Drop`; abort/SIGKILL bypass it. Explicit guardian ownership and a detached reaper replace it. A bookkeeping error must not trigger a destructor kill. |
 | Python/Node Unicode, locale-start strings, ps layout and subprocess error emulation | Existing supervisor `pending`, `ps`, `fabric_ps`, and confinement `python`/`pending` implement runtime parity. Native integer identity and typed errors serve the actual safety decisions; v7 R0 removes parity as a requirement. |
-| Whole-run retention and cleanup plans | Keep generated scratch deletion by the guardian at settlement. Drop clean plan/apply, CleanupPlan and its directory; history, captures and unclassified data remain retained. Run owns any surviving `clean` verb. |
+| Whole-run retention and cleanup plans | Keep generated scratch deletion by the guardian at settlement. Drop clean plan/apply, CleanupPlan and its directory; history, captures and unclassified data remain retained. No `clean` verb survives. |
 | `worktree remove --force`, automatic dependency-tree cloning/linking | `worktree.py` can bypass live-writer checks and provision Node modules. A Rust product needs neither Node bootstrap nor a live-writer override. Keep clean linked-worktree creation/removal and merged-branch pruning only within supplied authority. |
 | Standalone writer lease, launch/exit wrappers and Git-evidence packet wrapper | `writer_lease.py`, `lane_launch.py`, `lane_exit.py`, `git_evidence_packet.py` duplicate decisions now shared by Run, confinement and workflow. Preserve their safety checks in library calls; run owns git_evidence_packet and completed-attempt facts, workflow owns review policy, and Fabric owns the landing lease. |
 | Cross-session transcript scanning and caller-supplied terminal-report CLI | `worker_liveness.py` correlates newest transcript by cwd and accepts an exit status from its caller; multiple workers make that correlation ambiguous. Keep native repo-scoped PID/start/CWD/CPU diagnostics, also consumed by custody and the documented direct-CLI fallback. Drop old-root transcript correlation under R1 and require owned wait evidence for managed terminal reports. |
@@ -84,7 +84,8 @@ provider decoder composed beside supervisor; supervisor imports neither Run nor
 providers. A private, bounded launch channel transfers the plan and duplicated
 writer lease, with an ownership acknowledgement before the parent disconnects.
 Secrets use memory/pipes and the child environment, never argv or disk. Hidden
-`internal supervise` accepts only this handshake, not a public raw launch spec.
+`internal supervise` takes no arguments and accepts only this handshake, which
+names Run's scheduler or guardian role, not a public raw launch spec.
 MCP cancellation stops a wait; explicit Run cancellation writes a scoped request.
 
 The guardian keeps the provider, attempt lock and writer-lease duplicate after
@@ -272,15 +273,15 @@ and recovery. Fabric's landing lease is separate from the writer lease.
 
 | Command / handler | Contract |
 | --- | --- |
-| `worktree create NAME` | New or existing branch, optional base/repo; create a clean linked tree under verified `.worktrees/`, return path, branch and pinned base. No Node provisioning. |
+| `worktree create BRANCH` | New or existing branch, optional `--base` for a new branch only; global `--project` selects the repository; create a clean linked tree under verified `.worktrees/`, return path, branch and pinned base. No Node provisioning. |
 | `worktree list` | Repo-scoped path, branch/head, dirty state and writer state free/live/unknown. |
-| `worktree remove NAME` / `worktree remove --merged` | Refuse primary, dirty, live or unknown writers; no force. Merged pruning requires explicit authority, a pinned integration tip and exact branch or since scope under cli's frozen flags. Recheck OID before ref deletion; a scoped post-merge hook cannot sweep other branches. |
+| `worktree remove NAME` / `worktree remove --merged` | Refuse primary, dirty, live or unknown writers; no force. Merged pruning requires explicit authority, a pinned integration tip and exactly one of `--branch NAME…` or `--since OID` under cli's frozen flags. Recheck OID before ref deletion; a scoped post-merge hook cannot sweep other branches. |
 | `hook claude pre-tool-use` | Lane-safety handler registered in cli's `HookSpec` table. Bound stdin to 1 MiB; allow/non-Bash emits empty stdout/0, deny uses recorded harness decision JSON/0. Unreadable, malformed, oversized or timed-out guard input emits deny JSON with exit 0. Only failure to write the denial uses blocking exit 2 and content-free stderr. Installer consumes the same table. |
 
 Drop worktree check/verify/prune, clean plan/apply, git evidence and run workers.
 Checks register findings under `check`'s binding subjects; workflow uses pinned
 Git evidence and tip verification as library calls. The guardian deletes
-scratch at settlement. Run owns any surviving clean command.
+scratch at settlement; no `clean` command survives.
 
 Keep lane-safety's prohibition on name/pattern-based kills (`pkill`, `killall`,
 pattern-fed kill/xargs) and worktree cleanup racing an owned writer. Its bounded

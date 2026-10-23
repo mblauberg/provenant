@@ -77,10 +77,12 @@ Redacted diagnostics go to stderr. No library chooses exits or renders JSON.
 | Command | Inputs and result |
 | --- | --- |
 | `route list` | Optional `--adapter ADAPTER`; catalogue revision, exact models/efforts, named routes and cached availability with reasons/age. No probe. |
-| `route resolve` | Exactly one `--model ADAPTER/ID` or `--route NAME`; optional `--effort VALUE`, `--fallback none\|ADAPTER/ID[,ADAPTER/ID]`. Returns `ResolvedRoute`, alternatives and reasons; pure, no admission or state mutation. Dispatch uses the same route fields. |
-| `quota show` | Optional `--provider ADAPTER`; cached windows/reset/source/age, coverage and `report_path`. No refresh. |
-| `quota tick` | Optional `--provider ADAPTER`; `--trigger timer\|panel\|manual\|wake\|power` (default manual), `--power ac\|battery\|low` (default ac). Refresh due sources, publish the current report, return per-source results and next due without sleeping. |
+| `route resolve` | Exactly one `--model ADAPTER/ID` or `--route NAME`; optional `--effort VALUE`, `--fallback ADAPTER/ID[,ADAPTER/ID]` (omitted means none). Returns `ResolvedRoute`, alternatives and reasons; pure, no admission or state mutation. Dispatch uses the same route fields. |
+| `quota show` | Optional `--adapter ADAPTER`; cached windows/reset/source/age, coverage and `report_path`. No refresh. |
+| `quota tick` | Optional `--adapter ADAPTER`; `--trigger timer\|panel\|manual\|wake\|power` (default manual), `--power ac\|battery\|low` (default ac). Refresh due sources, publish the current report, return per-source results and next due without sleeping. |
 
+Requests are `RouteListQuery { adapter }`, `RouteRequest`, `QuotaQuery { adapter }`
+and `QuotaTick { adapter, trigger, power }`; cli's reconciled table freezes the flags.
 Route preview uses a read-only context; dispatch supplies its separately
 validated access/confinement context to the same resolver.
 Every verb accepts `--json`. No account, confidential, native, task-class,
