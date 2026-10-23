@@ -1722,3 +1722,9 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
 - Disposition: await p3-rrc's records-owned ordered lossless codec, not on
   main at this repair. No new codec is built here. Both run-registry unit 01
   and its withdrawn interface stay absent from the completion claims.
+
+RP-FR3-005 repair evidence correction: the locked serde_json writes `1e+21`,
+matching Node for the reported exponent fixture. The differential proves
+parity for that case and exact inequality for integral floats and nested order.
+The earlier `1e21` Rust-output statement is superseded; the shared-codec gap
+and withdrawn claims remain.

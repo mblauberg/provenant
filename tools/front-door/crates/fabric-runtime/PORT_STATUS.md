@@ -115,8 +115,9 @@ was read-only; the required writer run used the isolated cache above.
 ## PR 1334 cross-family repair follow-up
 
 Item 2 is blocked by p3-rrc's lossless ordered JSON codec, absent from main
-`b527d675`. Owner extras still serialise through `Value`: `1.0`, `1e21` and
-nested `{"b":1,"a":2}` differ from Node wire strings `1`, `1e+21` and the
-original nested order. The exact differential records all three mismatches.
+`b527d675`. Owner extras still serialise through `Value`: `1.0` and nested
+`{"b":1,"a":2}` differ from Node wire strings `1` and the original nested
+order. The exact differential records both mismatches and verifies that the
+locked serde_json already spells `1e21` as `1e+21`, matching Node.
 The finite-number helper alone cannot restore order lost during decoding.
 RP-FR3-005 tracks this gap; run-registry unit and interface remain partial.

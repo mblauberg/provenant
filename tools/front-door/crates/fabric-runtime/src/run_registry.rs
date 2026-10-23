@@ -281,7 +281,7 @@ console.log(JSON.stringify(JSON.parse(fixtures).map(text => {
         let prefix = r#"{"schema_version":1,"kind":"dispatch","owner_pid":12,"owner_pgid":12"#;
         let extras = [
             (r#""x":1.0"#, r#""x":1"#, r#""x":1.0"#),
-            (r#""x":1e21"#, r#""x":1e+21"#, r#""x":1e21"#),
+            (r#""x":1e21"#, r#""x":1e+21"#, r#""x":1e+21"#),
             (r#""future":{"b":1,"a":2}"#, r#""future":{"b":1,"a":2}"#, r#""future":{"a":2,"b":1}"#),
         ];
         let fixtures: Vec<_> = extras.iter().map(|(extra, _, _)| format!("{prefix},{extra}}}")).collect();
@@ -304,7 +304,9 @@ return JSON.stringify(JSON.parse(readFileSync(join(dir,'dispatch-owner.json'),'u
         }).collect();
         let expected_rust: Vec<_> = extras.iter().map(|(_, _, extra)| wire(extra)).collect();
         assert_eq!(rust, expected_rust);
-        for (rust, node) in rust.iter().zip(expected_node) { assert_ne!(*rust, node); }
+        for (index, (rust, node)) in rust.iter().zip(expected_node).enumerate() {
+            if index == 1 { assert_eq!(*rust, node); } else { assert_ne!(*rust, node); }
+        }
     }
 
 }
