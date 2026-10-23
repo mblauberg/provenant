@@ -1,12 +1,15 @@
 use super::*;
 
-pub fn agy(plan: &Plan) -> AdapterProfile {
+pub fn agy(plan: &Plan) -> Result<AdapterProfile, crate::pending::IntegerError> {
     let mut argv = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--disable-slash-commands".into(),
         "--print-timeout".into(),
-        format!("{}s", plan.timeout_seconds.max(1)),
+        format!(
+            "{}s",
+            crate::pending::positive_timeout(&plan.timeout_seconds)?
+        ),
     ];
     if plan.mode.is_writer() {
         argv.push("--dangerously-skip-permissions".into());
@@ -33,18 +36,7 @@ pub fn agy(plan: &Plan) -> AdapterProfile {
         "--print".into(),
         format!("{}\nTask:\n{}", plan.boundary_prompt, plan.prompt),
     ]);
-    profile(
-        "agy",
-        argv,
-        Metadata {
-            transport: PromptTransport::Argv,
-            stdin: StdinMode::Null,
-            output: "stream-json",
-            effort_flag: Some("--effort"),
-            session_keys: &["session_id", "conversation_id", "conversationId"],
-            model_source: Some("agy:init.model|log"),
-        },
-    )
+    Ok(profile("agy", argv))
 }
 
 #[cfg(test)]
@@ -56,7 +48,7 @@ pub(crate) mod tests {
             mode,
             prompt: "do it".into(),
             boundary_prompt: "Read only".into(),
-            timeout_seconds: 0,
+            timeout_seconds: serde_json::json!(0),
             agy_sandbox: true,
             resume_session: None,
             model: Some("model-x".into()),
@@ -65,13 +57,13 @@ pub(crate) mod tests {
             cwd: "/repo".into(),
             add_dirs: vec!["/shared".into()],
             endpoint_base_url: None,
-            context_ceiling: Some(1000),
+            context_ceiling: Some(serde_json::json!(1000)),
         }
     }
 
     #[test]
     fn agy_clamps_timeout_and_selects_mode_permission() {
-        let read = agy(&plan(Mode::ReadOnly));
+        let read = agy(&plan(Mode::ReadOnly)).unwrap();
         assert_eq!(
             &read.argv[..7],
             &[
@@ -84,10 +76,36 @@ pub(crate) mod tests {
                 "--sandbox"
             ]
         );
-        let writer = agy(&plan(Mode::WorktreeWrite));
+        let writer = agy(&plan(Mode::WorktreeWrite)).unwrap();
         assert!(writer
             .argv
             .contains(&"--dangerously-skip-permissions".into()));
         assert_eq!(writer.argv.last().unwrap(), "Read only\nTask:\ndo it");
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+    #[test]
+    fn timeout_coercion_matches_python_including_failures() {
+        let values = serde_json::json!([null, false, true, -3, -0.1, 0, 0.9, 1.9, 30, " -2 ", "1_000", "١٢", "１２", "\u{1c}+4\u{1f}", "", "1__2", "_1", "1_", "1.2", [], {}]);
+        let actual: Vec<_> = values.as_array().unwrap().iter().map(|value| {
+            let mut p = super::tests::plan(Mode::ReadOnly);
+            p.timeout_seconds = value.clone();
+            agy(&p).map(|profile| serde_json::json!(profile.argv)).unwrap_or(serde_json::Value::Null)
+        }).collect();
+        let Some(expected): Option<Vec<serde_json::Value>> = crate::oracle::python(r#"
+import json,sys
+from skills.orchestrate.scripts.adapters.agy import argv
+out=[]
+for v in json.load(sys.stdin):
+    p=dict(timeout_seconds=v,mode='read_only',agy_sandbox=True,resume_session=None,model='model-x',effort='high',applied={'add_dirs':['/shared']},boundary_prompt='Read only',prompt='do it')
+    try: out.append(argv(p))
+    except (ValueError,TypeError,OverflowError): out.append(None)
+print(json.dumps(out))
+"#, &values, None) else { return; };
+        assert_eq!(actual, expected);
+        assert_eq!(crate::pending::positive_timeout(&serde_json::json!("18446744073709551616")), Err(crate::IntegerError::NumberOutOfRange));
     }
 }
