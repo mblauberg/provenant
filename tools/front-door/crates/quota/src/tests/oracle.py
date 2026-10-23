@@ -57,7 +57,7 @@ elif operation == 'credit_advice':
 elif operation == 'freshest':
     result = quota.freshest(args[0])
 elif operation == 'report':
-    result = display.report(vars(quota), request['values'], now,
+    result = display.report(vars(quota), json.loads(request['values_json']) if 'values_json' in request else request['values'], now,
                             refreshing=context.get('refreshing', []), activity=context.get('activity', {}))
 elif operation == 'render':
     # Load only the pure table formatter; telemetry's state never opens.

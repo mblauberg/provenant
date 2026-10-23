@@ -29,7 +29,7 @@ fn snapshot(provider: &str, label: &str, windows: Vec<Window>) -> Snapshot {
         account: label.into(),
         host: Some("fixture-host".into()),
         active: Some(false),
-        observed_at: Some(json!(NOW)),
+        observed_at: Some(json!(NOW).into()),
         status: Some("ok".into()),
         windows,
         ..Default::default()
@@ -237,7 +237,7 @@ fn display_report_parity_thresholds_staleness_restatement_and_pools() {
             window("weekly_all:2", 20.0, Some(10080.0), Some(172850.0)),
         ],
     );
-    s.observed_at = Some(json!(at(-7200.0)));
+    s.observed_at = Some(json!(at(-7200.0)).into());
     let r = compare_report(&[s], &context());
     assert_eq!(r.accounts[0].status.as_deref(), Some("stale"));
     assert_eq!(r.accounts[0].windows.len(), 2);
@@ -294,7 +294,7 @@ fn display_report_parity_refusals_and_signed_out_history() {
                 ),
             ],
         );
-        s.observed_at = Some(json!(at(-7200.0)));
+        s.observed_at = Some(json!(at(-7200.0)).into());
         s.allowance = Some(Allowance {
             ordinary_usage_allowed: Some(false),
             spend_control_reached: Some(spend_cap),
@@ -316,7 +316,7 @@ fn display_report_parity_refusals_and_signed_out_history() {
         ],
     );
     s.status = Some("signed_out".into());
-    s.observed_at = Some(json!(at(-604800.0)));
+    s.observed_at = Some(json!(at(-604800.0)).into());
     let r = compare_report(&[s], &context());
     assert_eq!(r.accounts[0].state, "signed_out");
     assert!(r.accounts[0].display_window.is_none());
@@ -913,7 +913,7 @@ fn renderer_matches_python_bytes_including_credits_budgets_and_history() {
     );
     s.active = Some(true);
     s.plan = Some("pro_student".into());
-    s.observed_at = Some(json!(at(-7200.0)));
+    s.observed_at = Some(json!(at(-7200.0)).into());
     s.windows[0].limit_amount = Some(Number::Float(250.0));
     s.windows[0].used_amount = Some(Number::Float(136.0));
     s.windows[0].currency = Some(json!("USD"));
@@ -1327,11 +1327,54 @@ fn display_review_regression_duplicate_names_and_numeric_signed_out_history() {
         ],
     );
     compare_report(&[s], &context());
-    for observed in [json!(1792735200), json!(1792735200.5), json!(0), json!("")] {
+    for observed in [
+        json!(1792735200),
+        json!(1792735200.5),
+        json!(1e-7),
+        json!(true),
+        json!(false),
+        json!(["a\"b", true, 1e-5]),
+        json!({"seen":true}),
+        json!([]),
+        json!(0),
+        json!(""),
+    ] {
         let mut s = snapshot("claude", "a", vec![]);
         s.status = Some("signed_out".into());
-        s.observed_at = Some(observed);
+        s.observed_at = Some(observed.into());
         compare_report(&[s], &context());
+    }
+}
+
+#[test]
+fn signed_out_history_preserves_input_dictionary_order() {
+    if !python_available() {
+        return;
+    }
+    for observed in [
+        r#"{"z":1,"a":2}"#,
+        r#"{"z":{"y":true,"a":["x",1e-7]},"a":2}"#,
+        r#"{"z":1,"a":2,"z":3}"#,
+    ] {
+        let wire = format!(
+            r#"{{"provider":"claude","account":"a","status":"signed_out","observed_at":{observed}}}"#
+        );
+        let value: Snapshot = decode_record(wire.as_bytes()).unwrap();
+        let c = context();
+        let actual = describe(
+            &OraclePolicy { context: c.clone() },
+            &c,
+            &value,
+            None,
+            now(),
+        )
+        .unwrap();
+        let expected: Value =
+            oracle(json!({"operation":"report", "values_json":format!("[{wire}]"),"now":NOW}));
+        assert_eq!(
+            actual.summary,
+            expected["accounts"][0]["summary"].as_str().unwrap()
+        );
     }
 }
 

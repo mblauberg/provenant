@@ -129,7 +129,7 @@ pub struct Snapshot {
     pub host: Option<String>,
     pub active: Option<bool>,
     pub priority: Option<i64>,
-    pub observed_at: Option<Value>,
+    pub observed_at: Option<PythonValue>,
     pub attempted_at: Option<Value>,
     pub source: Option<String>,
     pub status: Option<String>,
@@ -169,7 +169,7 @@ pub struct DisplayAccount {
     pub host: Option<String>,
     pub active: Option<bool>,
     pub priority: Option<i64>,
-    pub observed_at: Option<Value>,
+    pub observed_at: Option<PythonValue>,
     pub attempted_at: Option<Value>,
     pub status: Option<String>,
     pub error: Option<String>,
@@ -690,6 +690,261 @@ pub fn from_timestamp(seconds: f64) -> Result<jiff::Timestamp, crate::QuotaError
     jiff::Timestamp::from_microsecond(micros).map_err(|_| crate::QuotaError::TimeRange)
 }
 
+mod python_unicode;
+
+// port: belongs in provenant-core
+pub(crate) fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut result = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c == quote => {
+                result.push('\\');
+                result.push(c);
+            }
+            c if !python_unicode::printable(c) => {
+                let code = u32::from(c);
+                if code < 256 {
+                    result.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    result.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    result.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => result.push(c),
+        }
+    }
+    result.push(quote);
+    result
+}
+
+// port: belongs in provenant-core
+/// Python's str/repr share shortest float digits but differ from JSON's notation.
+fn python_number_str(number: &serde_json::Number) -> String {
+    if !number.is_f64() {
+        return number.to_string();
+    }
+    // Keep serde's correctly rounded shortest digits; Rust LowerExp can choose
+    // the other decimal at a shortest-representation tie (e.g. ...851.125).
+    let text = number.to_string();
+    let (mantissa, exponent) = text.split_once('e').map_or((text.as_str(), 0), |(m, e)| {
+        (m, e.parse::<i32>().unwrap_or(0))
+    });
+    let (sign, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or(("", mantissa), |m| ("-", m));
+    let mut point = mantissa.find('.').unwrap_or(mantissa.len()) as i32 + exponent;
+    let digits = mantissa.replace('.', "");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return format!("{sign}0.0");
+    }
+    point -= (digits.len() - significant.len()) as i32;
+    let digits = significant.trim_end_matches('0');
+    let exponent = point - 1;
+    if !(-4..16).contains(&exponent) {
+        let (first, rest) = digits.split_at(1);
+        let mantissa = if rest.is_empty() {
+            first.into()
+        } else {
+            format!("{first}.{rest}")
+        };
+        return format!("{sign}{mantissa}e{exponent:+03}");
+    }
+    if point <= 0 {
+        format!("{sign}0.{}{digits}", "0".repeat((-point) as usize))
+    } else if point as usize >= digits.len() {
+        format!(
+            "{sign}{digits}{}.0",
+            "0".repeat(point as usize - digits.len())
+        )
+    } else {
+        let (whole, fraction) = digits.split_at(point as usize);
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
+// port: belongs in provenant-core
+fn python_value_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(n) => python_number_str(n),
+        Value::String(s) => python_repr(s),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(python_value_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(items) => format!(
+            "{{{}}}",
+            items
+                .iter()
+                .map(|(k, v)| format!("{}: {}", python_repr(k), python_value_repr(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_str(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        value => python_value_repr(value),
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(v) => *v,
+        Value::Number(_) => {
+            Number::from_value(value).is_some_and(|n| n.numeric_cmp(Number::Int(0)).is_ne())
+        }
+        Value::String(v) => !v.is_empty(),
+        Value::Array(v) => !v.is_empty(),
+        Value::Object(v) => !v.is_empty(),
+    }
+}
+
+// port: belongs in provenant-records
+/// A JSON observation plus its Python representation. Value alone sorts object
+/// keys, losing the insertion order Python retains when rendering this field.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct PythonValue {
+    value: Value,
+    #[serde(skip)]
+    representation: String,
+}
+impl PythonValue {
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+    pub(crate) fn python_str(&self) -> String {
+        if let Value::String(s) = &self.value {
+            s.clone()
+        } else {
+            self.representation.clone()
+        }
+    }
+}
+impl From<Value> for PythonValue {
+    fn from(value: Value) -> Self {
+        let representation = if let Value::String(s) = &value {
+            python_repr(s)
+        } else {
+            python_str(&value)
+        };
+        Self {
+            value,
+            representation,
+        }
+    }
+}
+impl<'de> Deserialize<'de> for PythonValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PythonVisitor;
+        impl<'de> serde::de::Visitor<'de> for PythonVisitor {
+            type Value = PythonValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Value::Null.into())
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                self.visit_unit()
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(Value::Bool(v).into())
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(Value::Number(v.into()).into())
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(Value::Number(v.into()).into())
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(v)
+                    .map(|n| Value::Number(n).into())
+                    .ok_or_else(|| E::custom("non-finite JSON number"))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(Value::String(v.into()).into())
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(Value::String(v).into())
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::<PythonValue>::new();
+                while let Some(value) = input.next_element()? {
+                    values.push(value);
+                }
+                let representation = format!(
+                    "[{}]",
+                    values
+                        .iter()
+                        .map(|v| v.representation.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Ok(PythonValue {
+                    value: Value::Array(values.into_iter().map(|v| v.value).collect()),
+                    representation,
+                })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::<(String, PythonValue)>::new();
+                let mut positions = BTreeMap::<String, usize>::new();
+                while let Some((key, value)) = input.next_entry::<String, PythonValue>()? {
+                    // Python replaces duplicate keys without moving their first position.
+                    if let Some(&position) = positions.get(&key) {
+                        values[position].1 = value;
+                    } else {
+                        positions.insert(key.clone(), values.len());
+                        values.push((key, value));
+                    }
+                }
+                let representation = format!(
+                    "{{{}}}",
+                    values
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", python_repr(k), v.representation))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Ok(PythonValue {
+                    value: Value::Object(values.into_iter().map(|(k, v)| (k, v.value)).collect()),
+                    representation,
+                })
+            }
+        }
+        deserializer.deserialize_any(PythonVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +960,44 @@ mod tests {
                 decode_record::<Value>(text.as_bytes()),
                 Err(crate::QuotaError::Record(_))
             ));
+        }
+    }
+
+    #[test]
+    fn json_string_conversion_and_truthiness_match_cpython() {
+        let mut values = vec![
+            json!(null),
+            json!(true),
+            json!(false),
+            json!(0),
+            json!(u64::MAX),
+            json!(-0.0),
+            json!("é\u{1c}"),
+            json!([]),
+            json!({}),
+            json!(["a'b", true, 1e-5]),
+            json!({"a": "\u{200b}", "b": [false, null]}),
+        ];
+        for exponent in -9..=20 {
+            values.push(json!(10.0_f64.powi(exponent)));
+        }
+        let mut bits = 0x81e2_7635_a49b_c0df_u64;
+        for _ in 0..512 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if let Some(number) = serde_json::Number::from_f64(f64::from_bits(bits)) {
+                values.push(Value::Number(number));
+            }
+        }
+        let actual: Vec<_> = values
+            .iter()
+            .map(|v| (python_str(v), python_truthy(v)))
+            .collect();
+        let Some(expected): Option<Vec<(String, bool)>> = crate::oracle::run(
+            crate::oracle::Interpreter::Python,
+            &["-c".as_ref(), "import json,sys; json.dump([(str(v),bool(v)) for v in json.load(sys.stdin)],sys.stdout)".as_ref()],
+            &json!(values)) else { return };
+        for ((value, actual), expected) in values.iter().zip(actual).zip(expected) {
+            assert_eq!(actual, expected, "{value}");
         }
     }
 

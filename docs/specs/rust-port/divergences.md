@@ -331,3 +331,27 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Disposition: open and blocking completion/cut-over of the gate unit. Preserve
   the partial designation. The integration owner must settle the response codec
   and add the boundary judge before claiming this unit fully ported.
+
+### RP-7 follow-up: Python string conversion in signed-out history (fixed)
+
+- The native v4 repair review found that `observed_at: 1e-7` rendered as
+  `1e-7` instead of Python's `1e-07`; truthy booleans were also displayed as
+  `never` instead of `True`. The public report regression reproduced the
+  exponent mismatch before repair and now covers exponent floats, booleans
+  and container values tolerated by Python's reader.
+- Signed-out summaries now use Python truthiness and string conversion in
+  `pending`, marked for `provenant-core`. String repr and its Unicode table
+  are copied from main's CLI implementation, then extended for JSON values.
+  Number conversion keeps integer digits exact and normalises float notation
+  from serde's shortest digits, including CPython's exponent padding.
+- An exact CPython differential covers notation boundaries, nested strings,
+  empty values and 512 deterministic float bit patterns. It also exposed a
+  decimal tie where Rust LowerExp selected `...851.13` and CPython selected
+  `...851.12`; retaining serde's shortest digits fixes that case.
+- Repair re-review also found sorted JSON maps losing Python dict insertion
+  order in this same tolerant observation field. `PythonValue` now retains
+  its Python representation while decoding, including nested objects and
+  duplicate-key replacement in the original position. Its wire serialization
+  stays a JSON value. The raw-input public report regression failed before
+  repair and now covers reordered, nested and duplicate-key objects without
+  adding `preserve_order` or a dependency.

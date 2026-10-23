@@ -370,7 +370,10 @@ pub fn describe(
     now: Timestamp,
 ) -> Result<DisplayAccount, QuotaError> {
     let labels = window_labels(context);
-    let observed = value.observed_at.as_ref().and_then(parse_time);
+    let observed = value
+        .observed_at
+        .as_ref()
+        .and_then(|v| parse_time(v.value()));
     let allowance = value.allowance.as_ref().cloned().unwrap_or_default();
     let reached = allowance
         .limit_reached_type
@@ -585,12 +588,8 @@ pub fn describe(
                 value
                     .observed_at
                     .as_ref()
-                    .and_then(|value| match value {
-                        Value::String(s) if !s.is_empty() => Some(s.clone()),
-                        Value::Number(n) if n.as_f64().is_some_and(|n| n != 0.0) =>
-                            Some(n.to_string()),
-                        _ => None,
-                    })
+                    .filter(|value| python_truthy(value.value()))
+                    .map(PythonValue::python_str)
                     .unwrap_or_else(|| "never".into())
             )
         } else {
