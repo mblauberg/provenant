@@ -63,7 +63,6 @@ JOB_PERMISSIONS = {
     "detect-changes": {"actions": "read", "contents": "read", "pull-requests": "read"},
     "harness-checks": {"contents": "read"},
     "python-tests": {"contents": "read"},
-    "lane-conformance": {"contents": "read"},
     "docs": {"contents": "read"},
     "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
@@ -280,7 +279,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
     assert set(outputs) == {
-        "harness", "docs", "split-root", "workflows", "rust", "lane", "tree", "passed-tree"
+        "harness", "docs", "split-root", "workflows", "rust", "tree", "passed-tree"
     }
     # `docs`, `tree` and `passed-tree` are computed from the PR file list or
     # tested checkout, not path filters. They do not cover tracked paths.

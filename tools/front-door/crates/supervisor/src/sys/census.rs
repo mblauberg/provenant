@@ -167,7 +167,6 @@ fn linux_owner_holds_lock(pid: i64, device: u64, inode: u64) -> Result<bool, Cus
 
 #[cfg(target_os = "linux")]
 fn lock_record_matches(line: &str, device: u64, inode: u64) -> bool {
-    use std::os::unix::fs::MetadataExt;
     let Some(rest) = line.strip_prefix("lock:") else {
         return false;
     };
@@ -392,11 +391,11 @@ pub(crate) fn observe_with_boot(pid: i64, boot: &str) -> ProcessObservation {
         let Some(ticks) = linux_clock_ticks() else {
             return ProcessObservation::Unknown(ObservationIssue::Io);
         };
-        return match linux_process(pid, boot, ticks) {
+        match linux_process(pid, boot, ticks) {
             LinuxRead::Present(fact) => ProcessObservation::Present(fact),
             LinuxRead::Absent => ProcessObservation::Absent,
             LinuxRead::Unknown(issue) => ProcessObservation::Unknown(issue),
-        };
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -465,7 +464,7 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
             unknown.insert(pid, ObservationIssue::Malformed);
             continue;
         };
-        match linux_process(pid_i32, &boot, ticks) {
+        match linux_process(pid_i32, boot, ticks) {
             LinuxRead::Present(fact) => facts.push(fact),
             LinuxRead::Absent => {
                 absent.insert(pid);
@@ -696,6 +695,7 @@ fn darwin_zero_probe_session(pid: i32) -> (i32, Option<i32>) {
     (session, (errno != 0).then_some(errno))
 }
 
+#[cfg(target_os = "macos")]
 fn classify_darwin_zero_probe(session: i32, errno: Option<i32>) -> ProcessObservation {
     if session > 0 {
         return ProcessObservation::Unknown(ObservationIssue::Io);
@@ -888,6 +888,7 @@ mod native_tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn darwin_zero_probe_requires_fresh_esrch_and_never_guesses_from_a_live_pid() {
         assert_eq!(
             classify_darwin_zero_probe(-1, Some(libc::ESRCH)),
@@ -987,6 +988,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn lock_record_requires_exact_file_identity_and_write_flock() {
+        use std::os::unix::fs::MetadataExt;
         let metadata = match std::fs::metadata("/proc/self/exe") {
             Ok(metadata) => metadata,
             Err(_) => return,

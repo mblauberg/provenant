@@ -918,3 +918,26 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
         Err(FsError::CrossDevice { .. })
     ));
 }
+
+#[test]
+fn a_handle_reached_through_a_followed_link_never_reanchors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Directory::open_anchor(temp.path()).unwrap();
+    root.mkdir(OsStr::new("directory"), 0o700).unwrap();
+    root.symlink(Path::new("directory"), OsStr::new("dir-link"))
+        .unwrap();
+    let linked = root
+        .open_directory_with_links(OsStr::new("dir-link"), true)
+        .unwrap();
+    let error = linked.into_anchor().unwrap_err();
+    assert!(matches!(error, FsError::Symlink { .. }));
+    assert_eq!(error.raw_os_error(), Some(errno::ELOOP));
+    let descendant = root
+        .open_directory_with_links(OsStr::new("dir-link"), true)
+        .unwrap();
+    descendant.mkdir(OsStr::new("child"), 0o700).unwrap();
+    let child = descendant.open_directory(OsStr::new("child")).unwrap();
+    assert!(matches!(child.into_anchor(), Err(FsError::Symlink { .. })));
+    let direct = root.open_directory(OsStr::new("directory")).unwrap();
+    direct.into_anchor().unwrap();
+}

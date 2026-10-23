@@ -1089,7 +1089,14 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
         // process is ready; in that case si_pid is zero.
         let info = unsafe { info.assume_init() };
         #[cfg(target_os = "linux")]
-        let (seen_pid, status, code) = (info.si_pid(), info.si_status(), info.si_code);
+        let (seen_pid, status, code) = {
+            // SAFETY: waitid succeeded, so siginfo is either zeroed (no event)
+            // or a SIGCHLD record whose pid and status fields are initialised.
+            let seen_pid = unsafe { info.si_pid() };
+            // SAFETY: as above, the SIGCHLD status field is initialised.
+            let status = unsafe { info.si_status() };
+            (seen_pid, status, info.si_code)
+        };
         #[cfg(target_os = "macos")]
         let (seen_pid, status, code) = (info.si_pid, info.si_status, info.si_code);
         if seen_pid == 0 {

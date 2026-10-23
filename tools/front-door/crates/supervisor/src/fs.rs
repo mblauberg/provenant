@@ -272,6 +272,8 @@ pub enum PublishMode {
 pub struct Directory {
     file: File,
     device: u64,
+    // Reached through an explicitly followed link; such a handle never re-anchors.
+    linked: bool,
     // Diagnostic only; never used to resolve an operation. Relative to anchor.
     path: PathBuf,
 }
@@ -299,13 +301,26 @@ impl Directory {
             .metadata()
             .map_err(error("fstat directory", &path))?
             .dev();
-        Ok(Self { file, device, path })
+        Ok(Self {
+            file,
+            device,
+            linked: false,
+            path,
+        })
     }
     /// Establish this held directory as a new filesystem-device boundary.
     /// Call only after the caller has validated the configured root. Unlike
     /// open_anchor, this consumes the existing handle without resolving a path
     /// again; descendant operations retain the usual no-cross-device policy.
+    /// A handle reached through a followed link is refused, so link expansion
+    /// cannot launder a cross-device child into an anchor.
     pub fn into_anchor(self) -> Result<Self> {
+        if self.linked {
+            return Err(FsError::Symlink {
+                path: self.path,
+                source: io::Error::from_raw_os_error(errno::ELOOP),
+            });
+        }
         Self::from_file(self.file, self.path)
     }
     pub fn metadata(&self) -> Result<Metadata> {
@@ -333,6 +348,7 @@ impl Directory {
             self.path.join(name),
         )?;
         child.device = self.device;
+        child.linked = self.linked || follow;
         Ok(child)
     }
     /// Refuse observed identity differences across stat/open/stat and traversal
