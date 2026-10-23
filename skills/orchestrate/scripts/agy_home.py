@@ -57,11 +57,11 @@ def _link_overlay(fd, source, source_fd, parts):
     if part is None:
         return
     os.mkdir(part, 0o700, dir_fd=fd)
-    child = os.open(part, provider_exec.DIRECTORY_FLAGS, dir_fd=fd)
+    child = os.open(part, provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=fd)
     child_source = None
     try:
         try:
-            child_source = os.open(part, provider_exec.DIRECTORY_FLAGS, dir_fd=source_fd) if source_fd is not None else None
+            child_source = os.open(part, provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=source_fd) if source_fd is not None else None
         except FileNotFoundError:
             pass
         _link_overlay(child, source / part, child_source, parts[1:])
@@ -76,8 +76,8 @@ def stage_agy_home(plan, tmp_fd, private_tmp):
     made after its state directories so each of them is a link too."""
     if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
         return None
-    provider_exec._prepare_state_directories(plan)
-    real_fd = provider_exec._open_canonical_dir(provider_exec._provider_state(plan)["resolved_home"] / "antigravity-cli")
+    provider_exec.provider_confinement._prepare_state_directories(plan)
+    real_fd = provider_exec.provider_confinement._open_canonical_dir(provider_exec.provider_confinement._provider_state(plan)["resolved_home"] / "antigravity-cli")
     try:
         # SQLite resolves a link to its database; with no database to link, it would make one in
         # the overlay that cleanup then discards. An empty file is a valid empty database.
@@ -91,10 +91,10 @@ def stage_agy_home(plan, tmp_fd, private_tmp):
         os.close(real_fd)
     name = "agy-home-" + uuid.uuid4().hex[:12]
     os.mkdir(name, 0o700, dir_fd=tmp_fd)
-    home = provider_exec._open_canonical_dir(Path.home().resolve())
+    home = provider_exec.provider_confinement._open_canonical_dir(Path.home().resolve())
     overlay = None
     try:
-        overlay = os.open(name, provider_exec.DIRECTORY_FLAGS, dir_fd=tmp_fd)
+        overlay = os.open(name, provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=tmp_fd)
         _link_overlay(overlay, Path.home(), home, AGY_PRIVATE_BIN.parts)
     except BaseException:
         provider_exec.attempt_storage.remove_at(tmp_fd, name)
@@ -143,7 +143,7 @@ def _install_state(directory, name, data):
     except FileNotFoundError:
         mode = 0o600
     try:
-        provider_exec._write_new(directory, staged, data, mode)
+        provider_exec.provider_confinement._write_new(directory, staged, data, mode)
         os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
     except OSError:
         try:
@@ -192,10 +192,10 @@ def finish_agy_home(plan, tmp_fd, home):
     problems = []
     fds = []
     try:
-        fds.append(os.open(home.name, provider_exec.DIRECTORY_FLAGS, dir_fd=tmp_fd))
+        fds.append(os.open(home.name, provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=tmp_fd))
         for part in AGY_PRIVATE_BIN.parts[:-1]:
-            fds.append(os.open(part, provider_exec.DIRECTORY_FLAGS, dir_fd=fds[-1]))
-        fds.append(provider_exec._open_canonical_dir(provider_exec._provider_state(plan)["resolved_home"] / "antigravity-cli"))
+            fds.append(os.open(part, provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=fds[-1]))
+        fds.append(provider_exec.provider_confinement._open_canonical_dir(provider_exec.provider_confinement._provider_state(plan)["resolved_home"] / "antigravity-cli"))
         lane_fd, real_fd = fds[-2], fds[-1]
         # Concurrent finishers take turns, so each compares and installs against the last install.
         # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.
@@ -254,13 +254,13 @@ def stage_ps_shim(tmp_fd, private_tmp):
     if left:
         raise OSError(f"ps shim left by an earlier try was not removed: {', '.join(left)}")
     os.mkdir("provenant-shim", 0o700, dir_fd=tmp_fd)
-    stage = os.open("provenant-shim", provider_exec.DIRECTORY_FLAGS, dir_fd=tmp_fd)
+    stage = os.open("provenant-shim", provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=tmp_fd)
     try:
-        provider_exec._write_new(stage, "process_info.py", (source / "process_info.py").read_bytes(), 0o644)
+        provider_exec.provider_confinement._write_new(stage, "process_info.py", (source / "process_info.py").read_bytes(), 0o644)
         os.mkdir("bin", 0o700, dir_fd=stage)
-        shim_bin = os.open("bin", provider_exec.DIRECTORY_FLAGS, dir_fd=stage)
+        shim_bin = os.open("bin", provider_exec.provider_confinement.DIRECTORY_FLAGS, dir_fd=stage)
         try:
-            provider_exec._write_new(shim_bin, "ps", (source / "bin" / "ps").read_bytes(), 0o755)
+            provider_exec.provider_confinement._write_new(shim_bin, "ps", (source / "bin" / "ps").read_bytes(), 0o755)
         finally:
             os.close(shim_bin)
     finally:

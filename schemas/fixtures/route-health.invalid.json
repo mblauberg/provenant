@@ -1,0 +1,9 @@
+{
+  "schema": "fabric.route-health.v1",
+  "routes": [],
+  "task_class_routes": {
+    "mechanical": {
+      "alias": "junior"
+    }
+  }
+}
