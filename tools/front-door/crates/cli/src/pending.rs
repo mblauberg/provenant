@@ -240,10 +240,14 @@ pub enum IntegerError {
 // port: belongs in provenant-core
 pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
     let digits = text.chars().count();
-    if digits > 4300 { return Err(IntegerError::DigitLimit { digits }); }
+    if digits > 4300 {
+        return Err(IntegerError::DigitLimit { digits });
+    }
     text.chars().try_fold(0u64, |n, c| {
         let d = decimal_digit(c).ok_or(IntegerError::NumberOutOfRange)?;
-        n.checked_mul(10).and_then(|n| n.checked_add(u64::from(d))).ok_or(IntegerError::NumberOutOfRange)
+        n.checked_mul(10)
+            .and_then(|n| n.checked_add(u64::from(d)))
+            .ok_or(IntegerError::NumberOutOfRange)
     })
 }
 
@@ -251,9 +255,58 @@ pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
 pub(crate) fn python_value_repr(value: &serde_json::Value) -> String {
     use serde_json::Value;
     match value {
-        Value::Null => "None".into(), Value::Bool(true) => "True".into(), Value::Bool(false) => "False".into(),
-        Value::String(text) => python_repr(text), Value::Number(number) => number.to_string(),
-        Value::Array(values) => format!("[{}]",values.iter().map(python_value_repr).collect::<Vec<_>>().join(", ")),
-        Value::Object(values) => format!("{{{}}}",values.iter().map(|(k,v)|format!("{}: {}",python_repr(k),python_value_repr(v))).collect::<Vec<_>>().join(", ")),
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(text) => python_repr(text),
+        Value::Number(number) => number.to_string(),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_value_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(k, v)| format!("{}: {}", python_repr(k), python_value_repr(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_splitlines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(
+            c,
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        ) {
+            lines.push(&text[start..i]);
+            start = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                chars.next();
+                start += 1;
+            }
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
 }

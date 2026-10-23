@@ -1,4 +1,4 @@
-//! Stale-checkout advisory interface. Local Git inspection remains with the root owner.
+//! Local, read-only stale-checkout inspection with an explicit Git execution boundary.
 use crate::CommandOutput;
 use std::path::Path;
 
@@ -84,6 +84,148 @@ impl Advisory {
             },
             ..Default::default()
         }
+    }
+}
+
+/// Utility execution request. The process owner supplies the bounded runner;
+/// this module neither fetches nor inherits repository redirection variables.
+#[derive(Debug)]
+pub struct GitQuery<'a> {
+    pub root: &'a Path,
+    pub arguments: &'a [&'a str],
+    pub environment: [(&'static str, &'static str); 4],
+    pub timeout: std::time::Duration,
+    pub stdin_null: bool,
+}
+
+pub const TRUSTED_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// A failed spawn, timeout, nonzero exit, import or text decode becomes None.
+/// The returned string is strictly decoded stdout of a successful local query.
+pub trait LocalGit {
+    fn read(&mut self, query: GitQuery<'_>) -> Option<String>;
+}
+impl<F> LocalGit for F
+where
+    F: FnMut(GitQuery<'_>) -> Option<String>,
+{
+    fn read(&mut self, query: GitQuery<'_>) -> Option<String> {
+        self(query)
+    }
+}
+
+fn query(git: &mut impl LocalGit, root: &Path, arguments: &[&str]) -> Option<Vec<String>> {
+    git.read(GitQuery {
+        root,
+        arguments,
+        environment: [
+            ("PATH", TRUSTED_PATH),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ],
+        timeout: std::time::Duration::from_secs(1),
+        stdin_null: true,
+    })
+    .map(|text| {
+        crate::pending::python_splitlines(&text)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+/// Collect only local observations. Git failures are advisory silence, including
+/// missing/invalid FETCH_HEAD, detached HEADs and unresolvable remote refs.
+pub fn inspect(root: &Path, git: &mut impl LocalGit) -> Snapshot {
+    let Some(paths) = query(
+        git,
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            "--git-path",
+            "FETCH_HEAD",
+        ],
+    ) else {
+        return Snapshot::default();
+    };
+    if paths.len() != 3 || paths[0] != paths[1] {
+        return Snapshot::default();
+    }
+    let fetch_modified_at = std::fs::metadata(&paths[2])
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|time| match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs_f64(),
+            Err(e) => -e.duration().as_secs_f64(),
+        });
+    let default = query(
+        git,
+        root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|lines| {
+        lines
+            .first()
+            .map(|s| s.strip_prefix("origin/").unwrap_or(s).to_owned())
+    })
+    .unwrap_or_else(|| "main".into());
+    let branch = match query(git, root, &["branch", "--show-current"]) {
+        None => Branch::Unknown,
+        Some(lines) if lines == [default.clone()] => Branch::Named(default.clone()),
+        Some(lines) => match lines.first() {
+            Some(name) => Branch::Named(name.clone()),
+            None => Branch::Detached,
+        },
+    };
+    let counts = query(
+        git,
+        root,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("HEAD...origin/{default}"),
+        ],
+    )
+    .and_then(|lines| {
+        lines.first().and_then(|line| {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+        })
+    });
+    Snapshot {
+        primary_checkout: true,
+        fetch_modified_at,
+        default_branch: Some(default),
+        branch,
+        counts,
+    }
+}
+
+pub fn check_stale_checkout(root: &Path, now: f64, git: &mut impl LocalGit) -> Vec<String> {
+    warnings(root, &inspect(root, git), now)
+}
+
+impl Advisory {
+    /// The binary forwards CHILD_MARKER to its children when this is first called.
+    pub fn inspect_once(
+        &mut self,
+        root: &Path,
+        now: f64,
+        git: &mut impl LocalGit,
+    ) -> CommandOutput {
+        if self.checked {
+            return CommandOutput::default();
+        }
+        let state = inspect(root, git);
+        self.render_once(root, &state, now)
     }
 }
 
@@ -222,14 +364,38 @@ mod tests {
         let Some(expected): Option<Vec<String>> = crate::oracle::python(
             "import json,sys; from pathlib import Path; sys.path.insert(0,'scripts'); from lib.stale_checkout import check_stale_checkout; x=json.load(sys.stdin); print(json.dumps(check_stale_checkout(Path(x['root']),now=x['now'])))", &input
         ) else { return; };
-        let snapshot = Snapshot {
-            primary_checkout: true,
-            fetch_modified_at: Some(568000.0),
-            default_branch: Some("trunk".into()),
-            branch: Branch::Named("feature".into()),
-            counts: Some((0, 1)),
+        let mut local_git = |query: GitQuery<'_>| {
+            assert_eq!(query.timeout, std::time::Duration::from_secs(1));
+            assert!(query.stdin_null);
+            let mut args = vec![
+                std::ffi::OsString::from("-C"),
+                query.root.as_os_str().to_owned(),
+            ];
+            args.extend(query.arguments.iter().map(std::ffi::OsString::from));
+            let result = crate::oracle::utility("git".as_ref(), &args, &query.environment).unwrap();
+            result
+                .status
+                .success()
+                .then(|| String::from_utf8(result.stdout).ok())
+                .flatten()
         };
-        assert_eq!(warnings(&root, &snapshot, 1000000.0), expected);
+        assert_eq!(
+            check_stale_checkout(&root, 1000000.0, &mut local_git),
+            expected
+        );
+        // A linked tree and nonrepository are silent, using the actual collector.
+        let linked = dir.path().join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ]);
+        assert!(check_stale_checkout(&linked, 1000000.0, &mut local_git).is_empty());
+        let absent = dir.path().join("absent");
+        assert!(check_stale_checkout(&absent, 1000000.0, &mut local_git).is_empty());
         assert_eq!(expected.len(), 3);
     }
 }
