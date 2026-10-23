@@ -32,3 +32,4 @@ skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
+scripts/lib/roots.py#unit-01

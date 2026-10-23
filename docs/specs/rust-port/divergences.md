@@ -1154,3 +1154,20 @@ The source revision above is unchanged; CLI rendering remains an edge task.
 - Remaining: pointer loading for surrogateescaped paths, extended JSON in
   ignored fields, and exact integer ingress. The retained ignored differential
   still documents these reader gaps; the unit remains partial.
+
+## RP-core-2-02 — scripts root facade completion
+
+- Unit: `scripts/lib/roots.py#unit-01`; rulebook v4; class `bug` (fixed).
+  Source/oracle `7475ff01`, unchanged at `cc02dde4`; route
+  `codex/gpt-6.1-sol@high`.
+- The Rust `roots` exports are the statically linked equivalent of the Python
+  facade's re-exported constant and two functions. Shared-root policy was already
+  present; direct facade differentials now cover unset/empty overrides, tilde,
+  lexical path spelling, unknown-user errors and native environment path bytes.
+- A right-reason failing differential exposed a missing final period in
+  `PathError::Home`; its wording now matches Python's expanduser RuntimeError.
+- All runtime policy is ported. Python importlib loading/defensive missing-module
+  branches are interpreter plumbing, replaced by Rust's compile-time module
+  linkage; no Python loader seam is copied. No command is switched.
+- Evidence: five roots tests pass, including the two direct-facade
+  differentials; default install paths use canonical paths on macOS.
