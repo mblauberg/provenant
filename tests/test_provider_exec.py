@@ -2468,7 +2468,7 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
 @pytest.mark.parametrize("ending", ["reconnect", "transport", "exit", "signal", "recovered"])
 def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypatch, rollover, ending):
     module = supervisor()
-    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(module.provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Review in progress"}}]
     if ending in {"reconnect", "recovered"}:
         events.extend({"type": "error", "message": f"Reconnecting... {i}/5 (failed to load workspace requirements)"}
@@ -2506,7 +2506,7 @@ def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypa
 
 def test_codex_terminal_result_in_rolled_output_survives_later_signal(tmp_path, monkeypatch):
     module = supervisor()
-    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048)
+    monkeypatch.setattr(module.provider_observer, "MAX_EVENTS_BYTES", 2048)
     padding = [{"type": "telemetry", "data": "x" * 100}] * 1000
     events = padding + [
         {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
@@ -2571,7 +2571,7 @@ def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
 
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypatch, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
         {"type": "text", "part": {"text": "Working narration"}},
@@ -2588,7 +2588,7 @@ def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypa
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_exit_after_output_keeps_final_step_text(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(mod.provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "step_start", "part": {}},
         {"type": "text", "part": {"text": "Working narration"}},
@@ -2630,7 +2630,7 @@ def test_opencode_failure_reason_skips_info_only_stderr(tmp_path, log):
 
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_final_text_is_preserved_beside_a_structured_failure(tmp_path, monkeypatch, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "error", "error": {"message": "shutdown failed"}},
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
@@ -2666,7 +2666,7 @@ def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
 ])
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_structured_failure_wins_over_incidental_eperm(tmp_path, monkeypatch, message, status, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "error", "error": {"message": message}},
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
@@ -6787,7 +6787,7 @@ def test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result(tmp_
 
 def test_stream_capture_retains_early_semantic_events_with_bounded_storage(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json
 print(json.dumps({'type':'system','model':'observed','session_id':'retained'}))
 print(json.dumps({'type':'result','result':'DONE'}))
@@ -6958,7 +6958,7 @@ def test_writer_progress_ignores_new_excluded_and_ignored_paths(tmp_path):
 
 def test_stream_rollover_preserves_unclassified_structured_failure(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json
 print(json.dumps({'type':'result','is_error':True,'result':'backend exploded'}))
 for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
@@ -6979,7 +6979,7 @@ def test_explicit_route_fallback_policy_reaches_router(tmp_path, monkeypatch):
 
 def test_oversized_plain_result_is_partial_and_not_certifiable(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     plan = fixture_plan(tmp_path, "print('a' * 10000)", intent='assurance', orchestrator_family='anthropic')
     record = mod.execute(plan, tmp_path / 'result.md')
     assert record['status'] == 'partial'
@@ -6990,7 +6990,7 @@ def test_oversized_plain_result_is_partial_and_not_certifiable(tmp_path, monkeyp
 
 def test_oversized_split_result_cannot_certify_preliminary_text(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json,sys,time
 print(json.dumps({'type':'assistant','message':{'content':'preliminary'}}), flush=True)
 result = json.dumps({'type':'result','result':'a'*100000})+'\\n'
@@ -7011,7 +7011,7 @@ def test_malformed_router_fallback_does_not_crash_finished_attempt():
 @pytest.mark.parametrize('rollover', [False, True])
 def test_successful_terminal_result_supersedes_transient_retry_error(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
     code = '''import json
 print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
 for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
@@ -7024,7 +7024,7 @@ print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))
 @pytest.mark.parametrize('rollover', [False, True])
 def test_retry_success_never_erases_a_separate_hard_failure(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
     code = '''import json
 print(json.dumps({'type':'error','error':'permission denied'}))
 print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
@@ -8224,8 +8224,8 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
 
 
 def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
-    fatal = supervisor().OPENCODE_FATAL_LOG
-    quiet = supervisor().OPENCODE_QUIET_LOG
+    fatal = supervisor().provider_observer.OPENCODE_FATAL_LOG
+    quiet = supervisor().provider_observer.OPENCODE_QUIET_LOG
     assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
     assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
     assert re.match(quiet, "timestamp=x level=WARN message=y")
