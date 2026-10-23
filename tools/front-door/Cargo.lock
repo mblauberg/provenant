@@ -394,6 +394,15 @@ version = "0.1.0"
 [[package]]
 name = "provenant-telemetry"
 version = "0.1.0"
+dependencies = [
+ "jiff",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-workflow"
