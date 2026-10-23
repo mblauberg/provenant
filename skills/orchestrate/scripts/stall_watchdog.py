@@ -6,9 +6,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
+# The shared library sits one level above this skill and is not reachable
+# from the script's own directory, so this entry point establishes it (#755).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.custody import OwnedFileError, atomic_write_contained, open_contained_regular
 import secret_scan
 
