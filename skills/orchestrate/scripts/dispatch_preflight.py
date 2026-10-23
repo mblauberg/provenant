@@ -239,7 +239,7 @@ def _read_prompt_once(workspace: Path, prompt_source: Path, max_bytes: int | Non
         os.close(fd)
 
 PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace, a caller temp directory or a registered Fabric project>; "
-                   "register another project by running `fabric whoami` there, or dispatch from it.")
+                   "register another project by running `provenant fabric identity --json` there, or dispatch from it.")
 
 class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):

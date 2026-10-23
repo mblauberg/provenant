@@ -1,5 +1,7 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+pub mod fabric;
+pub use fabric::Fabric;
 mod grammar;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
@@ -126,7 +128,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-fn clap_error(error: clap::Error) -> CliError {
+fn clap_error(mut error: clap::Error) -> CliError {
+    // Clap normally includes the rejected value. Fence tokens are secrets,
+    // including malformed tokens, so redact them before either renderer.
+    use clap::error::{ContextKind, ContextValue};
+    if error
+        .get(ContextKind::InvalidArg)
+        .is_some_and(|arg| arg.to_string().starts_with("--token"))
+    {
+        error.insert(
+            ContextKind::InvalidValue,
+            ContextValue::String("[redacted]".into()),
+        );
+    }
     let text = error.to_string();
     let message = text
         .split("\nUsage:")

@@ -413,7 +413,7 @@ impl<'a> CoordinationService<'a> {
         let requested = WaitBudget::new(
             self.clock.mono_now(),
             DurationMicros::from_micros(wait_ms * 1_000),
-            WaitTransport::Mcp,
+            WaitTransport::Cli,
         )?;
         Ok(
             if requested.deadline().as_mono_time() < budget.deadline().as_mono_time() {
@@ -431,12 +431,7 @@ impl<'a> CoordinationService<'a> {
     }
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
-        let first = entropy_half()?;
-        let second = entropy_half()?;
-        let mut bytes = [0_u8; 16];
-        bytes[..8].copy_from_slice(&first);
-        bytes[8..].copy_from_slice(&second);
-        Ok(bytes)
+        LocalFs.entropy_128().map_err(CoordinationError::Entropy)
     }
 
     fn task_fence(&self, proof: &TaskProof) -> provenant_fabric_store::TaskFence {
@@ -797,70 +792,6 @@ impl CoordinationApi for CoordinationService<'_> {
         }
         let request = self.request(budget, cancel);
         match input {
-            LandingInput::Acquire {
-                reference,
-                expected,
-                candidate,
-                lease_ms,
-            } => {
-                let guard = self
-                    .store
-                    .lock_landing(self.project, &reference, &request)?;
-                let fence = self.store.acquire_landing(
-                    &guard,
-                    &LandingRequest {
-                        id: ClaimId::from_bytes(Self::new_id_bytes()?),
-                        project: self.project,
-                        actor: self.actor,
-                        token: Self::new_id_bytes()?,
-                        reference: reference.clone(),
-                        expected,
-                        candidate,
-                        lease: Self::lease_duration(lease_ms),
-                    },
-                    &request,
-                )?;
-                let landing = self.store.verify_landing(&guard, &fence, &request)?;
-                Ok(LandingResult::Acquired {
-                    proof: self.landing_proof(reference, fence),
-                    landing,
-                })
-            }
-            LandingInput::Renew { proof, lease_ms } => {
-                let guard = self
-                    .store
-                    .lock_landing(self.project, &proof.reference, &request)?;
-                let fence = self.landing_fence(&proof);
-                self.store.renew_landing(
-                    &guard,
-                    &fence,
-                    Self::lease_duration(lease_ms),
-                    &request,
-                )?;
-                let landing = self.store.verify_landing(&guard, &fence, &request)?;
-                Ok(LandingResult::Renewed { landing })
-            }
-            LandingInput::Verify { proof } => {
-                let guard = self
-                    .store
-                    .lock_landing(self.project, &proof.reference, &request)?;
-                let landing =
-                    self.store
-                        .verify_landing(&guard, &self.landing_fence(&proof), &request)?;
-                Ok(LandingResult::Verified { landing })
-            }
-            LandingInput::Release { proof } => {
-                let guard = self
-                    .store
-                    .lock_landing(self.project, &proof.reference, &request)?;
-                let id = proof.id;
-                self.store
-                    .release_landing(&guard, &self.landing_fence(&proof), &request)?;
-                Ok(LandingResult::Released {
-                    id,
-                    reference: proof.reference,
-                })
-            }
             LandingInput::Wait {
                 reference,
                 generation,
@@ -894,41 +825,174 @@ impl CoordinationApi for CoordinationService<'_> {
                     self.pause(poll_budget, cancel);
                 }
             }
+            input => {
+                let reference = landing_reference(&input)?;
+                let guard = self.store.lock_landing(self.project, reference, &request)?;
+                self.landing_locked(input, &guard, &request)
+            }
         }
     }
 }
 
-// TODO(F9 supervisor entropy API, fabric.md owner interface): replace temporary
-// name decoding with supervisor::sys getentropy-backed 16-byte identifiers.
-fn entropy_half() -> Result<[u8; 8], CoordinationError> {
-    let name = LocalFs
-        .temporary_name()
-        .map_err(CoordinationError::Entropy)?;
-    let name = name
-        .into_string()
-        .map_err(|_| CoordinationError::EntropyEncoding)?;
-    let encoded = name
-        .strip_prefix(".provenant-staging.")
-        .ok_or(CoordinationError::EntropyEncoding)?;
-    let bytes = encoded.as_bytes();
-    if bytes.len() != 24 {
-        return Err(CoordinationError::EntropyEncoding);
+impl CoordinationService<'_> {
+    fn landing_locked(
+        &self,
+        input: LandingInput,
+        guard: &provenant_fabric_store::LandingGuard,
+        request: &Request<'_>,
+    ) -> Result<LandingResult, CoordinationError> {
+        match input {
+            LandingInput::Acquire {
+                reference,
+                expected,
+                candidate,
+                lease_ms,
+            } => {
+                let fence = self.store.acquire_landing(
+                    guard,
+                    &LandingRequest {
+                        id: ClaimId::from_bytes(Self::new_id_bytes()?),
+                        project: self.project,
+                        actor: self.actor,
+                        token: Self::new_id_bytes()?,
+                        reference: reference.clone(),
+                        expected,
+                        candidate,
+                        lease: Self::lease_duration(lease_ms),
+                    },
+                    request,
+                )?;
+                let landing = self.store.verify_landing(guard, &fence, request)?;
+                Ok(LandingResult::Acquired {
+                    proof: self.landing_proof(reference, fence),
+                    landing,
+                })
+            }
+            LandingInput::Renew { proof, lease_ms } => {
+                let fence = self.landing_fence(&proof);
+                self.store
+                    .renew_landing(guard, &fence, Self::lease_duration(lease_ms), request)?;
+                let landing = self.store.verify_landing(guard, &fence, request)?;
+                Ok(LandingResult::Renewed { landing })
+            }
+            LandingInput::Verify { proof } => {
+                let landing =
+                    self.store
+                        .verify_landing(guard, &self.landing_fence(&proof), request)?;
+                Ok(LandingResult::Verified { landing })
+            }
+            LandingInput::Release { proof } => {
+                let id = proof.id;
+                self.store
+                    .release_landing(guard, &self.landing_fence(&proof), request)?;
+                Ok(LandingResult::Released {
+                    id,
+                    reference: proof.reference,
+                })
+            }
+            LandingInput::Wait { .. } => {
+                Err(CoordinationError::InvalidInput("wait is an observation"))
+            }
+        }
     }
-    let mut output = [0_u8; 8];
-    for (index, byte) in output.iter_mut().enumerate() {
-        let start = index
-            .checked_mul(2)
-            .ok_or(CoordinationError::EntropyEncoding)?;
-        let end = start
-            .checked_add(2)
-            .ok_or(CoordinationError::EntropyEncoding)?;
-        let pair = bytes
-            .get(start..end)
-            .ok_or(CoordinationError::EntropyEncoding)?;
-        let pair = std::str::from_utf8(pair).map_err(|_| CoordinationError::EntropyEncoding)?;
-        *byte = u8::from_str_radix(pair, 16).map_err(|_| CoordinationError::EntropyEncoding)?;
+
+    /// Retryable, bounded mutations atomically commit their receipt and effects.
+    /// The landing OS lock is acquired before the SQLite transaction.
+    pub fn mutate(
+        &self,
+        input: Mutation,
+        id: &provenant_core::OperationId,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError> {
+        self.ensure_active(budget, cancel)?;
+        let request = self.request(budget, cancel);
+        let guard = if let Mutation::Landing(value) = &input {
+            Some(
+                self.store
+                    .lock_landing(self.project, landing_reference(value)?, &request)?,
+            )
+        } else {
+            None
+        };
+        let frozen = input.clone();
+        self.store
+            .coordination_operation(
+                self.project,
+                self.actor,
+                id,
+                &frozen,
+                &request,
+                || match input {
+                    Mutation::Mail(value) => match value {
+                        MailInput::Read { .. } => {
+                            Err(CoordinationError::InvalidInput("read is an observation"))
+                        }
+                        value => self.mail(value, budget, cancel).map(MutationResult::Mail),
+                    },
+                    Mutation::Task(value) => match value {
+                        TaskInput::List { .. } => {
+                            Err(CoordinationError::InvalidInput("list is an observation"))
+                        }
+                        value => self.task(value, budget, cancel).map(MutationResult::Task),
+                    },
+                    Mutation::Events(value) => match value {
+                        EventsInput::Read { .. } => {
+                            Err(CoordinationError::InvalidInput("read is an observation"))
+                        }
+                        value => self
+                            .events(value, budget, cancel)
+                            .map(MutationResult::Events),
+                    },
+                    Mutation::Claim(value) => match value {
+                        ClaimInput::Verify { .. } | ClaimInput::List { .. } => {
+                            Err(CoordinationError::InvalidInput("read is an observation"))
+                        }
+                        value => self.claim(value, budget, cancel).map(MutationResult::Claim),
+                    },
+                    Mutation::Landing(value) => {
+                        value.validate_input()?;
+                        match (&value, guard.as_ref()) {
+                            (LandingInput::Verify { .. } | LandingInput::Wait { .. }, _) => {
+                                Err(CoordinationError::InvalidInput("read is an observation"))
+                            }
+                            (_, Some(guard)) => self
+                                .landing_locked(value, guard, &request)
+                                .map(MutationResult::Landing),
+                            _ => Err(CoordinationError::InvalidInput("landing lock required")),
+                        }
+                    }
+                },
+            )
     }
-    Ok(output)
+}
+
+fn landing_reference(input: &LandingInput) -> Result<&str, CoordinationError> {
+    match input {
+        LandingInput::Acquire { reference, .. } => Ok(reference),
+        LandingInput::Renew { proof, .. }
+        | LandingInput::Release { proof }
+        | LandingInput::Verify { proof } => Ok(&proof.reference),
+        LandingInput::Wait { .. } => Err(CoordinationError::InvalidInput("wait is an observation")),
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "domain", content = "input", rename_all = "snake_case")]
+pub enum Mutation {
+    Mail(MailInput),
+    Task(TaskInput),
+    Events(EventsInput),
+    Claim(ClaimInput),
+    Landing(LandingInput),
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MutationResult {
+    Mail(MailResult),
+    Task(TaskResult),
+    Events(EventsResult),
+    Claim(ClaimResult),
+    Landing(LandingResult),
 }
 
 #[cfg(test)]

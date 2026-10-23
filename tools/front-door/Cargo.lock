@@ -436,8 +436,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "jiff",
+ "provenant-config",
+ "provenant-confinement",
  "provenant-core",
+ "provenant-fabric-runtime",
  "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "thiserror",
@@ -500,6 +504,7 @@ dependencies = [
 name = "provenant-fabric-runtime"
 version = "0.1.0"
 dependencies = [
+ "provenant-config",
  "provenant-core",
  "provenant-fabric-store",
  "provenant-records",

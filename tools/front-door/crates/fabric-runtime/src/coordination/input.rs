@@ -123,6 +123,13 @@ fn wait(milliseconds: u64) -> Result<(), InputError> {
     Ok(())
 }
 
+fn cli_wait(milliseconds: u64) -> Result<(), InputError> {
+    if !(1_000..=14_400_000).contains(&milliseconds) {
+        return Err(field("wait_ms"));
+    }
+    Ok(())
+}
+
 fn artifact(artifact: &ArtifactRef, path: &str) -> Result<(), InputError> {
     let encoded = serde_json::to_value(&artifact.path).map_err(|_| field(path))?;
     let value = encoded["path"].as_str().ok_or_else(|| field(path))?;
@@ -291,7 +298,7 @@ impl ValidateInput for EventsInput {
                 }
                 page(*limit, "limit")?;
                 if let Some(milliseconds) = wait_ms {
-                    wait(*milliseconds)?;
+                    cli_wait(*milliseconds)?;
                 }
                 Ok(())
             }
@@ -342,7 +349,7 @@ impl ValidateInput for LandingInput {
                 reference, wait_ms, ..
             } => {
                 landing_reference(reference, "reference")?;
-                wait(*wait_ms)
+                cli_wait(*wait_ms)
             }
         }
     }

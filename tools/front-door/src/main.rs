@@ -161,7 +161,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             unavailable("config show", "config", globals)
         }
-        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", globals),
+        Command::Fabric(cmd) => provenant_cli::fabric::run(cmd, globals),
         Command::Install(_) => unavailable("install", "config", globals),
         Command::Uninstall(_) => unavailable("uninstall", "config", globals),
         Command::Route(route) => match route {

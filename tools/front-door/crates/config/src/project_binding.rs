@@ -359,6 +359,68 @@ fn decode_location(value: &str) -> Result<PathBuf, ConfigError> {
     Ok(path)
 }
 
+/// Initialise the host's random identity once, using the same safe state
+/// anchor and locking contract as project bindings. Never reads legacy roots.
+pub fn bind_host(roots: &Roots, fs: &dyn SafeFs) -> Result<provenant_core::HostId, ConfigError> {
+    let state = fs.open_anchor(roots.state.as_path())?;
+    verify_directory(&*state, true)?;
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), LOCK_WAIT_SECONDS)
+        .map_err(|_| ConfigError::ProjectBindingBudget)?;
+    let cancel = CancelToken::new();
+    let _lock = state.lock(
+        OsStr::new("host-binding.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let name = OsStr::new("host-id");
+    match state.metadata_at(name, false) {
+        Ok(meta) => {
+            if meta.kind != FileKind::Regular
+                || meta.links != 1
+                || meta.uid != effective_uid()
+                || meta.mode & 0o077 != 0
+                || meta.size != 32
+            {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let mut file = state.open_read(name)?;
+            if !same_metadata(&meta, &file.metadata()?) {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let mut bytes = Vec::new();
+            (&mut *file)
+                .take(33)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ConfigError::InvalidProjectBinding)?;
+            if !same_metadata(&meta, &file.metadata()?)
+                || !same_metadata(&meta, &state.metadata_at(name, false)?)
+            {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let text =
+                std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+            text.parse().map_err(|_| ConfigError::InvalidProjectBinding)
+        }
+        Err(error) if error.is_not_found() => {
+            let id = provenant_core::HostId::from_bytes(fs.entropy_128()?);
+            match state.atomic_write(
+                name,
+                ".host-",
+                id.to_string().as_bytes(),
+                0o600,
+                PublishMode::NoReplace,
+            )? {
+                provenant_supervisor::fs::Publication::Durable => Ok(id),
+                _ => Err(ConfigError::InvalidProjectBinding),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

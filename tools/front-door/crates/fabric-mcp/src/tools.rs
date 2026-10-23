@@ -38,6 +38,15 @@ impl ToolCall {
     /// Strict runtime serde contracts own argument validation. The catalogue
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        if arguments
+            .get("wait_ms")
+            .and_then(Value::as_u64)
+            .is_some_and(|ms| ms > 55_000)
+        {
+            return Err(InvalidInput::Arguments {
+                path: "arguments.wait_ms".into(),
+            });
+        }
         macro_rules! parse {
             ($ty:ty, $variant:ident) => {
                 serde_json::from_value::<$ty>(arguments.clone())
