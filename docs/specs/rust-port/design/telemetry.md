@@ -117,6 +117,7 @@ old files. Below that root:
 telemetry/
   ledger.sqlite3          # private, schema version 1
   writer.lock             # supervisor-held, bounded acquisition
+  import.snapshot         # one reserved temporary slot, never historical state
 runs/...                  # new run-owned terminal attempt records; input only
 ```
 
@@ -126,7 +127,9 @@ request to execution/state, not permission to scan the old `.agent-run/`.
 
 `provenant-records` owns the serialised models. Own records deny unknown
 fields and carry `schema_version: 1`; absent optional measurements are null.
-Unknown versions fail closed. The schema is deliberately small:
+Unknown versions fail closed. Identifier strings are at most 256 UTF-8 bytes;
+opaque core IDs retain their tighter type bounds. Reject oversized fields
+before retaining them, including legacy projections. The schema is small:
 
 | Record/table | Key and retained fields |
 |---|---|
@@ -149,8 +152,11 @@ SQLite is the ledger and transactional index, using the already allowlisted
 attempt identity. Persist typed record JSON with a 64 KiB per-record bound;
 indexed timestamps are signed epoch milliseconds, counters inside records
 are `u64`. Do not route unsigned counts through SQLite REAL or SQL SUM:
-stream selected records and use checked Rust reductions. Cap distinct report
-groups at 10,000 and return `report_too_large` on overflow.
+stream selected records and use checked Rust reductions. Before inserting a
+group, enforce both 10,000 groups and 1 MiB cumulative retained key bytes;
+fixed numeric accumulators have no per-event vectors. Output counting also
+stops at 8 MiB. Violations return `report_too_large` without retaining the
+extra key or allocating an oversized output buffer.
 
 The first build PR adds **only supervisor's safe filesystem/lock API** to
 telemetry's R2 internal dependency row, alongside core/records/config, and
@@ -229,12 +235,20 @@ execution metric, not cost per accepted delivery.
    handle into a private new-root temporary snapshot, and require the copy's
    digest and a final source digest to match. Recheck source identity/size
    and sidecar absence; changes return 3 without a destination commit.
-   No checkpoint, recovery, source-side lock/write or provider-config read.
+   The copy uses the single reserved `telemetry/import.snapshot` slot, under
+   the writer lock. Before each import, supervisor removes a stale regular
+   scratch file from that slot and creates it exclusively; no directory sweep
+   or Drop-based cleanup. Thus retries cannot accumulate copies. Reject a
+   source inside StateRoot or aliasing the destination/scratch file before
+   cleanup. No source checkpoint, recovery, lock/write or config read.
 3. Open **only the verified private copy**, using SQLite
    `mode=ro&immutable=1` and `trusted_schema=OFF`, never reopen the old path
-   through SQLite. This closes replace-and-restore races. Delete only this
-   new-root temporary copy after use, never the source. Bound each row and
-   the entire import to 60 seconds; failure rolls back. A busy legacy store
+   through SQLite. This closes replace-and-restore races. Unlink the private
+   slot after the immutable connection opens; its held SQLite descriptor
+   keeps the snapshot alive and the OS reclaims it even after a kill. A crash
+   before unlink leaves at most one scratch file, removed before retry.
+   Never unlink the source. Bound each row and the import to 60 seconds;
+   failure rolls back. A busy legacy store
    needs a quiescent copy supplied by its owner, not importer repair.
 4. Project only `usage` facts, attempt metadata from `source=fabric`, and
    host alias metadata necessary to deduplicate that ledger's own rows.
@@ -324,7 +338,8 @@ Follow R9; delete removed-subject tests instead of translating them.
   prices, missing buckets/coverage, UTC/undated bounds, exact model identity,
   route-changing retries/latest task outcomes, nearest-rank samples,
   aliases/sessions/fixtures, including host_ids-only conflicting aliases,
-  immutable-fact conflicts, versions and bounds.
+  immutable-fact conflicts, versions and bounds, including many oversized
+  distinct keys rejected before aggregation allocation.
   Inject clocks and data.
 - **Binary integration, isolated state:** real CLI human/JSON shapes/exits;
   empty reads create nothing; corruption refuses; ingest repairs advisory
@@ -335,7 +350,8 @@ Follow R9; delete removed-subject tests instead of translating them.
   import file and its sidecar checks.
 - **Process, Linux/macOS:** handshake/FIFO fixtures hold the writer lock and
   verify bounded code 3, coherent reads, interrupted-import rollback/retry,
-  ENOSPC/fsync failure without partial facts/marker, and source replacement/
+  ENOSPC/fsync failure without partial facts/marker, stale-copy reclamation
+  after termination during copy/open and before retry, and source replacement/
   symlink refusal, including replace-and-restore before SQLite open. A fake
   provider remains alive under telemetry failure,
   publishes terminal once and leaves ingestible evidence. No sleeps;
