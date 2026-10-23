@@ -210,7 +210,7 @@ Run owns schema and transactions; shared typed records live in records:
   custody/session, timestamps, state/outcome/reason, usage/context with source,
   reviewer provenance when supplied by verified edge evidence, artifact
   paths/digests, clipping/redaction and publication errors.
-- `AttemptFact`: Serialize-only terminal projection in records, built by run
+- `AttemptFact`: `Serialize`-only terminal projection in records, built by run
   from validated store records: task, attempt number, operation, project,
   terminal state, exit, `started_at`/`finished_at`, resolved route (provider,
   model, effort, account label), usage counts (`u64`), output paths, reviewer
@@ -496,7 +496,7 @@ Whole run sources to remove (`skills/orchestrate/scripts/` prefix):
 | `dispatch_preflight.py` | 584 | 2+3, with dispatch/batch importers |
 | `memory_admission.py` | 340 | 2+3, with dispatch importer |
 | `batch_run.py` | 933 | 3 |
-| `run_controls.py` | 1192 | 5, with run_dir_finalize and Fabric callers |
+| `run_controls.py` | 1192 | 5, with `run_dir_finalize` and Fabric callers |
 | `run_lineage.py` | 656 | 4, after provider_exec and run callers |
 | `run_records.py` | 455 | 5, last importer |
 | `layout.py` | 245 | 5, last importer with state/confinement |
@@ -648,7 +648,7 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
    consumes `AttemptReader::attempt` at the composition edge (workflow does not use `work_snapshot`). The seam
    is the tested library from step 4: this PR adds federation/MCP composition
    and removes the remaining old consumers together. Delete run_controls and
-   its tests with run_dir_finalize and the Fabric execution/batch/resume
+   its tests with `run_dir_finalize` and the Fabric execution/batch/resume
    callers. Run cuts run_dir_init, RUN_RECEIPT/MANIFEST and the driver lease
    after the caller matrix is updated; run records plus clean replace them.
    Delete git_evidence_packet with its last control and inert workflow oracle
@@ -658,7 +658,7 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
    | Leaf (run deletion owner) | Last-importer gate |
    | --- | --- |
    | `run_records.py` | dispatch/preflight (2), batch (3), controls (5), lane_launch dynamic call and all old tests/oracles gone |
-   | `attempt_evidence.py` | run_records above, dispatch/batch/controls and run_dir_finalize (5), records/workflow Python oracle references gone |
+   | `attempt_evidence.py` | run_records above, dispatch/batch/controls and `run_dir_finalize` (5), records/workflow Python oracle references gone |
    | `layout.py` | dispatch/preflight/batch/controls, provider_exec, provider_confinement, fabric_records, utility.py and run_dir_init.sh all removed/replaced by their owners |
    | `context_usage.py` | dispatch_run, provider_exec, provider_observer and fabric_records all removed/replaced by providers/routing/Fabric; then delete context usage tests |
 

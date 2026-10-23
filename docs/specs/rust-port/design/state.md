@@ -133,7 +133,7 @@ stored typed serde models with `schema_version = 1`, closed enums and
 `deny_unknown_fields`. Unknown major versions fail before mutation; absence
 has only documented defaults. Domain owners choose their own extension rules.
 Persisted models can derive `Serialize, Deserialize`; facts built only by
-trusted edge code derive **Serialize only** (including workflow validation
+trusted edge code derive **`Serialize` only** (including workflow validation
 facts and run's `AttemptFact`). Decode a separate stored record and validate
 it before constructing a fact; deserialisation cannot manufacture evidence.
 
@@ -383,7 +383,7 @@ with or without replace. Config uses only that safe filesystem API, never raw
 libc or `Command`. Lock the install root and selected destination parents in
 stable order; validate all proposals before writing. Recheck target identity
 and content immediately before each atomic publication; on drift stop and
-report the selector. These locks serialize cooperating installers; an
+report the selector. These locks serialise cooperating installers; an
 uncooperative editor racing the final recheck/rename is not excluded. Cut-over
 requires stopping harness clients and config editors before the dry-run and
 keeping them stopped through install/check; chairs own that cut-over gate.
@@ -406,7 +406,7 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 | Owner | Public API or contract |
 | --- | --- |
 | core | Distinct `HostId`, `ProjectId`, `WorkspaceId`, `RepoId`, `ActorId`, `RunId`, `TaskId`, `AttemptId`, `DeliveryId`, `SessionId`, `InstallId`, `ImportId`; `GitOid`, `Digest`, `WorkScope`, `CancelToken`; `RootInputs -> Result<Roots>`, `RelativePath::parse`; `WallTime`/`UtcMicros`, `MonoTime`, `DurationMicros`, `Deadline`, `Clock`. No ambient discovery or I/O. |
-| records | `decode<T: DeserializeOwned>(reader, Limits)`, `encode<T: Serialize>`; `CanonicalV1::bytes`, record/file/source digests; `PathWire`; bounded frontmatter/sidecar/JSONC parsers; state/install/import models. Stored records and Serialize-only facts are separate types. |
+| records | `decode<T: DeserializeOwned>(reader, Limits)`, `encode<T: Serialize>`; `CanonicalV1::bytes`, record/file/source digests; `PathWire`; bounded frontmatter/sidecar/JSONC parsers; state/install/import models. Stored records and `Serialize`-only facts are separate types. |
 | records (CLI contract) | `CommandResult<T> { schema_version, command, status, data: Option<T>, error: Option<CommandError> }`, closed status enum and redacted typed errors; `Finding` and `HelpCatalog`. Output supports additive fields within v1. CLI constructs/renders envelopes and maps exits; no library imports cli. |
 | config | `load(roots, reader) -> Result<ResolvedConfig>` with origins and selected compiled preset; `bind_project(roots, ProjectLocation, SafeFs) -> Result<ProjectBinding>`; pure `plan_install(Release, Targets, Snapshots) -> Result<InstallPlan>`; `install(plan, SafeFs, reporter) -> Result<InstallOutcome>`; `check_install`, `uninstall`. Plan is ephemeral, not a persisted recovery protocol. |
 | supervisor | Production `SystemClock` (`jiff` wall time), entropy, safe no-follow FS/locks/publication and bounded version/help smoke processes. `run_utility` for fixed Git/gh reads; test-only fixture binary with a scoped `Command::new` allow for process tests. |
@@ -487,12 +487,12 @@ MCP executables; old Python/TS output is not an oracle.
 | Five harnesses | Accepted MCP config/stdio argv; Codex feature flag and hooks.json; TOML comments/inline tables; OpenCode JSONC comments/trailing commas; unrelated entries and unsupported-version refusal. |
 | Hooks | Actual enabled client event input, allow/no-op/deny output and exits, plus accepted registration. CLI supplies policy. No missing-fixture install. |
 | Legacy cut-over | Four exact hook commands (including recorded interpreter/quoting forms), all compiled skill links plus `_shared` across five harnesses, three workflow links, instruction/HARNESS links, the global-instruction variable rewrite and live MCP entries. Include near-matches, mixed hook groups, foreign directories and broken links; assert only the authorised instruction files are read/changed in old roots, and every change is printed first. |
-| Skills/Git/MCP | Every tracked SKILL.md/agents YAML subset; primary/linked/non-Git discovery and SHA-1/SHA-256 repos; Fabric initialize/list/EOF/cancellation and stdout purity. |
+| Skills/Git/MCP | Every tracked SKILL.md/agents YAML subset; primary/linked/non-Git discovery and SHA-1/SHA-256 repos; Fabric `initialize`/list/EOF/cancellation and stdout purity. |
 
 Unit tests prove ID/path/version/time overflow, canonical bytes and digest
 separation, integer/duplicate/bounds refusal, YAML/JSONC syntax, typed TOML,
 presets, origins and editor byte preservation. Test cancellation scope and
-Serialize-only fact construction at the trusted edge. Integrations use real
+`Serialize`-only fact construction at the trusted edge. Integrations use real
 commands with synthetic release/provider/MCP fixtures: first install, no-op,
 partial failure then re-apply, drift, malformed config, adoption, exact legacy
 removals, `check install`/`uninstall` and two independent host roots. Assert
