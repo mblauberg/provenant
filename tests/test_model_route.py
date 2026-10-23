@@ -1343,6 +1343,7 @@ def select_route(
     *,
     state_name="spread-state.json",
     candidates_name="candidates.json",
+    catalog=None,
 ):
     candidates_path = tmp_path / candidates_name
     preferences_path = tmp_path / f"{candidates_name}.preferences.json"
@@ -1365,12 +1366,26 @@ def select_route(
             str(preferences_path),
             "--spread-state-file",
             str(state_path),
+            *(["--catalog", str(catalog)] if catalog else []),
         ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     return result, json.loads(result.stdout) if result.stdout else None, state_path
+
+
+@pytest.mark.parametrize("effort", ["medium", "high"])
+def test_selector_uses_configured_task_class_tier(tmp_path, effort):
+    catalog = product_catalog()
+    catalog['task_class_routes']['critical-review'].update(
+        alias='senior', effort=effort, minimum_effort='medium')
+    path = tmp_path / 'catalog.json'
+    path.write_text(json.dumps(catalog))
+    candidate = principal('anthropic', alias='senior', effort='medium')
+    result, selection, _ = select_route(tmp_path, [candidate], {}, catalog=path)
+    assert result.returncode == 0, result.stderr
+    assert selection['chosen_candidate_id'] == candidate['candidate_id']
 
 
 def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
@@ -3079,10 +3094,11 @@ def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
     assert route["effort"] == ""
 
 
-def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("field", ["effort", "minimum_effort"])
+def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch, capsys, field):
     router = load_router()
     catalog = product_catalog()
-    catalog["task_class_routes"]["critical-review"]["effort"] = "hgh"
+    catalog["task_class_routes"]["critical-review"][field] = "hgh"
     catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
@@ -3094,6 +3110,18 @@ def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch
     assert route["status"] == "task_class_config_invalid"
     assert result == 2
     assert route["effort"] == ""
+
+
+def test_task_class_effort_below_configured_minimum_fails_closed(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    catalog = product_catalog()
+    catalog['task_class_routes']['research']['minimum_effort'] = 'high'
+    use_catalog(router, monkeypatch, tmp_path, catalog)
+    result = router.main(['resolve', '--adapter', 'codex', '--task-class', 'research', '--role', 'worker'])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route['status'] == 'task_class_config_invalid'
+    assert route['effort'] == ''
 
 
 def test_task_class_role_label_does_not_change_class_tier(tmp_path, monkeypatch, capsys):
@@ -3123,6 +3151,7 @@ def test_task_class_route_tier_is_configurable(
     catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"][field] = value
     if field == "effort":
+        catalog["task_class_routes"]["critical-review"]["minimum_effort"] = value
         catalog["task_class_routes"]["critical-review"]["models"]["claude"] = ["claude-haiku-5-5"]
     catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 

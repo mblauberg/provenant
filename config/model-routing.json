@@ -190,6 +190,7 @@
     "mechanical": {
       "alias": "junior",
       "effort": "low",
+      "minimum_effort": "low",
       "role": "worker",
       "models": {
         "codex": [
@@ -207,6 +208,7 @@
     "legwork": {
       "alias": "senior",
       "effort": "medium",
+      "minimum_effort": "medium",
       "role": "worker",
       "models": {
         "codex": [
@@ -224,6 +226,7 @@
     "critical-review": {
       "alias": "principal",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "critical-review",
       "models": {
         "codex": [
@@ -241,6 +244,7 @@
     "orchestration": {
       "alias": "principal",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "orchestrator",
       "models": {
         "codex": [
@@ -258,6 +262,7 @@
     "implementation": {
       "alias": "senior",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "worker",
       "models": {
         "codex": [
@@ -277,6 +282,7 @@
     "ui-taste": {
       "alias": "principal",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "worker",
       "models": {
         "codex": [
@@ -295,6 +301,7 @@
     "screenshots": {
       "alias": "senior",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "worker",
       "models": {
         "codex": [
@@ -312,6 +319,7 @@
     "review": {
       "alias": "principal",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "reviewer",
       "models": {
         "codex": [
@@ -331,6 +339,7 @@
     "second-opinion": {
       "alias": "principal",
       "effort": "high",
+      "minimum_effort": "high",
       "role": "reviewer",
       "models": {
         "codex": [
@@ -350,6 +359,7 @@
     "research": {
       "alias": "senior",
       "effort": "medium",
+      "minimum_effort": "medium",
       "role": "worker",
       "models": {
         "codex": [
@@ -368,6 +378,7 @@
     "bulk": {
       "alias": "junior",
       "effort": "low",
+      "minimum_effort": "low",
       "role": "worker",
       "models": {
         "codex": [
@@ -1069,7 +1080,7 @@
       }
     ],
     "role_defaults": {
-      "scout": "junior",
+      "junior": "junior",
       "implementer": "senior",
       "reviewer": "principal",
       "lander": "senior",

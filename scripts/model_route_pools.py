@@ -207,6 +207,16 @@ def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
                 target = new_name(target)
             kept[name] = target
         document["route_synonyms"] = kept
+    classification = document.get("task_classification")
+    if isinstance(classification, dict) and isinstance(classification.get("role_defaults"), dict):
+        path = "task_classification.role_defaults"
+        defaults = rename_keys(classification["role_defaults"], path)
+        for role, alias in defaults.items():
+            if _renamed(alias):
+                notes.append(f"{path}.{role} {alias} -> {new_name(alias)}")
+                moved.append(f"{path}.{role}")
+                defaults[role] = new_name(alias)
+        classification["role_defaults"] = defaults
     tasks = document.get("task_class_routes")
     for name, route in (tasks.items() if isinstance(tasks, dict) else ()):
         rename_alias(route, f"task_class_routes.{name}")

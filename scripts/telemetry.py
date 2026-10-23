@@ -127,7 +127,7 @@ def patterns():
     }
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 4
 
 
 class LedgerSchemaMismatch(ValueError):
@@ -298,10 +298,14 @@ def _prepare(db):
                 db.execute('INSERT OR REPLACE INTO rebuilds VALUES (?,?)', (source, json.dumps(paths)))
                 db.execute('DELETE FROM usage_files WHERE source=?', (source,))
                 db.execute('DELETE FROM cursors WHERE source=?', (source,))
-    if version in (1, 2, 3, 4):
-        # Re-read additive receipt metadata from surviving attempt records.
+    if version in (1, 2, 3):
+        # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+    if db.execute("SELECT 1 FROM meta WHERE key='classifier_metadata_backfill'").fetchone() is None:
+        # Classifier columns are additive; keep v4 compatible with peer readers.
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('classifier_metadata_backfill', ?)", (now(),))
     if db.execute("SELECT 1 FROM meta WHERE key='model_split'").fetchone() is None:
         # Re-read surviving receipts; pruned receipts keep unknown model components.
         db.execute("DELETE FROM cursors WHERE source='fabric'")

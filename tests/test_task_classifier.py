@@ -96,3 +96,12 @@ def test_routing_hook_installer_is_opt_in_and_preserves_other_hooks(tmp_path):
     assert data["hooks"]["PreToolUse"][0]["matcher"] == "Agent|.*fabric_dispatch"
     assert "--pre-tool" in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert configure.main(["--settings", str(settings), "--remove-routing-hook"]) == 0
+
+
+def test_hook_accepts_legacy_role_against_canonical_roster():
+    cfg = config()
+    cfg['task_classification']['role_defaults'] = {'junior': 'junior'}
+    assert hook.soft_warning(cfg, {'tool_name': 'Agent',
+                                  'tool_input': {'role': 'scout', 'model': 'codex/gpt-6-luna'}}) is None
+    assert hook.soft_warning(cfg, {'tool_name': 'Agent',
+                                  'tool_input': {'role': 'scout', 'model': 'outside/model'}})

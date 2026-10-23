@@ -36,7 +36,10 @@ def routing_context(config):
 
 def allowed_models(config, role):
     allowed = set()
-    alias = config.get("task_classification", {}).get("role_defaults", {}).get(role)
+    defaults = config.get("task_classification", {}).get("role_defaults", {})
+    alias = defaults.get(role)
+    if alias is None and role == "scout":
+        alias = defaults.get("junior")
     for entry in config.get("routes", {}).get(alias, []):
         if isinstance(entry, dict) and isinstance(entry.get("model"), str):
             allowed.add(entry["model"].casefold())

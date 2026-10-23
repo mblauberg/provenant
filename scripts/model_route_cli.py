@@ -143,7 +143,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
     if args.command == "select":
         catalog = model_route.load_catalog(Path(args.catalog) if args.catalog else None)
         task_class_policy = {name: {"minimum_alias": route.get("alias"),
-                                    "minimum_effort": route.get("effort"),
+                                    "minimum_effort": route.get("minimum_effort", route.get("effort")),
                                     "role": args.role or "worker"}
                              for name, route in catalog.get("task_class_routes", {}).items()
                              if isinstance(route, dict)}
@@ -154,7 +154,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
         print(json.dumps(record, sort_keys=True))
         return 0
     if args.command == "health":
-        record = _health_record(model_route.load_catalog())
+        record = _health_record(model_route.load_catalog(), model_route)
         print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
         return 0
     if args.command == "routes":
@@ -162,7 +162,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
         document = model_route._pools.describe(
             model_route._router(), catalog, model_route._pools.Availability(model_route._router(), catalog), model_route.EFFORT_ORDER)
         if args.health:
-            document["health"] = _health_record(catalog)
+            document["health"] = _health_record(catalog, model_route)
         if args.json:
             print(json.dumps(document, sort_keys=True))
         else:
@@ -373,6 +373,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
                 return reject("task_class_config_invalid")
             route_alias = route.get("alias")
             configured_effort = route.get("effort")
+            minimum_effort = route.get("minimum_effort", configured_effort)
             route_effort = configured_effort
             size_tier = next((band for band in catalog.get("task_classification", {}).get("size_tiers", [])
                               if band.get("name") == model_route.ROUTE_CLASSIFICATION.get("size_tier")), None)
@@ -389,12 +390,15 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
             if (
                 route_alias not in model_route.ALIAS_ORDER
                 or route_effort not in model_route.EFFORT_ORDER
+                or minimum_effort not in model_route.EFFORT_ORDER
             ):
                 return reject(
                     "task_class_config_invalid",
                     alias=route_alias if isinstance(route_alias, str) else "",
                     effort=route_effort if isinstance(route_effort, str) else "",
                 )
+            if model_route.EFFORT_ORDER[route_effort] < model_route.EFFORT_ORDER[minimum_effort]:
+                return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
             if args.effort:
                 return reject("task_class_effort_conflict", alias=route_alias, effort=route_effort)
             if args.model:
@@ -427,7 +431,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
             args.alias = route_alias
             args.task_class_effort, args.task_class_effort_shift = (
                 route_effort, 0) if size_escalated else model_route.shifted_task_class_effort(
-                    args.task_class, configured_effort, configured_effort, resolved_entries)
+                    args.task_class, configured_effort, minimum_effort, resolved_entries)
             # A runtime fallback may not go below the lower of the configured and shifted effort.
             args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=model_route.EFFORT_ORDER.__getitem__)
         elif args.alias not in {"principal", "senior", "junior"}:
