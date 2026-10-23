@@ -35,6 +35,7 @@ impl Fixture {
         .map(PathBuf::from)
         .find(|path| path.is_file())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Git fixture is unavailable"))?;
+        let git = fs::canonicalize(git)?;
         let temp = tempfile::tempdir_in("/tmp")?;
         let root = temp.path().join("repo");
         let home = temp.path().join("home");
