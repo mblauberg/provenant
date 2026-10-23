@@ -16,3 +16,11 @@ directory sync and bound reads remain blocked on that API. R7 forbids local
 unsafe/syscall implementations, and pathname opens cannot substitute for them.
 The private `pending` module holds `OwnedFileError`, which belongs in
 `provenant-confinement`. No fake successful effects are exposed.
+
+## Portable workflow unit 01
+
+Identity validation, object reads, SHA-256 digest, contract/context validation
+and fallback artifact writes are ported. CLI parsing remains for cut-over.
+The private `pending::python_json` encoder belongs in `provenant-records`;
+it preserves sorted keys, ASCII escaping, spaces and the final newline at
+this artifact boundary. It is not a general canonical floating-point codec.
