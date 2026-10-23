@@ -8,6 +8,13 @@ use std::collections::BTreeMap;
 
 pub const OUTCOME_KEYS: [&str; 5] = ["adapter", "model", "effort", "task_class", "route"];
 pub const ROW_LIMIT: usize = 12;
+const TOKEN_FIELDS: [&str; 5] = [
+    "input_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+];
 pub fn percentile(values: &[f64], share: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -298,6 +305,349 @@ pub fn bounded_table(
         })
         .collect();
     table(&selected, &cells)
+}
+
+fn field<'a>(value: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    value.get(name).unwrap_or(&serde_json::Value::Null)
+}
+fn value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".into(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => value.to_string(),
+    }
+}
+fn text_or(value: &serde_json::Value, fallback: &str) -> String {
+    if value.is_null() || value.as_str().is_some_and(str::is_empty) {
+        fallback.into()
+    } else {
+        value_text(value)
+    }
+}
+fn compact_json(value: &serde_json::Value) -> Option<String> {
+    let number = value.as_number()?;
+    if let Some(n) = number.as_i64() {
+        return Some(compact(Some(n as f64)));
+    }
+    if let Some(n) = number.as_u64() {
+        if n < 1000 {
+            return Some(n.to_string());
+        }
+        return Some(compact(Some(n as f64)));
+    }
+    number.as_f64().map(|n| compact(Some(n)))
+}
+fn python_general(value: f64) -> String {
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.into();
+    }
+    let scientific = format!("{value:.5e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent = exponent.parse::<i32>().unwrap_or(0);
+    if !(-4..6).contains(&exponent) {
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!(
+            "{mantissa}e{}{abs:02}",
+            if exponent < 0 { '-' } else { '+' },
+            abs = exponent.abs()
+        )
+    } else {
+        let rounded = scientific.parse::<f64>().unwrap_or(value);
+        let digits = (5 - exponent).max(0) as usize;
+        let fixed = format!("{rounded:.digits$}");
+        if fixed.contains('.') {
+            fixed.trim_end_matches('0').trim_end_matches('.').into()
+        } else {
+            fixed
+        }
+    }
+}
+fn array(value: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    value.as_array().into_iter().flatten()
+}
+fn text_row(values: impl IntoIterator<Item = String>) -> String {
+    format!("  {}", values.into_iter().collect::<Vec<_>>().join("  "))
+}
+
+/// Render the existing stats report without owning its ledger or printing directly.
+pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> {
+    let limit = if detail { usize::MAX } else { ROW_LIMIT };
+    let mut lines = vec![format!(
+        "Usage on {}{}: costs are API-equivalent USD estimates; - marks missing usage or prices.",
+        value_text(field(report, "host")),
+        if field(report, "since").is_null() || field(report, "since") == "" {
+            String::new()
+        } else {
+            format!(" since {}", value_text(field(report, "since")))
+        }
+    )];
+    let usage: Vec<_> = array(field(report, "usage")).collect();
+    let usage_rows: Vec<Vec<Option<String>>> = usage
+        .iter()
+        .map(|row| {
+            let mut cells = vec![
+                Some(text_or(field(row, "provider"), "-")),
+                Some(text_or(field(row, "adapter"), "None")),
+                Some(text_or(field(row, "model"), "None")),
+                Some(value_text(field(row, "rows"))),
+            ];
+            cells.extend(
+                TOKEN_FIELDS
+                    .iter()
+                    .map(|name| compact_json(field(row, name))),
+            );
+            cells.push(
+                field(row, "cache_read_share")
+                    .as_f64()
+                    .map(|v| format!("{:.0}%", v * 100.0)),
+            );
+            cells.push(
+                field(row, "estimated_cost_usd")
+                    .as_f64()
+                    .map(|v| format!("{v:.2}")),
+            );
+            cells.push(Some(text_or(field(row, "billing"), "-")));
+            cells
+        })
+        .collect();
+    lines.extend(bounded_table(
+        &[
+            "provider",
+            "adapter",
+            "model",
+            "rows",
+            "input",
+            "cache_read",
+            "cache_write",
+            "output",
+            "reasoning",
+            "cache%",
+            "cost_usd",
+            "billing",
+        ]
+        .map(str::to_owned),
+        &usage_rows,
+        Some(limit),
+        &["cost_usd"],
+    )?);
+    if !detail && usage.len() > ROW_LIMIT {
+        lines.push(format!(
+            "{} more; use --detail/--json",
+            usage.len() - ROW_LIMIT
+        ));
+    }
+
+    let outcomes: Vec<Vec<Option<String>>> = array(field(report, "outcomes"))
+        .map(|row| {
+            let route = format!(
+                "{}/{}{}",
+                text_or(field(row, "adapter"), "None"),
+                text_or(field(row, "model"), "None"),
+                field(row, "effort")
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("@{s}"))
+                    .unwrap_or_default()
+            );
+            let errors = field(row, "error_classes")
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| format!("{k}:{}", value_text(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "-".into());
+            let cost = if field(row, "known_cost_usd").is_number()
+                && field(row, "missing_cost_rows").as_u64().unwrap_or(0) == 0
+            {
+                field(row, "known_cost_usd")
+                    .as_f64()
+                    .map(|v| format!("{v:.2}"))
+            } else {
+                None
+            };
+            vec![
+                Some(route),
+                Some(text_or(field(row, "task_class"), "-")),
+                Some(text_or(field(row, "route"), "-")),
+                Some(value_text(field(row, "lanes"))),
+                field(row, "success_rate")
+                    .as_f64()
+                    .map(|v| format!("{:.0}%", v * 100.0)),
+                Some(value_text(field(row, "retries"))),
+                Some(errors),
+                cost,
+                field(row, "cost_per_success_usd")
+                    .as_f64()
+                    .map(|v| format!("{v:.2}")),
+                compact_json(field(row, "latency_p50_s")),
+                compact_json(field(row, "latency_p90_s")),
+                compact_json(field(row, "output_tokens_per_s")),
+            ]
+        })
+        .collect();
+    if !outcomes.is_empty() {
+        lines.extend([
+            String::new(),
+            "Outcomes by route (latest attempt per lane):".into(),
+        ]);
+        lines.extend(bounded_table(
+            &[
+                "route",
+                "task_class",
+                "alias",
+                "lanes",
+                "ok",
+                "retries",
+                "errors",
+                "cost_usd",
+                "$/ok",
+                "p50_s",
+                "p90_s",
+                "out_tok/s",
+            ]
+            .map(str::to_owned),
+            &outcomes,
+            Some(limit),
+            &["cost_usd", "$/ok"],
+        )?);
+        if !detail && outcomes.len() > ROW_LIMIT {
+            lines.push(format!(
+                "{} more; use --detail/--json",
+                outcomes.len() - ROW_LIMIT
+            ));
+        }
+    }
+    let last_limits: Vec<Vec<String>> = array(field(report, "last_limit_events"))
+        .map(|row| {
+            vec![
+                text_or(field(row, "provider"), "-"),
+                text_or(field(row, "account"), "unattributed"),
+                value_text(field(row, "timestamp")),
+                format!("{}s ago", value_text(field(row, "age_seconds"))),
+            ]
+        })
+        .collect();
+    let mut limit_rows: Vec<_> = array(field(report, "limits_per_day")).collect();
+    let limit_rows = limit_rows
+        .drain(limit_rows.len().saturating_sub(14)..)
+        .map(|r| {
+            vec![
+                text_or(field(r, "day"), "-"),
+                text_or(field(r, "provider"), "-"),
+                value_text(field(r, "status")),
+                value_text(field(r, "events")),
+            ]
+        })
+        .collect();
+    let mut sections: Vec<(&str, Vec<Vec<String>>)> = vec![
+        (
+            "Lanes",
+            array(field(report, "lanes"))
+                .map(|r| {
+                    vec![
+                        value_text(field(r, "status")),
+                        text_or(field(r, "error_class"), "-"),
+                        value_text(field(r, "lanes")),
+                    ]
+                })
+                .collect(),
+        ),
+        (
+            "Compactions per lane",
+            array(field(report, "compactions_per_lane"))
+                .map(|r| {
+                    vec![
+                        value_text(field(r, "lane")),
+                        value_text(field(r, "compactions")),
+                        text_or(field(r, "host"), "-"),
+                    ]
+                })
+                .collect(),
+        ),
+        ("Limit events", limit_rows),
+        (
+            "Last limit events",
+            last_limits.iter().take(limit).cloned().collect(),
+        ),
+    ];
+    if detail {
+        sections.push((
+            "Latest quota observations",
+            array(field(report, "quota_observations"))
+                .map(|r| {
+                    vec![
+                        text_or(field(r, "provider"), "-"),
+                        value_text(field(r, "window")),
+                        field(r, "used_percent")
+                            .as_f64()
+                            .map(|v| format!("{}%", python_general(v)))
+                            .unwrap_or_else(|| "None%".into()),
+                        text_or(field(r, "reset_at"), "-"),
+                        text_or(field(r, "timestamp"), "-"),
+                    ]
+                })
+                .collect(),
+        ));
+    }
+    for (title, rows) in sections {
+        if !rows.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("{title}:"));
+            lines.extend(rows.into_iter().map(text_row));
+        }
+    }
+    if !detail && last_limits.len() > ROW_LIMIT {
+        lines.push(format!(
+            "{} more limit events; use --detail/--json",
+            last_limits.len() - ROW_LIMIT
+        ));
+    }
+    let quota = array(field(report, "quota_observations")).count();
+    if !detail && quota > 0 {
+        lines.push(format!("{quota} quota observations; use --detail/--json"));
+    }
+    let unattributed: Vec<_> = array(field(report, "unattributed")).collect();
+    let excluded = field(report, "excluded_rows").as_object();
+    if !unattributed.is_empty() || excluded.is_some_and(|m| !m.is_empty()) {
+        let summary_rows = unattributed
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}/{} rows={}",
+                    value_text(field(r, "source")),
+                    text_or(field(r, "adapter"), "-"),
+                    value_text(field(r, "rows"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut summary = if summary_rows.is_empty() {
+            "Not attributed to a model: ".to_owned()
+        } else {
+            format!("Not attributed to a model: {summary_rows}")
+        };
+        if let Some(excluded) = excluded {
+            for (name, count) in excluded {
+                summary.push_str(&format!("; excluded {name}={}", value_text(count)));
+            }
+        }
+        lines.extend([String::new(), summary]);
+    }
+    for host in array(field(report, "hosts")) {
+        lines.push(format!(
+            "host {}: {}{}",
+            value_text(field(host, "host")),
+            value_text(field(host, "status")),
+            field(host, "reason")
+                .as_str()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 #[cfg(test)]
