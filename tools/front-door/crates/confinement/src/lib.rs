@@ -3,3 +3,4 @@
 
 pub mod agy_home;
 pub mod instruction_quarantine;
+pub mod lane_protection;
