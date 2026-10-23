@@ -30,5 +30,4 @@ pub mod sys;
 mod test_support;
 pub mod worker_liveness;
 
-#[doc(hidden)]
-pub mod legacy_json;
+mod legacy_json;

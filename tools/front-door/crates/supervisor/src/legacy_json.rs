@@ -1,6 +1,7 @@
 //! Minimal strict JSON reader, enough for the product-root pointer file.
 //! Strict means no `NaN`, no trailing commas and no control characters in
 //! strings; duplicate keys keep the last value, as Python's `json` does.
+#![forbid(unsafe_code)]
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

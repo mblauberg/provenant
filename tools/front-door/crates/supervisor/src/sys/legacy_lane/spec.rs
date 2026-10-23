@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::legacy_json::{self as json, Value};
 use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};

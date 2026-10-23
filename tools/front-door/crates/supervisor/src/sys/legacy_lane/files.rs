@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! File publication has no process-group handle and cannot request a stop.
 use std::collections::VecDeque;
 use std::fs::File;

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::files;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, ReadDir};
