@@ -124,3 +124,43 @@ pub(crate) fn field(
     }
     Ok(Some(result))
 }
+
+/// JavaScript grammar validation with opaque, ordered top-level values.
+/// Unlike the Python projection, bare NaN/Infinity are invalid JSON here.
+pub(crate) fn js_fields(
+    text: &str,
+) -> Result<Option<crate::pending::OrderedMap<&str>>, serde_json::Error> {
+    serde_json::from_str::<IgnoredAny>(text)?;
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    whitespace(bytes, &mut index);
+    if bytes.get(index) != Some(&b'{') {
+        return Ok(None);
+    }
+    index += 1;
+    let mut result = crate::pending::OrderedMap::default();
+    loop {
+        whitespace(bytes, &mut index);
+        if bytes.get(index) == Some(&b'}') {
+            break;
+        }
+        let end = string_end(bytes, index);
+        let key = serde_json::from_str::<String>(&text[index..end]).ok();
+        index = end;
+        whitespace(bytes, &mut index);
+        index += 1;
+        whitespace(bytes, &mut index);
+        let end = value_end(bytes, index);
+        if let Some(key) = key {
+            result.insert(key, &text[index..end]);
+        }
+        index = end;
+        whitespace(bytes, &mut index);
+        if bytes.get(index) == Some(&b',') {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(Some(result))
+}

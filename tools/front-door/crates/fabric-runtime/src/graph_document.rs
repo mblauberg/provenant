@@ -17,7 +17,7 @@ pub struct Fault {
 #[derive(Debug, Error)]
 pub enum GraphError {
     #[error("graph number needs the lossless JavaScript numeric owner: {0}")]
-    JavaScriptNumber(String),
+    JavaScriptNumber(#[from] crate::pending::JsNumberBoundary),
     #[error("duplicate graph node {0}")]
     DuplicateNode(String),
     #[error(transparent)]
@@ -41,61 +41,10 @@ pub fn valid_node_id(value: &str) -> bool {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
         })
 }
-// port: belongs in provenant-records
-fn number(number: &serde_json::Number) -> Result<String, GraphError> {
-    if !number.is_f64() {
-        if number
-            .as_i64()
-            .is_some_and(|n| (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&n))
-            || number.as_u64().is_some_and(|n| n <= 9_007_199_254_740_991)
-        {
-            return Ok(number.to_string());
-        }
-        return Err(GraphError::JavaScriptNumber(number.to_string()));
-    }
-    let text = number.to_string();
-    let (mantissa, exponent) = text.split_once('e').map_or((text.as_str(), 0), |(m, e)| {
-        (m, e.parse::<i32>().unwrap_or(0))
-    });
-    let (sign, mantissa) = mantissa
-        .strip_prefix('-')
-        .map_or(("", mantissa), |m| ("-", m));
-    let mut point = mantissa.find('.').unwrap_or(mantissa.len()) as i32 + exponent;
-    let digits = mantissa.replace('.', "");
-    let significant = digits.trim_start_matches('0');
-    if significant.is_empty() {
-        return Ok("0".into());
-    }
-    point -= (digits.len() - significant.len()) as i32;
-    let digits = significant.trim_end_matches('0');
-    let exponent = point - 1;
-    Ok(if !(-6..21).contains(&exponent) {
-        let (first, rest) = digits.split_at(1);
-        let mantissa = if rest.is_empty() {
-            first.into()
-        } else {
-            format!("{first}.{rest}")
-        };
-        if exponent >= 0 {
-            format!("{sign}{mantissa}e+{exponent}")
-        } else {
-            format!("{sign}{mantissa}e{exponent}")
-        }
-    } else if point <= 0 {
-        format!("{sign}0.{}{digits}", "0".repeat((-point) as usize))
-    } else if point as usize >= digits.len() {
-        format!(
-            "{sign}{digits}{}",
-            "0".repeat(point as usize - digits.len())
-        )
-    } else {
-        let (whole, fraction) = digits.split_at(point as usize);
-        format!("{sign}{whole}.{fraction}")
-    })
-}
+
 pub fn canonical_json(value: &Value) -> Result<String, GraphError> {
     match value {
-        Value::Number(value) => number(value),
+        Value::Number(value) => Ok(crate::pending::js_json_number(value)?),
         Value::Array(values) => Ok(format!(
             "[{}]",
             values
@@ -369,7 +318,7 @@ mod relation_tests {
     use serde_json::json;
     #[test]
     fn dependency_height_cycles_confidentiality_and_writer_order_match_node() {
-        let fixtures = vec![
+        let fixtures = [
             vec![
                 NodeRelation {
                     id: "a".into(),

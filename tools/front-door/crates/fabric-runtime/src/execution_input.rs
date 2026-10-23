@@ -229,31 +229,34 @@ pub fn dispatch_defaults(workspace: &std::path::Path) -> DefaultsResult {
         }
         Err(_) => return unreadable(),
     };
-    let policy: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
+    let policy = match crate::policy_json::js_fields(&text) {
+        Ok(Some(value)) => value,
+        Ok(None) => return DefaultsResult::default(),
         Err(_) => return unreadable(),
     };
     let Some(raw) = policy.get("dispatch_defaults") else {
         return DefaultsResult::default();
     };
-    if !raw.is_object() {
-        return DefaultsResult {
-            warnings: vec![format!(
-                "{POLICY} dispatch_defaults is not an object; ignored"
-            )],
-            ..Default::default()
-        };
-    }
-    #[derive(Deserialize)]
-    struct Policy {
-        dispatch_defaults: OrderedMap<Value>,
-    }
-    let policy: Policy = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(_) => return unreadable(),
+    let fields = match crate::policy_json::js_fields(raw) {
+        Ok(Some(value)) => value,
+        _ => {
+            return DefaultsResult {
+                warnings: vec![format!(
+                    "{POLICY} dispatch_defaults is not an object; ignored"
+                )],
+                ..Default::default()
+            }
+        }
     };
+    let fields: OrderedMap<Value> = OrderedMap(
+        fields
+            .0
+            .into_iter()
+            .map(|(key, raw)| (key, serde_json::from_str(raw).unwrap_or(Value::Null)))
+            .collect(),
+    );
     let mut result = DefaultsResult::default();
-    for (key, value) in policy.dispatch_defaults.0 {
+    for (key, value) in fields.0 {
         let valid = match (key.as_str(), &value) {
             ("add_dirs", Value::Array(values))
                 if values
@@ -355,7 +358,12 @@ pub fn route_arguments(
                 value
                     .as_str()
                     .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string()),
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        crate::pending::js_json_value(value).map_err(|error| {
+                            InputError::new("incomplete_json_number", error.to_string())
+                        })
+                    })?,
             ]),
         }
     }
@@ -367,11 +375,43 @@ mod request_policy_tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn defaults_ignore_unread_exotic_values_like_node() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".agents")).unwrap();
+        let fixtures = [
+            r#"{"dispatch_defaults":{"network":true},"unused":1e999}"#,
+            r#"{"unused":"\ud800","dispatch_defaults":{"network":true}}"#,
+            r#"{"dispatch_defaults":{"unused":1e999,"network":true,"timeout_seconds":1e999}}"#,
+            r#"{"dispatch_defaults":{"network":true},"unused":NaN}"#,
+        ];
+        let script = r#"import {dispatchDefaults} from './src/execution-input.ts';
+import {writeFileSync} from 'node:fs';
+const [root,fixtures]=process.argv.slice(1);
+console.log(JSON.stringify(JSON.parse(fixtures).map(text=>{writeFileSync(root+'/.agents/fabric-policy.json',text);return dispatchDefaults(root)})));"#;
+        let Some(expected) = crate::test_support::node(
+            script,
+            &[
+                root.path().to_str().unwrap().into(),
+                serde_json::to_string(&fixtures).unwrap(),
+            ],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = fixtures
+            .iter()
+            .map(|text| {
+                std::fs::write(root.path().join(".agents/fabric-policy.json"), text).unwrap();
+                dispatch_defaults(root.path())
+            })
+            .collect();
+        assert_eq!(json!(actual), expected);
+    }
+    #[test]
     fn defaults_warnings_and_argv_order_match_node() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join(".agents")).unwrap();
         std::fs::write(root.path().join(".agents/fabric-policy.json"),r#"{"dispatch_defaults":{"z":1,"network":true,"add_dirs":["shared"],"bad":false,"timeout_seconds":1.5}}"#).unwrap();
-        let wire = r#"{"adapter":"codex","model":"m","alias":"senior","preface":false,"read_roots":["/r"],"allow_secrets":false,"confidential":true,"fallback":false,"knobs":["x=y"]}"#;
+        let wire = r#"{"adapter":"codex","model":"m","alias":"senior","preface":false,"read_roots":["/r"],"allow_secrets":false,"confidential":true,"fallback":false,"context_ceiling":1e20,"small":1e-7,"knobs":["x=y"]}"#;
         let mut route: crate::pending::OrderedMap<Value> = serde_json::from_str(wire).unwrap();
         let defaults = dispatch_defaults(root.path());
         apply_dispatch_defaults(&mut route, &defaults.defaults);
