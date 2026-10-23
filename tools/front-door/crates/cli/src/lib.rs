@@ -15,6 +15,8 @@ pub struct CommandOutput {
 pub mod clean;
 mod pending;
 
+pub use pending::IntegerError;
+
 pub mod git_evidence;
 
 pub mod lane_safety;

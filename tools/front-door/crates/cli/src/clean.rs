@@ -123,7 +123,7 @@ pub enum DurationError {
     #[error("duration must be like 7d or 24h")]
     Invalid,
     #[error(transparent)]
-    Integer(#[from] crate::pending::IntegerError),
+    Integer(#[from] crate::IntegerError),
 }
 
 pub fn duration(value: &str) -> Result<DurationDays, DurationError> {
@@ -367,13 +367,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let Some(expected): Option<(Value, Value)> = crate::oracle::python(
             r#"
-import json,sys,os
+import json,sys,os,subprocess
 from pathlib import Path
 from datetime import datetime,timezone
 from scripts.clean import plan
 root=Path(json.load(sys.stdin)['root']).resolve()
+# TMPDIR can sit inside a live checkout. Establish an isolated repository so
+# primary_root cannot discover and scan that enclosing project's run tree.
+subprocess.run(['git','init','-q',str(root)],check=True,capture_output=True,timeout=10)
 p=root/'.agent-run/scratch/old.txt'; p.parent.mkdir(parents=True); p.write_text('fixture');os.utime(p,(100000,100000))
-# A standalone non-Git root is permitted by clean.primary_root.
+# Only this isolated repository supplies cleanup observations.
 r=plan(root,pr_bodies=[],now=datetime.fromtimestamp(1000000,timezone.utc))
 public={**{k:v for k,v in r.items() if k not in {'approval','_context'}},'rows':[{k:v for k,v in row.items() if k!='_identity'} for row in r['rows']]}
 r['_context']['open_heads']=sorted(r['_context']['open_heads'])
