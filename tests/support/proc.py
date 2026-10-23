@@ -22,10 +22,10 @@ def run_cli(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``argv`` capturing text output, never raising on a non-zero exit.
 
-    ``env`` is merged over the inherited environment; ``path`` entries are
-    prepended to ``PATH``.
+    ``env`` replaces the environment when given (subprocess semantics) and is
+    inherited when None; ``path`` entries are prepended to its ``PATH``.
     """
-    merged = {**os.environ, **(env or {})}
+    merged = dict(os.environ if env is None else env)
     if path:
         merged["PATH"] = os.pathsep.join([*map(str, path), merged.get("PATH", "")])
     return subprocess.run(
@@ -43,18 +43,18 @@ def run_cli(
 def run_cf_dispatch(
     cwd: Path,
     *args: str,
-    bin_dir: Path | None = None,
+    path: Sequence[Path] = (),
     env: Mapping[str, str] | None = None,
+    timeout: float = 120,
 ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     """Run cf_dispatch.py with a Fabric-free environment.
 
-    Returns the process and its parsed stdout record (None when stdout is not
-    one JSON object). Asserts nothing.
+    ``env`` is overlaid on the Fabric-free environment. Returns the process
+    and its parsed stdout record, which is None when stdout is not one JSON
+    object (callers assert with ``result.stderr``). Asserts nothing.
     """
     merged = {**fabric_free_env(), **(env or {})}
-    result = run_cli(
-        [SCRIPT, *args], cwd=cwd, env=merged, path=[bin_dir] if bin_dir else ()
-    )
+    result = run_cli([SCRIPT, *args], cwd=cwd, env=merged, path=path, timeout=timeout)
     try:
         record = json.loads(result.stdout)
     except ValueError:

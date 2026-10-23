@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env
+from tests.cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env
 from tests.support.fake_cli import fake_bin, write_executable
 from tests.support.git import git_repo, linked_worktree
 

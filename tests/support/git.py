@@ -7,7 +7,9 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-IDENTITY = ("-c", "user.name=Test", "-c", "user.email=test@example.invalid")
+IDENTITY = (
+    "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+)
 
 
 def git(cwd: Path, *args: str, check: bool = True, env: Mapping[str, str] | None = None) -> str:
@@ -38,8 +40,13 @@ def git_repo(
     branch: str = "main",
     files: Mapping[str, str] | None = None,
     message: str = "initial",
+    commit: bool = True,
 ) -> Path:
-    """Create a repository with one commit (empty when ``files`` is None)."""
+    """Create a repository with one commit (empty when ``files`` is None).
+
+    ``commit=False`` leaves the files unstaged and uncommitted. Returns the
+    resolved path.
+    """
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", branch)
     git(path, "config", "user.name", "Test")
@@ -48,13 +55,19 @@ def git_repo(
         target = path / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-    git(path, "add", "-A")
-    git(path, "commit", "-q", "--allow-empty", "-m", message)
-    return path
+    if commit:
+        git(path, "add", "-A")
+        git(path, "commit", "-q", "--allow-empty", "-m", message)
+    return path.resolve()
 
 
-def linked_worktree(repo: Path, name: str, *, branch: str | None = None) -> Path:
-    """Add a linked worktree ``name`` beside ``repo`` on a new ``branch``."""
-    worktree = repo.parent / name
+def linked_worktree(
+    repo: Path, name: str, *, branch: str | None = None, path: Path | None = None
+) -> Path:
+    """Add a linked worktree on a new ``branch`` (default ``name``).
+
+    It lives at ``path``, or beside ``repo`` as ``name``. Returns the resolved path.
+    """
+    worktree = path or repo.parent / name
     git(repo, "worktree", "add", "-q", "-b", branch or name, str(worktree))
     return worktree.resolve()
