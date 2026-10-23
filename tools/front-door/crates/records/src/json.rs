@@ -144,7 +144,7 @@ where
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
     let facts = validate_document(&bytes, limits)?;
-    normalize_negative_zeroes(&mut bytes, &facts.negative_zeroes);
+    normalise_negative_zeroes(&mut bytes, &facts.negative_zeroes);
     serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
         line: source.line(),
         column: source.column(),
@@ -159,7 +159,7 @@ where
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
     let facts = validate_document(&bytes, limits)?;
-    normalize_negative_zeroes(&mut bytes, &facts.negative_zeroes);
+    normalise_negative_zeroes(&mut bytes, &facts.negative_zeroes);
     let header_value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
             line: source.line(),
@@ -243,7 +243,7 @@ fn validate_document(input: &[u8], limits: Limits) -> Result<ValidationFacts, De
     })
 }
 
-fn normalize_negative_zeroes(input: &mut [u8], positions: &[usize]) {
+fn normalise_negative_zeroes(input: &mut [u8], positions: &[usize]) {
     for position in positions {
         if let Some(digits) = input.get_mut(*position..position.saturating_add(2))
             && let Some((minus, zero)) = digits.split_first_mut()
