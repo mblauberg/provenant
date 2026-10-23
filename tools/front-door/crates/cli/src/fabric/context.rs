@@ -50,9 +50,36 @@ fn roots(globals: &Globals) -> Result<(Roots, PathBuf, PathBuf), EdgeError> {
     inputs.workspaces.push(cwd.clone());
     Ok((inputs.resolve(&LocalFs)?, home, cwd))
 }
-fn private_dir(path: &Path) -> Result<Directory, EdgeError> {
+fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
     let mut dir = Directory::root(true)?;
-    for part in path.components() {
+    // Configured roots may live on mounted home/state volumes. Establish the
+    // root boundary through no-follow held handles, checking each observed
+    // identity; device confinement starts at that root, not at filesystem /.
+    for part in root.components() {
+        if let Component::Normal(name) = part {
+            match dir.mkdir(name, 0o700) {
+                Ok(()) => dir.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let before = dir.metadata_at(name, false)?;
+            let child = dir.open_directory(name)?;
+            let opened = child.metadata()?;
+            let after = dir.metadata_at(name, false)?;
+            if !before.same_identity(&opened) || !opened.same_identity(&after) {
+                return Err(EdgeError::Invalid);
+            }
+            dir = child.into_anchor()?;
+        }
+    }
+    if dir.metadata()?.mode & 0o077 != 0 {
+        return Err(EdgeError::Invalid);
+    }
+    for part in path
+        .strip_prefix(root)
+        .map_err(|_| EdgeError::Invalid)?
+        .components()
+    {
         if let Component::Normal(name) = part {
             match dir.mkdir(name, 0o700) {
                 Ok(()) => dir.sync()?,
@@ -60,10 +87,12 @@ fn private_dir(path: &Path) -> Result<Directory, EdgeError> {
                 Err(error) => return Err(error.into()),
             }
             dir = dir.open_verified_directory(name)?;
+            if dir.metadata()?.mode & 0o077 != 0 {
+                return Err(EdgeError::Invalid);
+            }
+        } else {
+            return Err(EdgeError::Invalid);
         }
-    }
-    if dir.metadata()?.mode & 0o077 != 0 {
-        return Err(EdgeError::Invalid);
     }
     Ok(dir)
 }
@@ -74,9 +103,9 @@ impl Context {
         let config = provenant_config::read_with_domains(&roots, &LocalFs, &SECTIONS)?
             .domains
             .fabric;
-        private_dir(roots.state.as_path())?;
+        private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp/git-home");
-        private_dir(&utility_home)?;
+        private_dir(roots.state.as_path(), &utility_home)?;
         let git = [
             "/opt/homebrew/bin/git",
             "/usr/local/bin/git",
@@ -167,7 +196,7 @@ pub(super) fn publish<T: Serialize>(
     ) -> Result<AbsolutePath, EdgeError> {
         let (roots, _, _) = roots(globals)?;
         let path = roots.state.as_path().join("tmp/results");
-        let dir = private_dir(&path)?;
+        let dir = private_dir(roots.state.as_path(), &path)?;
         let name = provenant_supervisor::fs::temporary_name()?;
         let bytes = serde_json::to_vec(value)?;
         match dir.atomic_write(&name, ".result-", &bytes, PublishMode::NoReplace)? {

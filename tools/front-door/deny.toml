@@ -17,7 +17,12 @@ allow = [
   "Apache-2.0",   # The other ADR 0028 default; used across the dependency tree.
 ]
 
-exceptions = [{ crate = "unicode-ident", allow = ["Unicode-3.0"] }]
+exceptions = [
+  { crate = "unicode-ident", allow = ["Unicode-3.0"] },
+  # Already in the approved transitive set and lockfile through hashbrown.
+  # Keep this exception version-scoped; no additional crate or feature is enabled.
+  { crate = "foldhash@=0.2.0", allow = ["Zlib"] },
+]
 
 [bans]
 multiple-versions = "warn"
