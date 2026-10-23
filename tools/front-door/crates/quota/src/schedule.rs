@@ -324,9 +324,11 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
             _ => Number::Int(1),
         })?;
     }
-    let mut ttl = config
-        .max_interval_seconds
-        .min(config.min_interval_seconds.max(base.multiply(factor)?));
+    let mut ttl = config.max_interval_seconds.min(
+        config
+            .min_interval_seconds
+            .max(base.multiply_capped(factor, config.max_interval_seconds)?),
+    );
     if power == "low" && trigger != "manual" && config.low_power_skip_costs.contains(&config.cost) {
         ttl = config.max_interval_seconds;
         reason = "low_power";

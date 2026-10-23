@@ -1539,3 +1539,31 @@ fn display_compares_and_labels_large_integer_windows_exactly() {
         Err(QuotaError::NumberOutOfRange)
     ));
 }
+
+#[test]
+fn schedule_caps_products_before_integer_or_float_overflow() {
+    use crate::schedule::*;
+    for factor in [json!(u64::MAX), json!(1e308)] {
+        let account = json!({"battery_factor":factor});
+        let (config, notes) = resolve("claude", &account, &Value::Null).unwrap();
+        let result = plan(PlanInput {
+            account_id: "claude/a",
+            snapshot: None,
+            now: now(),
+            config: &config,
+            trigger: "timer",
+            power: "battery",
+            activity_at: None,
+            ignore_backoff: false,
+            notes: &notes,
+        });
+        let (block, _) = result.unwrap();
+        assert_eq!(json!(block.ttl_seconds), json!(21600));
+        if python_available() {
+            let expected: Value = oracle(
+                json!({"operation":"schedule","provider":"claude","account_id":"claude/a","account_quota":account,"power":"battery","now":NOW}),
+            );
+            assert_record_eq(&json!(block), &expected[2]);
+        }
+    }
+}

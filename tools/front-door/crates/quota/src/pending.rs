@@ -366,6 +366,27 @@ impl Number {
         }
         Ok(Self::Float(product))
     }
+    /// Positive schedule inputs can be capped before a large intermediate
+    /// product has to fit the retained integer range.
+    pub(crate) fn multiply_capped(self, other: Self, cap: Self) -> Result<Self, crate::QuotaError> {
+        if let (Some(a), Some(b)) = (self.integer_value(), other.integer_value()) {
+            if a >= 0 && b >= 0 {
+                // Both factors fit u64; their product always fits u128.
+                let product = (a as u128) * (b as u128);
+                if product > u64::MAX as u128 {
+                    return if cap.numeric_cmp(Self::Unsigned(u64::MAX)).is_le() {
+                        Ok(cap)
+                    } else {
+                        Err(crate::QuotaError::NumberOutOfRange)
+                    };
+                }
+                return Ok(cap.min(Self::Unsigned(product as u64)));
+            }
+            return self.multiply(other).map(|product| cap.min(product));
+        }
+        // Python permits an infinite float intermediate that min then caps.
+        Ok(cap.min(Self::Float(self.get() * other.get())))
+    }
     pub(crate) fn rounded_integer(self) -> Result<Self, crate::QuotaError> {
         match self {
             Self::Float(n) => Self::checked_integer(n.round_ties_even()),

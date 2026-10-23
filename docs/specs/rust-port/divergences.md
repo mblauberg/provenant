@@ -220,3 +220,7 @@ They form the current baseline; they are not newly discovered port mismatches.
   checked before deserialisation, including unknown nested numbers.
 - Python's explicit floating point formats (`:g` and `:,.0f`) still use float
   calculation at the text boundary, as the source does. Wire integers do not.
+- The follow-up regression `schedule_caps_products_before_integer_or_float_overflow`
+  also failed before repair. Scheduling compares positive integer products in
+  u128 and applies the configured cap before requiring the retained TTL to fit
+  i64/u64. A Python float product that becomes infinity is likewise capped.
