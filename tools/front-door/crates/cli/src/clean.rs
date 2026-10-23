@@ -128,14 +128,23 @@ pub enum DurationError {
 
 pub fn duration(value: &str) -> Result<DurationDays, DurationError> {
     let unit = value.chars().last().ok_or(DurationError::Invalid)?;
-    if !matches!(unit, 'd' | 'h') { return Err(DurationError::Invalid); }
+    if !matches!(unit, 'd' | 'h') {
+        return Err(DurationError::Invalid);
+    }
     let digits = &value[..value.len() - 1];
-    if digits.is_empty() || !digits.chars().all(|c| crate::pending::decimal_digit(c).is_some()) {
+    if digits.is_empty()
+        || !digits
+            .chars()
+            .all(|c| crate::pending::decimal_digit(c).is_some())
+    {
         return Err(DurationError::Invalid);
     }
     let number = crate::pending::decimal_integer(digits)?;
-    if unit == 'd' { Ok(DurationDays::Integer(number)) }
-    else { Ok(DurationDays::Fractional(number as f64 * (1.0 / 24.0))) }
+    if unit == 'd' {
+        Ok(DurationDays::Integer(number))
+    } else {
+        Ok(DurationDays::Fractional(number as f64 * (1.0 / 24.0)))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,6 +157,159 @@ pub struct Skipped {
 pub struct RemovalReport {
     pub removed: Vec<String>,
     pub skipped: Vec<Skipped>,
+}
+
+/// Cleanup's actual retained/public shapes. Policy and deletion remain owner work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Row {
+    pub path: String,
+    pub kind: String,
+    pub age_days: f64,
+    pub size_bytes: u64,
+    pub verdict: String,
+    #[serde(rename = "_identity")]
+    pub identity: (u64, u64, i64, u64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalRow {
+    pub path: String,
+    pub kind: String,
+    pub verdict: String,
+    #[serde(rename = "_identity")]
+    pub identity: (u64, u64, i64, u64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Integration {
+    pub integration_ref: String,
+    pub integration_revision: String,
+    pub branches: Vec<String>,
+    // Present null when --branch, rather than --merged-since, selected the worktrees.
+    pub merged_since_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum RetentionDays {
+    Integer(u64),
+    Fractional(f64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Approval {
+    pub root: String,
+    pub include: Vec<String>,
+    pub older_than: Option<RetentionDays>,
+    pub rows: Vec<ApprovalRow>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<Integration>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SavedPlan {
+    pub plan_sha256: String,
+    pub approval: Approval,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlanContext {
+    pub refs: Option<String>,
+    pub pr_unknown: bool,
+    pub open_heads: BTreeSet<String>,
+    pub integration_ref: Option<String>,
+    pub older_than: Option<RetentionDays>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SizedPath {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SizeWarning {
+    pub message: String,
+    pub largest: Vec<SizedPath>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlanReport {
+    pub root: String,
+    pub rows: Vec<Row>,
+    pub reclaimable_bytes: u64,
+    pub plan_sha256: String,
+    pub approval: Approval,
+    #[serde(rename = "_context")]
+    pub context: PlanContext,
+    pub warnings: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<Integration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<SizeWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PublicRow {
+    pub path: String,
+    pub kind: String,
+    pub age_days: f64,
+    pub size_bytes: u64,
+    pub verdict: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublicPlan {
+    pub root: String,
+    pub rows: Vec<PublicRow>,
+    pub reclaimable_bytes: u64,
+    pub plan_sha256: String,
+    pub warnings: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<Integration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<SizeWarning>,
+}
+
+impl PlanReport {
+    pub fn public(&self) -> PublicPlan {
+        PublicPlan {
+            root: self.root.clone(),
+            rows: self
+                .rows
+                .iter()
+                .map(|row| PublicRow {
+                    path: row.path.clone(),
+                    kind: row.kind.clone(),
+                    age_days: row.age_days,
+                    size_bytes: row.size_bytes,
+                    verdict: row.verdict.clone(),
+                })
+                .collect(),
+            reclaimable_bytes: self.reclaimable_bytes,
+            plan_sha256: self.plan_sha256.clone(),
+            warnings: self.warnings.clone(),
+            integration: self.integration.clone(),
+            warning: self.warning.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApplyReport {
+    pub removed: Vec<String>,
+    pub count: u64,
+    pub skipped: Vec<Skipped>,
+}
+
+// Untagged wire shapes, exactly as clean.py prints them; no enum wrapper.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PublicReport {
+    Plan(PublicPlan),
+    Applied(ApplyReport),
+    Pruned(RemovalReport),
 }
 
 /// Removal output has two distinct text contracts. JSON records remain owner data.
@@ -197,6 +359,45 @@ mod tests {
     use super::*;
     fn args(words: &[&str]) -> Arguments {
         Arguments::try_parse_from(std::iter::once("clean").chain(words.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn retained_and_public_plan_contracts_match_python_records() {
+        use serde_json::{json, Value};
+        let dir = tempfile::tempdir().unwrap();
+        let Some(expected): Option<(Value, Value)> = crate::oracle::python(
+            r#"
+import json,sys,os
+from pathlib import Path
+from datetime import datetime,timezone
+from scripts.clean import plan
+root=Path(json.load(sys.stdin)['root']).resolve()
+p=root/'.agent-run/scratch/old.txt'; p.parent.mkdir(parents=True); p.write_text('fixture');os.utime(p,(100000,100000))
+# A standalone non-Git root is permitted by clean.primary_root.
+r=plan(root,pr_bodies=[],now=datetime.fromtimestamp(1000000,timezone.utc))
+public={**{k:v for k,v in r.items() if k not in {'approval','_context'}},'rows':[{k:v for k,v in row.items() if k!='_identity'} for row in r['rows']]}
+r['_context']['open_heads']=sorted(r['_context']['open_heads'])
+print(json.dumps([r,public]))
+"#,
+            &json!({"root":dir.path()}),
+        ) else {
+            return;
+        };
+        let report: PlanReport = serde_json::from_value(expected.0.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&report).unwrap(), expected.0);
+        assert_eq!(serde_json::to_value(report.public()).unwrap(), expected.1);
+        let report: PublicReport = serde_json::from_value(expected.1.clone()).unwrap();
+        assert_eq!(serde_json::to_value(report).unwrap(), expected.1);
+        let base = json!({"root":"/r","include":["worktrees"],"older_than":null,"rows":[],"integration_ref":"origin/main","integration_revision":"abc","branches":["topic"],"merged_since_revision":null});
+        let approval: Approval = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(serde_json::to_value(approval).unwrap(), base);
+        for record in [
+            json!({"removed":["p"],"count":1,"skipped":[]}),
+            json!({"removed":[],"skipped":[{"path":"p","reason":"keep:active"}]}),
+        ] {
+            let report: PublicReport = serde_json::from_value(record.clone()).unwrap();
+            assert_eq!(serde_json::to_value(report).unwrap(), record);
+        }
     }
 
     #[test]
