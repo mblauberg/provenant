@@ -198,6 +198,7 @@ if [[ -d "$HOME/.claude/workflows" ]]; then
 fi
 
 run_test "$SCRIPTS_ROOT/static-security-check.py"
+run_stdlib "$SCRIPTS_ROOT/lint-timebomb-fixtures.py"
 
 [[ "$CHECKS_ONLY" == true ]] && exit 0
 

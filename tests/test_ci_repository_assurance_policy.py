@@ -324,6 +324,9 @@ def test_lane_conformance_runs_serially_on_linux_and_macos_for_lane_changes() ->
         "tests/support/runs.py",
         "tests/support/fake_cli.py",
         "tests/support/git.py",
+        "config/model-routing.json",
+        "scripts/lib/jsonc.py",
+        "scripts/fabric_hosts.py",
         "tests/cf_dispatch_support.py",
         "tests/conftest.py",
         ".github/workflows/ci.yml",
@@ -470,7 +473,10 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     pin_index = next(
         index for index, command in enumerate(setup_commands) if "npm install --global npm@11.12.1" in command
     )
-    install_index = next(index for index, command in enumerate(setup_commands) if command.strip() == "npm ci")
+    install_index = next(
+        index for index, command in enumerate(setup_commands)
+        if "retry-npm-install.py -- npm ci" in command
+    )
     assert pin_index < install_index
 
     for job_name in ("harness-checks", "python-tests", "fabric", "split-root"):

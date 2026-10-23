@@ -57,8 +57,7 @@ def test_run_cf_dispatch_parses_json_and_hides_fabric_variables(tmp_path, monkey
 
 
 @pytest.mark.parametrize("impl", ["python", "rust", ""])
-def test_lane_collection_rejects_unavailable_implementations(monkeypatch, impl):
-    monkeypatch.setenv("PROVENANT_TEST_SHARD", "99/100")
+def test_lane_collection_rejects_unavailable_implementations(impl):
     env = {key: value for key, value in os.environ.items() if key != "PROVENANT_TEST_SHARD"}
     root = Path(__file__).resolve().parents[1]
     result = run_cli(
@@ -71,6 +70,12 @@ def test_lane_collection_rejects_unavailable_implementations(monkeypatch, impl):
     else:
         assert result.returncode == 4, result.stderr
         assert "unsupported PROVENANT_LANE_IMPL" in result.stderr
+
+
+def test_process_group_pids_includes_current_process():
+    from tests.support.proc import process_group_pids
+
+    assert os.getpid() in process_group_pids(os.getpgrp())
 
 
 def test_lane_provider_without_fifo_writer_exits_at_eof(tmp_path):
