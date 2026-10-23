@@ -1,6 +1,6 @@
 {
-  "version": 5,
-  "rulebook_version": 5,
+  "version": 6,
+  "rulebook_version": 6,
   "source_digest": "2c2d7759d2f7023ed64c110da44fa99aa15ce11d8c63be597ff85961a0f75264",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {

@@ -1,11 +1,53 @@
 # Rust port rulebook
 
-Version: **5**. Status: accepted 2026-10-23 with
+Version: **6**. Status: accepted 2026-10-23 with
 [ADR 0028](../../adr/0028-rust-port-dependencies.md); version 3 scopes the
 judge gates to cut-over, version 4 fixes number, timestamp and differential
 rules from wave-1 review. Version 5 settles YAML, retires Python-AST tooling
-and records fixture and macOS release checks. Applies to every port lane.
+and records fixture and macOS release checks. Version 6 makes the port
+Rust-native (R0): parity only at the external contract, redesign inside it,
+and delete the Python/TS owner, its tests and dead code in the cut-over
+slice. Applies to every port lane.
 The [plan](README.md) owns the boundary, phases and landing method.
+
+## R0. Rust-native port: contract parity, free design, delete as you land
+
+The goal is a smaller, better Rust product, not a transliteration. Each lane
+spends its effort on the contract and on deletion, never on reproducing
+Python or TypeScript internals.
+
+**The external contract** is what survives outside this repository's source:
+- persisted state that existing installs carry (run directories and records,
+  Fabric SQLite, telemetry stores, config and managed files, J2 schemas,
+  digests and hashed identities);
+- the `provenant` CLI and MCP surface as users, other harnesses and installed
+  hooks see it (J1 machine output, exit codes, J3 transcripts);
+- provider wire forms (argv, environment, protocol frames).
+Callers inside this repository (skills, hooks, scripts, docs, tests) are not
+the contract: the cut-over slice updates them.
+
+**Inside the contract, redesign.** Choose the Rust data model, module split and
+algorithms that fit the job. Do not emulate CPython or V8 behaviour (`repr`,
+`str.strip` classes, Unicode digit tables, surrogateescape, float rounding,
+argparse wording, dict-order accidents, exception text) unless it is visible
+at the contract. Where it is visible, one owner in `provenant-core` or
+`provenant-records` implements it, and only for that contract. An internal
+behaviour change needs no divergence entry; a contract-visible change does,
+and the chair decides it.
+
+**Prune before porting.** A unit whose only callers are tests, retired tools,
+compatibility shims, superseded code paths or unused features is deleted, not
+ported. Tests that exercise Python seams, monkeypatches or private helpers are
+deleted with their subject. Each lane lists its deletions first.
+
+**Cut over in vertical slices.** A slice is a command, entry point or subsystem
+with its callers. One slice PR ports it, switches every in-repo caller to the
+Rust path, and deletes the Python/TS source, its tests and helpers that no
+longer have callers. Language-neutral judges (J1 golden, J2 schema, J3
+transcript, lane conformance) are the proof and survive the deletion.
+Differential tests against Python are optional scaffolding for risky logic and
+leave with the Python. Inert library ports with no cut-over plan are not
+started.
 
 ## R1. Version the rules and regenerate their consequences
 
@@ -87,8 +129,8 @@ JSON Schemas under `schemas/` are the contract. Do not generate a replacement
 schema from the new structs and call that parity. Compare old fixtures and
 new serialisation against the same J2 schemas and semantic validators.
 
-Match defaults, unknown-field handling, empty versus absent, nulls, integer
-ranges, milliseconds versus seconds, timestamp formatting and version refusal
+For persisted records and contract output (R0), match defaults,
+unknown-field handling, empty versus absent, nulls, integer ranges, milliseconds versus seconds, timestamp formatting and version refusal
 exactly. Do not apply `deny_unknown_fields` or serde defaults indiscriminately.
 Use bounded input reads; preserve malformed/oversized-input refusals. Preserve
 paths as OS strings until a record's encoding rule applies. Cover Unicode,
@@ -286,16 +328,13 @@ change alters CLI output on purpose, and list the change in `divergences.md`.
 2. Read the Python/TS source and its tests, including neighbours and callers.
    List observable behaviours, errors, effects, config/env inputs and retained
    record fields. Separate policy tests from test seams and approved retirements.
-3. Check each behaviour has an independent old-pass/mutant-fail judge. A
-   library port into an inert crate (nothing calls it yet) does not wait for
-   the J1/J2/J3 judges: it proceeds with crate unit tests translated from the
-   policy tests plus differential tests against the Python/TS code where
-   cheap, and the PR lists the judge gaps. The judges gate cut-over: no
-   command switches to Rust and no Python/TS source is deleted until the
-   relevant judges pass. If the unit needs another crate's API that is not
-   on main yet, define a minimal private version in a `pending` module and
-   list it in the PR. Refine an oversized unit into cohesive half-day units;
-   a lane may port a coherent part and report the rest.
+3. Work by slice (R0). List the slice's contract surface and check a
+   language-neutral judge covers it; add the missing golden, schema or
+   conformance cases first, recorded against the old implementation. The
+   judges gate the switch and the deletion in the same PR. Use owners on
+   main; if an owner API is missing, add it to the owner crate in the same
+   slice when it is small, otherwise stop the slice and report the API. Do
+   not add new `pending` copies.
 4. Port the behaviour through the agreed crate API. Delete duplicate/private
    machinery when the new owner makes it unnecessary. Automate repetitive
    symbol/record mapping in a deterministic, reviewed script. Keep one small
@@ -305,18 +344,17 @@ change alters CLI output on purpose, and list the change in `divergences.md`.
    old/new paths and isolated state. In CI, run the full required matrix.
    Differential record and database comparisons include failure and recovery
    cases, not just successful requests.
-6. Append each mismatch to [divergences.md](divergences.md), classified
-   `bug|library|python-bug|improvement`, with evidence and disposition. Fix Rust
-   bugs. A library mismatch is still a mismatch; adapt it or escalate. Never
-   silently accept a difference because the new behaviour looks cleaner.
+6. Append each contract-visible mismatch to [divergences.md](divergences.md),
+   classified `bug|library|python-bug|improvement`, with evidence and
+   disposition. Fix Rust bugs. Internal differences need no entry.
 7. A principal reviewer gets the diff, contract and evidence and assumes the
    patch is wrong. Provide the review ladder required by `HARNESS.md`; the
    chair arranges cross-family review. Record actual resolved routes only.
    Recurring findings update this rulebook before the next affected wave.
 8. Commit generated changes, push the assigned branch and open the PR against
-   the chosen integration branch. CI is the gate. Do not merge or cut over
-   from a lane without repository workflow authority. Remove fallback/source
-   only after the relevant judges pass and surviving caller/test proof.
+   main. CI is the gate. Lanes do not merge; the chair merges through the
+   repository workflow. The same PR removes the Python/TS source, its tests
+   and any fallback once its judges pass and no in-repo caller remains.
 
 ## R11. Escalation stops the affected unit
 
@@ -329,9 +367,11 @@ signalled, lost terminal publication, unverifiable rollback or a live database
 schema change. Do not continue promotion while those remain unresolved. Escalation stops
 only the affected unit; the lane continues with the rest of its batch.
 
-Return to the user for an external boundary change, intentional Python-bug
-fix/improvement, unapproved dependency/ADR amendment, unresolved landing
-choice when it affects publication, state migration or live cut-over. Preparing
+The user has delegated port decisions to the chairs (2026-10-23): intentional
+contract improvements, cut-over and deletion are chair decisions, with a
+cross-family council for hard calls. Return to the user only for an
+unapproved dependency/ADR amendment or a state migration that cannot be
+rolled back. Preparing
 inert crates and this proposal does not need that landing answer. Classifying
 a difference is not accepting it. No lane may lower a gate, invent approval,
 read credentials or modify the stable install to get a green result.

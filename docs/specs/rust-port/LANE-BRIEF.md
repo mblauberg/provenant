@@ -1,26 +1,28 @@
 # Port lane brief
 
 Chairs fill `CRATE`, `BRANCH`, `UNITS` and `EXTRA`, then dispatch this text as
-the lane prompt. `UNITS` comes from `python3 docs/specs/rust-port/ready.py
-CRATE 12`. Every self-check item below was a blocking review finding in batch 1.
+the lane prompt. `UNITS` names the slice: its commands or entry points and the
+graph units they cover (see `docs/specs/rust-port/SLICES.md`). Every self-check item below was a blocking review finding in batch 1.
 
 ---
 
-Task: port the units below into the Rust crate `provenant-CRATE`
-(`tools/front-door/crates/CRATE/`). This is one batch of the whole-project Rust
-port. The user has accepted the plan: land through continuous PRs to main, port
-Fabric's TypeScript runtime as well, and use a small crate allowlist.
+Task: deliver the slice below in the Rust crate `provenant-CRATE`
+(`tools/front-door/crates/CRATE/`), switch its callers to Rust and delete the
+Python/TypeScript it replaces. This is the whole-project Rust port, run under
+PORTING.md R0: parity only at the external contract, Rust-native design
+inside it, and deletion in the same PR. The user wants a smaller, better
+product, not a line-by-line rewrite.
 
 You are in your own worktree on branch `BRANCH`, started from `origin/main`.
 If main moves while you work, merge `origin/main` in; never rebase.
 
 Read first, in full: `docs/adr/0028-rust-port-dependencies.md` and
-`docs/specs/rust-port/PORTING.md` (version 5, the rulebook). Skim
-`docs/specs/rust-port/README.md` and the graph entries for your units in
-`docs/specs/rust-port/graph.json`. Read the crate's current `src/` and
-`README.md` or `PORT_STATUS.md`: partial units from batch 1 continue from there.
+`docs/specs/rust-port/PORTING.md` (version 6, the rulebook; R0 first). Skim
+`docs/specs/rust-port/README.md` (contract boundary table) and the graph
+entries for your units. Read the crate's current `src/` and `PORT.md` or
+`PORT_STATUS.md`: earlier inert ports may already cover part of the slice.
 
-Units, in dependency order:
+Slice:
 
 UNITS
 
@@ -28,65 +30,61 @@ EXTRA
 
 How to work:
 
-- Write scope: only `tools/front-door/crates/CRATE/**`, that crate's
-  `Cargo.toml` (dependencies from `[workspace.dependencies]` only, as
-  `{ workspace = true }`), appends to `docs/specs/rust-port/divergences.md`
-  and `ported.txt`, and a regenerated `Cargo.lock`. Do not edit other crates,
-  the root binary, Python or TypeScript sources, CI or the graph.
-- Depend on other crates directly: internal crates are workspace
-  dependencies (`provenant-core = { workspace = true }`), limited to the edges
-  PORTING.md R2 allows; `tests/test_rust_port_layering.py` enforces them. Use
-  the shared owners on main, including `provenant_core::py`,
-  `provenant_records::checked_json` and the supervisor's safe filesystem API,
-  and delete this crate's `pending` copies they replace. Only when the owner
-  has no such API on main yet, define a minimal private version in `pending`,
-  mark each item `// port: belongs in provenant-<crate>`, and list it in the
-  PR.
-- Refactor as you go, not line for line. Keep every observable behaviour
-  (outputs, record fields, errors, exit codes and effects) and use idiomatic
-  Rust: typed errors (thiserror), serde records, no global mutable state, no
-  copied test seams. Record every intended behaviour change in
-  `divergences.md` with its class.
-- Tests: translate the Python/TypeScript tests that assert policy for these
-  units into Rust tests in the crate. Skip tests of internal seams. Add
-  differential tests that run the Python or TS implementation on the same
-  fixtures. Oracles use `PROVENANT_PORT_PYTHON` / `PROVENANT_PORT_NODE`, run
-  Python with `-I` and an explicit environment, print `skip:` when the
-  interpreter is absent, and fail when `PROVENANT_PORT_DIFF_REQUIRED=1`. Use
-  fixtures and explicit clocks; no sleeps as assertions.
-- Nothing calls these crates yet. Do not switch any command over and do not
-  delete Python or TS sources.
-- One logical commit per unit, with the unit id in the commit body.
-- Port as many units as you can in this lane; this is a large batch on
-  purpose. Do not stop after the first finished unit: keep going until every
-  listed unit is fully ported or blocked by a named missing API on main. If a
-  unit is too big, port a coherent part and note what remains. Do not stop
-  the batch for one unit.
-- Design for extension. Put a trait at each seam where the source already
-  varies (adapters, providers, stores, hosts), and describe per-variant
-  behaviour in data tables with one source of truth, so a new variant is a
-  table row plus a small impl rather than another branch in a central
-  match.
+1. Map the slice before coding. List its contract surface (CLI verbs and
+   machine output, records and files it reads or writes, env, exit codes,
+   MCP tools) and every in-repo caller (`grep` skills, hooks, scripts,
+   `tools/front-door/src`, docs, tests). List what you will delete: the
+   Python/TS modules, their tests, helpers left without callers, and code
+   that is dead or test-only (delete it rather than port it).
+2. Make sure a language-neutral judge covers the contract surface: J1
+   golden cases (`tests/golden/`), J2 schemas (`schemas/`), J3 transcripts or
+   lane conformance. Add missing cases and record them against the current
+   implementation before switching.
+3. Implement in Rust as a redesign: choose the data model and structure that
+   fit Rust (typed errors with thiserror, serde records, traits at real
+   seams, data tables for variants, no global mutable state). Reuse earlier
+   inert code where it is good and simplify it where it is not. Do not
+   emulate Python or V8 internals (`repr`, strip/whitespace classes, digit
+   tables, surrogateescape, float rounding, argparse wording) unless the
+   contract shows them; then use the single owner in `provenant-core` or
+   `provenant-records`. Do not add `pending` copies: add a small missing
+   owner API to its owner crate in this slice, or stop and report it.
+4. Switch callers: the front door routes the verb to Rust; skills, hooks,
+   scripts and docs call `provenant <verb>` instead of the Python/TS path.
+5. Delete the replaced Python/TS, their tests and orphaned helpers, and
+   update the inventory/graph generator inputs if they list deleted files.
+   Rust tests cover policy; Python differential tests are optional
+   scaffolding and go with the Python.
+6. Record only contract-visible changes in `docs/specs/rust-port/divergences.md`.
+
+Write scope: the crate, owner crates for small missing APIs, the front-door
+routing for the slice's verbs, the slice's callers, the files you delete,
+their tests, `tests/golden` cases for the slice, `Cargo.lock`, `ported.txt`
+and `divergences.md`. Not CI workflows, not other slices' code.
+
+- Crate edges follow PORTING.md R2 (`tests/test_rust_port_layering.py`).
 - Checks in `tools/front-door`: `cargo fmt --all`,
   `cargo clippy -p provenant-CRATE --all-targets -- -D warnings`,
-  `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-CRATE`. Use the
-  pinned toolchain (`~/.cargo/bin/cargo` if cargo is not on PATH).
-- Before opening the PR, have one native subagent review the diff against the
-  source, assuming the port is wrong. Fix what it finds.
+  `cargo test -p provenant-CRATE`; plus the golden cases you touched
+  (`python tests/golden/run.py --verb V`) and the Python tests that remain
+  for any caller you edited. Heavy suites run in CI.
+- Before opening the PR, have one native subagent review the diff assuming
+  it is wrong, especially for lost contract behaviour and missed callers.
 - Leave no rebase, cherry-pick or merge in progress.
-- Open a PR to main titled `port(CRATE): <short summary>`. Do not arm
-  auto-merge: the chair arms it after the cross-family review. In the body, a line
-  `Units: <id>, <id>, ...` lists only fully ported units; then partial and
-  skipped units with reasons, `pending` items, divergences and test counts.
-  Also append the fully ported ids to `docs/specs/rust-port/ported.txt`.
+- Open a PR to main titled `port(CRATE): <slice>`. Do not arm auto-merge. In
+  the body: `Units:` with the fully replaced graph units, `Deleted:` with the
+  removed files and line counts, the contract surface and its judges,
+  contract-visible divergences, and anything left for a later slice. Append
+  the replaced ids to `docs/specs/rust-port/ported.txt`.
 
 Self-check before review:
 
-- `Units:` lists only units with every function, branch and error path
-  ported. A `#interface` unit is the typed contract for a source cycle; its
+- `Units:` lists only units whose source is deleted or whose every
+  contract-visible behaviour the Rust path now serves. A `#interface` unit is the typed contract for a source cycle; its
   types must match the source's real input and output shapes, with no
   invented fields or variants.
-- Python semantics, not Rust defaults: truthiness (empty str, 0, 0.0, [], {}
+- At the contract only (records, machine output, digests), Python semantics
+  where they are visible: truthiness (empty str, 0, 0.0, [], {}
   and None are falsy), `str()`/`repr()` (True, None, single quotes, repr
   escapes), `str.strip` (also strips U+001C to U+001F), `==` across int, float
   and bool, dict insertion order (no HashMap or BTreeMap where order is
@@ -99,7 +97,9 @@ Self-check before review:
 - Bounded waits only; never an unbounded `wait()` on a child.
 - Wire forms: serde enums serialise exactly like the source JSON, with no
   externally tagged wrappers.
-- Differential tests cover failure and edge cases, not only the happy path.
+- Judges cover failure and edge cases, not only the happy path.
+- No caller is left pointing at a deleted path: grep for the module name,
+  script path and any `python3 -m` form.
 - macOS: `/var` is a symlink to `/private/var`. Compare canonicalised tempdir
   paths. The full Rust test job runs on Linux; the macOS release-build smoke
   job does not run tests. A sandboxed `TMPDIR` can hide this locally.

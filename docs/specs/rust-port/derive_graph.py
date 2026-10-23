@@ -17,7 +17,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[3]
 HOME = Path(__file__).resolve().parent
-VERSION = 5
+VERSION = 6
 JS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".mjs"}
 RETIREMENTS = {
     "scripts/static-security-check.py": "no tracked Python sources remain",
