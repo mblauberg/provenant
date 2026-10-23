@@ -1,11 +1,16 @@
 use super::Mode;
 use super::Plan;
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum AdapterError {
     #[error("CF_DISPATCH_CODEX_CONFIG must be clean or inherited")]
     InvalidCodexConfig,
+    #[error("Codex MCP transport is not an object")]
+    MalformedTransport,
+    #[error("Codex MCP transport type is not hashable")]
+    MalformedTransportType,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -20,6 +25,61 @@ pub struct Inputs {
     pub intent_assurance: bool,
     pub capabilities: bool,
     pub choice: String,
+}
+
+/// JSON scalars are valid TOML scalars; serde's compact string encoder also
+/// leaves non-BMP characters as Unicode instead of producing surrogate escapes.
+pub fn toml_scalar(value: &Value) -> Result<String, serde_json::Error> {
+    serde_json::to_string(value)
+}
+
+/// Whether an MCP server transport starts a local process or enables command
+/// execution. The set of data-only HTTP fields mirrors Codex's input contract.
+pub fn transport_executes(transport: &Value) -> Result<bool, AdapterError> {
+    const INERT: &[&str] = &[
+        "type",
+        "url",
+        "bearer_token_env_var",
+        "http_headers",
+        "env_http_headers",
+    ];
+    let fields = transport
+        .as_object()
+        .ok_or(AdapterError::MalformedTransport)?;
+    let kind = fields.get("type");
+    if kind.is_some_and(|value| value.is_array() || value.is_object()) {
+        return Err(AdapterError::MalformedTransportType);
+    }
+    Ok(match kind.and_then(Value::as_str) {
+        Some("stdio") => true,
+        Some("streamable_http") => fields.iter().any(|(key, value)| {
+            !INERT.contains(&key.as_str()) && crate::pending::python_truth(value)
+        }),
+        _ => true,
+    })
+}
+
+/// Encode an insertion-ordered list of MCP server tables as Codex inline TOML.
+pub fn toml_table(entries: &[(String, Vec<(String, Value)>)]) -> Result<String, serde_json::Error> {
+    let mut result = String::from("{");
+    for (entry_index, (name, fields)) in entries.iter().enumerate() {
+        if entry_index != 0 {
+            result.push_str(", ");
+        }
+        result.push_str(&toml_scalar(&Value::String(name.clone()))?);
+        result.push_str(" = {");
+        for (field_index, (key, value)) in fields.iter().enumerate() {
+            if field_index != 0 {
+                result.push_str(", ");
+            }
+            result.push_str(key);
+            result.push_str(" = ");
+            result.push_str(&toml_scalar(value)?);
+        }
+        result.push('}');
+    }
+    result.push('}');
+    Ok(result)
 }
 
 /// Implements the clean/inherited decision without launching Codex discovery.
@@ -91,6 +151,34 @@ mod tests {
             ),
             Err(AdapterError::InvalidCodexConfig)
         );
+    }
+
+    #[test]
+    fn codex_transport_and_toml_helpers_match_python() {
+        let input = serde_json::json!({
+            "transports": [
+                {}, {"type":"stdio"}, {"type":"streamable_http","url":"https://example.invalid"},
+                {"type":"streamable_http","http_headers":{"X-Key":"v"}},
+                {"type":"streamable_http","command":"exec"},
+                {"type":"http","command":null}
+            ],
+            "entries": [["mcp.one", [["enabled", false], ["default_tools_approval_mode", "approve"]]], ["工具", [["mode", "🦀"]]]]
+        });
+        let actual = serde_json::json!({
+            "executes": input["transports"].as_array().unwrap().iter().map(|transport| transport_executes(transport).unwrap()).collect::<Vec<_>>(),
+            "toml": toml_table(&input["entries"].as_array().unwrap().iter().map(|entry| (
+                entry[0].as_str().unwrap().to_owned(),
+                entry[1].as_array().unwrap().iter().map(|pair| (pair[0].as_str().unwrap().to_owned(), pair[1].clone())).collect()
+            )).collect::<Vec<_>>()).unwrap()
+        });
+        let Some(expected): Option<Value> = crate::oracle::python(
+            r#"import importlib,json,sys; m=importlib.import_module('skills.orchestrate.scripts.adapters.codex'); x=json.load(sys.stdin); print(json.dumps({'executes':[m._executes(t) for t in x['transports']], 'toml':m._toml_table({name:dict(fields) for name,fields in x['entries']})}))"#,
+            &input,
+            None,
+        ) else {
+            return;
+        };
+        assert_eq!(actual, expected);
     }
 
     #[test]
