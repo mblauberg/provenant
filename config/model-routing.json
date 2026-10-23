@@ -201,7 +201,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Small, deterministic edits with a narrow, mechanical acceptance check."
     },
     "legwork": {
       "alias": "senior",
@@ -217,7 +218,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Bounded investigation or implementation support with low uncertainty."
     },
     "critical-review": {
       "alias": "principal",
@@ -233,7 +235,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "High-stakes adversarial review of correctness, safety, or policy."
     },
     "orchestration": {
       "alias": "principal",
@@ -249,7 +252,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Planning and coordination across tasks, agents, or providers."
     },
     "implementation": {
       "alias": "senior",
@@ -267,7 +271,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Changes that add or alter product behaviour."
     },
     "ui-taste": {
       "alias": "principal",
@@ -284,7 +289,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Visual or interaction design judgement."
     },
     "screenshots": {
       "alias": "senior",
@@ -300,7 +306,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Browser or application visual capture and comparison."
     },
     "review": {
       "alias": "principal",
@@ -318,7 +325,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Independent review of code, plans, or artifacts."
     },
     "second-opinion": {
       "alias": "principal",
@@ -336,7 +344,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "A distinct independent perspective on an existing conclusion."
     },
     "research": {
       "alias": "senior",
@@ -353,7 +362,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Evidence gathering and synthesis without direct implementation."
     },
     "bulk": {
       "alias": "junior",
@@ -369,7 +379,8 @@
         "agy": [
           "gemini-3.8-flash"
         ]
-      }
+      },
+      "description": "Large repetitive changes with predictable transformations."
     }
   },
   "families": {
@@ -951,6 +962,118 @@
     "utility": {
       "confidential": true,
       "allow_free": false
+    }
+  },
+  "task_classification": {
+    "chain": [
+      "explicit",
+      "rules",
+      "model",
+      "default"
+    ],
+    "shadow": [
+      "rules",
+      "model"
+    ],
+    "rules": [
+      {
+        "when": {
+          "mode": "read_only",
+          "prompt_any": [
+            "review",
+            "audit"
+          ]
+        },
+        "class": "review"
+      },
+      {
+        "when": {
+          "prompt_any": [
+            "security",
+            "vulnerability",
+            "threat model"
+          ]
+        },
+        "class": "critical-review"
+      },
+      {
+        "when": {
+          "prompt_any": [
+            "migration",
+            "schema migration"
+          ]
+        },
+        "class": "implementation"
+      },
+      {
+        "when": {
+          "prompt_any": [
+            "screenshot",
+            "visual compare"
+          ]
+        },
+        "class": "screenshots"
+      }
+    ],
+    "model": {
+      "alias": "utility",
+      "effort": "low",
+      "timeout_s": 20,
+      "min_confidence": 0.6
+    },
+    "default": "implementation",
+    "size_tiers": [
+      {
+        "name": "small",
+        "min_files": 0,
+        "min_lines": 0,
+        "alias": "junior",
+        "effort": "low"
+      },
+      {
+        "name": "medium",
+        "min_files": 6,
+        "min_lines": 201,
+        "alias": "senior",
+        "effort": "medium"
+      },
+      {
+        "name": "large",
+        "min_files": 21,
+        "min_lines": 1001,
+        "alias": "principal",
+        "effort": "high"
+      }
+    ],
+    "size_table": [
+      {
+        "label": "small",
+        "files": "1-5",
+        "lines": "up to 200",
+        "alias": "junior",
+        "effort": "low"
+      },
+      {
+        "label": "medium",
+        "files": "6-20",
+        "lines": "201-1000",
+        "alias": "senior",
+        "effort": "medium"
+      },
+      {
+        "label": "large",
+        "files": "over 20",
+        "lines": "over 1000",
+        "alias": "principal",
+        "effort": "high"
+      }
+    ],
+    "role_defaults": {
+      "scout": "junior",
+      "implementer": "senior",
+      "reviewer": "principal",
+      "lander": "senior",
+      "lead": "principal"
     }
   }
 }

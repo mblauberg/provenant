@@ -1279,6 +1279,16 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
     assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
 
 
+def test_ingest_records_classifier_stage_confidence_and_shadow_answers(tmp_path):
+    receipt(tmp_path, 'classified', status='ok', task_class='review', classified_by='rules',
+            classifier_confidence=0.9, shadow_answers={'model': {'class': 'review', 'confidence': 0.7}},
+            requested_route={'alias': 'principal', 'task_class': 'review'})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        row = db.execute('SELECT classified_by,classifier_confidence,shadow_answers FROM usage').fetchone()
+    assert row == ('rules', 0.9, '{"model": {"class": "review", "confidence": 0.7}}')
+
+
 def test_price_table_is_dated_sourced_and_marks_free_and_subscription_routes(tmp_path):
     table = json.loads((ROOT / 'config/telemetry-prices.json').read_text())
     assert table['schema_version'] == 2
