@@ -15,13 +15,13 @@ false report. Paste the first section into every lane and reviewer brief.
   `provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]`; it
   prints each process's age, parent, cwd and command first, and
   `--started-before` refuses a PID that was reused after your process began.
-- Enforcement is opt-in. `scripts/install-harness --platform claude
-  --lane-safety-hooks` adds the PreToolUse Bash hook
-  (`scripts/lane_safety_guard.py`) to the Claude `settings.json`, and
-  `--pre-push-hook` links `scripts/hooks/pre-push` into the product checkout.
+- Enforcement is opt-in. The lane-safety hook body is
+  `scripts/lane_safety_guard.py`; the pre-push guard is
+  `scripts/hooks/pre-push`. Harness hook registration belongs to the Rust
+  harness cut-over (state slice 4); the retired installer cannot register them.
   The pre-push guard refuses pushes to the default branch from a linked
   worktree, non-fast-forward updates and deletion of it, and pushed conflict
-  markers. `--no-lane-safety-hooks` and `--no-pre-push-hook` remove them.
+  markers.
 - A lane has no inbox: it hears new instructions only through `resume` or a new
   dispatch.
 

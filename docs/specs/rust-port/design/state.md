@@ -50,11 +50,12 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | --- | --- |
 | Default root | `~/.local/share/provenant/v1`, one root per host on macOS and Linux |
 | Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then default; empty or relative explicit values fail. No XDG/old-root fallback. |
-| Environment | State owns the only product inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
+| Environment | State owns the persistent state inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
+| Build root | An uninstalled binary requires explicit absolute `PROVENANT_ROOT`; installed binaries use their release location, never this override |
 | User config | `<state>/config.toml`; optional, user-owned, only configuration file |
 | Host identity | `<state>/state.json` |
-| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/lock` |
-| Immutable release | `<state>/releases/<SourceDigest>/{provenant,release.json,assets/}` |
+| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
+| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/,runtime/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |
@@ -250,7 +251,7 @@ A failed preview stream prevents writes.
 
 | Command | Inputs and behaviour |
 | --- | --- |
-| `root` | No flags; reports state, assets, global `--project` selection and installation together, without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
+| `root` | No flags; prints the absolute release root as one newline-terminated path, so `$(provenant root)/skills/...` works. An uninstalled build requires explicit `PROVENANT_ROOT`. No Git discovery, SQLite, state creation, threads or provider probes. |
 | `config show`, `check config` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
 | `install [--dry-run]` | `--source ABS` identifies a staged release; `--harness NAME` repeatable and explicit; optional `--bin-dir ABS`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validate all destinations and print every replace/remove/create before writes. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS` staged release, as for `install`, for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
@@ -262,25 +263,48 @@ CI/contributors build `cargo build --release --locked` in `tools/front-door`.
 A workspace `build.rs` uses records' pure source-digest module. The digest
 covers workspace/member manifests, lockfile, toolchain/config files when
 present, every member's source/build scripts and explicit bundled assets,
-including product skills/templates/instructions outside the Rust workspace.
+including product skills/templates/instructions and surviving script/runtime
+owners outside the Rust workspace.
 Hash sorted workspace-relative POSIX names, framed by big-endian u64 name
 length, name bytes, u64 content length and exact contents; prefix
 `provenant-source-v1\0`. Reject duplicate, missing or symlink/escaping inputs.
 Cargo rerun directives track additions/deletions; no digest environment override.
 
-Build packaging emits typed `release.json` beside `provenant` and `assets/`,
+Build packaging emits typed `release.json` beside `bin/provenant` and the
+product asset directories,
 with source digest, target triple, toolchain and bounded file inventory/digests.
 This is a build artefact, not a second executable or installer command.
 `--version --json` reports the embedded digest and record/config versions.
+Release builds trim source paths so checkout and registry paths do not affect
+binary bytes. Packaging and source-aware install checks compare the binary's
+reported source digest, target, toolchain and asset inventory with the manifest.
+Executable assets retain mode 0700; other assets are 0600.
+
+An installed binary resolves its own `bin/provenant` location to the release
+root holding `release.json`; `provenant root` prints that root. The release
+contains `skills`, `library`, `templates`, `config`, `instructions`, `scripts`
+and `runtime` directly so `$(provenant root)/skills/...` remains usable. An uninstalled
+build requires an explicit absolute `PROVENANT_ROOT`; it refuses without it.
+These reads never create state. An installed release launches no Python owner by default. Without a checkout
+Git entry, a local `.venv` interpreter or explicit `HARNESS_PYTHON`, each
+Python-owned route fails with typed `owner unavailable in installed release`
+and exit 3. Tests that exercise a Python owner set `HARNESS_PYTHON` explicitly.
 Install verifies manifest, platform, file bytes and modes, then asks the
 binary composition edge to run bounded version/help smoke checks through
 supervisor (30 s, capped output, no provider access). A digest proves identity,
 not publisher trust. Runtime startup never compiles itself.
 
 Install copies verified files into the immutable release directory, then
-atomically publishes a regular executable at the stable bin path and per-entry
+atomically publishes a link to `bin/provenant` at the stable bin path and per-entry
 links to release skills/instructions. Re-application accepts exact desired
-bytes/links as no-ops, including writes completed before a crash. Receipt
+bytes/links as no-ops, including writes completed before a crash. Until
+`release.json` is published, mismatching unfinished files may be replaced.
+That manifest is published after all other release entries; afterwards the
+release is immutable. Equal source digests with different manifest bytes fail
+with typed `ReleaseConflict`, naming both manifest digests and recovery.
+Upgrades remove unchanged owned entries dropped by each selected harness;
+changed or unmanaged entries remain. The sole installation lock is
+`<state>/install/install.lock`; no locks are left in harness or bin directories. Receipt
 records release identity, resolved targets, selectors, expected owned
 values and the optional absolute `legacy_checkout` substitution root plus
 compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last. No cross-file or two-host atomicity is claimed.
@@ -486,8 +510,9 @@ Fabric defines its command and receipt. Install/startup never imports. Do not
 read transcripts, revive runs/processes/claims/leases/sessions, or import
 telemetry/quota history. The old ledger remains available to the old install;
 telemetry owns retirement of the OTel collector. `tests/test_host_identity.py`
-and the OTel slices of `tests/test_install_harness.py` are counted/deleted
-once by state, excluded from telemetry's count.
+and the old OTel cases in `tests/test_install_harness.py` are counted once by
+state. Those cases move to `tests/test_install_otel_collector.py`, so telemetry
+excludes them.
 
 Source reads must not write SQLite journals, SHM or checkpoints. Require a
 quiescent self-contained source or supplied consistent snapshot; refuse a
@@ -554,6 +579,14 @@ The old inert Rust config/knob implementation was already deleted by slice 1
 `Preset` policy types introduced during slice 2 are withdrawn before landing,
 so they are not deletions relative to `origin/main`.
 
+Slice 3 retires the Python installation entrypoints `scripts/install-harness`,
+`scripts/install-skills` and `scripts/check-provenant-install.py` as explicit
+exit-3 stubs. Slice 4 owns deleting those stubs when its command wiring replaces
+them. The last file retains the read-only `provider_registration_status` query
+until Fabric's consumer is replaced. Its query tests and the live OTel
+installer tests remain; OTel tests move to `tests/test_install_otel_collector.py`.
+Tests are removed only when their subject retires.
+
 Slice 5 removes `skills/_shared/harness_profile.py`,
 `scripts/harness_profile.py`, `config/harness-knobs.json`,
 `tests/test_harness_profile.py`, `scripts/provenant-profile` and its front-door,
@@ -584,7 +617,7 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 4 | `scripts/configure-codex-skill-overrides.py` | 140 |
 | 4 | `scripts/check-provenant-install.py` | 165 |
 
-| Slice | Deleted Python test | Lines |
+| Slice | Deleted or trimmed Python tests | Lines removed |
 | --- | --- | ---: |
 | 5 | `tests/test_host_identity.py` | 129 |
 | 1 | `tests/test_product_root_single_resolver.py` | 59 |
@@ -596,19 +629,19 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 3 | `tests/test_instance_installation.py` | 931 |
 | 3 | `tests/test_install_provenant_command.py` | 272 |
 | 3 | `tests/test_install_skills.py` | 1,311 |
-| 4 | `tests/test_configure_fabric_mcp.py` | 1,310 |
+| 3 | `tests/test_configure_fabric_mcp.py` (five tests trimmed; module retained) | 162 |
 | 4 | `tests/test_check_provenant_install.py` | 358 |
-| 4 | `tests/test_install_harness.py` | 2,427 |
+| 3 | `tests/test_install_harness.py` (deleted) | 2,177 |
 
-Python total: **13,125 lines**. Shell entrypoints removed in the corresponding
-slices: `scripts/provenant-profile` **5**, `scripts/install-skills` **87**,
-`scripts/install-harness` **702**; shell total **794**. The installation test
-module also tests collector/workflow/other hook subjects: those domain lanes
-must land their replacement tests or retire their subject before slice 4
-removes it; state counts its OTel slices within the 2,427 lines, and telemetry
-excludes them. State deletes all of `tests/test_install_skills.py` with the old
-installer in slice 3; execution-run has no edit/deletion claim on that file.
-Do not carry unrelated old tests into Rust config.
+Python total: **11,727 lines removed**. Shell entrypoints removed in the
+corresponding slices: `scripts/provenant-profile` **5**, `scripts/install-skills`
+**87**, `scripts/install-harness` **702**; shell total **794**. The removed
+installation test module also covered collector, workflow and other hook
+subjects. Its OTel tests moved to `tests/test_install_otel_collector.py`; the
+2,177 deleted lines include their old cases once, and telemetry excludes those
+cases. State deletes all of `tests/test_install_skills.py` with the old installer
+in slice 3; execution-run has no edit/deletion claim on that file. Do not carry
+unrelated old tests into Rust config.
 
 No TS file is wholly owned/deleted by this area. The dependent lanes delete
 these mixed files with their own consumers, without double-counting them here:

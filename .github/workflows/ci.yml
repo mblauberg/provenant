@@ -13,6 +13,9 @@ on:
 # declares exactly what it needs.
 permissions: {}
 
+env:
+  PROVENANT_ROOT: ${{ github.workspace }}
+
 # Concurrency policy (issue #170, deferred from #150/#168): PR runs cancel
 # their predecessor on the same ref — a superseded push means the stale run's
 # result can never matter, so cancelling it just frees runners faster.
@@ -45,7 +48,6 @@ jobs:
       # classification step below.
       harness: ${{ github.event_name != 'pull_request' && 'true' || (steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only != 'true') }}
       docs: ${{ github.event_name == 'pull_request' && steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only == 'true' }}
-      split-root: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.split-root }}
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
       rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
       tree: ${{ steps.tree.outputs.tree }}
@@ -164,40 +166,18 @@ jobs:
               # Locked Python test tooling for this job's own gate.
               - 'pyproject.toml'
               - 'uv.lock'
-            split-root:
-              - *ci-contract
-              - *node-workspace
-              # Install/instance/contract surfaces only. runtime/** and
-              # scripts/** stay because the job runs `npm run check` and the
-              # provisioner under genuinely split ambient roots: a
-              # root-resolution regression that passes fused would otherwise
-              # skip split entirely (fail-open), and install-harness calls
-              # helpers beyond install*/instance* (manage_installation,
-              # configure-*, write-product-root-pointer, lib/**,
-              # the installed command). tests/ narrows to exactly the contract
-              # files this job runs — every other test rides the harness
-              # fused suite. Broader docs/skills changes skip split;
-              # the harness filter stays near-total by design.
-              - 'config/**'
-              - 'runtime/**'
-              - 'scripts/**'
-              - 'tests/test_split_root_contract.py'
-              - 'tests/test_install_harness.py'
-              - 'tests/test_install_provenant_command.py'
-              - 'tests/test_install_skills.py'
-              - 'tests/test_instance_installation.py'
-              - 'tests/test_check_provenant_install.py'
-              - 'docs/worktrees.md'
             rust:
               - *ci-contract
+              - 'scripts/**'
+              - 'runtime/**'
+              - 'skills/**'
+              - 'library/**'
+              - 'config/**'
+              - 'templates/**'
+              - 'AGENTS.md'
+              - 'HARNESS.md'
               - 'tools/front-door/**'
-              - 'tests/test_stale.py'
               - 'tests/support/front_door.py'
-              - 'scripts/check_target.py'
-              - 'scripts/lib/front_door_build.py'
-              - 'scripts/lib/product_root_resolver.py'
-              - 'scripts/lib/stale_checkout.py'
-              - 'scripts/worktree.py'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -220,8 +200,7 @@ jobs:
           # Full history supports the frozen eval-predecessor test's
           # historical blob lookup in tests/test_skill_eval_fixtures.py.
           # PR-scoped timebomb fixture lint also needs origin/main for its
-          # changed-context diff. The split-root job below checks out shallow
-          # because its narrowed contract set is HEAD-local.
+          # changed-context diff.
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: $/.github/actions/setup-node-workspace
@@ -233,11 +212,11 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
+      - name: Run workspace checks
+        run: npm run check
       - name: Run ordinary checks
         env:
-          # A source checkout is the fused product/instance fixture for this
-          # job. The split-root job below provisions and verifies the installed
-          # two-root contract separately.
+          # Remaining Python checks use an isolated checkout fixture.
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
           AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
@@ -274,9 +253,11 @@ jobs:
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
       - name: Build Rust front door before parallel test collection
+        # rustup reads rust-toolchain.toml from the working directory, not the manifest path.
+        working-directory: tools/front-door
         run: |
-          binary="$(.venv/bin/python scripts/lib/front_door_build.py build tools/front-door tools/front-door/target)"
-          printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          cargo build --release --locked -p provenant --bin provenant
+          printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$GITHUB_WORKSPACE/tools/front-door/target/release/provenant" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
@@ -318,88 +299,6 @@ jobs:
         run: |
           .venv/bin/python scripts/check_harness.py
           .venv/bin/python -m pytest -q tests/test_harness_document_contract.py
-
-  split-root:
-    name: Split-root contract rig
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.split-root == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # Shallow is enough for the narrowed contract set below: every one
-          # of those files is HEAD-local or fixture-scoped, verified by
-          # running the exact subset green in a depth-1 checkout. The harness
-          # job keeps full history for its pinned-blob tests (see its
-          # checkout comment); the old claim that retained-receipt tests need
-          # origin/main here was stale — no such test exists.
-          fetch-depth: 1
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      - name: Provision genuinely split roots through install-harness
-        run: |
-          set -euo pipefail
-          split_parent="$(mktemp -d "${RUNNER_TEMP}/provenant-split.XXXXXX")"
-          split_home="$split_parent/home"
-          split_instance="$split_parent/instance"
-          mkdir -p "$split_home/.codex" "$split_instance"
-          export HOME="$split_home"
-          export CODEX_HOME="$split_home/.codex"
-          export PROVENANT_BIN_DIR="$split_home/.local/bin"
-          export AGENT_FABRIC_PRODUCT_ROOT="$GITHUB_WORKSPACE"
-          export AGENT_FABRIC_INSTANCE_ROOT="$split_instance"
-          unset AGENTS_HOME
-          export PATH="$PROVENANT_BIN_DIR:$PATH"
-          scripts/install-harness --platform codex
-          test -f "$split_instance/AGENTS.md"
-          test -f "$split_instance/config/model-routing.json"
-          test -f "$split_instance/config/model-preferences.json"
-          test "$AGENT_FABRIC_PRODUCT_ROOT" != "$AGENT_FABRIC_INSTANCE_ROOT"
-          printf 'product root: %s\ninstance root: %s\n' "$AGENT_FABRIC_PRODUCT_ROOT" "$AGENT_FABRIC_INSTANCE_ROOT"
-          # Export the two roots and nothing else.  The seeding above needs a
-          # split HOME, CODEX_HOME and PROVENANT_BIN_DIR, but exporting those
-          # to later steps makes the suite fail on the ambient installer
-          # environment rather than on the split roots, which is not what this
-          # job is for.
-          {
-            echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
-            echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
-          } >> "$GITHUB_ENV"
-      - name: Run install and relocation contract under split roots
-        env:
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: |
-          set -euo pipefail
-          # The full Python suite already ran fused in the harness job; under
-          # split roots only the install/relocation/reconciliation contract
-          # matters (ADR 0019). Same checks, cheaper placement.
-          # One case is deselected, not dropped: ..._fused_desired_state
-          # asserts workstation state of the live checkout (its ignored
-          # installation.json), not the split contract — it still runs in the
-          # harness fused suite. In the full suite it passes only via an
-          # earlier test's side effect on the checkout; that latent
-          # order-dependence is recorded for hygiene follow-up.
-          $HARNESS_PYTHON -m pytest tests/test_split_root_contract.py \
-            tests/test_instance_installation.py tests/test_install_harness.py \
-            tests/test_install_provenant_command.py \
-            tests/test_install_skills.py tests/test_check_provenant_install.py \
-            --deselect tests/test_instance_installation.py::test_the_repository_ships_a_valid_fused_desired_state -q
-      # Verify checkout-local Node dependencies under split product/instance roots.
-      - name: Run workspace checks under split roots
-        run: npm run check
 
   rust:
     name: Rust front door
@@ -474,10 +373,7 @@ jobs:
       - name: Build release binary
         working-directory: tools/front-door
         run: |
-          PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
-            cargo build --release --locked
-      - name: Run stale-checkout coverage against the binary
-        run: PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/test_stale.py -q
+          cargo build --release --locked
       - name: Run the golden CLI suite
         run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden -q
 
@@ -540,8 +436,7 @@ jobs:
       - name: Build release front door
         working-directory: tools/front-door
         run: |
-          PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
-            cargo build --release --locked -p provenant --bin provenant
+          cargo build --release --locked -p provenant --bin provenant
 
   generic-checks:
     name: Spelling, workflows and Markdown links
@@ -622,7 +517,6 @@ jobs:
       - harness-checks
       - python-tests
       - docs
-      - split-root
       - rust
       - rust-macos-release
       - rust-dependencies

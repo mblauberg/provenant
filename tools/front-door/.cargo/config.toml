@@ -3,3 +3,9 @@
 # test's fork can inherit the copy's write descriptor, and exec then fails with
 # ETXTBSY, so the suite runs serially; it takes well under a second.
 RUST_TEST_THREADS = "1"
+
+[build]
+# This repository setting overrides build.rustc-wrapper in global Cargo config.
+# To retain that wrapper, set RUSTC_WRAPPER to a chaining wrapper that also invokes
+# .cargo/rustc-wrapper.sh; Cargo gives RUSTC_WRAPPER precedence over this setting.
+rustc-wrapper = ".cargo/rustc-wrapper.sh"

@@ -6,7 +6,6 @@
 .venv/
 skills/.backups/
 .agent-run/
-.agent-fabric/product-root.json
 .worktrees/
 .public-release-fable-review.md
 .claude/settings.local.json
@@ -28,6 +27,6 @@ config/installation.json
 # artifact is the path-free desired state, which lives in the instance root.
 .agent-harness-installation.json
 .agent-harness-workflows-installation.json
-# The pointer to this machine's product checkout, rewritten on every install.
+# Machine-local Fabric coordination state.
 .agent-fabric/
 .fabric-trial/

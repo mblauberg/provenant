@@ -52,6 +52,8 @@ of about 6 ms
    `provenant check` is security-relevant and already tested. The binary calls
    `scripts/check_target.py`, which owns the Python custody functions and
    returns the checker and root.
+   Superseded by the Rust rewrite (state.md): the binary selects the caller's
+   checkout itself and `scripts/check_target.py` is deleted.
 7. **Platforms.** The minimum is macOS 27, which both of the user's Macs run.
    macOS 15 and 26 are cheap, so darwin builds set
    `MACOSX_DEPLOYMENT_TARGET=15.0`. Linux is built and tested in CI. The

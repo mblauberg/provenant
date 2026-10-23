@@ -19,7 +19,6 @@ import tomllib
 from typing import Any
 
 from lib.jsonc import parse_jsonc
-from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_path
 
 
 SERVER_NAME = "fabric"
@@ -692,14 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                 ))
         if args.platform in {"all", "opencode"} and "opencode" not in args.skip_client:
             instruction_root = instance_root or Path.home() / ".agents"
-            previous_product = load_pointer_path(instruction_root)
             instruction_product = agents_home
-            if not agents_home_explicit and (instruction_root / POINTER_RELATIVE_PATH).exists():
-                if previous_product is None or not (previous_product / "HARNESS.md").is_file():
-                    raise RegistrationError(
-                        "product-root pointer is invalid or stale; repair: run install-harness"
-                    )
-                instruction_product = previous_product
             proposals.append(opencode_update(
                 args.opencode_config,
                 registration(
@@ -712,7 +704,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 (
                     instruction_root / "AGENTS.md", instruction_product / "HARNESS.md",
-                    previous_product / "HARNESS.md" if previous_product else None,
+                    None,
                 ),
             ))
         if args.check:

@@ -4,7 +4,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 
-from lib.front_door_build import build, source_digest
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,4 +19,8 @@ def front_door_binary() -> Path:
         return binary
     crate = ROOT / "tools/front-door"
     target = Path(os.environ.get("CARGO_TARGET_DIR", crate / "target"))
-    return build(crate, target, source_digest(crate))
+    subprocess.run(
+        ["cargo", "build", "--locked", "--release", "--bin", "provenant", "--target-dir", str(target)],
+        cwd=crate, check=True, capture_output=True, timeout=300,
+    )
+    return target / "release/provenant"

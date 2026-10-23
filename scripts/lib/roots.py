@@ -2,12 +2,10 @@
 
 The implementation lives in `skills/_shared/roots.py` and this module re-exports
 it, so exactly one file decides the root. It cannot live here: the installed
-skills catalogue has to be self-sufficient. `install-skills` materialises the
-manifest's entries into a tree that carries `skills/` and nothing else, and
-`tests/test_install_skills.py::test_materialised_per_entry_layout_makes_the_shared_library_load_bearing`
-runs the deliver and orchestrate consumers from exactly that tree under
-`python -I`. A skill script reaching into `scripts/lib/` breaks there, whereas
-`_shared` travels with the catalogue by design.
+skills catalogue has to be self-sufficient. Deliver and orchestrate consumers
+can run under `python -I` from a tree carrying only `skills/`. A skill script
+reaching into `scripts/lib/` breaks there, whereas `_shared` travels with the
+catalogue by design.
 
 The load is by file rather than by import because a caller under `scripts/` may
 be invoked directly by path with nothing on `sys.path`.

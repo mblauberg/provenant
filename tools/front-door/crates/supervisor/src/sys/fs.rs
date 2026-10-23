@@ -431,6 +431,34 @@ pub(crate) fn wait(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
 
+/// Read a link's native bytes without following the target. The explicit cap
+/// refuses truncation, including an entry that grows during inspection.
+pub(crate) fn read_link(directory: &File, name: &OsStr) -> io::Result<std::path::PathBuf> {
+    let name = string(name)?;
+    let mut bytes = vec![0u8; 65_537];
+    // SAFETY: directory is borrowed and live, name is NUL-terminated and bytes
+    // is writable for its full length. No pointers or ownership escape; the
+    // syscall is independent of concurrent readers and errno is thread-local.
+    let count = unsafe {
+        libc::readlinkat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    if count < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let count =
+        usize::try_from(count).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+    if count >= bytes.len() {
+        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    bytes.truncate(count);
+    Ok(OsString::from_vec(bytes).into())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

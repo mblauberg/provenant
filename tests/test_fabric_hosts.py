@@ -769,8 +769,6 @@ class SshdAcceptance(unittest.TestCase):
             (remote_home / '.agents/.agent-fabric/hosts.json').write_text(
                 json.dumps({'schema_version': 1, 'local_host': 'workshop'}))
             shutil.copy2(front_door_binary(), remote_home / '.local/bin/provenant')
-            (remote_home / '.agents/.agent-fabric/product-root.json').write_text(
-                json.dumps({'schema_version': 1, 'product_root': str(ROOT)}))
 
             host_key, client_key = root / 'host_key', root / 'client_key'
             ssh_binary = shutil.which('ssh')
@@ -781,7 +779,8 @@ class SshdAcceptance(unittest.TestCase):
                 self.assertEqual(generated.returncode, 0, generated.stderr)
             requested_marker = root / 'malicious-command-ran'
             forced = ('env HOME=' + shlex.quote(str(remote_home)) + ' AGENT_FABRIC_INSTANCE_ROOT='
-                      + shlex.quote(str(remote_home / '.agents')) + ' '
+                      + shlex.quote(str(remote_home / '.agents')) + ' PROVENANT_ROOT='
+                      + shlex.quote(str(ROOT)) + ' '
                       + shlex.quote(str(remote_home / '.local/bin/provenant')) + ' peer')
             forced_option = forced.replace('\\', '\\\\').replace('"', '\\"')
             authorized = root / 'authorized_keys'

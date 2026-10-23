@@ -466,61 +466,6 @@ def test_route_line_names_why_the_pool_picked_the_model():
     assert command[command.index("--pick-reason") + 1] == "ad-hoc council 1/2"
 
 
-def test_refresh_routing_carries_new_route_keys_and_keeps_instance_reweighting(tmp_path):
-    script = ROOT / "scripts" / "instance_installation.py"
-    product = tmp_path / "product"
-    (product / "config").mkdir(parents=True)
-    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
-    (product / "AGENTS.md").write_text("# Product doctrine\n")
-    (product / "config" / "model-preferences.json").write_text("{}\n")
-    source = product / "config" / "model-routing.json"
-    source.write_text(json.dumps({"catalog_date": "2026-09-23", "adapters": {}}))
-    instance_root = tmp_path / "instance"
-
-    def run(action):
-        result = subprocess.run([sys.executable, str(script), action, "--product-root", str(product),
-                                 "--instance-root", str(instance_root)], text=True, capture_output=True)
-        assert result.returncode == 0, result.stderr
-        return result
-
-    run("seed")
-    run("refresh-routing")
-    target = instance_root / "config" / "model-routing.json"
-    source.write_text(json.dumps({"catalog_date": "2026-09-23", "adapters": {},
-                                  "routes": CATALOG["routes"], "model_traits": CATALOG["model_traits"],
-                                  "route_synonyms": CATALOG["route_synonyms"]}))
-    run("refresh-routing")
-    installed = json.loads(target.read_text())
-    assert installed["routes"] == CATALOG["routes"]
-    installed["routes"]["design"] = [{"model": "claude/claude-opus-5-5", "weight": "high"}]
-    target.write_text(json.dumps(installed))
-    changed = json.loads(source.read_text())
-    changed["routes"]["writing"] = [{"model": "agy/gemini-3.8-flash", "weight": "high"}]
-    source.write_text(json.dumps(changed))
-    run("refresh-routing")
-    refreshed = json.loads(target.read_text())
-    assert refreshed["routes"]["design"] == [{"model": "claude/claude-opus-5-5", "weight": "high"}]
-    assert refreshed["routes"]["writing"] == [{"model": "agy/gemini-3.8-flash", "weight": "high"}]
-    assert refreshed["model_traits"] == CATALOG["model_traits"]
-
-    # Both sides edit one pool: the instance switches one entry off (under a
-    # spelling alias) while the product reweights another; both edits survive.
-    changed = json.loads(source.read_text())
-    changed["adapters"] = CATALOG["adapters"]
-    source.write_text(json.dumps(changed))
-    run("refresh-routing")
-    installed = json.loads(target.read_text())
-    installed["routes"]["senior"] = [{**entry, "model": "codex/gpt-6-sol", "weight": "off"} if entry["model"] == "codex/gpt-6.1-sol"
-                                     else entry for entry in installed["routes"]["senior"]]
-    target.write_text(json.dumps(installed))
-    changed["routes"]["senior"] = [{**entry, "weight": "high"} if entry["model"] == "codex/gpt-6-astra" else entry
-                                   for entry in changed["routes"]["senior"]]
-    source.write_text(json.dumps(changed))
-    result = run("refresh-routing")
-    senior = json.loads(target.read_text())["routes"]["senior"]
-    assert [(entry["model"], entry["weight"]) for entry in senior] == [
-        ("claude/claude-opus-5-5", "high"), ("codex/gpt-6-sol", "off"), ("codex/gpt-6-astra", "high")], result.stdout
-    assert senior[1]["effort"] == ["high", "xhigh"]
 
 
 

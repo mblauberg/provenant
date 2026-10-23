@@ -951,6 +951,52 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
 }
 
 #[test]
+fn object_safe_atomic_write_preserves_requested_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir: &dyn SafeDir = &Directory::open_anchor(temp.path()).unwrap();
+    assert!(matches!(
+        dir.atomic_write(
+            OsStr::new("provenant"),
+            ".provenant-staging.",
+            b"binary bytes",
+            0o755,
+            PublishMode::NoReplace,
+        )
+        .unwrap(),
+        Publication::Durable
+    ));
+    assert_eq!(
+        dir.metadata_at(OsStr::new("provenant"), false)
+            .unwrap()
+            .mode
+            & 0o777,
+        0o755
+    );
+    let mut file = dir.open_read(OsStr::new("provenant")).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"binary bytes");
+}
+
+#[test]
+fn object_safe_read_link_uses_held_directory_and_rejects_noncomponents() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = Directory::open_anchor(temp.path()).unwrap();
+    owner
+        .symlink(Path::new("../target"), OsStr::new("managed-link"))
+        .unwrap();
+    let dir: &dyn SafeDir = &owner;
+    assert_eq!(
+        dir.read_link(OsStr::new("managed-link")).unwrap(),
+        PathBuf::from("../target")
+    );
+    assert!(matches!(
+        dir.read_link(OsStr::new("../escape")),
+        Err(FsError::InvalidComponent { .. })
+    ));
+}
+
+#[test]
 fn object_safe_consumers_can_use_real_and_mock_files() {
     fn read_file(file: &mut dyn SafeFile) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
@@ -960,8 +1006,14 @@ fn object_safe_consumers_can_use_real_and_mock_files() {
     let temp = tempfile::tempdir().unwrap();
     let fs: &dyn SafeFs = &LocalFs;
     let dir = fs.open_anchor(temp.path()).unwrap();
-    dir.atomic_write(OsStr::new("file"), ".test.", b"real", PublishMode::Replace)
-        .unwrap();
+    dir.atomic_write(
+        OsStr::new("file"),
+        ".test.",
+        b"real",
+        0o600,
+        PublishMode::Replace,
+    )
+    .unwrap();
     assert_eq!(
         read_file(&mut *dir.open_read(OsStr::new("file")).unwrap()).unwrap(),
         b"real"

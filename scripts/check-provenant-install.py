@@ -1,29 +1,17 @@
 #!/usr/bin/env python3
-"""Check the pointer-owned installed Provenant front door.
+"""Retained provider-registration query for Fabric hosts; no install state reads.
 
-The installed command is a binary built from `tools/front-door/` (ADR 0027).
-Its embedded source digest must equal the sources in this checkout.
+The checkout installation checker retired with mutable installation ownership.
+The shared read-only query waits for its Fabric host consumer's replacement.
 """
-
 from __future__ import annotations
-
 import os
-import argparse
 import json
 from pathlib import Path
 import shutil
 import sys
 import tomllib
-
-from lib.front_door_build import CRATE_RELATIVE, embedded_digest, source_digest
 from lib.jsonc import parse_jsonc
-from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
-from lib.stale_checkout import warn_if_stale_checkout
-from instance_installation import InstallError, routing_drift
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
 
 def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
     claude_root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
@@ -61,105 +49,6 @@ def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
     return result
 
 
-def _provider_lines(home: Path) -> tuple[list[str], bool]:
-    lines = []
-    missing = False
-    for provider, state in provider_registration_status(home).items():
-        if not state["present"]:
-            lines.append(f"provider {provider} present=no")
-            continue
-        skills, mcp = state["skills"], state["registered"]
-        complete = skills and mcp
-        missing |= not complete
-        lines.append(
-            f"provider {provider} present=yes skills={'ok' if skills else 'missing'} "
-            f"mcp={'ok' if mcp else 'missing'}"
-            + (" repair=install-harness --platform all" if not complete else "")
-        )
-    return lines, missing
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--strict", action="store_true", help="fail on routing or provider warnings")
-    args = parser.parse_args()
-    instance_value = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
-    instance_root = (
-        Path(instance_value).expanduser()
-        if instance_value is not None
-        else Path.home() / ".agents"
-    )
-    if not instance_root.is_absolute():
-        print("FAIL: Agent Fabric instance root must be absolute", file=sys.stderr)
-        return 1
-    pointed_product = load_pointer_file(instance_root)
-    pointer = instance_root / POINTER_RELATIVE_PATH
-    if (pointer.exists() or pointer.is_symlink()) and pointed_product is None:
-        print(f"FAIL: product-root pointer is invalid or stale at {pointer}", file=sys.stderr)
-        return 1
-    warn_if_stale_checkout(pointed_product or ROOT)
-    if pointed_product is None or pointed_product.resolve() != ROOT.resolve():
-        print("provenant installed stub=not-owned-by-this-checkout")
-        return 0
-
-    bin_value = os.environ.get("PROVENANT_BIN_DIR") or None
-    bin_directory = (
-        Path(bin_value).expanduser()
-        if bin_value is not None
-        else Path.home() / ".local/bin"
-    )
-    if not bin_directory.is_absolute():
-        print("FAIL: PROVENANT_BIN_DIR must be absolute", file=sys.stderr)
-        return 1
-    command = bin_directory / "provenant"
-    if command.is_symlink() or not command.is_file():
-        print(
-            f"FAIL: {command} must be a regular managed copy; re-run install-harness",
-            file=sys.stderr,
-        )
-        return 1
-    if not os.access(command, os.X_OK):
-        print(
-            f"FAIL: {command} is not executable; re-run install-harness",
-            file=sys.stderr,
-        )
-        return 1
-    stamped = embedded_digest(command)
-    if stamped is None:
-        print(
-            "FAIL: installed front door has no Rust source identity; "
-            "re-run install-harness",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        current = source_digest(ROOT / CRATE_RELATIVE)
-    except FileNotFoundError:
-        current = None
-    if stamped != current:
-        print(
-            f"FAIL: installed front door was built from different sources than {CRATE_RELATIVE} "
-            f"(embeds {stamped}, checkout is {current}); "
-            "rebuild: re-run install-harness",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"provenant installed stub=ok path={command}")
-    print("front-door=rust")
-    provider_lines, provider_missing = _provider_lines(Path.home())
-    for line in provider_lines:
-        print(line)
-    try:
-        differences = routing_drift(ROOT, instance_root)
-    except InstallError as exc:
-        print(f"warning: routing catalogue {exc}; repair=install-harness --platform all --refresh-routing", file=sys.stderr)
-        differences = ["unreadable"]
-    for key in differences:
-        print(f"routing drift={key} repair=install-harness --platform all --refresh-routing", file=sys.stderr)
-    if args.strict and (differences or provider_missing):
-        return 1
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    print("Checkout installation checks are retired during the Rust rewrite.", file=sys.stderr)
+    raise SystemExit(3)

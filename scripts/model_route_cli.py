@@ -203,7 +203,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
         args.available_effort = model_route._without_max({"efforts": list(args.available_effort)})["efforts"]
     model_route.ROUTE_WARNINGS = ([
         "routing catalogue was stale; resolved against the fresh product snapshot; "
-        "fix: run scripts/install-harness --platform all --refresh-routing"
+        "fix: use the current release routing catalogue; reinstall the current release if needed"
     ] if args.command == "resolve" and snapshot.get("stale_routing") else [])
     if args.command == "resolve":
         model_route.ROUTE_CLASSIFICATION = {}

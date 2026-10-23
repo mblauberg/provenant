@@ -1,7 +1,8 @@
 usage: provenant <command> [arguments...]
 
 Commands
-  root checkout
+  root release
+  mcp            Fabric MCP server
   route|routes   scripts/model-route ...
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree       create, list and remove managed Git worktrees
