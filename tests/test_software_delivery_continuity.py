@@ -1,27 +1,25 @@
 import hashlib
-import importlib.util
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import os
 
 import pytest
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
-def load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def timestamp(moment):
+    return moment.isoformat().replace("+00:00", "Z")
 
 
-DELIVERY = load(ROOT / "skills/deliver/scripts/validate_delivery.py", "continuity_delivery")
-REFERENCE = load(ROOT / "skills/deliver/scripts/reference_runs.py", "continuity_reference")
-MATERIALISE = load(ROOT / "skills/deliver/scripts/reference_evaluation.py", "continuity_materialise")
+DELIVERY = load_script(ROOT / "skills/deliver/scripts/validate_delivery.py", "continuity_delivery")
+REFERENCE = load_script(ROOT / "skills/deliver/scripts/reference_runs.py", "continuity_reference")
+MATERIALISE = load_script(ROOT / "skills/deliver/scripts/reference_evaluation.py", "continuity_materialise")
 
 
 def git(root: Path, *args: str, text: bool = True):
@@ -84,19 +82,19 @@ def merged_software_delivery(workspace: Path) -> dict:
         write_json_artifact(workspace, "github-ci", {
             "schema_version": 1, "contract": "github-ci-evidence",
             "repository": repository, "commit": merged, "check": "ci-status",
-            "conclusion": "success", "completed_at": "2026-07-10T00:08:30Z",
+            "conclusion": "success", "completed_at": timestamp(NOW),
         }),
         write_json_artifact(workspace, "review-openai", {
             "schema_version": 1, "contract": "code-review-evidence",
             "repository": repository, "commit": head, "provider_family": "openai",
             "adapter": "native-subagent", "model": "runtime-resolved", "verdict": "pass",
-            "reviewed_at": "2026-07-10T00:07:30Z",
+            "reviewed_at": timestamp(NOW - timedelta(minutes=1)),
         }),
         write_json_artifact(workspace, "review-anthropic", {
             "schema_version": 1, "contract": "code-review-evidence",
             "repository": repository, "commit": head, "provider_family": "anthropic",
             "adapter": "claude-code", "model": "runtime-resolved", "verdict": "pass",
-            "reviewed_at": "2026-07-10T00:08:00Z",
+            "reviewed_at": timestamp(NOW - timedelta(seconds=30)),
         }),
     ])
     run["software_delivery"] = {
@@ -435,7 +433,7 @@ def test_binder_binds_merged_evidence_before_project_landing_acceptance(tmp_path
         "GIT_DIR": str(redirected_git_dir),
         "GH_MARKER": str(marker),
         "GH_PR_JSON": json.dumps({
-            "number": pr["number"], "state": "closed", "merged_at": "2026-07-10T00:08:00Z",
+            "number": pr["number"], "state": "closed", "merged_at": timestamp(NOW),
             "html_url": pr["url"], "head": {"sha": pr["head_commit"]},
             "merge_commit_sha": pr["merge_commit"],
         }),
@@ -469,7 +467,7 @@ def test_binder_binds_merged_evidence_before_project_landing_acceptance(tmp_path
     receipt.write_text(json.dumps(run))
     original_review = review_sources[0].read_bytes()
     invalid_review = json.loads(original_review)
-    invalid_review["reviewed_at"] = "2026-07-10T00:07:30+00:00"
+    invalid_review["reviewed_at"] = (NOW - timedelta(minutes=1)).isoformat()
     review_sources[0].write_text(json.dumps(invalid_review) + "\n")
     before_invalid_review = receipt.read_bytes()
     rejected_review = subprocess.run(command, env=environment, capture_output=True, text=True)
@@ -481,7 +479,7 @@ def test_binder_binds_merged_evidence_before_project_landing_acceptance(tmp_path
     before_invalid_ci = receipt.read_bytes()
     environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
         "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
-        "conclusion": "success", "completed_at": "2026-07-10T00:08:30+00:00",
+        "conclusion": "success", "completed_at": NOW.isoformat(),
     }]})
     rejected_ci = subprocess.run(command, env=environment, capture_output=True, text=True)
     assert rejected_ci.returncode == 1

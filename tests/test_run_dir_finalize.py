@@ -1,8 +1,10 @@
-import importlib.util
 import json
+from datetime import UTC, date, datetime
 from pathlib import Path
 import subprocess
 import sys
+
+from tests.support.modules import load_script
 
 import pytest
 
@@ -10,11 +12,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills" / "orchestrate" / "scripts" / "run_dir_init.sh"
 SCRIPT = ROOT / "skills" / "orchestrate" / "scripts" / "run_dir_finalize.py"
-SPEC = importlib.util.spec_from_file_location("run_dir_finalize", SCRIPT)
-run_dir_finalize = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader
-sys.modules[SPEC.name] = run_dir_finalize
-SPEC.loader.exec_module(run_dir_finalize)
+run_dir_finalize = load_script(SCRIPT, "run_dir_finalize", register=True)
+TODAY = date.today().isoformat()
 
 from _shared.review_ladder import (
     REVIEW_PLAN_COMPLETE_STATUS,
@@ -883,7 +882,7 @@ def test_pruning_is_dry_run_then_removes_only_classified_ephemeral(tmp_path):
     run = init_run(tmp_path)
     raw = run / "findings" / "raw.txt"
     raw.write_text("duplicate payload")
-    add_manifest_row(run, "| A1 | findings/raw.txt | retry noise | worker | 2026-07-10 | retired | ephemeral | - |")
+    add_manifest_row(run, f"| A1 | findings/raw.txt | retry noise | worker | {TODAY} | retired | ephemeral | - |")
     args = [str(run), "--status", "failed", "--reason", "bounded failure", "--prune-ephemeral"]
     assert run_dir_finalize.main(args) == 0
     assert raw.exists()
@@ -893,7 +892,7 @@ def test_pruning_is_dry_run_then_removes_only_classified_ephemeral(tmp_path):
 
 def test_manifest_rejects_parent_path(tmp_path):
     run = init_run(tmp_path)
-    add_manifest_row(run, "| A1 | ../outside.txt | escape | worker | 2026-07-10 | verified | evidence | - |")
+    add_manifest_row(run, f"| A1 | ../outside.txt | escape | worker | {TODAY} | verified | evidence | - |")
     errors, _ = run_dir_finalize.validate(run, "failed", "bad manifest")
     assert any("path escapes run directory" in error for error in errors)
 
@@ -934,7 +933,7 @@ def test_paired_receipt_must_preserve_compaction_and_lease_state(tmp_path):
         return values
     (run / "LEASE.json").write_text(json.dumps({
         "schema_version": 1, "status": "released", "holder": "", "previous_holder": "openai-session-1",
-        "generation": 2, "updated_at": "2026-07-10T00:00:00Z", "expires_at": "",
+        "generation": 2, "updated_at": datetime.now(UTC).isoformat(), "expires_at": "",
     }))
     data["pair"] = {
         "mode": "paired-primary", "chair_family": "openai", "chair_id": "openai-session-1",
@@ -1035,8 +1034,8 @@ def test_prune_preserves_ephemeral_file_referenced_by_retained_evidence(tmp_path
     raw = run / "findings" / "raw.txt"
     summary.write_text("Evidence: findings/raw.txt")
     raw.write_text("raw")
-    add_manifest_row(run, "| S1 | findings/summary.md | summary | worker | 2026-07-10 | verified | evidence | - |")
-    add_manifest_row(run, "| R1 | findings/raw.txt | raw | worker | 2026-07-10 | retired | ephemeral | - |")
+    add_manifest_row(run, f"| S1 | findings/summary.md | summary | worker | {TODAY} | verified | evidence | - |")
+    add_manifest_row(run, f"| R1 | findings/raw.txt | raw | worker | {TODAY} | retired | ephemeral | - |")
     errors, rows = run_dir_finalize.validate(run, "failed", "demo")
     assert errors == []
     assert run_dir_finalize.prune_candidates(run, rows) == []
@@ -1048,8 +1047,8 @@ def test_prune_preserves_relative_markdown_link_from_retained_evidence(tmp_path)
     raw = run / "findings" / "raw.txt"
     summary.write_text("[raw evidence](raw.txt)")
     raw.write_text("raw")
-    add_manifest_row(run, "| S1 | findings/summary.md | summary | worker | 2026-07-10 | verified | evidence | - |")
-    add_manifest_row(run, "| R1 | findings/raw.txt | raw | worker | 2026-07-10 | retired | ephemeral | - |")
+    add_manifest_row(run, f"| S1 | findings/summary.md | summary | worker | {TODAY} | verified | evidence | - |")
+    add_manifest_row(run, f"| R1 | findings/raw.txt | raw | worker | {TODAY} | retired | ephemeral | - |")
     errors, rows = run_dir_finalize.validate(run, "failed", "demo")
     assert errors == []
     assert run_dir_finalize.prune_candidates(run, rows) == []
@@ -1059,8 +1058,8 @@ def test_duplicate_manifest_path_cannot_downgrade_retained_evidence(tmp_path):
     run = init_run(tmp_path)
     report = run / "findings" / "report.md"
     report.write_text("verified evidence")
-    add_manifest_row(run, "| A1 | findings/report.md | report | reviewer | 2026-07-10 | verified | capsule | - |")
-    add_manifest_row(run, "| A2 | findings/report.md | alias | worker | 2026-07-10 | superseded | ephemeral | - |")
+    add_manifest_row(run, f"| A1 | findings/report.md | report | reviewer | {TODAY} | verified | capsule | - |")
+    add_manifest_row(run, f"| A2 | findings/report.md | alias | worker | {TODAY} | superseded | ephemeral | - |")
     errors, rows = run_dir_finalize.validate(run, "failed", "demo")
     assert any("duplicate manifest path" in error for error in errors)
     assert run_dir_finalize.prune_candidates(run, rows) == []

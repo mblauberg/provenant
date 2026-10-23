@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,10 +14,7 @@ SKILL_ROOT = ROOT / "skills" / "legal-writing"
 
 def test_lint_uses_generic_safety_instrument_overstatement_rule() -> None:
     module_path = SKILL_ROOT / "scripts" / "lint_legal_style.py"
-    spec = importlib.util.spec_from_file_location("legal_style_lint", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(module_path, "legal_style_lint")
 
     patterns = dict(module.FAIL_PATTERNS)
     safety_pattern = patterns["safety-instrument overstatement"]

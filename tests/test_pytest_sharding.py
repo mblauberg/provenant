@@ -1,16 +1,13 @@
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import zlib
 
+from tests.support.git import git
+from tests.support.modules import load_script
+
 
 ROOT = Path(__file__).resolve().parents[1]
-ROOT_CONFTEST_SPEC = importlib.util.spec_from_file_location(
-    "provenant_root_tests_conftest", ROOT / "tests" / "conftest.py"
-)
-assert ROOT_CONFTEST_SPEC is not None and ROOT_CONFTEST_SPEC.loader is not None
-conftest = importlib.util.module_from_spec(ROOT_CONFTEST_SPEC)
-ROOT_CONFTEST_SPEC.loader.exec_module(conftest)
+conftest = load_script(ROOT / "tests" / "conftest.py", "provenant_root_tests_conftest")
 
 
 def test_collection_hook_pins_fabric_hosts_and_partitions_other_files(monkeypatch) -> None:
@@ -97,5 +94,4 @@ def test_detached_checkout_temp_sources_pass_generated_file_guard(tmp_path, monk
                           capture_output=True).returncode != 0
     # A fixture can still establish its own Git repository below the boundary.
     subprocess.run(["git", "init", "-q"], cwd=fixture, check=True)
-    assert subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=fixture,
-                          check=True, capture_output=True, text=True).stdout.strip() == str(fixture)
+    assert git(fixture, "rev-parse", "--show-toplevel", env=os.environ) == str(fixture)

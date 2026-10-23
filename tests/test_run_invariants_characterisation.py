@@ -15,25 +15,17 @@ only through `update()`, so the tests survive a move of the definitions.
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py"
 CHECKPOINT = ROOT / "skills" / "implement" / "scripts" / "checkpoint_run.py"
-
-
-def load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.fixture(scope="module")
@@ -46,7 +38,7 @@ def producer():
     manufacture two `ReceiptError` classes no matter how the product is
     arranged.
     """
-    module = load(PRODUCER, "delivery_receipt")
+    module = load_script(PRODUCER, "delivery_receipt")
     previous = sys.modules.get("delivery_receipt")
     sys.modules["delivery_receipt"] = module
     yield module
@@ -58,7 +50,7 @@ def producer():
 
 @pytest.fixture(scope="module")
 def checkpoint(producer):
-    return load(CHECKPOINT, "checkpoint_run_for_invariants")
+    return load_script(CHECKPOINT, "checkpoint_run_for_invariants")
 
 
 ROUTINE_ASSESSMENT = {
