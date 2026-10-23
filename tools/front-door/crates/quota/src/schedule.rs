@@ -200,7 +200,9 @@ pub fn backoff_seconds(
     let wait = match kind {
         ErrorKind::Missing => config.missing_seconds.get(),
         ErrorKind::Auth => config.auth_seconds.get(),
-        _ => config.max_seconds.get()
+        _ => config
+            .max_seconds
+            .get()
             .min(config.base_seconds.get() * 2.0_f64.powi((failures.clamp(1, 32) - 1) as i32)),
     } * (1.0 + jitter(&format!("{seed}|{failures}"), config.jitter_fraction.get()));
     if kind == ErrorKind::RateLimited {
@@ -225,8 +227,8 @@ fn near(rows: &[&Window], now: Timestamp, ttl: f64, config: &Config) -> bool {
         if used >= config.near_exhaustion_percent.get() {
             return true;
         }
-        let Some((reset, minutes)) =
-            stamp(row.reset_at.as_deref()).zip(row.window_minutes.map(Number::get).filter(|v| *v != 0.0))
+        let Some((reset, minutes)) = stamp(row.reset_at.as_deref())
+            .zip(row.window_minutes.map(Number::get).filter(|v| *v != 0.0))
         else {
             return false;
         };
@@ -316,7 +318,9 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
             _ => 1.0,
         };
     }
-    let mut ttl = config.max_interval_seconds.get()
+    let mut ttl = config
+        .max_interval_seconds
+        .get()
         .min(config.min_interval_seconds.get().max(base * factor));
     if power == "low" && trigger != "manual" && config.low_power_skip_costs.contains(&config.cost) {
         ttl = config.max_interval_seconds.get();
@@ -338,8 +342,10 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
             .collect();
         if !exhausted.is_empty() && exhausted.iter().all(|r| r.is_some_and(|r| r > now)) {
             if let Some(last) = exhausted.into_iter().flatten().max() {
-                due = add_seconds(last, config.reset_grace_seconds.get())?
-                    .min(add_seconds(attempted, config.exhausted_recheck_seconds.get())?);
+                due = add_seconds(last, config.reset_grace_seconds.get())?.min(add_seconds(
+                    attempted,
+                    config.exhausted_recheck_seconds.get(),
+                )?);
                 reason = "exhausted_until_reset";
             }
         }
@@ -384,7 +390,9 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
             "event" => {
                 timer_due
                     || age
-                        >= config.min_interval_seconds.get()
+                        >= config
+                            .min_interval_seconds
+                            .get()
                             .max(config.event_debounce_seconds.get())
             }
             "wake" => timer_due || age >= config.min_interval_seconds.get(),

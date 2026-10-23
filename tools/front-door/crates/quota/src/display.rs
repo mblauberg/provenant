@@ -106,7 +106,9 @@ pub fn window_labels(context: &Context) -> BTreeMap<String, String> {
 // Python regex \d accepts decimal digits; str.isdigit also accepts these
 // non-decimal digit ranges (Unicode 16, the source interpreter's table).
 fn python_digit(c: char) -> bool {
-    c.is_ascii_digit() || crate::time::decimal_digit(c).is_some() || matches!(c as u32,
+    c.is_ascii_digit()
+        || crate::time::decimal_digit(c).is_some()
+        || matches!(c as u32,
         0x00b2..=0x00b3 | 0x00b9 | 0x1369..=0x1371 | 0x19da |
         0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089 | 0x2460..=0x2468 |
         0x2474..=0x247c | 0x2488..=0x2490 | 0x24ea | 0x24f5..=0x24fd |
@@ -152,7 +154,9 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
             let lower = word.to_lowercase();
             let digits_unit = lower.chars().last().is_some_and(|c| "mhdw".contains(c))
                 && lower.len() > 1
-                && lower[..lower.len() - 1].chars().all(|c| c.is_ascii_digit() || crate::time::decimal_digit(c).is_some());
+                && lower[..lower.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || crate::time::decimal_digit(c).is_some());
             !LENGTH.contains(&lower.as_str()) && Some(*word) != row.pool.as_deref() && !digits_unit
         })
         .collect();
@@ -172,7 +176,9 @@ fn alert_number(context: &Context) -> Number {
         .map(Number::Float)
         .unwrap_or(Number::Int(90))
 }
-pub fn alert_percent(context: &Context) -> f64 { alert_number(context).get() }
+pub fn alert_percent(context: &Context) -> f64 {
+    alert_number(context).get()
+}
 
 pub fn display_name(
     policy: &impl QuotaPolicy,
@@ -235,7 +241,8 @@ pub fn display<'a>(
     }
     let longest = maximum(current.iter().copied(), |a, b| {
         a.window
-            .window_minutes.map(Number::get)
+            .window_minutes
+            .map(Number::get)
             .unwrap_or(0.0)
             .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
             .then(a.window.used().total_cmp(&b.window.used()))
@@ -245,18 +252,20 @@ pub fn display<'a>(
             r.window.used() >= alert
                 && !std::ptr::eq(*r, longest)
                 && r.window.window_minutes.map(Number::get).unwrap_or(0.0)
-                    < longest.window.window_minutes.map(Number::get).unwrap_or(0.0)
+                    < longest
+                        .window
+                        .window_minutes
+                        .map(Number::get)
+                        .unwrap_or(0.0)
         }),
         |a, b| {
-            a.window
-                .used()
-                .total_cmp(&b.window.used())
-                .then(
-                    b.window
-                        .window_minutes.map(Number::get)
-                        .unwrap_or(0.0)
-                        .total_cmp(&a.window.window_minutes.map(Number::get).unwrap_or(0.0)),
-                )
+            a.window.used().total_cmp(&b.window.used()).then(
+                b.window
+                    .window_minutes
+                    .map(Number::get)
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.window.window_minutes.map(Number::get).unwrap_or(0.0)),
+            )
         },
     )
     .or(Some(longest))
@@ -266,7 +275,8 @@ pub fn repeats(window: &DisplayWindow, windows: &[DisplayWindow]) -> bool {
         && windows.iter().any(|other| {
             !other.window.name.contains(':')
                 && other.window.pool == window.window.pool
-                && other.window.window_minutes.map(Number::get) == window.window.window_minutes.map(Number::get)
+                && other.window.window_minutes.map(Number::get)
+                    == window.window.window_minutes.map(Number::get)
                 && other.window.used() == window.window.used()
                 && stamp(other.window.reset_at.as_deref())
                     .zip(stamp(window.window.reset_at.as_deref()))
@@ -301,7 +311,11 @@ fn optional_credits(
     value: &Snapshot,
     banked: Option<&BankedCredits>,
 ) -> (Vec<UsageCredit>, Option<Resets>) {
-    let counted = value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked);
+    let counted = value
+        .credits
+        .as_ref()
+        .filter(|c| c.reset_credits.is_some() || c.source.is_some())
+        .or(banked);
     let fallback = counted.map(|c| Resets {
         available: c.reset_credits.unwrap_or(0),
         expires_at: vec![],
@@ -340,7 +354,10 @@ fn runway(
             let floor = number(&context.settings["credit_floor"]).unwrap_or(0.0);
             format!(
                 "then about {} on credits at the measured credit burn rate",
-                duration((credit.balance.map(Number::get).unwrap_or(0.0) - floor).max(0.0) / rate * 3600.0)
+                duration(
+                    (credit.balance.map(Number::get).unwrap_or(0.0) - floor).max(0.0) / rate
+                        * 3600.0
+                )
             )
         } else {
             format!(
@@ -401,8 +418,8 @@ pub fn describe(
         } else {
             allowance.ordinary_usage_allowed == Some(false)
         };
-        let inactive = outdated
-            || observed.is_some() && passed && window.used() < NEAR_EXHAUSTED && !refused;
+        let inactive =
+            outdated || observed.is_some() && passed && window.used() < NEAR_EXHAUSTED && !refused;
         let pace = policy.pace(&window, now);
         if let Some(pool) = &pool {
             window.pool = Some(pool.clone());
@@ -424,13 +441,12 @@ pub fn describe(
     if refusal_reset(policy, value, &rows) {
         effective.allowance = OptionalRecord::Missing;
     }
-    let mut worst = policy
-        .binding(
-            &rows
-                .iter()
-                .filter(|r| r.reset_passed != Some(true))
-                .collect::<Vec<_>>(),
-        );
+    let mut worst = policy.binding(
+        &rows
+            .iter()
+            .filter(|r| r.reset_passed != Some(true))
+            .collect::<Vec<_>>(),
+    );
     if worst.is_none()
         && effective
             .allowance
@@ -439,7 +455,8 @@ pub fn describe(
     {
         worst = policy.binding(&rows.iter().collect::<Vec<_>>());
     }
-    let worst_index = worst.and_then(|selected| rows.iter().position(|row| std::ptr::eq(row, selected)));
+    let worst_index =
+        worst.and_then(|selected| rows.iter().position(|row| std::ptr::eq(row, selected)));
     let worst = worst.cloned();
     let spent = policy.allowance_spent(&effective, worst.as_ref());
     let drawing = policy.credit_draw(value, spent);
@@ -455,11 +472,15 @@ pub fn describe(
     let longest = maximum(
         rows.iter().filter(|r| {
             r.window.reset_at.as_ref().is_some_and(|s| !s.is_empty())
-                && r.window.window_minutes.map(Number::get).is_some_and(|v| v != 0.0)
+                && r.window
+                    .window_minutes
+                    .map(Number::get)
+                    .is_some_and(|v| v != 0.0)
         }),
         |a, b| {
             a.window
-                .window_minutes.map(Number::get)
+                .window_minutes
+                .map(Number::get)
                 .unwrap_or(0.0)
                 .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
         },
@@ -576,7 +597,8 @@ pub fn describe(
                     .as_ref()
                     .and_then(|value| match value {
                         Value::String(s) if !s.is_empty() => Some(s.clone()),
-                        Value::Number(n) if n.as_f64().is_some_and(|n| n != 0.0) => Some(n.to_string()),
+                        Value::Number(n) if n.as_f64().is_some_and(|n| n != 0.0) =>
+                            Some(n.to_string()),
                         _ => None,
                     })
                     .unwrap_or_else(|| "never".into())
@@ -594,8 +616,21 @@ pub fn describe(
                 value.provider
             )
         },
-        credits: value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked).cloned(),
-        credit_advice: policy.credit_advice(&rows, value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked), now),
+        credits: value
+            .credits
+            .as_ref()
+            .filter(|c| c.reset_credits.is_some() || c.source.is_some())
+            .or(banked)
+            .cloned(),
+        credit_advice: policy.credit_advice(
+            &rows,
+            value
+                .credits
+                .as_ref()
+                .filter(|c| c.reset_credits.is_some() || c.source.is_some())
+                .or(banked),
+            now,
+        ),
         use_it_or_lose_it: longest.map(|w| ExpiringHeadroom {
             window: w.window.name.clone(),
             reset_at: w.window.reset_at.clone(),
@@ -731,7 +766,8 @@ pub fn report(
     let order = |r: &DisplayAccount| {
         let longest = maximum(r.windows.iter(), |a, b| {
             a.window
-                .window_minutes.map(Number::get)
+                .window_minutes
+                .map(Number::get)
                 .unwrap_or(0.0)
                 .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
         });
@@ -866,7 +902,10 @@ fn format_credit(entry: &UsageCredit, timezone: &TimeZone) -> Result<String, Quo
     } else if entry.currency.as_ref().is_some_and(|s| !s.is_empty()) {
         format!(
             "{} credit",
-            amount(entry.balance.map(Number::get).unwrap_or(0.0), entry.currency.as_deref())
+            amount(
+                entry.balance.map(Number::get).unwrap_or(0.0),
+                entry.currency.as_deref()
+            )
         )
     } else {
         format!(
@@ -963,13 +1002,15 @@ pub fn render(value: &Report, verbose: bool, timezone: &TimeZone) -> Result<Stri
                 window.pace.summary.clone(),
                 used_text(w),
             );
-            if w.limit_amount.map(Number::get).is_some_and(|v| v != 0.0) && w.window_minutes.map(Number::get).is_none_or(|v| v == 0.0)
+            if w.limit_amount.map(Number::get).is_some_and(|v| v != 0.0)
+                && w.window_minutes.map(Number::get).is_none_or(|v| v == 0.0)
             {
                 state = "-".into();
                 detail = format!(
                     "{} left; {}",
                     amount(
-                        w.limit_amount.map(Number::get).unwrap_or(0.0) - w.used_amount.map(Number::get).unwrap_or(0.0),
+                        w.limit_amount.map(Number::get).unwrap_or(0.0)
+                            - w.used_amount.map(Number::get).unwrap_or(0.0),
                         w.currency.as_ref().and_then(Value::as_str)
                     ),
                     detail

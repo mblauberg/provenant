@@ -290,12 +290,18 @@ pub enum Number {
     Float(f64),
 }
 impl Default for Number {
-    fn default() -> Self { Self::Int(0) }
+    fn default() -> Self {
+        Self::Int(0)
+    }
 }
 impl Number {
     /// Floating point is used only for calculations, never for retained integers.
     pub fn get(self) -> f64 {
-        match self { Self::Int(n) => n as f64, Self::Unsigned(n) => n as f64, Self::Float(n) => n }
+        match self {
+            Self::Int(n) => n as f64,
+            Self::Unsigned(n) => n as f64,
+            Self::Float(n) => n,
+        }
     }
     pub fn integer_part(self) -> Result<Self, crate::QuotaError> {
         match self {
@@ -307,16 +313,26 @@ impl Number {
         if !n.is_finite() || n < i64::MIN as f64 || n >= 18446744073709551616.0 {
             return Err(crate::QuotaError::NumberOutOfRange);
         }
-        Ok(if n < 0.0 { Self::Int(n as i64) } else { Self::Unsigned(n as u64) })
+        Ok(if n < 0.0 {
+            Self::Int(n as i64)
+        } else {
+            Self::Unsigned(n as u64)
+        })
     }
 }
 impl<'de> Deserialize<'de> for Number {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let n = serde_json::Number::deserialize(deserializer)?;
-        if let Some(n) = n.as_i64() { return Ok(Self::Int(n)); }
-        if let Some(n) = n.as_u64() { return Ok(Self::Unsigned(n)); }
+        if let Some(n) = n.as_i64() {
+            return Ok(Self::Int(n));
+        }
+        if let Some(n) = n.as_u64() {
+            return Ok(Self::Unsigned(n));
+        }
         if n.is_f64() {
-            if let Some(n) = n.as_f64() { return Ok(Self::Float(n)); }
+            if let Some(n) = n.as_f64() {
+                return Ok(Self::Float(n));
+            }
         }
         Err(serde::de::Error::custom("quota number is out of range"))
     }
@@ -331,8 +347,16 @@ pub fn decode_record<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, 
             Value::Number(n) if !n.is_i64() && !n.is_u64() && !n.is_f64() => {
                 return Err(crate::QuotaError::NumberOutOfRange);
             }
-            Value::Array(items) => { for value in items { check(value)?; } }
-            Value::Object(items) => { for value in items.values() { check(value)?; } }
+            Value::Array(items) => {
+                for value in items {
+                    check(value)?;
+                }
+            }
+            Value::Object(items) => {
+                for value in items.values() {
+                    check(value)?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -343,5 +367,7 @@ pub fn decode_record<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, 
 }
 
 impl Window {
-    pub fn used(&self) -> f64 { self.used_percent.as_f64().unwrap_or(f64::NAN) }
+    pub fn used(&self) -> f64 {
+        self.used_percent.as_f64().unwrap_or(f64::NAN)
+    }
 }

@@ -55,7 +55,9 @@ fn context() -> Context {
     }
 }
 fn supported_python_version(output: &str) -> bool {
-    let Some(version) = output.trim().strip_prefix("Python ") else { return false; };
+    let Some(version) = output.trim().strip_prefix("Python ") else {
+        return false;
+    };
     let mut parts = version.split('.');
     matches!((parts.next().and_then(|n| n.parse::<u32>().ok()), parts.next().and_then(|n| n.parse::<u32>().ok())),
         (Some(3), Some(minor)) if minor >= 11)
@@ -66,22 +68,41 @@ fn python_interpreter() -> Option<&'static std::path::PathBuf> {
         let candidates = if let Some(path) = std::env::var_os("PROVENANT_PORT_PYTHON") {
             vec![std::path::PathBuf::from(path)]
         } else {
-            ["python3", "python3.14", "python3.13", "python3.12", "python3.11"]
-                .into_iter().map(std::path::PathBuf::from).collect()
+            [
+                "python3",
+                "python3.14",
+                "python3.13",
+                "python3.12",
+                "python3.11",
+            ]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect()
         };
         candidates.into_iter().find(|path| {
-            Command::new(path).arg("--version").output().is_ok_and(|out|
-                out.status.success() && supported_python_version(&String::from_utf8_lossy(&out.stdout)))
+            Command::new(path)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| {
+                    out.status.success()
+                        && supported_python_version(&String::from_utf8_lossy(&out.stdout))
+                })
         })
     });
     if selected.is_none() {
-        let reason = "differential oracle requires Python 3.11+; no supported interpreter was found";
-        assert!(std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"), "{reason}");
+        let reason =
+            "differential oracle requires Python 3.11+; no supported interpreter was found";
+        assert!(
+            std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"),
+            "{reason}"
+        );
         eprintln!("SKIP {reason}");
     }
     selected.as_ref()
 }
-fn python_available() -> bool { python_interpreter().is_some() }
+fn python_available() -> bool {
+    python_interpreter().is_some()
+}
 fn oracle<T: DeserializeOwned>(request: Value) -> T {
     let mut child = Command::new(python_interpreter().unwrap())
         .arg("-B")
@@ -789,7 +810,10 @@ fn schedule_backoff_and_auth_activity() {
             let expected: String = oracle(
                 json!({"operation":"backoff","provider":"claude","seed":"claude/a","args":[kind,failures,retry]}),
             );
-            assert_record_eq(&json!(wait), &serde_json::from_str::<Value>(&expected).unwrap());
+            assert_record_eq(
+                &json!(wait),
+                &serde_json::from_str::<Value>(&expected).unwrap(),
+            );
         }
     }
 }
@@ -1120,18 +1144,39 @@ fn review_regression_signed_date_components_are_rejected() {
 fn review_regression_activity_uses_fromtimestamp_fraction_rounding() {
     use crate::schedule::*;
     for (seconds, later) in [
-        (1700000000.0 + 6.0 * 2.0_f64.powi(-22), "2023-11-14T22:13:20.000002Z"),
-        (1735689600791625390_u64 as f64 / 1e9, "2025-01-01T00:00:00.791626Z"),
+        (
+            1700000000.0 + 6.0 * 2.0_f64.powi(-22),
+            "2023-11-14T22:13:20.000002Z",
+        ),
+        (
+            1735689600791625390_u64 as f64 / 1e9,
+            "2025-01-01T00:00:00.791626Z",
+        ),
     ] {
         let mut c = Config::for_provider("claude");
         c.active_window_seconds = Number::Int(0);
         let s = snapshot("claude", "a", vec![]);
-        let (block, _) = plan(PlanInput { account_id:"claude/a", snapshot:Some(&s),
-            now:later.parse().unwrap(), config:&c, trigger:"timer", power:"ac",
-            activity_at:Some(seconds), ignore_backoff:false, notes:&[] }).unwrap();
+        let (block, _) = plan(PlanInput {
+            account_id: "claude/a",
+            snapshot: Some(&s),
+            now: later.parse().unwrap(),
+            config: &c,
+            trigger: "timer",
+            power: "ac",
+            activity_at: Some(seconds),
+            ignore_backoff: false,
+            notes: &[],
+        })
+        .unwrap();
         assert_eq!(json!(block.ttl_seconds), json!(1800));
-        assert_eq!(parse_time(&json!(seconds)).map(iso).as_deref(),
-            Some(if seconds < 1730000000.0 { "2023-11-14T22:13:20.000001Z" } else { "2025-01-01T00:00:00.791625Z" }));
+        assert_eq!(
+            parse_time(&json!(seconds)).map(iso).as_deref(),
+            Some(if seconds < 1730000000.0 {
+                "2023-11-14T22:13:20.000001Z"
+            } else {
+                "2025-01-01T00:00:00.791625Z"
+            })
+        );
     }
 }
 
@@ -1155,31 +1200,63 @@ fn review_regression_integer_wire_spelling_is_preserved() {
     let wire = json!({"name":"weekly","used_percent":50,"window_minutes":10080,
         "raw_kind":null,"reset_at":null,"window_start":null,"used_amount":5,"limit_amount":10});
     let record: Window = serde_json::from_value(wire.clone()).unwrap();
-    assert_eq!(serde_json::to_string(&json!(record)).unwrap(), serde_json::to_string(&wire).unwrap());
+    assert_eq!(
+        serde_json::to_string(&json!(record)).unwrap(),
+        serde_json::to_string(&wire).unwrap()
+    );
 }
 
 #[test]
 fn checked_numbers_preserve_large_integers_and_reject_out_of_range_tokens() {
-    for text in ["-9223372036854775808", "9007199254740993", "18446744073709551615", "50.0", "50"] {
+    for text in [
+        "-9223372036854775808",
+        "9007199254740993",
+        "18446744073709551615",
+        "50.0",
+        "50",
+    ] {
         let n: Number = decode_record(text.as_bytes()).unwrap();
         assert_eq!(serde_json::to_string(&n).unwrap(), text);
         let wire = format!("{{\"name\":\"w\",\"used_percent\":{text},\"window_minutes\":{text},\"used_amount\":{text},\"limit_amount\":{text}}}");
         let row: Window = decode_record(wire.as_bytes()).unwrap();
         let value = json!(row);
-        for key in ["used_percent", "window_minutes", "used_amount", "limit_amount"] {
+        for key in [
+            "used_percent",
+            "window_minutes",
+            "used_amount",
+            "limit_amount",
+        ] {
             assert_eq!(value[key].to_string(), text);
         }
-        let state: Fetch = decode_record(format!("{{\"last_duration_ms\":{text},\"retry_after_s\":{text}}}").as_bytes()).unwrap();
+        let state: Fetch = decode_record(
+            format!("{{\"last_duration_ms\":{text},\"retry_after_s\":{text}}}").as_bytes(),
+        )
+        .unwrap();
         assert_eq!(json!(state)["last_duration_ms"].to_string(), text);
-        let credit: UsageCredit = decode_record(format!("{{\"balance\":{text}}}").as_bytes()).unwrap();
+        let credit: UsageCredit =
+            decode_record(format!("{{\"balance\":{text}}}").as_bytes()).unwrap();
         assert_eq!(json!(credit)["balance"].to_string(), text);
     }
-    for text in ["18446744073709551616", "-9223372036854775809", "999999999999999999999999999999999999999"] {
-        for wire in [text.to_owned(), format!("{{\"extra\":[{text}]}}"), format!("{{\"name\":\"w\",\"used_percent\":{text}}}")] {
-            assert!(matches!(decode_record::<Value>(wire.as_bytes()), Err(QuotaError::NumberOutOfRange)));
+    for text in [
+        "18446744073709551616",
+        "-9223372036854775809",
+        "999999999999999999999999999999999999999",
+    ] {
+        for wire in [
+            text.to_owned(),
+            format!("{{\"extra\":[{text}]}}"),
+            format!("{{\"name\":\"w\",\"used_percent\":{text}}}"),
+        ] {
+            assert!(matches!(
+                decode_record::<Value>(wire.as_bytes()),
+                Err(QuotaError::NumberOutOfRange)
+            ));
         }
     }
-    assert!(matches!(Number::checked_integer(18446744073709551616.0), Err(QuotaError::NumberOutOfRange)));
+    assert!(matches!(
+        Number::checked_integer(18446744073709551616.0),
+        Err(QuotaError::NumberOutOfRange)
+    ));
 }
 
 #[test]
@@ -1191,13 +1268,25 @@ fn schedule_tolerates_unreadable_percent_null_failures_and_empty_credits() {
             "windows":[{"name":"w","used_percent":used}], "fetch":{"failures":null,"last_duration_ms":3000},
             "credits":{}})).unwrap().as_slice()).unwrap();
         let (config, notes) = resolve("claude", &Value::Null, &Value::Null).unwrap();
-        let (block, due) = plan(PlanInput {account_id:"claude/a", snapshot:Some(&s), now:now(),
-            config:&config, trigger:"timer", power:"ac", activity_at:None, ignore_backoff:false, notes:&notes}).unwrap();
+        let (block, due) = plan(PlanInput {
+            account_id: "claude/a",
+            snapshot: Some(&s),
+            now: now(),
+            config: &config,
+            trigger: "timer",
+            power: "ac",
+            activity_at: None,
+            ignore_backoff: false,
+            notes: &notes,
+        })
+        .unwrap();
         assert_eq!(json!(block.ttl_seconds), json!(1800));
         assert_eq!(json!(block.last_duration_ms), json!(3000));
         assert_eq!(json!(block.failures), json!(0));
         if differential {
-            let expected: Value = oracle(json!({"operation":"schedule","provider":"claude","account_id":"claude/a","snapshot":s,"now":NOW}));
+            let expected: Value = oracle(
+                json!({"operation":"schedule","provider":"claude","account_id":"claude/a","snapshot":s,"now":NOW}),
+            );
             assert_record_eq(&json!(config), &expected[0]);
             assert_record_eq(&json!(block), &expected[2]);
             assert_eq!(json!(due), expected[3]);
@@ -1213,20 +1302,44 @@ fn schedule_tolerates_unreadable_percent_null_failures_and_empty_credits() {
 
 #[test]
 fn interpreter_version_and_required_differential_contract() {
-    for (version, supported) in [("Python 3.9.6", false), ("Python 3.10.16", false),
-        ("Python 3.11.0", true), ("Python 3.14.3\n", true), ("not Python", false)] {
+    for (version, supported) in [
+        ("Python 3.9.6", false),
+        ("Python 3.10.16", false),
+        ("Python 3.11.0", true),
+        ("Python 3.14.3\n", true),
+        ("not Python", false),
+    ] {
         assert_eq!(supported_python_version(version), supported, "{version}");
     }
     for required in ["0", "1"] {
         let out = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "policy_tests::differential_interpreter_probe", "--nocapture"])
-            .env("PROVENANT_PORT_PYTHON", "/nonexistent/provenant-quota-python")
+            .args([
+                "--exact",
+                "policy_tests::differential_interpreter_probe",
+                "--nocapture",
+            ])
+            .env(
+                "PROVENANT_PORT_PYTHON",
+                "/nonexistent/provenant-quota-python",
+            )
             .env("PROVENANT_PORT_DIFF_REQUIRED", required)
-            .output().unwrap();
-        assert_eq!(out.status.success(), required == "0", "{}", String::from_utf8_lossy(&out.stdout));
-        let diagnostic = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.success(),
+            required == "0",
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(diagnostic.contains("requires Python 3.11+"), "{diagnostic}");
-        if required == "0" { assert!(diagnostic.contains("SKIP")); }
+        if required == "0" {
+            assert!(diagnostic.contains("SKIP"));
+        }
     }
 }
 
@@ -1237,10 +1350,15 @@ fn differential_interpreter_probe() {
 
 #[test]
 fn provider_pool_oracle_uses_the_real_hook() {
-    if !python_available() { return; }
-    let policy = OraclePolicy { context:context() };
+    if !python_available() {
+        return;
+    }
+    let policy = OraclePolicy { context: context() };
     assert_eq!(policy.window_pool("agy", ".x"), None);
-    assert_eq!(policy.window_pool("agy", "claude.weekly").as_deref(), Some("claude"));
+    assert_eq!(
+        policy.window_pool("agy", "claude.weekly").as_deref(),
+        Some("claude")
+    );
 }
 
 #[test]
@@ -1251,9 +1369,17 @@ fn exact_record_comparison_rejects_integer_float_mutants() {
 
 #[test]
 fn display_review_regression_duplicate_names_and_numeric_signed_out_history() {
-    if !python_available() { return; }
-    let s = snapshot("claude", "a", vec![window("same", 10.0, Some(10080.0), Some(518400.0)),
-        window("same", 80.0, Some(300.0), Some(7200.0))]);
+    if !python_available() {
+        return;
+    }
+    let s = snapshot(
+        "claude",
+        "a",
+        vec![
+            window("same", 10.0, Some(10080.0), Some(518400.0)),
+            window("same", 80.0, Some(300.0), Some(7200.0)),
+        ],
+    );
     compare_report(&[s], &context());
     for observed in [json!(1792735200), json!(1792735200.5), json!(0), json!("")] {
         let mut s = snapshot("claude", "a", vec![]);
@@ -1265,7 +1391,9 @@ fn display_review_regression_duplicate_names_and_numeric_signed_out_history() {
 
 #[test]
 fn display_review_regression_empty_reset_cell_is_a_dash() {
-    if !python_available() { return; }
+    if !python_available() {
+        return;
+    }
     let mut s = snapshot("claude", "a", vec![window("w", 10.0, Some(300.0), None)]);
     s.windows[0].reset_at = Some(String::new());
     let r = compare_report(&[s], &context());
@@ -1276,21 +1404,38 @@ fn display_review_regression_empty_reset_cell_is_a_dash() {
 #[test]
 fn display_review_regression_window_label_uses_python_digit_classes() {
     let labels = BTreeMap::new();
-    for (name, expected) in [("½h", "5-hour (½h)"), ("²h", "5-hour (²h)"),
-        ("١h", "5-hour"), ("123h", "5-hour"), ("weekly:Ⅻ", "5-hour (Ⅻ)"),
-        ("weekly:²", "5-hour"), ("weekly:١", "5-hour"), ("weekly:123", "5-hour")] {
-        assert_eq!(window_label(&window(name, 10.0, Some(300.0), None), &labels), expected, "{name}");
+    for (name, expected) in [
+        ("½h", "5-hour (½h)"),
+        ("²h", "5-hour (²h)"),
+        ("١h", "5-hour"),
+        ("123h", "5-hour"),
+        ("weekly:Ⅻ", "5-hour (Ⅻ)"),
+        ("weekly:²", "5-hour"),
+        ("weekly:١", "5-hour"),
+        ("weekly:123", "5-hour"),
+    ] {
+        assert_eq!(
+            window_label(&window(name, 10.0, Some(300.0), None), &labels),
+            expected,
+            "{name}"
+        );
     }
 }
 
 #[test]
 fn worst_headline_without_binding_is_an_explicit_python_bug_divergence() {
-    if !python_available() { return; }
-    let mut s = snapshot("claude", "a", vec![window("advisory", 10.0, Some(300.0), Some(3600.0))]);
+    if !python_available() {
+        return;
+    }
+    let mut s = snapshot(
+        "claude",
+        "a",
+        vec![window("advisory", 10.0, Some(300.0), Some(3600.0))],
+    );
     s.windows[0].advisory = Some(true);
     let mut c = context();
     c.settings = json!({"menubar":{"headline":"worst"}});
-    let policy = OraclePolicy { context:c.clone() };
+    let policy = OraclePolicy { context: c.clone() };
     let mut row = describe(&policy, &c, &s, None, now()).unwrap();
     // A usable-looking account whose policy has no binding row.
     row.state = "unknown".into();

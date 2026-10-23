@@ -221,7 +221,9 @@ pub fn from_timestamp(seconds: f64) -> Result<Timestamp, crate::QuotaError> {
     }
     let micros = (seconds.trunc() as i64)
         .checked_mul(1_000_000)
-        .and_then(|whole| whole.checked_add((seconds.fract() * 1_000_000.0).round_ties_even() as i64))
+        .and_then(|whole| {
+            whole.checked_add((seconds.fract() * 1_000_000.0).round_ties_even() as i64)
+        })
         .ok_or(crate::QuotaError::TimeRange)?;
     Timestamp::from_microsecond(micros).map_err(|_| crate::QuotaError::TimeRange)
 }
