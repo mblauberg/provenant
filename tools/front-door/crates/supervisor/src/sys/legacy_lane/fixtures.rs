@@ -68,14 +68,14 @@ pub fn independent_start() -> String {
     };
     #[cfg(target_os = "linux")]
     let epoch = {
-        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
         let start = stat[stat.rfind(") ").unwrap() + 2..]
             .split_whitespace()
             .nth(19)
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        let boot = fs::read_to_string("/proc/stat")
+        let boot = std::fs::read_to_string("/proc/stat")
             .unwrap()
             .lines()
             .find_map(|s| s.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))
@@ -87,7 +87,7 @@ pub fn independent_start() -> String {
     };
     // SAFETY: localtime_r writes only to our live tm; strftime writes at most
     // the provided buffer length and receives a NUL-terminated format.
-    let start = unsafe {
+    unsafe {
         let epoch = epoch as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         assert!(!libc::localtime_r(&epoch, &mut tm).is_null());
@@ -95,8 +95,7 @@ pub fn independent_start() -> String {
         let n = libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm);
         assert!(n > 0);
         String::from_utf8_lossy(&buf[..n]).into_owned()
-    };
-    start
+    }
 }
 pub fn inherit_ignored_signals(command: &mut Command) {
     // SAFETY: the closure calls only async-signal-safe libc functions after
