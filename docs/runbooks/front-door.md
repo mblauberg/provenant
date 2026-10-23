@@ -36,9 +36,33 @@ the selected product checkout.
 
 ## Rebuild after a source change
 
-Changing anything under `tools/front-door/` makes the installed binary stale.
-`scripts/check-provenant-install.py` fails with "built from different sources".
-Re-run `scripts/install-harness --platform <platform>`.
+The install digest covers the whole `tools/front-door/` workspace, including
+libraries that the binary does not yet link. Inputs are hashed in this order:
+
+1. `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`,
+   when present, in that order.
+2. The remaining inputs in workspace-relative POSIX path order: root `build.rs`
+   and `src/**`, plus each `crates/*/Cargo.toml`, its sibling `build.rs`, and
+   `src/**`. Every Rust source (`*.rs`) anywhere under a workspace package also
+   counts, covering custom target and build-script paths. All files under
+   `src/` count, including help text and other assets, except dotfiles such as
+   `.DS_Store` or editor swap files and `~` backups.
+
+Each file contributes UTF-8 `path\0byte-length\0` followed by its unchanged
+bytes. Paths are relative to `tools/front-door/`; filesystem traversal order
+and checkout location do not affect the hash. This follows the workspace
+layout fixed by [PORTING.md R2](../specs/rust-port/PORTING.md#r2-one-workspace-one-front-door-libraries-by-responsibility).
+Build output under `target/` and files such as READMEs are excluded. Widening
+the digest to the workspace makes every existing install stale once; re-run
+the installer after upgrading.
+
+Changing, adding, renaming or removing an input makes the installed binary
+stale. `scripts/check-provenant-install.py` fails with "built from different
+sources". Re-run `scripts/install-harness --platform <platform>`.
+
+The builder and checker use `scripts/lib/front_door_build.py` for the digest;
+Rust embeds that value through `PROVENANT_FD_SOURCE_SHA256`. The identity line
+and managed-file marker retain their existing format.
 
 ## Supply a prebuilt binary
 
