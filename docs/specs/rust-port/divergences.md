@@ -1468,3 +1468,59 @@ checks its exact output spelling. Rust `panel_shortfall` is public and supports
 all positive u64 minima. Already-decoded values cannot recover integers lost
 by an unchecked caller; raw input must use the checked boundary. This is the
 PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
+### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
+
+- Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
+  rulebook v4. `process_info.processes()` consumes the `/proc` iterator outside
+  its open-error fallback. A later iteration OSError propagates to callers.
+- Rust used `ReadDir::flatten()`, silently converting an incomplete census to
+  success. It now preserves the underlying I/O error through the observation
+  decoder. A fixture with one readable PID followed by EACCES failed before
+  repair and passes afterwards; it runs on macOS as well as Linux.
+- No intentional source behavior change. The wider RP-1302 fallback error and
+  size-bound differences remain open; this does not complete the unit.
+
+### RP-SUP-PS-BUFFER: Fabric ps maxBuffer capture (open partial scope)
+
+- Class: `library`; not accepted. Source/oracle baseline:
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`, Node 24.21.0, rulebook v4.
+- Node `execFileSync` uses a pipe and exposes overflow-buffer bytes plus
+  `code`, `status`, `signal` and `stdout` on ENOBUFS. A 1,048,577-byte fixture
+  exposed status 0 and 1,048,577 captured bytes. The Rust utility runner uses
+  a file-backed spool, polls its size and retains a capped head/tail view.
+  It can overshoot the threshold on disk between polls and does not reproduce
+  Node's exact overflow stdout or associated termination observation.
+- Native review reproduced the mismatch and blocked a full claim for
+  `runtime/fabric/src/ps.mjs#unit-01`. Typed child errors now retain code,
+  exit status separately from signal, stdout size and truncation evidence;
+  signal/timeout fixtures compare directly against Node. This does not fix
+  the remaining maxBuffer mismatch. Signal-name mapping currently covers
+  common POSIX signals; platform-specific extensions also remain incomplete.
+- Disposition: keep the unit partial and absent from `ported.txt`/PR `Units:`.
+  No command uses the crate. Completing the unit requires a bounded pipe
+  adapter and exact overflow/failure differentials before cut-over; no
+  behavior change is accepted here.
+
+### RP-SUP-FS-ERRNO: portable filesystem error contract (fixed)
+
+- Class: `bug`; ungraphed supervisor filesystem foundation, PR #1328 repair.
+  Author route: `codex/gpt-6.1-sol@high`. Main baseline:
+  `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
+- Reproducer: no-follow directory open on a final symlink reports ENOTDIR on
+  Linux and ELOOP on macOS. The previous tests asserted only failure, leaving
+  consumers unable to distinguish links from ordinary non-directories.
+- Fixed contract: classify ENOTDIR/ELOOP with no-follow fstatat in the syscall
+  layer; a positively observed final symlink returns typed `FsError::Symlink`
+  and canonical ELOOP. Ordinary non-directories retain ENOTDIR. `io::Error`
+  conversion preserves the resulting errno/kind; typed errors retain complete
+  anchor-relative diagnostics. Observed anchor-device crossings report EXDEV.
+- Evidence: `directory_symlinks_have_a_portable_typed_errno_and_nested_context`,
+  `typed_error_predicates_and_io_conversion_preserve_errno_and_kind`, and
+  tightened final-link/anchor fixtures assert variants and errno. Publication
+  and regular-file flag regressions cover the same repair. Required local
+  supervisor tests pass on macOS; Linux execution remains a CI gate because
+  the cross-compilation target is not installed.
+- Scope: public filesystem traits and durable publication helpers now support
+  adapters for the pending confinement/records/config/core contracts. Consumers
+  remain unchanged; no graph unit or full conformance claim is added. README
+  maps the remaining pending run and UUID contracts explicitly.

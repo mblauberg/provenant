@@ -22,6 +22,13 @@ pub enum DecodeError {
 /// Integers stay i64/u64; schema conversion is a separate caller operation.
 /// Floats remain f64; integer -0 becomes Python's integer zero.
 pub fn from_str(text: &str) -> Result<Value, DecodeError> {
+    let normalized = normalize(text)?;
+    Ok(serde_json::from_str(&normalized)?)
+}
+
+/// Validate and normalize JSON text for callers that need a custom
+/// deserializer while retaining the shared integer and negative-zero policy.
+pub(crate) fn normalize(text: &str) -> Result<String, DecodeError> {
     // Validate the grammar before scanning, including enormous integer tokens.
     serde_json::from_str::<IgnoredAny>(text)?;
     let mut normalized = String::with_capacity(text.len());
@@ -62,7 +69,7 @@ pub fn from_str(text: &str) -> Result<Value, DecodeError> {
             normalized.push_str(if token == "-0" { "0" } else { token });
         }
     }
-    Ok(serde_json::from_str(&normalized)?)
+    Ok(normalized)
 }
 
 pub fn from_slice(bytes: &[u8]) -> Result<Value, DecodeError> {

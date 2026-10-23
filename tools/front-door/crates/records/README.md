@@ -8,11 +8,17 @@ Inert library under Rust port rulebook v4 (#1297). No command uses it. Source or
 |---|---|
 | `skills/orchestrate/scripts/attempt_evidence.py#unit-01` | Success alias, digest, process/result/adapter agreement and stable refusal ordering |
 | `skills/orchestrate/scripts/attempt_storage.py#unit-01` (partial) | Bounded accounting and tmp policy; descriptor-relative deletion has a proposed anchor-escape refusal, awaiting a boundary decision |
+| `skills/deliver/scripts/delivery_run_shape.py#unit-01` | Flat receipt field/type validation, gate predicates and insertion-ordered timestamp discovery |
 | `skills/orchestrate/scripts/fabric_records.py#interface` | Serde projections, absent/null/value fields, scoped cooldown keys, index identity and store transaction contract |
 | `skills/orchestrate/scripts/layout.py#interface` | Resolved discovery inputs, shared paths, explicit-run workspace containment, run kinds, names and typed I/O contract |
 
 `#interface` claims cover typed contracts only. Existing pure helpers are
 preparatory implementations; neither file's implementation units are complete.
+
+Delivery receipt values retain JSON object insertion order so timestamp
+discovery matches Python's recursive walk. The three gate predicates copied
+into this crate are marked pending for `provenant-workflow`; the records crate
+cannot depend on workflow under the crate dependency map.
 
 | Later unit | Public implementation work still owned there |
 |---|---|
