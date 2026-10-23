@@ -1,149 +1,140 @@
 # State and config
 
-Design proposal for the workshop chair and build lanes. Author route:
-`codex/gpt-6.1-sol@high`. Governed by [PORTING v7](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md), especially
-R0, R1 and R9, the [rewrite plan](../README.md), and the dependency allowlist in
-[ADR 0028](../../../adr/0028-rust-port-dependencies.md). The command surface
-below is a proposal for the command-tree freeze in `design/cli.md`.
+Design for the workshop chair and Rust build lanes. Author route:
+`codex/gpt-6.1-sol@high`. [PORTING v7](../PORTING.md), the
+[rewrite plan](../README.md) and the binding
+[cross-area decisions](README.md#cross-area-decisions) govern this design.
+State publishes the frozen paths and flags below; other areas cite this
+contract. CLI owns command rendering and exit codes.
 
-## Purpose and decisions
+## Purpose and feature decisions
 
-`provenant-core` gives every area the same identities, root and path values,
-and explicit time values. `provenant-records` owns bounded codecs, canonical
-bytes and digest contracts. `provenant-config` resolves typed configuration
-and profiles, and installs the binary, skills, MCP registrations and hooks
-without claiming the user's other files. Start with fresh state at
-`~/.local/share/provenant/v1`, use TOML for Provenant configuration, and keep
-runtime records in JSON. Other areas consume these APIs instead of discovering
-roots or reimplementing codecs. Core performs no filesystem, environment,
-clock, entropy or process access.
+`provenant-core` supplies identities, paths and explicit time/cancellation
+values. `provenant-records` supplies bounded codecs, canonical bytes, digests
+and shared transport models. `provenant-config` loads typed configuration and
+installs the binary, assets and harness entries. Core has no filesystem,
+environment, clock, entropy or process access.
 
-## Evidence and feature decisions
+Source material is the installation/configuration scripts, `scripts/lib/`,
+`skills/_shared/`, `config/`, their tests and the inert Rust crates at
+`1b3d48e4c549811ce3636edc30b047f36fd24ada`. The usage audit found installation,
+root lookup and builds in executable shell-tool positions, but no executed
+profile set/use/reset or per-knob environment overrides. No
+`harness-profile.json` exists. The old layering machinery is not a product
+requirement.
 
-The source baseline is commit `1b3d48e4c549811ce3636edc30b047f36fd24ada`.
-Read material includes `scripts/lib/`, installation/configuration scripts and
-their tests, `skills/_shared/harness_profile.py`, `config/`, `schemas/`, and
-the inert Rust in core, records and config. Tests describe hazards to address;
-they do not dictate the new interface. There is no top-level `install-harness`
-file at this baseline; its implementation is `scripts/install-harness`.
-
-The usage check on 23 October 2026 selected 69 Claude project transcripts and
-287 Codex sessions with a Provenant working directory. It counted executable
-positions in shell-tool calls, excluding prose, edits, reads and test names:
-Claude/Codex respectively ran `install-harness` 4/6 times and `provenant root`
-1/13 times; Claude ran the MCP configurer once and binary installer twice;
-Codex ran `provenant profile show` once and the builder three times. This is
-local observed use, not a fleet-wide absence claim. Reproducible record anchors
-(no transcript contents are bundled): Claude session
-`1c21e420-fb1c-4a3f-be95-eb42e8489edb` records 256/4354/9263 (install), 4411
-(MCP), 308 (publish), 13855 (root); Codex sessions
-`01a1625b-3ff9-7d60-8461-04a6be1fc14e` records 69/106/161 (build),
-`01a167a6-ebe1-70e2-bdb9-f92539427952` record 279 (root), and
-`01a162a9-09dc-7b33-a80a-d57571bd811f` record 498 (profile).
-
-| Keep | Evidence and smaller implementation |
+| Keep | Implementation |
 | --- | --- |
-| One root resolver and explicit project identity | `tools/front-door/src/resolve.rs`, `skills/_shared/roots.py` and its deliver/implement/session callers need a consistent product/state distinction. Resolve once at the binary edge and pass values. |
-| Stable local host identity | `scripts/host_identity.py` is called by Fabric hosts, provider identity and telemetry. Persist a random ID once; a hostname is a display label, not an identity or an alias. |
-| Skill ownership, reconciliation and conflict refusal | `scripts/manage_installation.py`, `scripts/install-skills`, the installation tests and `MAINTAINING.md` require preservation of unmanaged entries. Use one per-entry layout and one installation receipt. |
-| Source identity and prebuilt validation | `scripts/install-harness` and `scripts/check-provenant-install.py` call `scripts/lib/front_door_build.py`; it already covers workspace members. Keep a complete source digest and bounded smoke check. |
-| Six harness registration shapes | `scripts/configure-fabric-mcp.py` and `scripts/install-harness` have concrete Claude, Codex, OpenCode, Agy, Cursor and Kiro callers and tests. Share one planner with format-specific editors; explicit selection replaces auto-detection. |
-| Executable profile controls and review settings | `dispatch_run.py`, `provider_exec.py`, `batch_run.py`, `model_route.py` and `model_route_pools.py` consume profile values; code-review and implement skills read the review settings. Preserve the eight settings listed below, even if nobody invokes their editing CLI directly. |
-| External YAML subset | Tracked `SKILL.md` and `agents/*.yaml` are harness inputs. Retain the ADR subset, with tracked-file coverage, independent of old PyYAML behaviour. |
+| One root resolver, host and project identities | Resolve at the binary edge; pass typed values. Persist random host-local IDs once; hostnames are labels. |
+| Source identity and managed installation | One release manifest, one receipt, per-entry skill links and conflict refusal. Explicit harness selection; preserve unmanaged files. |
+| Five live harness registrations | Claude Code, Codex, Cursor, Agy and OpenCode have active surfaces. Format-specific editors share one planner. |
+| Compiled presets and typed TOML | Optional user `profile =`; read-only `config show` and `config check`. Domain owners supply policy types and defaults. |
+| External YAML subset | Agent Skills frontmatter and `agents/*.yaml` stay external inputs under ADR 0028. |
 
-| Drop | Evidence and consequence |
+| Drop | Reason and consequence |
 | --- | --- |
-| Fused/split instance modes, seeded copies of routing defaults, desired-state projections and three-way routing refresh | These exist to maintain two roots and copied catalogues in `instance_installation.py`. Fresh state and compiled defaults plus an explicit user overlay remove that problem. An old `--refresh-routing` invocation establishes an upgrade need, not a need for the merge algorithm. |
-| Old root pointers, `AGENTS_HOME`, `AGENT_FABRIC_*` root fallbacks and stale-checkout warnings on every command | They locate Python/TS owners in a mutable checkout (`src/resolve.rs`, `src/stale.rs`, `lib/stale_checkout.py`). The new installed binary executes its own owners. `install check --source` detects source drift explicitly; help/root never runs Git. |
-| Whole-directory skill links, `_shared` Python libraries and custom-skill projection/migration | The extra layout and migration branches exist in `_migrate_directory_link` and `install-skills` to accommodate helpers/custom content. One managed link per product skill leaves user skills in place; users install their custom skills themselves. Do not read old receipts to reconstruct ownership. |
-| Legacy Claude-agent and Agy receipt cleanup | `_retire_legacy_agents` and `check-legacy-agy` are historical upgrades. R1 forbids an old-state cleanup pass. Leave old files untouched. |
-| Advisory-only knobs: `repair.max_cycles`, `council.junior_size`, `writing.final_polish`, `context.summary_tokens`, `quota.pace_tolerance` | All five are marked `advisory` in `config/harness-knobs.json`; their named readers use fixed constants or prose rather than resolved values. Remove the ineffective config surface; domain owners retain real policy. |
-| Lenient profile fallback and per-knob environment variables | `harness_profile.lenient/value` can silently substitute defaults after malformed policy; dispatch stamps errors after continuing. Resolve strictly before admission. Pass a typed resolution to routing/run instead of exporting and reparsing `PROVENANT_KNOB_*`. |
-| Python/V8 emulation, differential oracles and `pending` copies | These crates are explicitly inert; R0 rejects runtime-language emulation. Unicode tables, surrogateescape ordering, Python errors/repr/numbers, JS coercion and duplicate ordered JSON disappear. |
-| Separate installer flags for Python/Node dependency provisioning, JS workflow installation and OTel service installation | `install-harness` provisions runtimes and invokes `install-workflows`/`install-otel-collector`; R2/R5 require one executable and no daemon. Workflow owns retirement/replacement of the JS workflows; telemetry owns collector retirement. This installer installs neither. |
-| Automatic disabling of Codex's bundled `skill-creator` | `configure-codex-skill-overrides.py` implements a product preference, not MCP/hook registration. Leave another tool's skill choice to the user; no new override is written. |
+| Fused/split roots, root pointers, seeded defaults and three-way refresh | Fresh state and immutable release assets remove copied catalogue reconciliation. No `AGENTS_HOME`, `AGENT_FABRIC_*` root fallback or per-command stale-checkout probe. |
+| Profile mutation, overlays and knob registry | No `config set/reset/profiles`, project `.provenant.toml`, task-class tables, `PROVENANT_PROFILE` or `PROVENANT_KNOB_*`; no strengthen-only re-resolution. Domain policy still enforces authority, confinement and review minima. |
+| Generic installer transactions | No bundle/plan/apply/recover commands, plan digest, rollback journal, exchange primitive or binary backup. Re-apply `install` after failure; rollback reinstalls `pre-rust-rewrite`. |
+| Kiro registration | No observed use; do not carry another unsupported client. |
+| `_shared`, JS workflows and old link layouts | Replace retained skills individually; remove exact retired links at cut-over. Do not migrate custom skill contents or read old receipts. |
+| Runtime provisioning, OTel service installation and Codex skill overrides | Product needs no Python/Node/daemon. Telemetry retires the collector; leave another tool's skill preferences alone. |
+| Python/V8 emulation, differential oracles and `pending` copies | R0 requires a new design, not runtime-language compatibility. |
 
-Do not drop confinement or custody controls because they lack direct CLI use.
-The CLI area decides which hook behaviours survive; this area owns their
-registration, safe editing and removal, not their policy.
+CLI owns which hook behaviours survive; config owns their registration and
+removal. Confinement and custody requirements do not depend on CLI usage.
 
-## Roots, records and configuration
+## Frozen paths and root selection
 
-### One state layout
+| Input or path | Contract |
+| --- | --- |
+| Default root | `~/.local/share/provenant/v1`, one root per host on macOS and Linux |
+| Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then default; empty or relative explicit values fail. No XDG/old-root fallback. |
+| User config | `<state>/config.toml`; optional, user-owned, only configuration file |
+| Host identity | `<state>/state.json` |
+| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/lock` |
+| Immutable release | `<state>/releases/<SourceDigest>/{provenant,release.json,assets/}` |
+| Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
+| Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
+| Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |
+| Fabric | `<state>/fabric/`; fabric-store owns its database and companions |
+| Other owners | `<state>/projects/<ProjectId>/workflow/`, `<state>/quota/`, `<state>/routing/`; owners define retention and record bodies |
+| Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |
 
-`--state-dir ABS` overrides `PROVENANT_STATE_DIR`, otherwise use the default
-above, on both macOS and Linux. Empty/relative explicit values are errors.
-There is no XDG or old-root fallback. The binary captures environment and home
-once; core resolves supplied values without I/O. Reject a state root equal to
-home or filesystem root, equal to or beneath any legacy state root, or equal to or beneath the product checkout. Resolve the
-existing ancestor/any symlink aliases before testing containment; when a root
-is missing, check the canonical parent plus normal relative tail. Named legacy
-roots include `~/.agents`, each selected workspace's `.agent-run`,
-`~/.local/state/agent-harness`, `~/.local/state/provenant`, and explicitly
-configured old roots. Also reject any `.agent-run` component in either the
-requested or canonical state path, even without a selected workspace. Guard
-equality as well as descendants; never initialise through a legacy-root alias.
-A missing root stays missing for reads, help and `root`; mutating commands
-initialise it explicitly with private permissions (directories 0700, files
-0600; installed executable 0755).
+There is no telemetry ledger subtree: `telemetry stats` reduces run's terminal
+records using the bundled TOML price asset. No telemetry import or source-store
+mutation is installed here.
 
-```text
-<state>/
-  state.json                       # StateHeader: schema_version=1, HostId
-  config.toml                      # optional, user-owned configuration
-  install/
-    current.json                   # completed InstallReceipt
-    transactions/<InstallId>.json  # resumable journal, paths/digests/owned edits
-    locks/                         # supervisor-owned OS lock anchors
-  releases/<SourceDigest>/         # immutable binary + product skills/assets
-    provenant
-    assets/
-  projects/<ProjectId>/
-    project.json                   # canonical repository/workspace binding
-    runs/<RunId>/                  # run owner: tasks, attempts, output, scratch
-    workflow/                      # workflow owner: delivery evidence
-  fabric/fabric.sqlite3            # Fabric owner, with its SQLite companions
-  telemetry/                       # telemetry owner: ledger and imports
-  quota/                           # quota owner: snapshots and cooldown state
-  routing/                         # routing owner: bounded discovery cache
-  imports/<ImportId>.json           # source fingerprint and import outcome
-  tmp/                             # per-operation scratch, never a global purge
-```
+Capture home/environment once. Core selects paths from supplied inputs;
+supervisor binds canonical directories and checks containment. Reject roots
+equal to home or filesystem root, or equal to/beneath the product checkout or
+any legacy root: `~/.agents`, `~/.local/state/agent-harness`,
+`~/.local/state/provenant`, selected workspaces' `.agent-run`, and explicitly
+supplied old roots. Reject any `.agent-run` path component even without a
+workspace. Resolve existing ancestor aliases and append only a normal missing
+tail; lexical checks alone cannot protect filesystem access. Never initialise
+through a legacy alias. Do not open legacy root contents to test containment.
 
-Each area owns its children and retention. Nothing writes `.agent-run/`,
-`~/.agents`, old telemetry/Fabric stores or harness transcripts. Config never
-opens SQLite. Fabric/quota/telemetry choose their own record bodies and DB
-schema versions; they use this root and the common IDs/codecs. Locks refer to
-one canonical root, so aliases cannot create two writers. No whole-root
-sweeper is introduced.
+Reads, help and `root` do not create state. Mutations initialise explicitly:
+directories 0700, files 0600, executable 0755. Config never opens SQLite.
+Each owner uses supervisor's safe locks and filesystem publication. Aliases
+bind to the same canonical lock; no whole-root sweeper is introduced.
 
-`StateHeader`, `ProjectBinding`, `InstallReceipt`, `InstallJournal`,
-`ImportReceipt` and `ProfileStamp` are typed records with integer
-`schema_version = 1`, closed enums and `deny_unknown_fields`. Unknown major
-versions fail before mutation; missing files have only the documented defaults.
-A successful operation never rewrites an unrecognised version. Domain record
-owners specify their own extension policy; there is no generic untyped bag.
+### Identities and time
 
-IDs are distinct Rust newtypes over 16 supplied random bytes, represented as
-32 lowercase hex digits, with typed field names rather than a stringly ID
-registry. Supervisor supplies entropy; core validates/formats it. HostId is
-created under the state initialisation lock and never changes with hostname.
-ProjectId is randomly allocated once per canonical Git common-directory
-binding; linked worktrees share it but retain separate workspace bindings and
-writer leases. Non-Git workspaces bind their canonical directory. Discovery
-and locking happen outside core. Rebinding a moved repository is explicit
-Fabric/project work, never a heuristic match of remote URLs.
+IDs are distinct newtypes over 16 supplied random bytes, formatted as 32
+lowercase hex digits. Supervisor supplies entropy. State initialisation
+persists `HostId` once under lock. `ProjectId` is **host-local**, randomly
+allocated per canonical Git common directory; linked worktrees share it but
+have separate `WorkspaceId` bindings and writer leases. Non-Git workspaces
+bind their canonical directory. It is never a federation key.
 
-`WallTime` uses UTC integer microseconds and a single `Z` RFC3339 rendering;
-`MonoTime`/durations are integer values scoped to a process, never persisted
-as cross-process deadlines. Callers provide both clocks. Reject overflow and
-invalid timestamps; do not reproduce Python's permissive date parser. Keep
-filesystem paths as `PathBuf`/`OsString`. When a durable Unix path needs text,
-use a tagged `PathWire` (`utf8` string or lowercase hex native bytes), never
-lossy conversion. Provider protocols requiring UTF-8 receive a typed error.
-Relative record paths reject absolute components, `.` and `..`; supervisor
-performs no-follow, handle-based containment, since lexical checks alone are
-not a security boundary.
+Config owns `bind_project(roots, ProjectLocation, SafeFs) -> ProjectBinding`:
+under a project-binding lock it finds or creates the canonical binding.
+Confinement owns Git discovery via supervisor's fixed `run_utility` Git reads
+(primary/linked/non-Git fixtures); core does no Git work. Fabric-runtime owns
+`bind_federated_project(ProjectBinding, CrossHostProjectKey)` and the key's
+validation, persistence and peer mapping. Equal remote URLs do not silently
+merge identities. Moves/rebinding require an explicit project operation.
+
+`ActorId` identifies an attributed actor, not authority or a model route;
+fabric-runtime resolves external addresses to a host-qualified actor.
+`WorkScope` is a closed enum: `Project(ProjectId)`,
+`Workspace { project: ProjectId, workspace: WorkspaceId }`, or
+`Run { project: ProjectId, run: RunId }`. Domain boundaries validate membership.
+`CancelToken` is a cloneable, in-memory cooperative flag (`Arc<AtomicBool>`)
+with `cancel()` and `is_cancelled()`; it is neither serialised nor a provider
+signal. Run/supervisor decide any permitted stop under their custody rules.
+
+`WallTime` (`UtcMicros`) is UTC integer microseconds with one RFC3339 `Z`
+rendering. `MonoTime`, `DurationMicros` and `Deadline` use checked integer
+arithmetic; monotonic values are process-local and never persisted as a
+cross-process deadline. Core owns `Clock { wall_now(), mono_now() }` and the
+time values; supervisor owns production `SystemClock` using `jiff` for wall
+time and `std::time::Instant` for elapsed time. Tests inject a fake clock.
+Supervisor's state machine receives sampled values, never reads the clock.
+
+`GitOid` is `Sha1([u8; 20]) | Sha256([u8; 32])`;
+`GitOid::parse(&str)` accepts complete 40/64 hexadecimal digits, emits lowercase
+and rejects abbreviations or other lengths. Git discovery supplies the
+repository's object format and validates the variant. This is distinct from
+Provenant's SHA-256 `Digest`.
+
+Paths stay `PathBuf`/`OsString`. Durable Unix paths use tagged `PathWire`
+(`utf8` or lowercase hex native bytes), never lossy conversion. Protocols
+requiring UTF-8 fail explicitly. `RelativePath` rejects absolute components,
+`.` and `..`; supervisor enforces no-follow, handle-based containment.
+
+### Record models
+
+`StateHeader`, `ProjectBinding`, `InstallReceipt` and `ImportReceipt` are
+stored typed serde models with `schema_version = 1`, closed enums and
+`deny_unknown_fields`. Unknown major versions fail before mutation; absence
+has only documented defaults. Domain owners choose their own extension rules.
+Persisted models can derive `Serialize, Deserialize`; facts built only by
+trusted edge code derive **Serialize only** (including workflow validation
+facts and run's `AttemptFact`). Decode a separate stored record and validate
+it before constructing a fact; deserialisation cannot manufacture evidence.
 
 ### Codecs and canonical bytes
 
@@ -170,7 +161,7 @@ is a Provenant contract, not a claim of RFC 8785 compatibility.
 `"provenant-record\0"`, the kind, NUL, decimal schema version, NUL, then canonical
 bytes; represent the full digest as `sha256:<64 lowercase hex>`. File digests
 hash exact raw bytes with a separate `FileDigest` type. Never use a display
-prefix as an identity. Attempt receipts, profile stamps and install receipts
+prefix as an identity. Attempt records and install receipts
 call this owner rather than depending on map iteration or Python JSON output.
 Domain owners decide which fields enter each digest.
 
@@ -187,376 +178,301 @@ parse only that bounded block. Sidecars parse as a complete document.
 Limit external YAML to 256 KiB, depth 32 and 10,000 nodes. The workflow skill
 validator owns allowed metadata keys; records owns syntax, not skill policy.
 
-### TOML and profiles
+### Configuration
 
-One config format: TOML, for compiled product defaults, user overrides and
-project overrides. Replace owned `config/*.json` and
-`config/adapter-compatibility.yaml` with domain-reviewed TOML sections; domain
-owners define routing, prices, graph and delivery bodies. JSON remains a wire
-and record format, not an alternative config syntax. Defaults are bundled
-with the release, not copied into mutable state on each installation.
+Use `toml_edit` with its R6-approved `serde` feature to load one strict typed
+`<state>/config.toml`. Files declare `schema_version = 1`; unknown keys,
+duplicates, bad types/ranges and unsupported versions fail. Absent means
+compiled defaults; unreadable/malformed means error. No include,
+interpolation, executable configuration or automatic migration.
 
-Load only `<state>/config.toml` and, when a project is selected,
-`<workspace>/.provenant.toml`. No ancestor walk outside the selected workspace,
-include directive, interpolation, executable config or automatic old-file
-migration. Parse with toml_edit into a validated typed model; no new dependency
-or feature expansion is required. All config documents declare
-`schema_version = 1`. The top-level optional `profile` selector is an enum
-(`balanced`, `economy`, `rigorous`), separate from the eight settings under
-`[knobs]`; `[task_classes.<class>]` can name its own `profile` and has an
-optional `[task_classes.<class>.knobs]` table.
-`config set profile=NAME` edits this selector; other profile keys address
-`knobs.<name>`. Domain sections have their own typed fields. Unknown keys,
-duplicates, bad types/ranges and unsupported versions fail. Files absent means defaults; unreadable/malformed means error.
-`config show` exposes provenance of resolved non-secret settings.
+The optional `profile = "balanced" | "economy" | "rigorous"` selects one
+compiled preset; omission selects `balanced`. Keep the preset behaviours as
+small TOML assets: balanced defaults; economy concurrency cap 4, context cap
+200,000 and weighted pool rotation; rigorous effort +1 except mechanical/bulk,
+one additional review, cross-family required and full re-review. Domain
+owners validate those values and enforce their minima. The config crate
+loads/validates user domain sections over the selected compiled defaults once;
+there is no profile layering, per-request profile selector or generic knobs
+API. A preset never grants authority or a provider stop reason.
 
-Resolution order, low to high: built-in defaults, the highest selected preset,
-user fields, project fields, `PROVENANT_PROFILE`, explicit CLI/request fields.
-The environment selector only selects the preset; it does not erase explicit
-user/project values. Within each file, the selected task-class section wins
-over its general section. Select the highest named preset first, apply its
-general/task-class values once, then overlay explicit fields. Request fields
-are typed input, never mutated process environment. A project can only set
-allowlisted task behaviour and strengthen review; it cannot choose state,
-installation paths, peer credentials, executable/provider commands or authority.
-Re-resolve review settings without the project and take the stronger result;
-apply risk-tier and task-class minima last. A profile cannot grant authority,
-lower the review ladder or turn silence into a stop reason.
+Catalogue, adapter table and prices ship as TOML release assets, never copied
+into mutable state as defaults. Config owns section types to avoid dependency
+cycles; routing/providers/quota/workflow validate semantics. Telemetry owns
+the price schema and its replacement of `config/telemetry-prices.json` by a
+TOML asset. `config show` returns effective non-secret values and origins;
+`config check` validates without mutation or provider access. There are no
+config/install MCP tools. Processes use an immutable startup snapshot.
 
-Keep presets `balanced` (defaults), `economy` (concurrency 4, context ceiling
-200,000, weighted pool rotation), and `rigorous` (effort +1, one extra review,
-cross-family required, full re-review; no effort increase for mechanical/bulk).
-Keep only these settings, with existing useful bounds:
+## Commands and installation
 
-| Setting | Default and bound | Consumer |
-| --- | --- | --- |
-| `effort.shift` | 0; -1..1; floor 0 for crucial/terminal | routing, constrained by model/task minimum |
-| `lanes.silence_seconds` | 300; 1..3600 | supervisor/run observation only |
-| `lanes.max_concurrency` | 8; 1..8 | run; cap the requested concurrency |
-| `context.ceiling_tokens` | omitted = catalogue; 100,000..1,000,000 when set | providers/run |
-| `review.extra_reviewers` | 0; 0..2, added to the ladder | workflow |
-| `review.cross_family` | `prefer` or stronger `require`; default `prefer` | workflow |
-| `review.rereview_scope` | `delta` or stronger `full`; default `delta` | workflow |
-| `routing.pool_mode` | `top` or `rotate`; default `top` | routing |
+CLI's [binding command contract](README.md#cross-area-decisions) supplies the
+JSON envelope (`schema_version`, `command`, `status`, `data`, `error`), 1 MiB
+result cap and exit mapping. Config returns typed outcomes. Install success
+or no-op is `ok`; drift is findings; foreign selectors are refused; malformed
+input is invalid; I/O or lock contention means cannot proceed. After a partial
+write, `data` lists completed/remaining actions and a re-apply instruction;
+CLI maps the underlying failure to its existing code, never exit 4. JSON
+stdout is one result; diagnostics are bounded stderr. Harness changes are
+printed before applying (stderr preview in JSON mode, final actions in data).
+A failed preview stream prevents writes.
 
-Omission represents optional defaults in TOML; no string `null` coercion.
-A `ProfileStamp` carries selected preset, task class, risk tier, effective typed
-values, floor adjustments and their full canonical digest. Provenance is
-reported separately and excluded from the behaviour digest. Routing and run
-consume the same immutable resolution and stamp it once per attempt.
+| Command | Inputs and behaviour |
+| --- | --- |
+| `root` | `--kind state\|assets\|project` (default state). Project requires `--project ABS` and prints that selection without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
+| `config show`, `config check` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
+| `install [--dry-run]` | `--source ABS` identifies a staged release; `--harness NAME` repeatable and explicit; optional `--bin-dir ABS`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validate all destinations and print every replace/remove/create before writes. Dry-run creates no root, lock or receipt. |
+| `check install` | Optional `--source ABS` source checkout for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
+| `remove` | Explicit `--harness NAME` repeatable; remove unchanged owned entries only. Keeps state, release assets, user skills/config and the running binary. No recursive deletion. |
 
-## Proposed commands and installer behaviour
+### Release identity and bootstrap
 
-All commands accept `--json` and global `--state-dir ABS`; `--project ABS`
-selects a workspace where applicable. Human output names the resolved paths,
-effective values and actions. JSON stdout is exactly one versioned result
-object (`schema_version`, `command`, `status`, `data`, `changes`, `errors`);
-stderr carries bounded diagnostics only. Changes contain path, owned selector,
-operation and safe before/after values. Errors contain stable code and path,
-not input excerpts. Exit 0 = successful/no-op, 1 = check found drift/missing
-installation, 2 = usage/invalid input or config, 3 = refusal/conflict/I/O,
-4 = partial installation requiring recovery. JSON error envelopes use the same
-exit code; clap usage errors need no result object. No aliases.
+CI/contributors build `cargo build --release --locked` in `tools/front-door`.
+A workspace `build.rs` uses records' pure source-digest module. The digest
+covers workspace/member manifests, lockfile, toolchain/config files when
+present, every member's source/build scripts and explicit bundled assets,
+including product skills/templates/instructions outside the Rust workspace.
+Hash sorted workspace-relative POSIX names, framed by big-endian u64 name
+length, name bytes, u64 content length and exact contents; prefix
+`provenant-source-v1\0`. Reject duplicate, missing or symlink/escaping inputs.
+Cargo rerun directives track additions/deletions; no digest environment override.
 
-| Command | Flags/input | Result |
-| --- | --- | --- |
-| `root` | `--kind state\|assets\|project` (default state) | One path, or typed path/identity JSON. Project requires `--project` and prints that selected directory without Git discovery; uninstalled assets is missing. No state creation, SQLite, threads or provider/Git probes. |
-| `config show` | `--task-class CLASS --risk-tier TIER --profile NAME --set KEY=VALUE` (last repeatable) | Effective non-secret configuration, per-field origin and profile stamp; safe defaults if files are absent. No raw harness config dump. |
-| `config check` | same resolution flags | Validity and bounded errors; does not call providers. |
-| `config set` | `KEY=VALUE...`, `--scope user\|project`, optional `--task-class CLASS` | Atomically edits TOML, validates the complete proposal and prints the owned-key changes. User scope default. Values use their declared type; `profile` selects a preset and `knobs.<name>` edits a retained setting. |
-| `config reset` | `KEY...`, same scope/class | Removes overrides; prints resulting changes. Unknown keys fail. |
-| `config profiles` | none | Presets, retained settings, ranges, minima and consumers. Select a persistent preset with `config set profile=NAME`. |
-| `install bundle` | `--source ABS --binary ABS --out ABS` | Verifies the stamped Cargo-built binary against source inputs and publishes a complete bundle directory, refusing an occupied output. No state/harness mutation. |
-| `install plan` | `--bundle ABS --harness NAME` (repeatable), `--bin-dir ABS` (default `~/.local/bin`), `--hooks on\|off` (default off), `--adopt-existing` | Validates bundle and selected destinations, prints precise proposed changes/conflicts and a plan digest; read-only. At least one explicit harness required; no `all` discovery. |
-| `install apply` | same flags; optional `--plan-digest SHA` | Re-plans under lock, checks supplied digest, previews human changes before publishing, then reports applied/no-op/partial results (JSON emits one final object). Refuses drift from a supplied plan. |
-| `install check` | optional `--source ABS` | Compares binary, bundle, owned registrations/hooks/skill links and receipt; source flag additionally checks source digest. Does not repair. |
-| `install remove` | `--harness NAME` (repeatable), optional `--hooks-only` | Removes only unchanged owned entries; reports conflicts. Keeps state, release bundles, user skills and config. |
-| `install recover` | `INSTALL_ID`, `--action resume\|rollback` | Reports completed and remaining operations; resumes or inverses only operations whose recorded preconditions still hold. No blind restoration of whole files. |
+Build packaging emits typed `release.json` beside `provenant` and `assets/`,
+with source digest, target triple, toolchain and bounded file inventory/digests.
+This is a build artefact, not a second executable or installer command.
+`--version --json` reports the embedded digest and record/config versions.
+Install verifies manifest, platform, file bytes and modes, then asks the
+binary composition edge to run bounded version/help smoke checks through
+supervisor (30 s, capped output, no provider access). A digest proves identity,
+not publisher trust. Runtime startup never compiles itself.
 
-There are no config/install MCP tools. Fabric MCP receives an immutable config
-snapshot at server startup; changes apply to the next process/explicit request,
-not a polling watcher. CLI owns parser/rendering and hook verbs. Config returns
-structured results, not exit codes or strings pretending to be CLI output.
+Install copies verified files into the immutable release directory, then
+atomically publishes a regular executable at the stable bin path and per-entry
+links to release skills/instructions. Re-application accepts exact desired
+bytes/links as no-ops, including writes completed before a crash. Receipt
+records release identity, resolved targets, selectors, expected owned
+values and the optional absolute `legacy_checkout` substitution root plus
+compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last. No cross-file or two-host atomicity is claimed.
 
-### Build identity and bootstrap
+### Harness registry
 
-The sole binary does not compile itself during ordinary startup. CI or a
-contributor runs `cargo build --release --locked` from `tools/front-door`;
-a new Rust workspace `build.rs` computes the source stamp through a shared
-pure records digest module also used by install checking. Build scripts may
-use allowed workspace build-dependencies; none introduces a second executable
-or OS process owner. Cargo is the build tool, not a runtime dependency.
+Defaults below derive from each selected harness home. Typed user-only
+`[install.targets.<harness>]` may override absolute home/config paths;
+`[install]` may set `bin_dir`. Explicit flags win over config, which wins over
+documented `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, then defaults. Other legacy
+environment overrides disappear. Paths are resolved once and shown in the
+preview/receipt; they cannot be changed by a project/request.
 
-The v1 source digest hashes a sorted list of workspace-relative POSIX names:
-workspace/member manifests, Cargo.lock, rust-toolchain.toml, `.cargo/config.toml`
-when present, every member's source and build scripts, and bundled assets.
-Frame each input with big-endian u64 path length, path bytes, big-endian u64
-content length, exact contents. Prefix with `provenant-source-v1\0`. Hash all
-members, including unlinked members. Reject symlinked/escaping inputs, duplicate
-paths and a missing manifest/lockfile. Ignore target outputs and editor litter;
-track the input manifest in the bundle. Product policies, templates and skills
-are explicit bundle inputs even when stored outside the workspace. They are
-hashed by this same manifest, not an undocumented include-file discovery walk.
-Cargo rerun directives cover files and input directories so additions/deletions
-also invalidate the stamp; ignore the old `PROVENANT_FD_SOURCE_SHA256` override.
+| Harness | MCP file and owned selector | Hook file | Skills directory | Instruction path |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude.json`: `mcpServers.fabric`, stdio command/args/env | `~/.claude/settings.json`: owned command leaves in `hooks.<event>[]` | `~/.claude/skills/` | `~/.claude/CLAUDE.md`, companion `HARNESS.md` |
+| Codex | `~/.codex/config.toml`: `[mcp_servers.fabric]`, command/args/env | `[features] hooks = true` in config plus `~/.codex/hooks.json`; own only required feature/command entries | `~/.codex/skills/` | `~/.codex/AGENTS.md`, companion `HARNESS.md` |
+| Cursor | `~/.cursor/mcp.json`: `mcpServers.fabric` | No supported hook registration | `~/.cursor/skills/` | No global instruction entry in existing installer; manual include until fixture-proven |
+| Agy | `~/.gemini/config/mcp_config.json`: `mcpServers.fabric` | No supported hook registration | `~/.gemini/skills/` | `~/.gemini/GEMINI.md`, companion `HARNESS.md` |
+| OpenCode | `~/.config/opencode/opencode.jsonc`: `mcp.fabric`, `type="local"`, command array/environment | No supported hook registration | `~/.config/opencode/skills/` | `~/.config/opencode/AGENTS.md`, companion `HARNESS.md` |
 
-The bundle manifest records source digest, target triple, toolchain, asset
-inventory and file digests; binary `--version --json` reports its embedded
-source digest and record/config versions. A source match is identity, not a
-signature or proof of a trusted publisher. `install plan` verifies manifest,
-platform, bytes and executable mode, then supervisor runs bounded
-`--version --json` and `help` smoke checks (30 seconds, capped output, no
-provider access). An unstamped or mismatched prebuilt binary is refused.
-After Cargo, CI or the contributor runs that release binary's
-`install bundle --source CHECKOUT --binary TARGET/release/provenant --out DIR`.
-The producer verifies the embedded source digest, stages `bundle.json`,
-`provenant` and `assets/{skills,library,config,instructions}` from the explicit
-input manifest, rejects symlinks/escapes, computes file digests/modes and
-fsyncs before publishing the directory without replacement. `bundle.json` is
-a versioned records model, not a hand-written CI manifest. Unit/integration
-fixtures build a synthetic bundle through this same producer, then feed it to
-plan/apply/check. Bootstrap/cut-over invokes the staged release binary's own
-`install apply`; no Python builder or shell installer is required.
+Every MCP entry executes the absolute stable binary with
+`--state-dir ABS fabric mcp --client NAME`; JSON/TOML clients use command and
+args, OpenCode uses a combined array. No checkout, Python, Node or secret env.
+CLI owns accepted startup arguments and fixture-backed hook verbs/events,
+matchers, stdin/stdout and exits. Codex fixtures must cover both the feature
+switch and `hooks.json`, rather than invent a Claude settings or notify hook.
+Unsupported hooks refuse before writes. When disabling/removing Codex hooks,
+remove only an unchanged installer-owned feature value; preserve pre-existing
+user `hooks = true`. Never register a hook whose fixture/policy is absent.
 
-### Preserve user-owned harness files
+Use `toml_edit` document mutation to preserve unrelated comments/order/values.
+JSON/JSONC uses records' bounded token/span parser to splice owned leaves and
+reparse; preserve unrelated bytes, comments, trailing commas and array order.
+Reject malformed/duplicate/ambiguous containers unchanged. Never serialise an
+entire user config or log its raw contents. Config files must be regular;
+symlinked configs refuse with their path, requiring an explicitly selected
+regular destination. Instruction/skill links are inspected with `readlink`,
+never opened through the old link.
 
-Installed command: a regular managed copy at `<bin-dir>/provenant`. Immutable
-release assets live under the new state root; receipts replace product-root
-pointers. Skills and `library/` skills become per-entry links to release assets;
-never link an entire harness skills directory. Existing user instructions are
-not seeded or overwritten. Where a harness supports instruction paths, append
-only the exact owned asset references. Otherwise report the optional manual
-instruction include rather than replace `CLAUDE.md`, `AGENTS.md` or `GEMINI.md`.
+### Cut over every legacy entry
 
-The registry below specifies external paths and container shapes, subject to
-recorded fixtures from the actual client versions at build time. Harness
-home/config overrides are explicit typed install configuration, not an
-ambient list of legacy environment fallbacks. The user-only TOML section
-`[install.targets.<harness>]` has optional absolute `home`, `mcp_config` and
-`hook_config` paths; `[install]` may set `bin_dir`. CLI `--bin-dir` wins for
-that target. Explicit configured paths win over captured documented harness
-environment (`CLAUDE_CONFIG_DIR` and `CODEX_HOME`), which wins over the table's
-defaults; other old override variables are removed. Child defaults derive from
-the selected home. A target whose harness has no hook file rejects
-`hook_config`. Projects/requests cannot redirect these paths. The plan and
-receipt record each resolved path and origin; apply/recovery use those pinned
-paths even if the environment changes.
+`--legacy-checkout ABS` authorises matching **only** the compiled legacy
+entry table below at the selected harness paths. Build slice 4 must land
+`assets/install/legacy.toml` as the authoritative, compiled matching manifest:
+finite entries with harness, config selector/event/matcher, exact command or
+link template and replace/remove disposition. Only captured home and the
+explicit legacy checkout substitute into templates; no prefix/glob/regex
+ownership matches. Fixtures must cover every entry. The table enumerates names,
+exact command templates/link targets and each new release's `replace` or
+`remove` disposition. Do not infer ownership from a basename, substring,
+arbitrary shell parsing or an old receipt. The build fixtures enumerate every
+legacy skill name below, including removed skills and `_shared`, and every
+accepted interpreter/quoting form; unsupported commands
+are conflicts, never guessed matches. No directory scan under the checkout or
+`~/.agents` is performed during install. `~` in this table means captured
+home, not a literal tilde or shell expansion.
 
-| Harness | Default registration file and owned entry | Hooks |
-| --- | --- | --- |
-| Claude Code | `~/.claude.json`: `mcpServers.fabric`, `type="stdio"`, command string, args array, env map | `~/.claude/settings.json`: only owned command entries within `hooks.<event>[]` |
-| Codex | `~/.codex/config.toml`: `[mcp_servers.fabric]`, `command`, `args`, nested `env` | Register only a fixture-proven hook supported by the target Codex version; otherwise `unsupported`, no invented Claude-shaped hook or `notify` substitution |
-| OpenCode | `~/.config/opencode/opencode.jsonc`: `mcp.fabric`, `type="local"`, command array, environment map | No hook registration in the existing owner; report unsupported |
-| Agy | `~/.gemini/config/mcp_config.json`: `mcpServers.fabric` | Unsupported until its actual hook contract is recorded |
-| Cursor | `~/.cursor/mcp.json`: `mcpServers.fabric` | Unsupported until its actual hook contract is recorded |
-| Kiro | `~/.kiro/settings/mcp.json`: `mcpServers.fabric` | Unsupported until its actual hook contract is recorded |
+The compiled legacy skill names are `autopilot`, `code-review`, `d2-diagrams`,
+`deliver`, `diagnose`, `engineering-docs`, `engineering-writing`, `evaluate`,
+`grill-me`, `implement`, `legal-writing`, `natural-writing`, `orchestrate`,
+`prototype`, `refactor`, `release`, `retrospect`, `scope`, `session`,
+`setup-repo`, `skill-craft`, `tdd`, `tracker`, `ui-ux-design`, `work-map` and
+`_shared` under `skills/`; `playwright`, `react-performance`, `tanstack-query`
+and `typescript-clean-code` under `library/`. Build tests freeze these names
+independently of the new release's retained-skill list.
 
-Each registration executes the absolute stable binary with
-`fabric mcp --client NAME --state-dir ABS`; no checkout path, Python, Node or
-secret environment values. JSON-based clients receive a command string plus
-args, OpenCode receives the combined array, TOML receives command/args tables.
-The Fabric/CLI freeze must accept these arguments. Hooks execute the same
-binary's `hook <kind>` verbs with shell quoting supplied by the CLI owner;
-policy, event names, matchers, stdin/stdout and exit semantics come from its
-fixture-backed hook registry. `--hooks on` for an unsupported harness refuses
-before any writes. A selected Git pre-push hook, if retained by CLI, likewise
-requires an explicit owned entry and Git-resolved hook path; never replace a
-foreign executable or change `core.hooksPath` to take it over.
+| Legacy entry | Exact match and planned action |
+| --- | --- |
+| Four Claude hooks | Compiled commands for `<legacy>/skills/session/scripts/compact_reinject.py`, `<legacy>/skills/session/scripts/state_check.py --hook`, `<legacy>/scripts/utility_output_hook.py`, `<legacy>/scripts/lane_safety_guard.py`, at `SessionStart`/matcher `compact`, `PreCompact`/no matcher, `PostToolUse`/matcher `Bash` and `PreToolUse`/matcher `Bash`, respectively. Replace retained behaviour with CLI's Rust hook; remove retired behaviour. Preserve sibling commands, even in the same hook group. |
+| Skill links in all five skills directories | For each compiled name, `readlink` equals `<legacy>/skills/<name>` or `<legacy>/library/<name>` (normalised relative targets allowed). Replace retained names; remove retired names and `_shared`. A whole skills-directory link to exactly `<legacy>/skills` is unlinked and replaced by a real directory of managed entries; never traverse it. Foreign files/directories conflict. |
+| Claude workflow links | `codebase-polish.js`, `cross-verify.js`, `implement-run.js`, each targeting `<legacy>/workflows/<name>`. Remove all three; no JS workflow replacement. Handle an exact whole-directory link without traversal. |
+| Instructions and constitution | Replace Claude `CLAUDE.md` and Codex `AGENTS.md` links whose `readlink` is exactly `~/.agents/AGENTS.md`, plus the registry's instruction links to `<legacy>/AGENTS.md` and companions targeting `<legacy>/HARNESS.md`. Link directly to the new release instruction assets. Never open or change `~/.agents/AGENTS.md` or any `~/.agents` contents. |
+| OpenCode instruction array | Exact `instructions[]` strings for `~/.agents/AGENTS.md` and `<legacy>/HARNESS.md`: replace with new release instruction assets, preserving other array entries. Do not dereference old paths. |
+| MCP entries in all five clients | Match compiled old command/args/env shapes for the stable shim (`~/.local/bin/provenant`, absent/empty args and the exact environment below) only. Other launch commands conflict. Known path values may reference old stores but are never dereferenced. Replace with the new stdio entry and remove obsolete owned env keys. Unknown/secret-bearing variants conflict. |
 
-Use toml_edit document mutation for Codex and Provenant TOML; retain unrelated
-comments, ordering, tables and values. JSON/JSONC uses a small token/span
-editor: validate bounded input, locate the owned leaf/container, splice only
-that entry (or insert a missing ancestor), and reparse the result. Preserve
-all unrelated bytes, including comments and trailing commas. Never strip
-comments and serialise the entire user document. Reject duplicate members,
-ambiguous container shapes and malformed files unchanged. Keep JSONC syntax
-handling in records, not core. No third-party parser dependency is added.
+Legacy MCP environment keys are exactly `AGENT_FABRIC_STATE_DIRECTORY` =
+`~/.local/state/agent-harness/fabric`, `AGENT_FABRIC_SEAT` and
+`AGENT_FABRIC_CLIENT_LABEL` = the selected seat (`claude`, `codex`, `cursor`,
+`agy`, `opencode`). The default old install omits
+`AGENT_FABRIC_INSTANCE_ROOT`; an explicit non-default root is accepted only
+as a recorded literal host entry in the compiled manifest.
+Claude also has `type = "stdio"`; OpenCode has `type = "local"`,
+`enabled = true`, a one-element command array and `environment` instead of
+`env`. Other recorded host-specific values/interpreter paths must be finite
+literal entries in the compiled manifest before cut-over. Session hook
+commands use `python3 "<script>"` (plus `--hook` for state check); lane safety
+uses the old installer's exact `shlex.quote` rendering of `python3 <script>`;
+utility output uses its recorded absolute Python interpreter with that
+rendering. Never accept arbitrary interpreters, shell suffixes, labels or env
+keys by pattern.
 
-A new entry may occupy an absent slot. A changed/foreign occupied slot fails,
-even if it is called `fabric`. First cut-over may explicitly adopt an existing
-entry with `--adopt-existing`: print its exact path/selector and safe change,
-then record the adopted selector/link as owned. This is confined to the supplied
-install targets, never a search/read of old state or legacy receipts. Skills
-require a precise existing link target match or remain conflicts; adoption
-never deletes a directory or rewrites arbitrary files. At first cut-over the
-same explicit adoption also covers the pre-existing stable **regular binary**:
-the plan shows its path and full file digest, requires the known old managed
-binary marker, and pins that exact file identity. Foreign or symlinked
-executables conflict. Before replacement, retain its exact bytes/mode in the
-private new install transaction directory and fsync them; journal the recovery
-path/digest. Publish only if the identity still matches. Rollback restores
-those saved executable bytes only while the current target still matches our
-published binary; otherwise it reports a conflict. No old installation receipt
-or root is opened. Test the old binary fixture, interruption and concurrent
-replacement. Subsequent operations
-compare the last installed owned value/link, not a filename substring.
-Removal deletes only those values that still match the receipt, preserving
-other server entries, user hooks and array order. Retired owned entries follow
-the same rule. The installer never edits provider authentication or permission
-policy. Credential references are opaque paths; it never opens credential
-files, including SSH/AWS/Kubernetes/secret stores. Adoption of an entry carrying
-inline secret environment values is refused: the user replaces it manually,
-so the recovery journal never becomes a credential store.
+Absolute and relative link targets are compared lexically after resolving
+relative components against the link's parent; no target contents are read.
+Only named harness entries are changed, not old state, transcripts or the
+primary checkout. Print matched selector/target, disposition and replacement
+before any write. A required legacy entry left unresolved blocks cut-over;
+`check install` checks all compiled legacy selectors for residual references.
+No cleanup of unrelated historical files is implied.
 
-All changes are planned before mutation. Human output previews paths and owned operations before publication; JSON
-emits one final result with planned/applied changes and partial-state details.
-Include before/after values generated by Provenant; redact secret-bearing
-fields and never dump a whole user config or credential. A broken report stream
-before publishing is an error; a failure after publishing reports partial
-state on any remaining usable diagnostic channel and leaves recovery metadata.
+`--adopt-existing` is limited to an occupied destination selector or the
+stable regular executable, printing/pinning its exact identity and digest.
+It never authorises deletion or a broad legacy sweep; link replacement/removal
+requires the exact table match and `--legacy-checkout`. Foreign directories
+and symlinked executables refuse. Adopting inline secret env values refuses,
+so neither preview nor receipt becomes a credential store. Existing regular
+user instructions are preserved; report a manual include if no owned link
+can be installed. Do not seed or overwrite them.
 
-Supervisor supplies a lock, bounded no-follow snapshots, metadata identity,
-same-directory staging, fsync(file), checked atomic replace/no-replace and
-fsync(parent). User config symlinks may be followed only to a regular target
-bound by a checked snapshot; preserve the link and recheck its chain before
-publishing. Never follow target-directory links opportunistically. A check
-followed by ordinary rename is insufficient: preserve and inspect the displaced
-file using supervisor's checked exchange primitive. On a concurrent edit,
-restore only if the installed identity is still ours; otherwise preserve both
-versions in a private sibling recovery directory and report conflict. Do not
-lose the editor's version. The journal records recovery paths/digests, not
-copies of unowned values; a displaced original is protected like the original
-file. Tests must prove this behaviour on Linux and macOS.
+### Publication and recovery
 
-Initial state, configuration edits, project bindings, receipts, journals,
-skill-link replacements and binary replacement are individually atomic and
-fsync'd. Record operation intent durably before the first external write;
-mark each operation complete only after publication and parent fsync. Publish
-`current.json` last. There is no cross-file or cross-Mac atomicity claim.
-Recovery is idempotent, locks out another installer, and checks each operation
-against its saved identity/digest before resuming or undoing it. A failed write
-or ENOSPC is never silently successful. Never depend on panic/Drop cleanup.
+Supervisor supplies no-follow snapshots, metadata identity, entropy, deadline
+locks (non-blocking flock poll), same-directory staging, fsync and publish
+with or without replace. Config uses only that safe filesystem API, never raw
+libc or `Command`. Lock the install root and selected destination parents in
+stable order; validate all proposals before writing. Recheck target identity
+and content immediately before each atomic publication; on drift stop and
+report the selector. These locks serialize cooperating installers; an
+uncooperative editor racing the final recheck/rename is not excluded. Cut-over
+requires stopping harness clients and config editors before the dry-run and
+keeping them stopped through install/check; chairs own that cut-over gate.
+User-edit preservation applies to those quiescent files and edits detected
+at the recheck, not an arbitrary simultaneous writer. Do not claim
+compare-and-swap or exchange semantics.
+
+Each file/link update is individually atomic and parent-fsync'd. On failure,
+return the applied/remaining actions and re-run the same `install` after
+resolving conflicts. Deterministic exact-desired matching plus the compiled
+legacy table makes this idempotent even if no receipt was published. No
+automatic inverses, saved binaries or displaced user files. Removal compares
+current values against the receipt and only unlinks unchanged owned entries;
+never recursively delete a directory. ENOSPC, broken output and uncertain
+publication are typed failures, never silent success or provider stop requests.
+Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 
 ## APIs and ownership boundaries
 
-The following are proposed public interfaces, not compatibility wrappers:
-
-| Crate | API other areas call |
+| Owner | Public API or contract |
 | --- | --- |
-| core | `HostId`, `ProjectId`, `RunId`, `TaskId`, `AttemptId`, `InstallId`, `ImportId`; `RootInputs -> Result<Roots>`; `RelativePath::parse`; explicit `WallTime`, `MonoTime`, `DurationMicros`; no ambient discovery or I/O |
-| records | `decode<T>(reader, Limits)`, `encode<T>`; `CanonicalV1::bytes`, `record_digest`, `file_digest`, `source_digest`; `PathWire`; `parse_frontmatter`, `parse_agent_yaml`, JSONC token/spans; versioned common envelopes and state/install/profile/import records |
-| config | `load(roots, workspace, reader) -> ConfigLayers`; pure `resolve(layers, RequestOverrides, PolicyMinima) -> ResolvedConfig` with field provenance and `ProfileStamp`; `plan_install(Bundle, Targets, Snapshots) -> InstallPlan`; `apply/recover(plan, SafeFs, reporter) -> InstallOutcome`; `check_install`; format editors return proposals without effects |
+| core | Distinct `HostId`, `ProjectId`, `WorkspaceId`, `RepoId`, `ActorId`, `RunId`, `TaskId`, `AttemptId`, `DeliveryId`, `SessionId`, `InstallId`, `ImportId`; `GitOid`, `Digest`, `WorkScope`, `CancelToken`; `RootInputs -> Result<Roots>`, `RelativePath::parse`; `WallTime`/`UtcMicros`, `MonoTime`, `DurationMicros`, `Deadline`, `Clock`. No ambient discovery or I/O. |
+| records | `decode<T: DeserializeOwned>(reader, Limits)`, `encode<T: Serialize>`; `CanonicalV1::bytes`, record/file/source digests; `PathWire`; bounded frontmatter/sidecar/JSONC parsers; state/install/import models. Stored records and Serialize-only facts are separate types. |
+| records (CLI contract) | `CommandResult<T> { schema_version, command, status, data: Option<T>, error: Option<CommandError> }`, closed status enum and redacted typed errors; `Finding` and `HelpCatalog`. Output supports additive fields within v1. CLI constructs/renders envelopes and maps exits; no library imports cli. |
+| config | `load(roots, reader) -> Result<ResolvedConfig>` with origins and selected compiled preset; `bind_project(roots, ProjectLocation, SafeFs) -> Result<ProjectBinding>`; pure `plan_install(Release, Targets, Snapshots) -> Result<InstallPlan>`; `install(plan, SafeFs, reporter) -> Result<InstallOutcome>`; `check_install`, `remove`. Plan is ephemeral, not a persisted recovery protocol. |
+| supervisor | Production `SystemClock` (`jiff` wall time), entropy, safe no-follow FS/locks/publication and bounded version/help smoke processes. `run_utility` for fixed Git/gh reads; test-only fixture binary with a scoped `Command::new` allow for process tests. |
+| confinement | `discover_project(Workspace, &DiscoveryAuthority) -> Result<ProjectLocation>` using supervisor Git reads; validates Git object format, repository/path membership and authority. Config consumes the result without a reverse dependency. |
+| fabric-runtime | Cross-host project key, `bind_federated_project`, external address-to-actor binding and federation routing of run queries. Fabric owns its read-only import and receipt. |
+| run | Registry, admission, attempts/status and atomic admission/operation insertion in run's durable store; top-level runs layout, `completed_attempt(AttemptId) -> AttemptFact` and terminal records. State owns no duplicate registry. |
 
-Config uses supervisor's **safe filesystem/lock API only**, as R2 permits.
-The binary composes smoke processes through supervisor; config does not import
-process orchestration. Records defines syntax/common record structures;
-run/Fabric/workflow own their domain records, transitions and semantic
-validation. Do not retain lifecycle, cooldown, storage-deletion or review-gate
-logic in records merely because an earlier inert module put it there.
+Records does not own lifecycle, cooldown, deletion or review policy. Config
+has no domain-runtime dependency: binary composition connects its values to
+supervisor/confinement/run/Fabric. Domain owners supply typed config sections
+without importing cli. `ExecutionContext` belongs to run/composition, carrying
+validated project, actor and authority, never raw argv or an untyped config bag.
+Before discovery, confinement validates a `DiscoveryAuthority` containing the
+caller and permitted workspace paths, with no ProjectId. Composition calls
+`discover_project`, then `bind_project`, then constructs `ExecutionContext`.
 
-Needed from other areas:
+The other cross-area asks stay with their named owners: run's `wait(Any|All)`
+wakes on terminal or `InputRequired`, capped at 3600 s CLI/30 s MCP;
+`events(cursor)` is lazy pull, and cancel/resume/read_output/export take
+`&ExecutionContext`. Run owns `git_evidence_packet` via supervisor Git reads
+and completed-attempt facts with every field workflow consumed (terminal
+state/exit, subject, output, route, reviewer); dispatch carries optional
+`delivery_id`. The run-directory receipt/manifest/finaliser contract is cut
+in favour of run records plus `clean`. No telemetry `upsert_delivery` or
+reducers survive the no-ledger decision. Workflow owns writing-rule data and
+CLI freezes `lint`. Use an in-house snapshot helper, no `insta` dependency.
 
-- Supervisor: bounded reads, canonical directory binding, no-follow handles,
-  metadata snapshots, entropy/clock capture at the edge, checked atomic
-  publication/exchange, fsync and install locks; bounded smoke subprocesses
-  with cleanup/custody. Config cannot duplicate these with raw libc or Command.
-- Confinement: validated credential/protected-path classification at the
-  composition boundary and authoritative policy minima. Project config is
-  data, never an expansion of authority.
-- Routing/providers/quota/telemetry/workflow: typed TOML sections, defaults,
-  validation and explicit units. No crate imports cli; config deserialises
-  sections into config-owned types to avoid cycles, and domains validate their
-  semantics after resolution. The owning build PR updates the R2 table only
-  if responsibility/edges actually change.
-- CLI: frozen verbs, result rendering and hook registry, plus a cheap
-  version/help smoke interface. Fabric: `fabric mcp` startup arguments,
-  project registration/discovery and the bounded legacy message/task importer.
-  Telemetry: the legacy ledger importer. Import execution belongs to those
-  domain owners, not a new config-to-Fabric/telemetry dependency.
+## Import, fixtures and cut-over
 
-## Import, fixtures and verification
+Only Fabric imports: explicit one-shot read-only open/blocked tasks and
+unacknowledged requests from the last 14 days; new cursors start after import.
+Fabric defines its command and receipt. Install/startup never imports. Do not
+read transcripts, revive runs/processes/claims/leases/sessions, or import
+telemetry/quota history. The old ledger remains available to the old install;
+telemetry owns retirement of the OTel collector. `tests/test_host_identity.py`
+is deleted once by state, not again by telemetry.
 
-### Read-only import and two-Mac cut-over
+Source reads must not write SQLite journals, SHM or checkpoints. Require a
+quiescent self-contained source or supplied consistent snapshot; refuse a
+live WAL requiring writable reader sidecars. Do not use `immutable=1` on a
+changing DB. Fabric bounds/validates input, deduplicates source/old-row IDs
+and publishes destination facts transactionally. Core supplies identity/codecs,
+not an import engine.
 
-R1's only legacy reads are explicit one-shot imports of Fabric messages/tasks
-and the telemetry ledger. Proposed domain commands are
-`fabric import --from ABS --dry-run` and `telemetry import --from ABS --dry-run`,
-with `--apply` instead of `--dry-run` for publication and the common JSON/exit
-contract. CLI/Fabric/telemetry owners freeze the final spelling. No importer
-runs at startup or install, scans a home directory, reads transcripts/config,
-or reconstructs active processes, claims, leases, sessions or quota state.
+Before chairs install on either Mac, both targets must pass isolated-root
+fake dispatch, MCP handshake and every retained hook. Build one accepted
+revision, verify release digests, quiesce old clients without killing healthy
+providers, and run `install --dry-run --legacy-checkout ABS` for all five live
+harnesses. Resolve every legacy reference, then re-run without dry-run.
+Restart clients and verify `check install`, version, fake dispatch, MCP and
+hook events. Report each host separately. Re-apply a failed install; rollback
+reinstalls the old tag. No build lane touches the stable install or primary
+checkout, and no live provider run is implied.
 
-Import opens only the named allowed store read-only, with no schema updates,
-WAL checkpoint or creation of source journal/SHM files. For SQLite require a
-quiescent self-contained source or an operator-supplied consistent snapshot;
-if a live WAL needs writable reader sidecars, refuse rather than modify it or
-use `immutable=1` against a changing database. Domain importers validate rows
-under bounds and stage destination publication transactionally. Namespace old
-IDs by source fingerprint; retain source identity/time as provenance rather
-than silently recanonicalising host aliases. Completed receipts deduplicate
-`(kind, source fingerprint, old row ID)`; changed sources require a new import.
-Reject invalid rows before publication and report counts. Success on one store
-never asserts success on the other. Config supplies roots, codecs and receipts.
-Old runs and output stay where they were, unreferenced by new live state.
+Record sanitised real-client contracts in
+`tools/front-door/tests/fixtures/contracts/` with client/version, platform,
+capture method, redactions and parsed expectations. Use isolated homes and fake
+MCP executables; old Python/TS output is not an oracle.
 
-The chairs perform cut-over only after fake-provider dispatch, Fabric MCP and
-all retained hooks pass from isolated roots on **both** Macs:
-
-1. Build the same accepted source revision for each target; verify bundle
-   digests. Each host gets its own fresh root/HostId. Do not copy absolute
-   machine paths or a state directory between Macs.
-2. Quiesce old dispatches/MCP clients without killing healthy providers; retain
-   the old install and state. On each Mac run the staged binary's `install plan`
-   with explicit harnesses and any deliberate adoption; resolve conflicts
-   before applying. No lane runs this on the stable install.
-3. Apply on each Mac, publish the stable binary after assets/registrations are
-   ready, and finish the receipt last. Report each host separately: a failure
-   on Mac two is a partial rollout, not a fictional distributed transaction.
-4. Restart clients, verify version/install check, one fake dispatch, MCP
-   handshake and retained hook events. Then run only deliberately requested
-   imports. No live provider run is implied by these checks.
-5. Roll back registrations with checked inverses if needed and reinstall
-   `pre-rust-rewrite` as the rewrite plan specifies. Old state remains intact;
-   new state is retained for diagnosis, never copied back into old stores.
-   Resolve intervening user edits manually rather than restore whole configs.
-
-### External contracts and recorded fixtures
-
-No provider CLI wire is implemented here; providers owns recorded argv/env and
-stream/result fixtures. No new fixture may be an old Python/TS result used as
-a differential judge. The build must record sanitised real harness behaviour
-before enabling each registration/hook contract; existing scratch fixtures are
-useful failure cases but are not proof of a current external protocol.
-
-Place recordings in `tools/front-door/tests/fixtures/contracts/` with a small
-metadata JSON giving client/version, platform, capture procedure, redactions
-and expected parsed fields. Capture only allowlisted structure from isolated
-homes and fake MCP executables; never copy a real credential-bearing config.
-
-| Contract | Required recordings/assertions |
+| Contract | Required fixtures |
 | --- | --- |
-| Six harness config formats | Each client's accepted local MCP registration and observed stdio launch argv/env; Codex TOML comments/inline tables, OpenCode JSONC comments/trailing comma, unrelated entries and config symlink. Unsupported versions refuse; no claim all six are already recorded. |
-| Claude hooks and any other enabled hook | Real client event stdin, allowed/no-op/deny stdout and exit result; client config acceptance. CLI supplies exact PreToolUse/SessionStart and any retained other event forms. Absence of a Codex fixture means no Codex hook install. |
-| MCP | Real `initialize`, `notifications/initialized`, `tools/list`, shutdown/EOF and cancellation recordings owned by fabric-mcp; prove installed command/args starts that server and stdout contains only JSON-RPC. |
-| Agent Skills | Parse every tracked `SKILL.md` frontmatter and `agents/*.yaml` sidecar via repository fixtures. Current frontmatter is name/description; seven tracked OpenAI sidecars use interface metadata. Add hand-labelled subset acceptance/refusal cases. No PyYAML oracle. |
-| Git | Recorded `rev-parse` forms for primary/linked/non-Git workspaces and resolved hooks path; run/confinement owns safe Git execution. No assumption `.git` is always a directory or repo identity equals a remote URL. |
+| Five harnesses | Accepted MCP config/stdio argv; Codex feature flag and hooks.json; TOML comments/inline tables; OpenCode JSONC comments/trailing commas; unrelated entries and unsupported-version refusal. |
+| Hooks | Actual enabled client event input, allow/no-op/deny output and exits, plus accepted registration. CLI supplies policy. No missing-fixture install. |
+| Legacy cut-over | Four exact hook commands (including recorded interpreter/quoting forms), all compiled skill links plus `_shared` across five harnesses, three workflow links, instruction/HARNESS links and live MCP entries. Include near-matches, mixed hook groups, foreign directories and broken links; assert no target/old-root contents are opened. |
+| Skills/Git/MCP | Every tracked SKILL.md/agents YAML subset; primary/linked/non-Git discovery and SHA-1/SHA-256 repos; Fabric initialize/list/EOF/cancellation and stdout purity. |
 
-Unit tests alongside modules prove ID/path/version validation, exact integer
-limits (including unknown JSON fields), duplicate refusal, canonical bytes,
-digest domain separation, YAML grammar/refusals/bounds, TOML precedence,
-project strengthen-only rules, risk floors, profile stamp equivalence and
-format-editor preservation. Use explicit clocks, entropy bytes and injected
-snapshots; test invalid transitions in install journals and every typed error.
+Unit tests prove ID/path/version/time overflow, canonical bytes and digest
+separation, integer/duplicate/bounds refusal, YAML/JSONC syntax, typed TOML,
+presets, origins and editor byte preservation. Test cancellation scope and
+Serialize-only fact construction at the trusted edge. Integrations use real
+commands with synthetic release/provider/MCP fixtures: first install, no-op,
+partial failure then re-apply, drift, malformed config, adoption, exact legacy
+removals, check/remove and two independent host roots. Assert help/root creates
+nothing and unowned spans/old-state fixture trees remain byte-identical.
 
-Binary integration tests run the real command tree in isolated homes/state,
-with a fake bundle/provider/MCP peer: first install, no-op reinstall, source
-and asset drift, foreign skills, adopted old registrations, malformed config,
-all six formats, unsupported hooks, broken stdout, check/remove/recover,
-read-only imports and two independent host roots. Byte-compare unowned file
-spans and the legacy fixture tree before/after; test help/root without SQLite,
-state creation or provider access. Use `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..."))` for repo fixtures and canonicalise temporary
-paths on macOS.
-
-Process tests run in CI on Linux/macOS with FIFO/handshake barriers: concurrent
-installers, a user edit between snapshot and exchange, config symlink swap,
-crash at every journal/publication boundary, ENOSPC/fsync/rename failure and
-resume/rollback. Assert original user bytes survive, one writer wins, no
-unowned link is removed and no healthy provider receives a signal. Every
-spawn goes through supervisor. No sleep-based synchronisation or CPython/V8
-oracle. Locally run fmt, clippy and tests for touched crates; CI runs the
-workspace, remaining subject-bearing Python/TS tests and macOS release build
-per R9. This design-only PR requires link/whitespace and scope checks, not a
-local full harness run.
+CI process tests on Linux/macOS use FIFO/handshake barriers for installer
+contention/deadlines, edits detected before publication, crash at each write,
+ENOSPC/fsync/rename errors and re-apply without a receipt. All process access
+is supervisor-owned; no sleeps, healthy-provider signals or exchange primitive.
+Tests set HOME, state and harness paths to temporary roots and use repo-relative
+`include_str!` fixtures; canonicalise macOS temporary aliases. Local checks are
+fast and targeted; full workspace/harness and platform checks run in CI.
 
 ## Deletion ledger and build order
 
@@ -635,8 +551,8 @@ authorised or counted by this area's ledger. `tests/test_record_schemas.py`,
 the rewrite plan's other deletion owners. None is an unlisted State
 implementation to port. Config-data deletions are additional to the language
 totals: slice 2 removes
-`config/harness-knobs.json` (118 lines), replacing its executable registry with
-typed settings/preset defaults. Domain owners replace the remaining policy
+`config/harness-knobs.json` (118 lines), replacing the knob registry with
+compiled preset defaults. Domain owners replace the remaining policy
 files in their TOML-default PRs: routing `model-routing.json` (1,090),
 `model-preferences.json` (17), `adapter-compatibility.yaml` (306); run/Fabric
 `graph-defaults.json` (8); telemetry `telemetry-prices.json` (319); workflow
@@ -645,44 +561,35 @@ files in their TOML-default PRs: routing `model-routing.json` (1,090),
 its domain's TOML replacement PR.
 
 Replace/prune the inert crate source trees: core **6,624**, records **3,181**,
-config **8,197** Rust lines (18,002 total). This includes all `pending`,
+config **8,197** Rust lines (18,002 total). Also delete the binary modules
+`tools/front-door/src/resolve.rs` **495**, `stale.rs` **150**, `json.rs` **389**,
+`check.rs` **115** and `exec.rs` **109** (1,258 lines); root, codec, install-check
+and process responsibilities move to the owners above. The crate deletions
+include all `pending`,
 `oracle`, `test_support`, core `py/*`/`js.rs` and their tests. Keep only useful
 new-design code; delete misplaced policy copies rather than preserve old API
 shapes. The language shims/oracle runner alone account for 4,084 Rust lines;
 the Python generator's 29 lines are already counted above. Planning estimate:
-about **6,000 Rust lines including replacement tests**, replacing these 18,002
+about **6,000 Rust lines including replacement tests**, replacing 19,260 Rust
 and deleting 13,125 Python/zero TS lines: expected Python+TS+Rust net
-**-25,127** (including shell, **-25,921**). This is an estimate, not a build
+**-26,385** (including shell, **-27,179**). This is an estimate, not a build
 quota; each PR reports its actual `Net lines:` and explains growth. Domain
 moves count once in their landing PR, not twice in subsystem estimates.
 
-Land these PR-sized slices in dependency order:
+Land these slices in dependency order:
 
-1. **Values and codecs.** Land the narrow core and records APIs, versioned
-   root/layout records, canonical/digest contract and YAML/JSONC readers with
-   their tests. Delete shared root/host/JSONC Python owners and emulation;
-   remove dependent old tests whose subject is gone. Consumers awaiting their
-   own rewrite wait; no Python adapters. Keep workspace Rust green by updating
-   Rust callers to the new values. Supervisor's real filesystem API follows
-   before any config mutation lands.
-2. **Typed config and profiles.** Land strict TOML loading/resolution and the
-   config subtree, replacing `config/harness-knobs.json` and the profile scripts/tests. Land domain default
-   TOML sections with their owning lanes, deleting their JSON/YAML config in
-   those PRs; do not implement multiple live config formats. Expose resolved
-   values to run/routing/workflow before those lanes build their owners.
-3. **Bundle and managed files.** Land source stamping, bundle verification,
-   install journal/recovery, skill reconciliation and staged binary publication;
-   delete builder, pointer, instance/manifest/skill/workflow installers and
-   their tests. This is isolated-root build/test work, never a stable install.
-4. **Harness registration.** Land fixture-backed TOML/JSON/JSONC editors,
-   MCP/hook registry integration and install plan/apply/check/remove/recover;
-   delete remaining installation entrypoints/tests and update docs/skills.
-   Domain lanes replace shared test subjects before the aggregate module goes.
-5. **Domain imports and cut-over gate.** Fabric and telemetry land their
-   read-only importers and delete their old stores' implementation/tests;
-   record no-source-write tests. Chairs then run the two-Mac acceptance and
-   cut-over above. Installation is a final authorised release operation, not
-   a design/build lane action.
+1. **Values and codecs:** core/records, clock trait, cancellation/scope/OID
+   types, stored models versus facts; delete root/host/JSONC and emulation
+   owners with their tests. Update Rust consumers; no old-language adapters.
+2. **Typed config:** single-file load, compiled presets, show/check; delete
+   profile/knob machinery and its tests. Domains land their TOML assets.
+3. **Release and managed files:** source stamping, manifest, receipt and
+   idempotent install; delete builders, pointers and instance installers.
+4. **Harness cut-over:** fixture-backed editors, compiled legacy entries,
+   five-client MCP/hooks/links, check/remove; delete remaining installers and
+   update skill/docs callers. Domain tests retire with their subjects first.
+5. **Acceptance:** Fabric's bounded read-only importer, old-root no-write
+   tests and both-Mac end-to-end checks; chairs own installation and rollback.
 
-Each build PR remains open for native diff review, chair/cross-family review
-and exact-head CI; lanes do not merge or arm auto-merge.
+Each build PR needs native diff review, chair/cross-family review and exact-head
+CI. Lanes do not merge or arm auto-merge.
