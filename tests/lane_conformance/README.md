@@ -1,8 +1,8 @@
 # Lane conformance
 
 Run `python -m pytest tests/lane_conformance -q` serially. The same command
-with `PROVENANT_LANE_IMPL=rust` is the contract for S2; S0 ignores that value
-and exercises today's Python supervisor.
+with `PROVENANT_LANE_IMPL=rust` is the contract for S2; S0 rejects values other
+than `python` (or unset) until S2 wires up the Rust supervisor.
 
 The real `dispatch_run.py` entry point plans through `cf_dispatch.py` and
 executes a FIFO-controlled Claude CLI. There are no supervisor imports,

@@ -3,13 +3,17 @@
 import json
 import os
 import select
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from dispatch_support import real_owner_fixture
+from tests.support.dispatch import ROOT, real_owner_fixture
+from tests.support.git import git
+from tests.support.proc import process_group_pids, process_state, process_stopped
 
 PROVIDER = Path(__file__).with_name("fake_provider.py").read_text()
 
@@ -34,24 +38,12 @@ def wait_for(probe, description, seconds=25):
         select.select([], [], [], .02)
 
 
-def process_state(pid):
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                            capture_output=True, text=True, timeout=5)
-    assert result.returncode in {0, 1} and not result.stderr, result.stderr
-    return result.stdout.strip()
-
-
-def process_stopped(pid):
-    state = process_state(pid)
-    return not state or "Z" in state
-
-
 class Lane:
     def __init__(self, root, monkeypatch, startup):
         root.mkdir()
         # A real fixture repository also stops discovery at the sandbox's
         # scratch boundary instead of inheriting the enclosing lane's Git dir.
-        subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+        git(root, "init", "--quiet")
         self.root = root
         self.run, _, self.argv = real_owner_fixture(root, monkeypatch, PROVIDER)
         self.argv += ["--task-id", "seed", "--timeout-seconds", "45"]
@@ -107,11 +99,12 @@ class Lane:
             self.run / "dispatch/tasks/seed/attempt-001/attempt.json"]
         provider = read_json(self.control / "provider.json")
         assert not process_state(provider["pid"]), "provider was not reaped"
+        assert not process_group_pids(row["pgid"]), "provider process group was not reaped"
         return row
 
     def cancel(self):
-        script = Path(self.argv[1]).with_name("run_controls.py")
-        subprocess.run([self.argv[0], str(script), "cancel", "--run-dir", str(self.run),
+        script = ROOT / "skills/orchestrate/scripts/run_controls.py"
+        subprocess.run([sys.executable, str(script), "cancel", "--run-dir", str(self.run),
                         "--task-id", "seed", "--attempt-id", "attempt-001", "--wait-seconds", "15"],
                        cwd=self.root, env=self.env, check=True, capture_output=True, text=True, timeout=20)
 
@@ -127,6 +120,21 @@ class Lane:
                 if owner and not process_stopped(owner["owner_pid"]):
                     self.cancel()
                     wait_for(lambda: process_stopped(owner["owner_pid"]), "nested cleanup")
+        except BaseException:
+            owner = read_json(self.run / "dispatch-owner.json")
+            owner_pgid = owner.get("owner_pgid")
+            if self.process is not None:
+                owner_pgid = self.process.pid  # start_new_session=True
+            for pgid in {owner_pgid, self.attempt().get("pgid")} - {None}:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if self.process is not None:
+                self.process.wait(timeout=5)
+            else:
+                wait_for(lambda: process_stopped(owner["owner_pid"]), "killed nested owner exit")
+            raise
         finally:
             os.close(self.fifo)
             if self.log:

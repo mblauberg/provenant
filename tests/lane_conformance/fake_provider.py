@@ -1,5 +1,6 @@
 """FIFO-controlled Claude CLI. Invoked by the real provider adapter."""
 
+import fcntl
 import json
 import os
 import subprocess
@@ -10,7 +11,9 @@ from pathlib import Path
 def main():
     sys.stdin.read()
     control = Path(os.environ["LANE_FIXTURE_DIR"])
-    with (control / "commands").open() as commands:
+    fd = os.open(control / "commands", os.O_RDONLY | os.O_NONBLOCK)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    with os.fdopen(fd) as commands:
         (control / "provider.json").write_text(json.dumps({"pid": os.getpid()}))
         for command in commands:
             command = command.strip()

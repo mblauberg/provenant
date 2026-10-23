@@ -6,11 +6,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cf_dispatch_support import write_executable
+from tests.support.fake_cli import write_executable
+from tests.support.runs import INIT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
-INIT = SCRIPT.with_name("run_dir_init.sh")
+
+
+def owner_command():
+    """Select the supervisor entry point; Rust is not wired up until S2."""
+    impl = os.environ.get("PROVENANT_LANE_IMPL", "python")
+    if impl != "python":
+        raise ValueError(f"unsupported PROVENANT_LANE_IMPL={impl!r}; only python is available until S2")
+    return [sys.executable, str(SCRIPT)]
 
 
 def disable_memory_admission_floor(workspace: Path) -> None:
@@ -34,6 +42,6 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
     prompt = tmp_path / 'caller-prompt.md'
     prompt.write_text('hello')
-    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
+    command = owner_command() + ['--run-dir', str(run), '--adapter', 'claude',
                '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
     return run, prompt, command

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dispatch_support import disable_memory_admission_floor, real_owner_fixture
+from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"

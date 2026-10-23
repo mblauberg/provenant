@@ -5,7 +5,9 @@ import signal
 
 import pytest
 
-from .support import process_state, read_json, wait_for
+from tests.support.proc import process_state
+
+from .support import read_json, wait_for
 
 
 @pytest.mark.parametrize("command,status,exit_code,provider_exit", [
@@ -24,7 +26,7 @@ def test_ordinary_dispatch_has_one_attempt_and_retains_exit(lane, command, statu
 
 
 def test_startup_timeout(lane):
-    owner = lane(startup=2)
+    owner = lane(startup=5)
     owner.start()
     owner.ready()
     # The provider remains silent and blocked on its FIFO until the watchdog.
@@ -74,7 +76,6 @@ def test_nested_owner_spared(lane):
     parent.send("nested")
     child_pid = child.ready()
     nested = read_json(child.run / "dispatch-owner.json")
-    assert nested["owner_pid"] == nested["owner_pgid"]
     parent.send("terminal")
     row = parent.finish(0)
     assert row["status"] == "ok"

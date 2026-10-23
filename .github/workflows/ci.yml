@@ -212,13 +212,10 @@ jobs:
             lane:
               - *ci-contract
               - 'tools/**'
-              - 'skills/orchestrate/scripts/cf_dispatch.py'
-              - 'skills/orchestrate/scripts/dispatch_run.py'
-              - 'skills/orchestrate/scripts/provider_exec.py'
-              - 'skills/orchestrate/scripts/run_controls.py'
-              - 'skills/orchestrate/scripts/run_lineage.py'
+              - 'skills/orchestrate/scripts/**'
+              - 'skills/_shared/**'
               - 'tests/lane_conformance/**'
-              - 'tests/dispatch_support.py'
+              - 'tests/support/**'
               - 'tests/cf_dispatch_support.py'
               - 'tests/conftest.py'
               - 'pyproject.toml'
@@ -322,7 +319,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
