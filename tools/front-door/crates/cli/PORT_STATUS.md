@@ -47,3 +47,12 @@ projection check/write/error fixtures and a local stale-checkout fixture with
 an explicit clock and fetch mtime. Source policy tests are retained unchanged.
 A non-printable Unicode refusal mismatch was caught and fixed; see RP-1001 in
 the divergence log. No intentional behaviour change is proposed.
+
+Final local evidence: 31 Rust tests, 51 unchanged Python policy tests
+(`test_projection.py`, `test_git_evidence.py`, `test_harness_document_contract.py`),
+fmt, warnings-denied clippy and static security checks pass. Native source-parity
+review inspected all seven source units and the implemented slices; its sole
+finding was fixed in `a79987fe` with four differential invalid-request cases
+(RP-1002). The repair review is clean. The native review did not rerun checks;
+these counts are the writer's foreground executions. Cross-family review and
+independent J1/J2 acceptance remain with the chair.
