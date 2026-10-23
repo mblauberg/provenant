@@ -577,7 +577,9 @@ impl Directory {
         let mut operations = LocalAtomicWriteOperations;
         self.atomic_write_with_operations(name, prefix, bytes, mode, &mut operations)
     }
-    #[cfg(any(test, feature = "fixture"))]
+    /// Fixture entry for other crates' fault tests; the trait is public only
+    /// under `fixture`, so this cannot take the private method's place.
+    #[cfg(feature = "fixture")]
     #[doc(hidden)]
     pub fn atomic_write_with_faults(
         &self,

@@ -602,7 +602,7 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
         errno: libc::EIO,
     };
     let first = dir
-        .atomic_write_with_faults(
+        .atomic_write_with_operations(
             OsStr::new("created"),
             ".stage.",
             b"visible",
@@ -632,7 +632,7 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
         errno: libc::EIO,
     };
     let second = dir
-        .atomic_write_with_faults(
+        .atomic_write_with_operations(
             OsStr::new("replaced"),
             ".stage.",
             b"new",
@@ -719,7 +719,7 @@ fn write_fsync_and_rename_faults_leave_the_previous_complete_file() {
     ] {
         let mut faults = FailAtomicWriteAt { phase, errno };
         let error = dir
-            .atomic_write_with_faults(name, ".receipt.", new, PublishMode::Replace, &mut faults)
+            .atomic_write_with_operations(name, ".receipt.", new, PublishMode::Replace, &mut faults)
             .unwrap_err();
         assert_eq!(error.raw_os_error(), Some(errno));
         assert_eq!(dir.read_bounded(name, 64).unwrap(), old);
@@ -742,7 +742,7 @@ fn directory_sync_fault_reports_new_complete_file_as_visible() {
         errno: libc::EIO,
     };
     let publication = dir
-        .atomic_write_with_faults(name, ".receipt.", new, PublishMode::Replace, &mut faults)
+        .atomic_write_with_operations(name, ".receipt.", new, PublishMode::Replace, &mut faults)
         .unwrap();
     match publication {
         Publication::VisibleDurabilityUnconfirmed { sync_error } => {
@@ -823,7 +823,7 @@ fn atomic_write_crash_fixture() {
         phase,
         socket: PathBuf::from(socket),
     };
-    let _ = dir.atomic_write_with_faults(
+    let _ = dir.atomic_write_with_operations(
         OsStr::new("receipt.json"),
         ".receipt.",
         b"new complete receipt",
