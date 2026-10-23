@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from tests.support.git import git_repo, linked_worktree as make_linked_worktree
+from tests.support.git import git as run_git, git_repo, linked_worktree as make_linked_worktree
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills/orchestrate/scripts"
@@ -232,7 +232,7 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
     common = primary / ".git"
     private = common / "worktrees/lane"
@@ -271,21 +271,19 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     assert "(deny file-read-data" not in profile
 
 
-def linked_worktree(tmp_path):
-    primary = tmp_path / "primary"
-    primary.mkdir()
-    git = ["git", "-C", str(primary), "-c", "user.email=a@b", "-c", "user.name=t"]
-    subprocess.run([*git[:3], "init", "-q"], check=True)
-    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
-    worktree = primary / ".worktrees" / "lane"
-    subprocess.run([*git, "worktree", "add", "-q", "-b", "lane", str(worktree)], check=True)
-    return primary.resolve(), worktree.resolve()
+def sandbox_profile_worktree(tmp_path):
+    primary = git_repo(tmp_path / "primary", branch="main", commit=False)
+    run_git(primary, "config", "user.name", "t")
+    run_git(primary, "config", "user.email", "a@b")
+    run_git(primary, "commit", "-q", "--allow-empty", "-m", "init")
+    worktree = make_linked_worktree(primary, "lane", path=primary / ".worktrees/lane")
+    return primary, worktree
 
 
 @pytest.mark.parametrize("adapter", ["claude", "cursor", "opencode", "kiro"])
 def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     monkeypatch.setattr(mod, "_require_kiro_engine", lambda: None)
     plan = mod.build_plan(adapter, {}, "hello", cwd=worktree, workspace_root=worktree,
@@ -306,7 +304,7 @@ def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter
 
 def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     plan = mod.build_plan("codex", {}, "hello", cwd=worktree, workspace_root=worktree,
                           worktree=worktree, mode="worktree_write")
@@ -321,7 +319,7 @@ def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monke
 
 def test_swapped_locks_link_is_not_granted_on_resume(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     first = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
                            worktree=worktree, mode="worktree_write")
@@ -352,7 +350,7 @@ def test_writer_without_worktree_creates_no_locks(monkeypatch, tmp_path):
 @pytest.mark.skipif(not shutil.which("sandbox-exec"), reason="sandbox-exec unavailable")
 def test_sandbox_probe_locks_writable_sessions_and_scratch_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     for name in ("sessions", "scratch"):
         (primary / ".agent-run" / name).mkdir(parents=True)
     plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
@@ -372,7 +370,7 @@ def test_sandbox_probe_locks_writable_sessions_and_scratch_denied(monkeypatch, t
 
 def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree)
     assert not (primary / ".agent-run").exists()
@@ -381,7 +379,7 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    _primary, worktree = linked_worktree(tmp_path)
+    _primary, worktree = sandbox_profile_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
     protected.mkdir(parents=True)
@@ -545,11 +543,8 @@ def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monke
     workspace = tmp_path / "workspace"
     repo = workspace / "app"
     repo.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
-                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
-    linked = repo / ".worktrees/linked"
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    git_repo(repo, branch="main")
+    linked = make_linked_worktree(repo, "linked", path=repo / ".worktrees/linked")
     (repo / ".agents").mkdir()
     (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
     for root in (repo, linked):
@@ -765,13 +760,11 @@ def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
-                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
+    git_repo(repo, branch="main")
     caller = tmp_path / "caller"
     sibling = tmp_path / "sibling"
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "caller", str(caller)], check=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sibling", str(sibling)], check=True)
+    make_linked_worktree(repo, "caller", path=caller)
+    make_linked_worktree(repo, "sibling", path=sibling)
 
     plan = supervisor.build_plan(
         "codex", {"resolved_model": "fixture"}, "hello",
@@ -2077,54 +2070,34 @@ def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
     assert any("writes are unconfined" in warning for warning in unconfined["warnings"])
 
 
-@pytest.mark.parametrize("adapter", ["claude", "cursor", "kiro", "agy", "opencode"])
-def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
-    monkeypatch, tmp_path, adapter,
-):
+@pytest.mark.parametrize(
+    "adapter,sandbox,expected",
+    [
+        pytest.param(adapter, None, "warn", id=f"{adapter}-unconfined")
+        for adapter in ("claude", "cursor", "kiro", "agy", "opencode")
+    ]
+    + [pytest.param("codex", None, "no-warning", id="codex-native")]
+    + [pytest.param(adapter, "/usr/bin/sandbox-exec", "no-warning", id=f"{adapter}-sandbox")
+       for adapter in ("agy", "opencode")],
+)
+def test_read_only_cwd_warning_tracks_adapter_and_confinement(monkeypatch, tmp_path, adapter, sandbox, expected):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     root = tmp_path / "workspace"
     cwd = root / "sub"
     cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: sandbox)
 
     plan = supervisor.build_plan(
         adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
     )
 
     warning = f"{adapter} read_only: cwd is not a read boundary"
-    assert plan["warnings"].count(warning) == 1
-
-
-def test_codex_read_only_cwd_below_workspace_does_not_warn(monkeypatch, tmp_path):
-    """Codex's native read-only sandbox reads everywhere, so a cwd bounds nothing whatever it is."""
-    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
-    root = tmp_path / "workspace"
-    cwd = root / "sub"
-    cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
-
-    plan = supervisor.build_plan(
-        "codex", {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
-    )
-
-    assert not any("read boundary" in warning for warning in plan["warnings"])
-
-
-@pytest.mark.parametrize("adapter", ["agy", "opencode"])
-def test_read_only_cwd_warning_is_omitted_with_os_read_confinement(
-    monkeypatch, tmp_path, adapter,
-):
-    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
-    root = tmp_path / "workspace"
-    cwd = root / "sub"
-    cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
-
-    plan = supervisor.build_plan(
-        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
-    )
-
-    assert f"{adapter} read_only: cwd is not a read boundary" not in plan["warnings"]
+    if expected == "warn":
+        assert plan["warnings"].count(warning) == 1
+    elif adapter == "codex":
+        assert not any("read boundary" in item for item in plan["warnings"])
+    else:
+        assert warning not in plan["warnings"]
 
 
 def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
@@ -3041,7 +3014,7 @@ def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_th
     assert mcp_table(reader) == {"fabric": {"enabled": False},
                                  "docs": {"default_tools_approval_mode": "approve"}}
     assert reader["applied"]["mcp_disabled"] == ["fabric"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert mcp_table(writer) == {"fabric": {"default_tools_approval_mode": "approve"},
@@ -3137,7 +3110,7 @@ def test_codex_plugin_servers_use_the_plugin_switch_not_a_server_override(monkey
     assert mcp_table(reader) == {"user": {"enabled": False}}
     assert reader["applied"]["plugins_disabled"] is True
     assert reader["applied"]["mcp_disabled"] == ["plug", "user"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert "features.plugins=false" not in codex_options(writer)
@@ -3157,7 +3130,7 @@ def test_codex_unspellable_server_name_makes_a_reader_go_clean_and_a_writer_skip
     route = {"resolved_model": "fixture"}
     reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
     assert reader["applied"]["config"] == "clean" and "cannot be overridden" in reader["applied"]["config_note"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert writer["applied"]["config"] == "inherited" and mcp_table(writer) == {}
@@ -3187,7 +3160,7 @@ def test_codex_writer_receipt_records_unconfined_hooks_and_stdio_servers(monkeyp
     monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers",
                         lambda cwd: {"projsrv": {"exec": True, "plugin": False},
                                      "projurl": {"exec": False, "plugin": False}})
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
                             worktree=worktree, workspace_root=worktree, network=True)
     options = codex_options(writer)
@@ -5379,12 +5352,18 @@ def test_observed_substitution_cannot_certify_the_resolved_family(tmp_path):
     assert not record["certification_eligible"]
 
 
-def test_catalogued_observed_substitution_records_answering_family_without_certifying(tmp_path):
-    code = """import json
+@pytest.mark.parametrize("observed,expected_family,catalogued", [
+    pytest.param("claude-sonnet-5-5", "anthropic", True, id="catalogued-family"),
+    pytest.param("gpt-claude-model", "unknown", False, id="ambiguous-family"),
+])
+def test_observed_substitution_records_only_a_verified_answering_family(
+    tmp_path, observed, expected_family, catalogued,
+):
+    code = f"""import json
 events = [
-    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
-    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+    {{"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"}},
+    {{"type":"assistant","message":{{"model":{observed!r},"content":[{{"type":"text","text":"DONE"}}]}}}},
+    {{"type":"result","result":"DONE","is_error":False,"session_id":"s-1"}},
 ]
 for event in events:
     print(json.dumps(event), flush=True)
@@ -5398,10 +5377,11 @@ for event in events:
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "claude-sonnet-5-5"
-    assert record["provenance"]["family"] == "anthropic"
-    assert record["provenance"]["identity"] == "observed"
-    assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
+    assert record["provenance"]["observed_model"] == observed
+    assert record["provenance"]["family"] == expected_family
+    if catalogued:
+        assert record["provenance"]["identity"] == "observed"
+        assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
     assert not record["cross_family"]
     assert not record["certification_eligible"]
 
@@ -5430,31 +5410,6 @@ for event in [
     assert record["status"] == "ok"
     assert record["provenance"]["family"] == "unknown"
     assert "observed model family unverified after substitution" in record["provenance"]["notes"]
-
-
-def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):
-    code = """import json
-events = [
-    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"gpt-claude-model","content":[{"type":"text","text":"DONE"}]}},
-    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
-]
-for event in events:
-    print(json.dumps(event), flush=True)
-"""
-    plan = fixture_plan(
-        tmp_path,
-        code,
-        "claude",
-        intent="assurance",
-        orchestrator_family="openai",
-    )
-    record = supervisor().execute(plan, tmp_path / "result.md")
-    assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "gpt-claude-model"
-    assert record["provenance"]["family"] == "unknown"
-    assert not record["cross_family"]
-    assert not record["certification_eligible"]
 
 
 def test_preface_env_and_credential_path_controls(tmp_path):
@@ -6044,14 +5999,11 @@ def git(root, *args):
 def instruction_lane(tmp_path):
     """A primary on main with a tracked skill, and a lane worktree cut before main moves."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    (repo / SKILL).parent.mkdir(parents=True)
-    (repo / SKILL).write_text("v1\n")
-    (repo / "app.txt").write_text("app\n")
+    git_repo(repo, branch="main", files={SKILL: "v1\n", "app.txt": "app\n"}, commit=False)
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
     lane = repo / ".worktrees/lane"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    make_linked_worktree(repo, "lane", path=lane)
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
     (repo / SKILL).write_text("v2\n")
@@ -7239,12 +7191,11 @@ def test_confined_writer_merges_protected_paths_and_fills_its_caches(monkeypatch
 def first_instruction_lane(tmp_path):
     """A lane cut before main adds the repository's first skill."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    (repo / "app.txt").write_text("app\n")
+    git_repo(repo, branch="main", files={"app.txt": "app\n"}, commit=False)
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
     lane = repo / ".worktrees/lane"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    make_linked_worktree(repo, "lane", path=lane)
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
     git(repo, "add", ".")
@@ -7402,7 +7353,7 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
 
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
 def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mode):
-    repo, cwd = linked_worktree(tmp_path)
+    repo, cwd = sandbox_profile_worktree(tmp_path)
     plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     plan["protected_paths"] = [str(repo / name) for name in (".claude", ".codex")]
@@ -7427,7 +7378,7 @@ def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_
     sandbox_exec = mod._sandbox_exec_path()
     if not sandbox_exec:
         pytest.skip("sandbox-exec is unavailable or disabled")
-    repo, cwd = linked_worktree(tmp_path)
+    repo, cwd = sandbox_profile_worktree(tmp_path)
     plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     protected = [repo / name for name in (".claude", ".codex")]
