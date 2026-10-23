@@ -118,6 +118,18 @@ fn names(values: &[(String, Json)]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+fn integer_error(name: &str, spec: &Json, origin: &str) -> String {
+    format!(
+        "{origin}: {name} takes an integer from {} to {}{}",
+        provenant_core::py::python_str(&spec["min"].value()),
+        provenant_core::py::python_str(&spec["max"].value()),
+        if spec["nullable"].truth() {
+            " or null"
+        } else {
+            ""
+        }
+    )
+}
 fn integer(v: &Json) -> Option<i128> {
     match v {
         Json::Bool(v) => Some(i128::from(*v)),
@@ -255,16 +267,7 @@ impl Registry {
                             && integer(&spec["max"]).is_some_and(|max| v <= max)
                     });
                 if !valid {
-                    return Err(invalid(format!(
-                        "{origin}: {name} takes an integer from {} to {}{}",
-                        provenant_core::py::python_str(&spec["min"].value()),
-                        provenant_core::py::python_str(&spec["max"].value()),
-                        if spec["nullable"].truth() {
-                            " or null"
-                        } else {
-                            ""
-                        }
-                    )));
+                    return Err(invalid(integer_error(name, spec, origin)));
                 }
             }
             Some("enum") => {
@@ -306,7 +309,16 @@ impl Registry {
             if spec["nullable"].truth() && matches!(lower.as_str(), "null" | "none" | "default") {
                 Value::Null
             } else if spec["type"].string() == Some("int") {
-                crate::pending::parse_int(text)?.unwrap_or_else(|| Value::String(text.into()))
+                match crate::pending::parse_int(text) {
+                    Ok(value) => value.unwrap_or_else(|| Value::String(text.into())),
+                    Err(crate::Error::NumberOutOfRange(source)) => {
+                        return Err(crate::Error::ProfileNumberOutOfRange {
+                            source,
+                            message: integer_error(name, spec, origin),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
             } else if spec["type"].string() == Some("bool") {
                 match lower.as_str() {
                     "true" | "1" | "on" => Value::Bool(true),
@@ -848,7 +860,8 @@ mod tests {
             ["effort.shift", "99999999999999999999999999"],
             ["missing", "True"],
             ["effort.shift", "2"],
-            ["effort.shift", "-0"]
+            ["effort.shift", "-0"],
+            ["effort.shift", "0".repeat(5000)]
         ]);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cases");
@@ -873,6 +886,10 @@ mod tests {
             serde_json::from_slice::<Value>(&output).unwrap(),
             serde_json::json!(actual)
         );
+        assert!(matches!(
+            registry.parse("effort.shift", "99999999999999999999999999", "env"),
+            Err(crate::Error::ProfileNumberOutOfRange { .. })
+        ));
         assert!(registry
             .check("effort.shift", &Value::Bool(true), "value")
             .is_err());

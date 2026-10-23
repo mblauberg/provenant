@@ -22,6 +22,12 @@ pub mod workflows;
 pub enum Error {
     #[error(transparent)]
     NumberOutOfRange(#[from] provenant_records::checked_json::NumberOutOfRange),
+    #[error("{message}")]
+    ProfileNumberOutOfRange {
+        #[source]
+        source: provenant_records::checked_json::NumberOutOfRange,
+        message: String,
+    },
     #[error(transparent)]
     Path(#[from] provenant_core::paths::PathError),
     #[error("cargo is not on PATH (looked in ~/.cargo/bin too)")]

@@ -1707,3 +1707,10 @@ RP-config-8 integer-boundary correction: profile text integers now use the same
 v4-approved typed `NumberOutOfRange` refusal as record integers, including
 Unicode decimal input, instead of silently falling back to a string validation
 error. The shared records error is reused; no f64 conversion is involved.
+The profile command retains the source's knob-range diagnostic for these
+oversized values while carrying `NumberOutOfRange` as its typed cause; the
+failure-edge differential includes this case. No CLI diagnostic change is needed.
+Native repair review also found CPython's default 4,300-decimal-digit conversion
+limit (including leading zeros). The pending parser now applies that default,
+with a 5,000-zero Python differential. Non-default interpreter digit-limit
+overrides remain an explicit host/codec boundary of the partial profile unit.

@@ -99,6 +99,9 @@ pub(crate) fn parse_int(text: &str) -> Result<Option<Value>> {
     if negative {
         ascii.push('-');
     }
+    let mut digit_count = 0;
+    // CPython's default decimal conversion limit excludes signs and underscores.
+    // Runtime interpreter overrides remain a pending host/codec limitation.
     // Python int accepts Unicode decimal digits and single underscores.
     for c in digits.chars() {
         if c == '_' {
@@ -111,6 +114,10 @@ pub(crate) fn parse_int(text: &str) -> Result<Option<Value>> {
         else {
             return Ok(None);
         };
+        digit_count += 1;
+        if digit_count > 4300 {
+            return Ok(None);
+        }
         ascii.push(char::from(b'0' + digit as u8));
     }
     if let Ok(v) = ascii.parse::<i64>() {
@@ -198,6 +205,7 @@ mod tests {
             Some(Value::from(i64::MIN))
         );
         assert_eq!(parse_int("12__3").unwrap(), None);
+        assert_eq!(parse_int(&"0".repeat(5000)).unwrap(), None);
     }
     #[test]
     fn non_utf8_paths_never_silently_change_the_receipt() {
