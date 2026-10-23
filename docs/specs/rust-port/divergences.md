@@ -27,6 +27,103 @@ Existing front-door exceptions D1–D3 are already recorded in
 [ADR 0027](../../adr/0027-rust-front-door.md#intentional-divergences-from-the-python-front-door).
 They form the current baseline; they are not newly discovered port mismatches.
 
+## RP-1010: telemetry exact numeric counters
+
+- Unit: `scripts/telemetry.py#interface`, `scripts/telemetry_costs.py#unit-01`,
+  `scripts/telemetry_report.py#unit-01`; rulebook v2. Class: `bug`.
+- Compared revisions: Python and policy tests at
+  `e897b10d58b27a46544969594eed08a5ed64c72c`; initial Rust unit commits
+  `7b8aabe6`, `541f2f41`, `075f8ed4`; repaired candidate is this PR's head.
+- Reproducer/evidence: crate test
+  `differential::numeric_boundaries_and_python_float_hash_spelling`, isolated
+  in-memory records, pinned Rust toolchain and Python 3.14. No live state.
+- Expected/actual: `9007199254740993` must remain exact in retained usage and
+  sums. Initial Rust `f64` fields rounded it to `9007199254740992` and could
+  collapse adjacent attempt numbers.
+- Disposition: fixed with integer/float numeric records, checked exact counter
+  sums and exact integer latest-attempt comparisons. Convert to floats at
+  pricing/measurement boundaries. The regression rejects the original fields.
+- Follow-up: records owner folds `pending::Numeric` into the shared record API;
+  full independently owned J2/mutant receipts remain an integration gate.
+
+## RP-1011: telemetry Python float hash spelling
+
+- Unit: `scripts/telemetry_ingest.py#unit-01`; rulebook v2. Class: `bug`.
+- Compared revisions: same oracle as RP-1010, initial Rust `3588b22d`, repaired
+  candidate is this PR's head.
+- Reproducer/evidence: `differential::numeric_boundaries_and_python_float_hash_spelling`
+  compares Python SHA-256 over JSON with Rust for `1e-5`, `1e-7`, `1e16`,
+  `1e20`, negative zero, Unicode and an exact integer above 2^53.
+- Expected/actual: Python hashes `1e-07`; initial Rust hashed `1e-7`.
+  A fractional fallback token counter could therefore receive a different ID.
+- Disposition: fixed by matching Python's shortest float spelling, exponent
+  signs/zero padding and ASCII string escaping. Oracle comparison passes.
+- Follow-up: canonical encoder belongs in `provenant-records`; this bounded
+  fixture set does not claim exhaustive float-codec/J2 parity.
+
+## RP-1012: telemetry peers accept integral floats
+
+- Unit: `scripts/telemetry_hosts.py#interface`; rulebook v2. Class: `bug`.
+- Compared revisions: same oracle as RP-1010, initial Rust `7088692b`, repaired
+  candidate is this PR's head.
+- Reproducer/evidence: `differential::peer_integral_floats_remain_accepted`.
+  Python's peer validator accepts `rows: 1.0` and integral missing-token counts.
+- Expected/actual: Rust's validator accepted these numbers but subsequent
+  `u64` deserialisation rejected them.
+- Disposition: fixed by retaining integer/float numeric count slots through
+  typed deserialisation, including integral floats above the u64 range. Regression passes and rejects the old path.
+- Follow-up: full peer snapshot/transport conformance is outside this interface
+  slice; independently owned J2/mutant receipts remain an integration gate.
+
+
+## RP-1013: lexical JSON integers beyond u64 remain blocked
+
+- Unit: `scripts/telemetry_hosts.py#interface`, and later JSON/record integration
+  for the partial ingestion/report units; rulebook v2. Class: `library`.
+- Compared revisions: same Python oracle as RP-1010; Rust candidate is this
+  PR's head with default workspace `serde_json` features.
+- Reproducer: parse `100000000000000000001` as Python JSON and as
+  `serde_json::Value`. Python retains an exact integer; the default Rust Value
+  parser converts the lexical integer beyond u64 to an approximate float.
+- Expected/actual: peer aggregate counters can exceed one SQLite row's i64
+  range. Passing them through Value can silently lose precision before the
+  typed numeric visitor sees the input.
+- Evidence: independent native repair review identified the Value boundary;
+  existing above-2^53 fixtures cover exact i64/u64 records and do not prove
+  exact lexical JSON above u64. No independent old-pass/mutant receipt claimed.
+- Disposition: **open, blocking affected unit completion and promotion**.
+  The hosts interface is partial. No feature expansion, wire narrowing or
+  intentional behaviour change is approved. The PR is a draft; no callers or
+  live state switch to this crate.
+- Follow-up: shared records/integration owner must supply an exact lexical
+  number codec or obtain the rulebook/ADR authority for a serde_json feature
+  expansion, then add independently owned large-counter conformance fixtures.
+### RP-1013 resolution under rulebook v4
+
+- Unit: checked JSON/record boundaries for telemetry and its pending records
+  codec; rulebook v4 R4, class `improvement` (supersedes the open v2 disposition
+  above). Approved by the rulebook and the PR #1295 follow-up instructions.
+- Rulebook revision: `41b1219cc3fb1a3febc0a47a851dc57d165bee78` (PR #1297).
+  Python source/policy oracle remains `e897b10d58b27a46544969594eed08a5ed64c72c`;
+  compared Rust WIP is `3e17af47`, repaired candidate is this PR's head.
+- Expected/actual: Python accepts unbounded lexical integers; Rust now retains
+  every i64/u64 integer exactly and refuses larger integers with typed
+  `NumberOutOfRange`, before serde_json can approximate them as f64. Arithmetic
+  also refuses integer results outside that wire range. No arbitrary-precision
+  workspace feature is enabled.
+- Reproducer/evidence: `cargo test -p provenant-telemetry -j 2` from
+  `tools/front-door`, macOS arm64, Python 3.14.8 and
+  `PROVENANT_PORT_DIFF_REQUIRED=1`. Surviving fixtures:
+  `pending::decode::tests::checked_decode_retains_spelling_at_integer_boundaries`,
+  `ingest::tests::review_regression_oversized_integer_is_a_typed_error` and
+  `pending::numeric::tests::arithmetic_refuses_integers_outside_wire_range`.
+  The arithmetic regression failed before repair; all 55 crate tests pass
+  after repair. Independently owned mutant-fail evidence is not claimed.
+- Disposition: resolved by the v4-approved refusal; no longer blocks the typed
+  peer interface. Peer transport/merge implementation remains partial.
+- Follow-up: move the marked checked codec and numeric contracts from `pending`
+  into `provenant-records` at integration; retain boundary/error regressions.
+
 ## RP-1001 — host identity JSON input (partial unit)
 
 - Unit: `scripts/host_identity.py#unit-01`; rulebook v2 with the inert-crate
@@ -218,6 +315,36 @@ Rust Unicode/range and integer-addition fixtures cover these cases. Lookup
 and census APIs propagate the typed range errors rather than dropping rows;
 the filesystem fixture checks both ppid and pgid overflow and disappearance.
 The source revision above is unchanged; CLI rendering remains an edge task.
+## RP-1014: telemetry Python value and Unicode semantics
+
+- Units: `scripts/telemetry_changes.py#unit-01`,
+  `scripts/telemetry_costs.py#unit-01`, `scripts/telemetry_report.py#unit-01`;
+  rulebook v4, class `bug` (fixed; no contract change).
+- Compared revisions: Python source/policy oracle
+  `e897b10d58b27a46544969594eed08a5ed64c72c`; faulty WIP `3e17af47`,
+  repaired candidate is this PR's head. Canonical Unicode oracle is CPython
+  3.14.8 / Unicode 16.0.0, matching main's copied CLI compatibility tables.
+- Expected/actual: Python strips U+001C–U+001F, accepts Unicode decimal window
+  and model suffix digits, and rejects U+0345 as an alphabetic alias. The old
+  Rust paths differed. Python merges equal numeric keys `1`/`1.0` and sorts
+  numeric dimensions using Python string spellings; Rust separated them and
+  mapped numeric sort keys to an empty string. Active-time integer
+  `9007199254740993` became `9007199254740992` through an f64 accumulator.
+- Reproducer/evidence: the `unicode_windows_and_refusals_match_python`,
+  `unicode_model_attribution_matches_python`,
+  `numeric_group_keys_and_order_match_python`,
+  `table_trailing_whitespace_matches_python` differential fixtures and
+  `changes::tests::active_time_preserves_large_integer_values` all failed
+  before their repairs and pass afterwards. Letter classification also
+  matches CPython over all Unicode scalar values. Run
+  `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-telemetry -j 2`
+  in `tools/front-door` on macOS arm64; 55 tests pass.
+- Disposition: fixed with copied/extended compatibility primitives in `pending`
+  and exact numeric accumulation/comparison. Independent native source review
+  identified the model, cost-key and table defects. Independently owned
+  old-pass/mutant-fail judge receipts are not claimed.
+- Follow-up: integrate the marked helpers into `provenant-core`; ledger query
+  adapters remain with the store owner and implementation units stay partial.
 ## RP-FR1-001: generic gate-extension JSON numbers (open, library)
 
 - Unit: `runtime/fabric/src/graph/gates.ts#unit-01` (partial), rulebook v2.
