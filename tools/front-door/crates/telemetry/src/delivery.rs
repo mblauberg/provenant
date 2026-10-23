@@ -381,24 +381,30 @@ pub fn cost_per_accepted(
         }
         run_groups.insert(run.run_id.clone(), run.risk_tier.clone());
     }
-    let mut dedup = BTreeMap::new();
+    let mut dedup = Vec::<&Usage>::new();
+    let mut positions = BTreeMap::new();
     for row in lanes
         .iter()
         .filter(|r| r.source == "fabric" && r.delivery_run_id.is_some())
     {
         let key = (&row.source, &row.event_id, identity.canonical(&row.host));
-        if !dedup.contains_key(&key) || row.host == identity.current {
-            dedup.insert(key, row);
+        if let Some(&index) = positions.get(&key) {
+            if row.host == identity.current {
+                dedup[index] = row;
+            }
+        } else {
+            positions.insert(key, dedup.len());
+            dedup.push(row);
         }
     }
-    for row in dedup.values() {
+    for row in dedup {
         let Some(tier) = run_groups.get(&row.delivery_run_id) else {
             continue;
         };
         let Some(group) = groups.get_mut(tier) else {
             continue;
         };
-        let mut row = (*row).clone();
+        let mut row = row.clone();
         row.model = costs::normalise_model(
             row.adapter.as_deref(),
             row.provider.as_deref(),
@@ -484,4 +490,14 @@ mod tests {
         );
         assert_eq!(failure_hash(&[]), "4f53cda18c2b");
     }
+    #[test]
+    fn review_regression_linked_costs_follow_first_seen_order() {
+        let run = Delivery {run_dir:"dir".into(),run_id:Some("run".into()),accepted:true,..Delivery::default()};
+        let rows:Vec<_> = [("c",1),("b",2),("a",3)].into_iter().map(|(id,n)| Usage {source:"fabric".into(),event_id:id.into(),host:"h".into(),delivery_run_id:Some("run".into()),adapter:Some("a".into()),model:Some("m".into()),input_tokens:Some((n*100_000).into()),cache_read_tokens:Some(0.into()),cache_write_tokens:Some(0.into()),output_tokens:Some(0.into()),..Usage::default()}).collect();
+        let prices = costs::Prices {models:BTreeMap::from([("a/m".into(),costs::Price {usd_per_million:BTreeMap::from([("input".into(),json!(1))]),..costs::Price::default()})]),..costs::Prices::default()};
+        let report = cost_per_accepted(&[run], &rows, &BTreeSet::new(), &HostIdentity::new("h".into(), BTreeSet::new(), &BTreeSet::new()), None, &prices, &BTreeMap::new()).unwrap();
+        assert_eq!(serde_json::to_value(&report[0]).unwrap()["cost_usd_lower_bound"].to_string(), "0.6000000000000001");
+        assert_eq!(report[0].cost_per_accepted_usd_lower_bound, Some(0.6000000000000001));
+    }
+
 }
