@@ -54,7 +54,7 @@ The user dropped timed trials on 2026-10-23; see the supervisor spec.
   - `test_fabric_reads_delegate_to_the_fabric_cli`
   - `test_installed_copy_ignores_same_named_commands_in_its_bin_directory`
   - `test_split_root_preserves_instance_root_for_mcp_child`
-  - `test_installed_stub_does_not_materialize_the_default_instance_root`
+  - `test_installed_stub_does_not_materialise_the_default_instance_root`
   - `test_checkout_dispatcher_does_not_inherit_agents_home_as_instance_root`
   - `test_checkout_dispatcher_resolves_the_instance_pointer_without_agents_home_fallback`
   - `test_explicit_product_root_overrides_instance_pointer_and_agents_home`

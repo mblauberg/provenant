@@ -3,7 +3,7 @@
   CONDUCTOR-OWNED, regenerated on material change and refreshed at STOP. This
   is the CAPSTONE deliverable: it takes the mission's output from
   "adversarially validated on delegated skills' terms" to "handed to a human
-  / next agent to carry forward." It SYNTHESIZES existing mission artifacts —
+  / next agent to carry forward." It SYNTHESISES existing mission artifacts —
   it does NOT introduce new decisions (a handoff that decides is a bug).
   Every claim traces to a source file (relative paths from the mission root,
   or a delegated .agent-run/runs/<mission-run-dir>/RUN.json receipt).
@@ -61,7 +61,7 @@ receipt/spec lives.)*
 
 ## 2. What was decided / built
 
-<Organized by dependency tier or work area. One bullet per load-bearing
+<Organised by dependency tier or work area. One bullet per load-bearing
 item: `QUEUE.md` id → the call → the one-line why → the delegated receipt
 path (`.agent-run/runs/<mission-run-dir>/RUN.json` or equivalent) if any.>
 

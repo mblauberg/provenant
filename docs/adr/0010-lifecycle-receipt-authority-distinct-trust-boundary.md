@@ -14,7 +14,7 @@ false circular dependency:
 
 1. **`lifecycle_authority_receipts`** — attestation of lifecycle *transitions*
    by an external append-only ledger, with `lifecycle_receipt_batches`,
-   `_batch_completions`, `_batch_authorizations`, `lifecycle_transition_applies`
+   `_batch_completions`, `_batch_authorisations`, `lifecycle_transition_applies`
    and `lifecycle_admitted_run_scopes`.
 
    [PR #24](https://github.com/mblauberg/provenant/pull/24) merged this schema

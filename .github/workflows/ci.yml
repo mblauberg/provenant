@@ -152,6 +152,7 @@ jobs:
               - 'tools/**'
               - 'workflows/**'
               - '.gitignore'
+              - '_typos.toml'
               - 'ACKNOWLEDGEMENTS.md'
               - 'AGENTS.md'
               - 'CLAUDE.md'
@@ -255,7 +256,7 @@ jobs:
           # narrowed contract set is HEAD-local, checks out shallow.
           fetch-depth: 0
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -295,7 +296,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -363,7 +364,7 @@ jobs:
           persist-credentials: false
       # test_fabric_skill_params exports the tool schemas with tsx.
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -394,7 +395,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -435,7 +436,7 @@ jobs:
           # origin/main here was stale — no such test exists.
           fetch-depth: 1
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -538,7 +539,7 @@ jobs:
       # Port differential tests run the Python/TS oracles and must not skip
       # in CI (PORTING R9).
       - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
+        uses: ./.github/actions/setup-node-workspace
       - name: Require port differential oracles
         run: |
           {
@@ -634,6 +635,49 @@ jobs:
           PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
             cargo build --release --locked -p provenant --bin provenant
 
+  generic-checks:
+    name: Spelling, workflows and Markdown links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install spelling checker
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: typos-cli@1.51.1
+      # These tools are not in install-action's supported binary catalogue.
+      # Verify the pinned upstream release archives before executing them.
+      - name: Install actionlint, ShellCheck and lychee
+        env:
+          TOOL_DIR: ${{ runner.temp }}/generic-tools
+        run: |
+          mkdir -p "$TOOL_DIR/bin"
+          cd "$TOOL_DIR"
+          curl --fail --silent --show-error --location --output actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          curl --fail --silent --show-error --location --output shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz' | sha256sum --check
+          tar -xJf shellcheck.tar.xz --strip-components=1 -C bin shellcheck-v0.11.0/shellcheck
+          curl --fail --silent --show-error --location --output lychee.tar.gz \
+            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz
+          echo '1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a  lychee.tar.gz' | sha256sum --check
+          tar -xzf lychee.tar.gz --strip-components=1 -C bin lychee-x86_64-unknown-linux-gnu/lychee
+          echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
+      - name: Check spelling
+        run: git ls-files | typos --file-list - --force-exclude
+      - name: Check workflows and their shell blocks
+        run: actionlint
+      - name: Check local Markdown links and fragments
+        run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
+
   zizmor:
     name: Workflow security lint
     runs-on: ubuntu-latest
@@ -677,6 +721,7 @@ jobs:
       - rust-macos-release
       - rust-dependencies
       - zizmor
+      - generic-checks
     if: always()
     steps:
       - name: Fail unless every needed job succeeded or was skipped by filter

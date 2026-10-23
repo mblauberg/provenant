@@ -1807,7 +1807,7 @@ from the digest because Rust's `Path::extension()` differs from Python's
 Python digest regressions cover both `src/.rs` and `tests/.rs`. The Codex partial
 also includes strict symlink-resolution diagnostic wording and invalid-UTF-8
 exception/traceback bytes. UTF-8 failures now preserve exit 1 and a typed encoding
-cause on every mode, but the synthesized final exception line does not reproduce
+cause on every mode, but the synthesised final exception line does not reproduce
 Python's traceback. These are open diagnostic limitations, not approved changes.
 
 RP-config-8 integer-boundary correction: profile text integers now use the same

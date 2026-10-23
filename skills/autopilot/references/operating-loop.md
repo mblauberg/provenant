@@ -23,7 +23,7 @@ Fill these once, in `GOAL.md`, before the first iteration. They are settled inpu
 | `{{DOMAIN}}` / `{{MISSION}}` | What this run produces and its north star (e.g. "exhaustively design and scaffold X", "synthesize the literature on Y", "audit Z for class-W vulnerabilities"). |
 | `{{LOCKED_CONSTRAINTS}}` | A do-not-re-litigate list the run designs **around**, not toward. Settled inputs. |
 | `{{ESCALATION_GATES}}` | Which work routes to which gate when the run cannot finish it autonomously. The taxonomy is generic (see §4); the specific gates are knobs. |
-| `{{BUILD_CEILING}}` | The line between what the run may build/produce autonomously and what requires explicit user authorization (e.g. "scaffold + local/mocked only; no real infra, no irreversible side effects"). |
+| `{{BUILD_CEILING}}` | The line between what the run may build/produce autonomously and what requires explicit user authorisation (e.g. "scaffold + local/mocked only; no real infra, no irreversible side effects"). |
 | `{{RUNAWAY_CAPS}}` | The tunable ceilings of §0a (concurrency, forks, depth, per-unit budget). |
 
 Model/effort routing and hard-gate review panels are **not** knobs of this
@@ -84,7 +84,7 @@ retain the load-bearing synthesis/adjudication role.
   policy requires them. Durable reasoning may be composed from verified
   evidence with citations to source artifacts; never paste an unreviewed worker
   return as project truth. Record thin/failed legs and re-dispatch or escalate.
-- **Stay re-entrant / crash-safe.** Assume your context may be summarized or compacted at any time. Everything needed to resume must live in the **state file**; never rely on remembering something you didn't write down. **Re-read the state file at the start of every loop** — it is the recover-after-compaction anchor.
+- **Stay re-entrant / crash-safe.** Assume your context may be summarised or compacted at any time. Everything needed to resume must live in the **state file**; never rely on remembering something you didn't write down. **Re-read the state file at the start of every loop** — it is the recover-after-compaction anchor.
 - **One active orchestrator lease.** Enforce acquire/renew/transfer/release with
   `skills/orchestrate/scripts/lease.py`; STATE records chair/session, generation and
   heartbeat. A Claude/Codex peer owns bounded stages, never a second loop
