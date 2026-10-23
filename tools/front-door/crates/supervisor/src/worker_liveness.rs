@@ -341,6 +341,7 @@ pub fn render(workers: &[Worker]) -> String {
         .join("\n")
 }
 
+pub mod edge;
 pub mod observe;
 pub use observe::{
     canonical_cwd, log_metadata, output_size, process_cwd, repository_id, session_logs, worker_cwd,
