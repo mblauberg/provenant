@@ -2,7 +2,6 @@ from pathlib import Path
 
 from tests.support.modules import load_script
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "static-security-check.py"
 

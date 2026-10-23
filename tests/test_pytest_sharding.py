@@ -1,10 +1,9 @@
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
-import zlib
 
 from tests.support.git import git
 from tests.support.modules import load_script
-
 
 ROOT = Path(__file__).resolve().parents[1]
 conftest = load_script(ROOT / "tests" / "conftest.py", "provenant_root_tests_conftest")

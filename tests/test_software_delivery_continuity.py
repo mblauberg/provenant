@@ -1,13 +1,13 @@
 import hashlib
 import json
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import subprocess
-import os
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime.now(timezone.utc).replace(microsecond=0)

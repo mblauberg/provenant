@@ -1,13 +1,11 @@
 import json
+import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
-import subprocess
-import sys
-
-from tests.support.modules import load_script
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills" / "orchestrate" / "scripts" / "run_dir_init.sh"

@@ -1,12 +1,12 @@
-from collections import Counter
 import json
-from pathlib import Path
 import subprocess
+from collections import Counter
+from pathlib import Path
 
 import pytest
 import yaml
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 

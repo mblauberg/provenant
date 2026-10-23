@@ -2,14 +2,14 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "worktree.py"
 worktree_policy = load_script(SCRIPT, "worktree_policy", register=True)

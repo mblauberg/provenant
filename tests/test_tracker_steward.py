@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.support.modules import load_script
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "tracker" / "scripts" / "steward.py"

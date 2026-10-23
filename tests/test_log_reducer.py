@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
 from tests.support.modules import load_script
 

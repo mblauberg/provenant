@@ -7,7 +7,6 @@ from pathlib import Path
 
 from tests.support.modules import load_script
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / "skills" / "legal-writing"
 
