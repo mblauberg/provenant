@@ -209,7 +209,7 @@ def pivot(telemetry, db, ref):
 
 def side(telemetry, db, start, end):
     """Metrics for [start, end) from the ledger's own stats report."""
-    report = telemetry.stats(db, telemetry.iso(start), until=telemetry.iso(end))
+    report = telemetry.report_owner().stats(telemetry, db, telemetry.iso(start), until=telemetry.iso(end))
     lane = (report['lane_totals'] or [{}])[0]
     usage = (report['usage_totals'] or [{}])[0]
     lanes, rows = lane.get('lanes', 0), usage.get('rows', 0)
@@ -293,9 +293,9 @@ def render_compare(telemetry, report):
     for name in ('before', 'after'):
         value = report[name]
         lines.append(f"{name:<6} {value['start']}..{value['end']} lanes={value['lanes']} "
-                     f"usage_rows={telemetry.compact(value['usage_rows'])}"
+                     f"usage_rows={telemetry.report_owner().compact(value['usage_rows'])}"
                      + (f' inconclusive (n<{MIN_SAMPLE})' if value['inconclusive'] else ''))
-    lines += telemetry.bounded_table(
+    lines += telemetry.report_owner().bounded_table(
         ('metric', 'before', 'after', 'n', 'verdict'),
         [(row['metric'], show(row['before'], row['metric']), show(row['after'], row['metric']),
           f"{row['n_before']}/{row['n_after']} {row['sample']}", row['verdict'])
@@ -334,7 +334,7 @@ def retro(telemetry, db, since=None, span=DEFAULT_WINDOW, *, now=None):
     current = now or telemetry.since_time(telemetry.now()).replace(microsecond=0)
     start = telemetry.since_time(since) if since else current - timedelta(days=7)
     overall = side(telemetry, db, start, current)
-    report = telemetry.stats(db, telemetry.iso(start))
+    report = telemetry.report_owner().stats(telemetry, db, telemetry.iso(start))
     errors = Counter()
     for row in report['attempts']:
         if row['error_class']:
@@ -354,7 +354,7 @@ def retro(telemetry, db, since=None, span=DEFAULT_WINDOW, *, now=None):
 def render_retro(telemetry, report, limit):
     overall = report['overall']
     lines = [f"Retro {report['since']}..{report['until']}: lanes={overall['lanes']} "
-             f"ok={show(overall['success_rate'], 'success_rate')} usage_rows={telemetry.compact(overall['usage_rows'])} "
+             f"ok={show(overall['success_rate'], 'success_rate')} usage_rows={telemetry.report_owner().compact(overall['usage_rows'])} "
              f"usd={show(overall['cost_usd'])} limit_events={overall['limit_events']}"]
     if report['changes']:
         lines.append(f"Changes (newest first; {report['window']} each side; + improved, - regressed, "
@@ -394,7 +394,7 @@ def render_retro(telemetry, report, limit):
 
 
 def render_changes(telemetry, rows, limit):
-    lines = telemetry.bounded_table(
+    lines = telemetry.report_owner().bounded_table(
         ('merged_at', 'change', 'commit', 'labels', 'title'),
         [(row['merged_at'], reference(row) if row['pr'] is not None else 'manual', (row['merge_commit'] or '')[:10] or None,
           ','.join(row['labels'])[:30] or None, (row['title'] or '')[:60]) for row in rows], limit)
