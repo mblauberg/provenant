@@ -8,3 +8,4 @@ mod pending;
 mod test_support;
 pub mod portable_workflow;
 pub mod review_ladder;
+pub mod review_terminal;

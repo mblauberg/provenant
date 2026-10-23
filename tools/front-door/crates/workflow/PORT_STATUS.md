@@ -31,3 +31,11 @@ Risk tiers, lens sets, blocker reasons, provider lineage and fallback counts
 are ported. `tests/generate_policy_fixtures.py` expands the unchanged Python
 policy assertions into retained JSON fixtures; Rust compares the same cases
 with both their expected values and the live Python implementation.
+
+## Review terminal unit 01
+
+Closed worker-result shape checks, verdict precedence, endpoint/provider/model
+lineage, unavailable statuses and certification rules are ported. Typed worker
+and normalised result records use serde. Policy fixtures translate all 17 pure
+assertions in `tests/test_review_terminal.py`; the registry/YAML drift test
+remains an integration gap. Differential cases also cover every adapter.

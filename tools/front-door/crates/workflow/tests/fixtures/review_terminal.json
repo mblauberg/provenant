@@ -1,0 +1,852 @@
+[
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "pass",
+      "reason": "",
+      "terminal_available": true,
+      "certifying_vote": true
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": null,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "unavailable",
+      "reason": "terminal-unavailable",
+      "terminal_available": false,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {},
+      "verdict": "",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "no-verdict",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": false,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "missing-transcript",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "unavailable",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "unavailable",
+      "reason": "provider-unavailable",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 9,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "nonzero-exit",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "cursor",
+        "adapter": "cursor",
+        "provider_family": "cursor",
+        "model_family": "xai",
+        "endpoint_provider": "cursor",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "xai",
+      "provider_family": "cursor",
+      "endpoint_provider": "cursor",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "pass",
+      "reason": "",
+      "terminal_available": true,
+      "certifying_vote": true
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "cursor",
+        "adapter": "cursor",
+        "provider_family": "xai",
+        "model_family": "xai",
+        "endpoint_provider": "cursor",
+        "orchestrator_family": "openai",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": false,
+        "cross_family": false
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "openai",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "xai",
+      "provider_family": "xai",
+      "endpoint_provider": "cursor",
+      "orchestrator_family": "openai",
+      "cross_family": true,
+      "status": "pass",
+      "reason": "",
+      "terminal_available": true,
+      "certifying_vote": true
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "",
+        "model_family": "",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "",
+      "provider_family": "",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": false,
+      "status": "unavailable",
+      "reason": "provider-unavailable",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "",
+        "model_family": "xai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "xai",
+      "provider_family": "",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": false,
+      "status": "unavailable",
+      "reason": "provider-unavailable",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "EXECUTION-UNAVAILABLE",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "unavailable",
+      "reason": "execution-unavailable",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "not-a-review-verdict",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "unparseable-verdict",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/missing.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": false
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "missing-transcript",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "anthropic",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "openai",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "openai",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "anthropic",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "openai",
+      "cross_family": false,
+      "status": "failed",
+      "reason": "endpoint/provider/model identity mismatch",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "anthropic",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "openai",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "anthropic",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": false,
+      "status": "failed",
+      "reason": "endpoint/provider/model identity mismatch",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "cursor",
+        "provider_family": "xai",
+        "model_family": "xai",
+        "endpoint_provider": "cursor",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "angle": "correctness",
+        "verdict": "approve",
+        "issues": [],
+        "crossFamily": {
+          "ran": true,
+          "tool": "codex",
+          "status": "ok",
+          "modelFamily": "openai",
+          "endpointProvider": "openai",
+          "crossFamily": true,
+          "certificationEligible": true,
+          "readOnlyGuarantee": "enforced",
+          "outputPath": "reviews/luna.out",
+          "routeReceipt": "reviews/luna.route.json",
+          "notRunReason": ""
+        },
+        "path": "reviews/luna.md"
+      },
+      "verdict": "approve",
+      "chair": "openai",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "xai",
+      "provider_family": "xai",
+      "endpoint_provider": "cursor",
+      "orchestrator_family": "anthropic",
+      "cross_family": false,
+      "status": "failed",
+      "reason": "tool/adapter identity mismatch",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  },
+  {
+    "input": {
+      "dispatch": {
+        "status": "ok",
+        "exit": 0,
+        "output_path": "reviews/luna.out",
+        "tool": "codex",
+        "adapter": "codex",
+        "provider_family": "openai",
+        "model_family": "openai",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "anthropic",
+        "read_only_guarantee": "enforced",
+        "certification_eligible": true,
+        "cross_family": true
+      },
+      "terminal": {
+        "summary": "provider stopped without a verdict"
+      },
+      "verdict": "approve",
+      "chair": "anthropic",
+      "transcript": true,
+      "output": true
+    },
+    "expected": {
+      "family": "openai",
+      "provider_family": "openai",
+      "endpoint_provider": "openai",
+      "orchestrator_family": "anthropic",
+      "cross_family": true,
+      "status": "failed",
+      "reason": "no-verdict",
+      "terminal_available": true,
+      "certifying_vote": false
+    }
+  }
+]
