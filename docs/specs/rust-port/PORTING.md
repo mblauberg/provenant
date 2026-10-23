@@ -70,7 +70,7 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
 | telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
-| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing, telemetry |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
 | fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
@@ -82,6 +82,8 @@ identity and process-level setup. `help` and root resolution stay cheap: no
 threads, no SQLite, no provider probes. Break cycles with typed events and
 decisions, never by importing `run` into `providers` or `routing`. The
 install digest covers all workspace source, manifests and the lockfile.
+CLI composes run's `AttemptReader` with telemetry's `stats`; run has no
+telemetry dependency. Their shared `AttemptFact` lives in records.
 
 ## R3. Typed errors in libraries, rendering at the edge
 
