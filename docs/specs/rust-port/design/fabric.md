@@ -524,6 +524,8 @@ struct TaskRequest { id: TaskId, prompt: InputBytes, inputs: Vec<ArtifactRef>,
 struct SubmissionReceipt { runs: Vec<AttemptRef>, routes: Vec<RouteReceipt> }
 struct ResumeRequest { target: AttemptRef, prompt: InputBytes, expected_generation: u64 }
 enum ReconcileDecision { AbandonUncertain }
+struct ExecutionContext { project: ProjectId, actor: Address, authority: Authority }
+struct AttemptTempPaths { root: PathBuf, provider_tmp: PathBuf, browser_socket: Option<PathBuf> }
 struct RunQuery { project: ProjectId, ids: Vec<AttemptRef>,
     states: Vec<RunState>, cursor: Option<Cursor>, limit: u16 }
 struct RunSnapshot { project: ProjectId, target: AttemptRef, state: RunState, owner: OwnerObservation,
