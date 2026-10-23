@@ -70,7 +70,7 @@ pub fn normalise_candidates(
     alias_order: &BTreeMap<String, usize>,
     effort_order: &BTreeMap<String, usize>,
 ) -> Result<Vec<Candidate>, String> {
-    if raw.get("schema_version").and_then(Value::as_u64) != Some(1) {
+    if !python_one(raw.get("schema_version")) {
         return Err("candidate_set_invalid".into());
     }
     let Some(candidates) = raw.get("candidates").and_then(Value::as_array) else {
@@ -123,7 +123,7 @@ pub fn normalise_candidates(
             .map(String::as_str)
             .unwrap_or_default();
         let policy_role = policy.get("role").map(String::as_str).unwrap_or_default();
-        let hard_policy_match = route.get("schema_version").and_then(Value::as_u64) == Some(1)
+        let hard_policy_match = python_one(route.get("schema_version"))
             && route.get("status").and_then(Value::as_str) == Some("ok")
             && route.get("task_class").and_then(Value::as_str) == Some(task_class)
             && route.get("route_source").and_then(Value::as_str) == Some("task-class")
@@ -195,6 +195,15 @@ fn parse_availability(value: Option<&Value>) -> Option<Availability> {
             reason: "AvailabilityNotObserved".into(),
         }),
     }
+}
+
+fn python_one(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| {
+        value.as_bool() == Some(true)
+            || value.as_i64() == Some(1)
+            || value.as_u64() == Some(1)
+            || value.as_f64() == Some(1.0)
+    })
 }
 
 fn route_model(route: &Map<String, Value>) -> String {
@@ -290,10 +299,14 @@ pub fn configuration_ignored(preferences: &Value, task_class: &str, role: &str) 
             .get("policy")
             .filter(|value| !value.is_null() && *value != "fair-round-robin")
         {
+            let policy_string = policy
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| policy.to_string());
             ignored.push(ignored_item(
                 "spreading_policy",
                 "spreading",
-                &policy.to_string(),
+                &policy_string,
                 "unsupported_policy",
             ));
         }
@@ -419,7 +432,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{normalise_candidates, preference_items, preference_rank, Availability};
+    use super::{
+        configuration_ignored, normalise_candidates, preference_items, preference_rank,
+        Availability,
+    };
 
     #[test]
     fn forged_routes_below_the_hard_floor_are_not_admissible() {
@@ -475,5 +491,26 @@ mod tests {
             preference_rank(&candidates[0], &ranks, &Default::default())
                 > preference_rank(&candidates[1], &ranks, &Default::default())
         );
+    }
+
+    #[test]
+    fn integer_like_python_schema_versions_and_unknown_policy_values_match_the_oracle() {
+        let raw = json!({"schema_version":1.0,"candidates":[]});
+        assert!(normalise_candidates(
+            &raw,
+            "work",
+            "worker",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        )
+        .is_ok());
+        let ignored = configuration_ignored(
+            &json!({"spreading":{"policy":"weighted"}}),
+            "work",
+            "worker",
+        );
+        assert_eq!(ignored[0]["value"], "weighted");
+        assert_eq!(ignored[0]["reason"], "unsupported_policy");
     }
 }
