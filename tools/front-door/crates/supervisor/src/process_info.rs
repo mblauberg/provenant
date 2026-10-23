@@ -31,8 +31,10 @@ pub struct ProcessInfo {
     pub lstart: String,
     pub elapsed: String,
     pub cpu: String,
-    pub command: String,
-    pub comm: String,
+    #[serde(with = "os_text")]
+    pub command: OsString,
+    #[serde(with = "os_text")]
+    pub comm: OsString,
     pub stat: String,
     pub rss: i64,
     pub tty: String,
@@ -541,5 +543,219 @@ print(json.dumps([_lstart(t) for t in [0, 1704067200, 1735689599, -1]]))
         assert!(darwin_facts_bytes(43, &raw).is_none());
         assert!(darwin_facts_bytes(42, &raw[..647]).is_none());
         assert!(mach_tick_seconds() > 0.0);
+    }
+}
+
+// OS text stays lossless until an explicitly UTF-8 record edge. Refuse invalid
+// UTF-8 at that edge rather than rewriting its bytes with replacement characters.
+mod os_text {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::ffi::{OsStr, OsString};
+    pub fn serialize<S: Serializer>(text: &OsStr, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = text.to_str().ok_or_else(|| serde::ser::Error::custom("process text is not UTF-8"))?;
+        serializer.serialize_str(text)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<OsString, D::Error> {
+        String::deserialize(deserializer).map(Into::into)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LinuxClock {
+    pub boot_epoch: i64,
+    pub ticks: i64,
+    pub page_size: i64,
+    pub now_epoch: f64,
+}
+
+/// The filesystem and clock are values so the Linux path can be exercised on
+/// macOS too. A missing cmdline retains the kernel's comm, including kthreads.
+pub fn linux_process_at(pid: i32, proc_root: &std::path::Path, clock: LinuxClock) -> Option<ProcessInfo> {
+    use std::os::unix::fs::MetadataExt;
+    let row = linux_read_row(pid, proc_root).ok()??;
+    let directory = proc_root.join(pid.to_string());
+    let raw = std::fs::read(directory.join("stat")).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let end = text.rfind(") ")?;
+    let fields: Vec<_> = text[end + 2..].split_whitespace().collect();
+    if clock.ticks <= 0 || clock.page_size <= 0 { return None; }
+    let number = |index: usize| fields.get(index)?.parse::<i64>().ok();
+    let epoch = clock.boot_epoch as f64 + row.started.parse::<f64>().ok()? / clock.ticks as f64;
+    let cpu = number(11)?.checked_add(number(12)?)? as f64 / clock.ticks as f64;
+    let rss = number(21)?.checked_mul(clock.page_size)?.div_euclid(1024);
+    let command = std::fs::read(directory.join("cmdline")).ok().and_then(|bytes| {
+        let start = bytes.iter().position(|&byte| byte != 0)?;
+        let end = bytes.iter().rposition(|&byte| byte != 0)? + 1;
+        Some(shell_join_os(bytes[start..end].split(|&byte| byte == 0).map(OsStr::from_bytes)))
+    }).unwrap_or_else(|| row.command.clone().into());
+    Some(ProcessInfo { pid, ppid: row.ppid, pgid: row.pgid,
+        lstart: crate::sys::process::lstart(epoch).ok()?,
+        elapsed: duration(clock.now_epoch - epoch, true, false).ok()?,
+        cpu: duration(cpu, false, false).ok()?, command, comm: row.command.into(),
+        stat: fields.first()?.to_string(), rss,
+        tty: if *fields.get(4)? == "0" { "?".into() } else { fields[4].into() },
+        uid: directory.metadata().ok()?.uid().into(), start_epoch: Some(epoch) })
+}
+
+pub fn now_epoch() -> f64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(time) => time.as_secs_f64(),
+        Err(error) => -error.duration().as_secs_f64(),
+    }
+}
+
+pub fn process(pid: i32) -> Option<ProcessInfo> { process_at(pid, now_epoch()) }
+
+pub fn process_at(pid: i32, now: f64) -> Option<ProcessInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        let row = darwin_process_row(pid)?;
+        let epoch = row.started.parse::<f64>().ok()?;
+        let task = crate::sys::process::darwin_task(pid);
+        let cpu = task.as_ref().map_or(0.0, |task| task.cpu_seconds);
+        let stat = match row.status { 4 => "T", 5 => "Z", _ => if task.as_ref().is_some_and(|task| task.running) { "R" } else { "S" } };
+        let uid = crate::sys::process::darwin_bsd(pid).map_or(-1, |info| info.uid);
+        let command = crate::sys::process::darwin_command(pid);
+        Some(ProcessInfo { pid, ppid: row.ppid, pgid: row.pgid,
+            lstart: crate::sys::process::lstart(epoch).ok()?,
+            elapsed: duration(now - epoch, true, true).ok()?, cpu: duration(cpu, false, true).ok()?,
+            command: if command.is_empty() { row.command.clone().into() } else { command },
+            comm: row.command.into(), stat: stat.into(), rss: task.map_or(0, |task| task.rss_kib),
+            tty: row.tty, uid, start_epoch: Some(epoch) })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let root = std::path::Path::new("/proc");
+        if !root.is_dir() { return ps_process(pid); }
+        let clock = LinuxClock { boot_epoch: linux_boot_time(root).ok()?, ticks: crate::sys::process::clock_ticks().ok()?,
+            page_size: crate::sys::process::page_size().ok()?, now_epoch: now };
+        linux_process_at(pid, root, clock)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    { let _ = now; ps_process(pid) }
+}
+
+fn ps_command(args: &[&str], timeout: f64, canonical: bool) -> Result<crate::capture::BoundedProcessResult, ProcessError> {
+    let mut env: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    if canonical {
+        env.insert("LC_ALL".into(), "C".into());
+        env.insert("LANG".into(), "C".into());
+    }
+    let mut options = crate::bounded::Options::new(std::path::Path::new("."), timeout);
+    options.env = Some(&env);
+    options.merge_stderr = false;
+    let command: Vec<_> = std::iter::once("/bin/ps").chain(args.iter().copied()).map(OsString::from).collect();
+    let result = crate::bounded::run_bounded(&command, options)?;
+    if result.timed_out { return Err(ProcessError::Census("ps census failed: process timed out".into())); }
+    if result.output_truncated || result.stderr_truncated == Some(true) {
+        return Err(ProcessError::Census("ps census output exceeds observation bound".into()));
+    }
+    Ok(result)
+}
+
+pub fn ps_start_time(pid: i32, canonical: bool) -> Option<String> {
+    let pid = pid.to_string();
+    let result = ps_command(&["-o", "lstart=", "-p", &pid], 2.0, canonical).ok()?;
+    (result.returncode == 0).then(|| result.output.trim().to_string())
+}
+
+pub fn ps_process(pid: i32) -> Option<ProcessInfo> {
+    let pid_arg = pid.to_string();
+    let result = ps_command(&["-o", "pid=,ppid=,pgid=,etime=,time=,stat=,rss=,command=", "-p", &pid_arg], 2.0, true).ok()?;
+    if result.returncode != 0 { return None; }
+    let lstart = ps_start_time(pid, true)?;
+    #[cfg(target_os = "macos")]
+    let epoch = crate::sys::process::darwin_facts(pid).map(|facts| facts.start_epoch);
+    #[cfg(not(target_os = "macos"))]
+    let epoch = None;
+    ps_process_output(pid, &result.output, Some(&lstart), epoch).ok().flatten()
+}
+
+pub fn start_time(pid: i32) -> Option<String> {
+    process(pid).map(|info| info.lstart).or_else(|| ps_start_time(pid, true))
+}
+
+pub fn processes() -> Result<Vec<ProcessInfo>, ProcessError> {
+    #[cfg(target_os = "macos")]
+    let candidates = crate::sys::process::darwin_pids().ok();
+    #[cfg(target_os = "linux")]
+    let candidates = std::fs::read_dir("/proc").ok().map(|entries| entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect::<Vec<i32>>());
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let candidates: Option<Vec<i32>> = None;
+    match candidates {
+        Some(pids) => Ok(pids.into_iter().filter(|&pid| pid > 0).filter_map(process).collect()),
+        None => ps_processes(),
+    }
+}
+
+pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
+    let result = ps_command(&["-axo", "pid="], 5.0, false)?;
+    if result.returncode != 0 {
+        return Err(ProcessError::Census(result.stderr.as_deref().map(str::trim).filter(|text| !text.is_empty()).unwrap_or("ps census failed").into()));
+    }
+    let pids: Vec<i32> = result.output.split_whitespace().filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .filter_map(|value| value.parse().ok()).collect();
+    if pids.is_empty() { return Err(ProcessError::Census("ps census returned no PIDs".into())); }
+    let rows: Vec<_> = pids.into_iter().filter_map(ps_process).collect();
+    if rows.is_empty() { return Err(ProcessError::Census("ps census could not inspect any PID".into())); }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn linux_fixture_computes_cpu_rss_arguments_and_clock_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("42");
+        std::fs::create_dir(&directory).unwrap();
+        let mut fields = vec!["0".to_string(); 22];
+        for (index, value) in [(0, "S"), (1, "2"), (2, "3"), (4, "0"), (11, "120"), (12, "5"), (19, "100"), (21, "4")] {
+            fields[index] = value.into();
+        }
+        std::fs::write(directory.join("stat"), format!("42 (tool) {}", fields.join(" "))).unwrap();
+        std::fs::write(directory.join("cmdline"), b"tool\0two words\0").unwrap();
+        let clock = LinuxClock { boot_epoch: 1704067200, ticks: 100, page_size: 4096, now_epoch: 1704067262.0 };
+        let row = linux_process_at(42, root.path(), clock).unwrap();
+        assert_eq!((row.ppid, row.pgid, row.rss), (2, 3, 16));
+        assert_eq!(row.start_epoch, Some(1704067201.0));
+        assert_eq!(row.elapsed, "01:01");
+        assert_eq!(row.cpu, "0:01.25");
+        assert_eq!(row.command, "tool 'two words'");
+        assert_eq!(row.stat, "S");
+        std::fs::write(directory.join("cmdline"), b"").unwrap();
+        assert_eq!(linux_process_at(42, root.path(), clock).unwrap().command, "tool");
+        std::fs::write(directory.join("cmdline"), b"tool\0bad\xff\0").unwrap();
+        let row = linux_process_at(42, root.path(), clock).unwrap();
+        assert_eq!(row.command.as_bytes(), b"tool 'bad\xff'");
+        assert!(serde_json::to_value(row).is_err());
+    }
+
+    #[test]
+    fn native_self_identity_matches_python_at_the_same_pid() {
+        let pid = std::process::id() as i32;
+        let Some(row) = process_at(pid, 2000000000.0) else {
+            panic!("native self observation unavailable");
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let script = format!(r#"
+import json
+from skills.orchestrate.scripts import process_info as p
+row = p.process({pid})
+assert row is not None
+print(json.dumps([row.pid, row.ppid, row.pgid, row.lstart, row.command, row.comm, row.tty, row.uid, row.start_epoch]))
+"#);
+        let Some(expected) = crate::test_support::python(&root, &script) else { return; };
+        assert_eq!(serde_json::json!([row.pid, row.ppid, row.pgid, row.lstart, row.command.to_str().unwrap(),
+            row.comm.to_str().unwrap(), row.tty, row.uid, row.start_epoch]), expected);
+    }
+
+    #[test]
+    fn native_census_contains_self_and_missing_pid_is_absent() {
+        assert!(process(2_000_000_000).is_none());
+        let rows = processes().unwrap();
+        assert!(rows.iter().any(|row| row.pid == std::process::id() as i32));
     }
 }

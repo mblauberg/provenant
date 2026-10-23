@@ -53,6 +53,8 @@ pub fn darwin_task(pid: i32) -> Option<DarwinTask> {
         rss_kib: (info.pti_resident_size / 1024) as i64, running: info.pti_numrunning > 0 })
 }
 
+// libc deprecates this in favour of a dependency outside the allowlist.
+#[allow(deprecated)]
 pub fn mach_tick_seconds() -> f64 {
     let mut timebase = MaybeUninit::<libc::mach_timebase_info>::uninit();
     // SAFETY: the kernel writes the exact pointer-free C struct to a live
