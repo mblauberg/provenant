@@ -21,19 +21,20 @@ pub const DEPLOYMENT_TARGET: &str = "15.0";
 pub const SMOKE_TIMEOUT_SECONDS: u64 = 30;
 const IDENTITY: &[u8] = b"provenant-front-door source-sha256=";
 
-fn files(directory: &Path, result: &mut Vec<PathBuf>) -> Result<()> {
+fn files(directory: &Path, result: &mut Vec<PathBuf>, skip_build_directories: bool) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(|e| io(directory, e))? {
         let path = entry.map_err(|e| io(directory, e))?.path();
         if path.is_file() {
             result.push(path);
         } else if path.is_dir()
             && !path.is_symlink()
-            && !matches!(
-                path.file_name().and_then(|s| s.to_str()),
-                Some("target" | ".git")
-            )
+            && (!skip_build_directories
+                || !matches!(
+                    path.file_name().and_then(|s| s.to_str()),
+                    Some("target" | ".git")
+                ))
         {
-            files(&path, result)?;
+            files(&path, result, skip_build_directories)?;
         }
     }
     Ok(())
@@ -89,7 +90,7 @@ pub fn source_digest(krate: &Path) -> Result<String> {
         }
         if package.join("src").is_dir() {
             let mut source_files = vec![];
-            files(&package.join("src"), &mut source_files)?;
+            files(&package.join("src"), &mut source_files, false)?;
             for path in source_files {
                 let relative = path
                     .strip_prefix(package.join("src"))
@@ -102,12 +103,12 @@ pub fn source_digest(krate: &Path) -> Result<String> {
                     .map_err(|e| invalid(e.to_string()))?
                     .to_str()
                     .ok_or_else(|| invalid("source digest path is not UTF-8"))?
-                    .replace('\\', "/");
+                    .to_owned();
                 rest.insert(name, path);
             }
         }
         let mut rust_files = vec![];
-        files(&package, &mut rust_files)?;
+        files(&package, &mut rust_files, true)?;
         for path in rust_files
             .into_iter()
             .filter(|path| path.extension().is_some_and(|e| e == "rs"))
@@ -126,7 +127,7 @@ pub fn source_digest(krate: &Path) -> Result<String> {
                 .map_err(|e| invalid(e.to_string()))?
                 .to_str()
                 .ok_or_else(|| invalid("source digest path is not UTF-8"))?
-                .replace('\\', "/");
+                .to_owned();
             rest.insert(name, path);
         }
     }
@@ -387,6 +388,9 @@ mod tests {
         fs::write(root.join("target/debug/noise.rs"), "excluded").unwrap();
         fs::write(root.join("src/.editor.rs"), "litter").unwrap();
         fs::write(root.join("src/backup.rs~"), "litter").unwrap();
+        fs::create_dir_all(root.join("src/target/nested")).unwrap();
+        fs::write(root.join("src/target/nested/kept.rs"), "source subtree").unwrap();
+        fs::write(root.join("src/literal\\name.rs"), "literal backslash").unwrap();
 
         let Some(output) = crate::oracle::python(
             "scripts/lib/front_door_build.py",
