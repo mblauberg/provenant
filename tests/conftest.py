@@ -154,8 +154,6 @@ def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
                 "PROVENANT_NESTED_CUSTODY_FD", "PROVENANT_PARENT_RUN_TOKEN",
                 "PROVENANT_RUN_DIR", "PROVENANT_RUN_ID"):
         monkeypatch.delenv(key, raising=False)
-    if request.node.path.name == "test_install_harness.py":
-        return
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
     monkeypatch.setenv("PROVENANT_BIN_DIR", str(tmp_path_factory.mktemp("bin-dir")))
 
@@ -165,8 +163,6 @@ def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
     """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both.
 
     The installer tests build their own HOME and expect CODEX_HOME to follow it."""
-    if request.node.path.name == "test_install_harness.py":
-        return
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state-home")))
 
@@ -175,8 +171,6 @@ def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
 def _codex_mcp_discovery_from_user_config(monkeypatch, request):
     """Tests never run the real `codex mcp list`; read the pinned CODEX_HOME config instead.
     Tests of discovery itself (project layers, failure) patch `_discover_mcp_servers` again."""
-    if request.node.path.name == "test_install_harness.py":
-        return
     import tomllib
 
     def discover(cwd):

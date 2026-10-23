@@ -9,50 +9,28 @@
     clippy::print_stderr,
     clippy::unwrap_used
 )]
-mod check;
 mod exec;
 mod help;
-mod json;
 use provenant_supervisor::sys::legacy_lane as lane;
-mod resolve;
-mod stale;
 
 use exec::{Launch, replace_process};
-use resolve::{FABRIC_MCP, Settings, is_file};
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Identity block read by the installer to tell a managed binary from a
-/// foreign file. It is the ADR 0019 marker line plus the source digest, each
-/// on its own line, so a byte search finds it.
-#[used]
-static IDENTITY: [u8; identity::LEN] = identity::BYTES;
-
-mod identity {
-    const HEAD: &str = "\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\nprovenant-front-door source-sha256=";
-    const SHA: &str = match option_env!("PROVENANT_FD_SOURCE_SHA256") {
-        Some(sha) => sha,
-        None => "unknown",
+/// Identity is computed by build.rs from the complete source inventory. No
+/// environment variable can override it at build or runtime.
+fn version_json() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let version = provenant_records::VersionInfo {
+        source_digest: provenant_records::SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?,
+        target: env!("PROVENANT_TARGET_TRIPLE"),
+        toolchain: env!("PROVENANT_TOOLCHAIN"),
+        record_schema_version: 1,
+        config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
     };
-    pub const LEN: usize = HEAD.len() + SHA.len() + 1;
-    pub const BYTES: [u8; LEN] = {
-        let mut out = [b'\n'; LEN];
-        let (head, sha) = (HEAD.as_bytes(), SHA.as_bytes());
-        let mut at = 0;
-        while at < head.len() {
-            out[at] = head[at];
-            at += 1;
-        }
-        let mut i = 0;
-        while i < sha.len() {
-            out[head.len() + i] = sha[i];
-            i += 1;
-        }
-        out
-    };
+    Ok(provenant_records::encode(&version)?)
 }
 
 const LEASE_VERBS: [&str; 5] = ["acquire", "release", "verify", "status", "push"];
@@ -205,16 +183,37 @@ fn fail(message: &str) -> u8 {
     3
 }
 
-/// Prefer the checkout this binary lives in, then the resolved product root.
-/// Only the resolved case rewrites the environment.
-fn target(relative: &str, settings: &Settings) -> Result<(PathBuf, Option<PathBuf>), String> {
-    if let Some(local) = resolve::local_root() {
-        if is_file(&local.join(FABRIC_MCP)) && is_file(&local.join(relative)) {
-            return Ok((local.join(relative), None));
-        }
+const FABRIC_MCP: &str = "runtime/fabric/bin/fabric-mcp";
+fn is_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+/// Pending owner verbs can only execute from their own checkout-local binary.
+/// Installed releases never consult a pointer, old root or runtime override.
+fn target(relative: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let executable = std::fs::canonicalize(std::env::current_exe().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let root = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("binary has no checkout parent")?;
+    if is_file(&root.join(FABRIC_MCP)) && is_file(&root.join(relative)) {
+        return Ok((root.join(relative), None));
     }
-    let root = resolve::product_root(settings)?;
-    Ok((root.join(relative), Some(root)))
+    Err("command awaits its Rust CLI owner".into())
+}
+fn state_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let home = std::env::var_os("HOME").ok_or("HOME must be captured explicitly")?;
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or("missing checkout path")?;
+    let mut inputs = provenant_core::RootInputs::new(home.into(), checkout.into());
+    inputs.environment_state_dir =
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+    Ok(inputs
+        .resolve(&provenant_supervisor::fs::RootPathResolver)?
+        .state
+        .into_path_buf())
 }
 
 fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked: bool) -> u8 {
@@ -228,11 +227,31 @@ fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked:
 }
 
 fn run(args: &[OsString]) -> u8 {
+    if args == ["--version", "--json"] {
+        return match version_json() {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                if std::io::stdout().write_all(&bytes).is_ok() {
+                    0
+                } else {
+                    3
+                }
+            }
+            Err(error) => fail(&error.to_string()),
+        };
+    }
+    if args == ["--version"] {
+        print(
+            concat!("provenant ", env!("PROVENANT_SOURCE_DIGEST"), "\n"),
+            false,
+        );
+        return 0;
+    }
+
     // The supervisor is built in even during the front-door Python trial.
     if args.first().is_some_and(|v| v == "lane") {
         return lane::run(&args[1..]);
     }
-    let settings = Settings::from_process();
     match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
         Route::Print {
             text,
@@ -243,41 +262,30 @@ fn run(args: &[OsString]) -> u8 {
             status
         }
         Route::Lane(rest) => lane::run(&rest),
-        Route::Root => match resolve::product_root(&settings) {
+        Route::Root => match state_root() {
             Ok(root) => {
                 let mut line = root.as_os_str().as_bytes().to_vec();
                 line.push(b'\n');
                 let _ = std::io::stdout().write_all(&line);
                 0
             }
+            Err(message) => fail(&message.to_string()),
+        },
+        Route::Mcp => match target(FABRIC_MCP) {
+            Ok((program, root)) => launch(&program, &[], root.as_deref(), false),
             Err(message) => fail(&message),
         },
-        Route::Mcp => match resolve::product_root(&settings) {
-            Ok(root) => launch(&root.join(FABRIC_MCP), &[], Some(&root), false),
+        Route::Check(rest) => match target("scripts/check-harness") {
+            Ok((program, root)) => replace_process(&Launch {
+                program: &program,
+                args: &rest,
+                root: root.as_deref(),
+                scrub_git: true,
+                stale_checked: false,
+            }),
             Err(message) => fail(&message),
         },
-        Route::Check(rest) => match check::select(&settings) {
-            Ok(selection) => {
-                match resolve::product_root(&settings) {
-                    Ok(product_root) => stale::warn(&product_root),
-                    Err(message)
-                        if std::env::var_os("PROVENANT_DEBUG").is_some_and(|v| !v.is_empty()) =>
-                    {
-                        eprintln!("provenant: stale-checkout check failed: {message}")
-                    }
-                    Err(_) => {}
-                }
-                replace_process(&Launch {
-                    program: &selection.checker,
-                    args: &rest,
-                    root: Some(&selection.root),
-                    scrub_git: true,
-                    stale_checked: true,
-                })
-            }
-            Err(message) => message.map_or(3, |message| fail(&message)),
-        },
-        Route::Owner { relative, args } => match target(relative, &settings) {
+        Route::Owner { relative, args } => match target(relative) {
             Ok((program, root)) => {
                 if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
                     let checkout = program
@@ -470,7 +478,7 @@ mod tests {
 
     #[test]
     fn unknown_commands_are_usage_errors() {
-        for word in ["bogus", "", "--version", "-v", "ROUTE", "Route", "--json"] {
+        for word in ["bogus", "", "-v", "ROUTE", "Route", "--json"] {
             assert_eq!(route(&args(&[word]), false), usage(), "{word:?}");
         }
     }
@@ -541,10 +549,9 @@ mod tests {
     }
 
     #[test]
-    fn identity_block_has_its_own_marker_lines() {
-        let text = String::from_utf8(IDENTITY.to_vec()).unwrap();
-        assert!(text.contains("\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\n"));
-        assert!(text.contains("\nprovenant-front-door source-sha256="));
-        assert!(text.ends_with('\n'));
+    fn version_reports_typed_build_identity() {
+        let value: serde_json::Value = serde_json::from_slice(&version_json().unwrap()).unwrap();
+        assert_eq!(value["source_digest"], env!("PROVENANT_SOURCE_DIGEST"));
+        assert_eq!(value["config_schema_version"], 1);
     }
 }

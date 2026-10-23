@@ -32,4 +32,5 @@ pub mod workflow;
 
 pub use install::{
     AbsolutePath, Harness, InstallReceipt, OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest,
+    VersionInfo,
 };

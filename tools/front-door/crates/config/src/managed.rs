@@ -188,6 +188,7 @@ pub struct InstallPlan {
     desired: BTreeMap<PathBuf, Desired>,
     receipt: InstallReceipt,
     actions: Vec<Action>,
+    manual_includes: Vec<ManualInclude>,
 }
 impl InstallPlan {
     pub fn actions(&self) -> &[Action] {
@@ -197,12 +198,21 @@ impl InstallPlan {
 #[derive(Debug, Serialize)]
 pub struct InstallOutcome {
     pub actions: Vec<Action>,
+    pub manual_includes: Vec<ManualInclude>,
     pub dry_run: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManualInclude {
+    pub path: AbsolutePath,
+    pub include: AbsolutePath,
 }
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
     fn preview(&mut self, actions: &[Action]) -> std::io::Result<()>;
+    fn manual_includes(&mut self, _includes: &[ManualInclude]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 /// Real process access belongs to binary composition/supervisor. Implementations
 /// must run version/help with a 30-second budget and capped output, no probes.
@@ -218,9 +228,32 @@ impl Snapshots {
     ) -> Result<Self, InstallError> {
         targets.validate()?;
         let desired = desired(release, targets)?;
+        let installed = targets
+            .roots
+            .state
+            .as_path()
+            .join("releases")
+            .join(release.manifest.source_digest.to_string());
+        match crate::release::inventory(&installed, fs) {
+            Ok(paths) => {
+                for p in paths {
+                    if !release.files.contains_key(&p) {
+                        return Err(InstallError::Tampered(installed.join(p)));
+                    }
+                }
+            }
+            Err(InstallError::Fs(e)) if e.is_not_found() => {}
+            Err(e) => return Err(e),
+        }
+
+        let completed = snapshot(&installed.join("release.json"), fs)?.is_some();
         let mut entries = BTreeMap::new();
         for path in desired.keys() {
-            entries.insert(path.clone(), snapshot(path, fs)?);
+            let current = snapshot(path, fs)?;
+            if completed && path.starts_with(&installed) && current.is_none() {
+                return Err(InstallError::Tampered(path.clone()));
+            }
+            entries.insert(path.clone(), current);
         }
         let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
         let receipt_snapshot = snapshot(&receipt_path, fs)?;
@@ -229,10 +262,7 @@ impl Snapshots {
             Some(Snapshot {
                 value: Value::File { bytes, mode: 0o600 },
                 ..
-            }) => Some(provenant_records::decode_v1(
-                bytes.as_slice(),
-                Limits::CONFIG,
-            )?),
+            }) => Some(decode_receipt(bytes)?),
             Some(_) => return Err(InstallError::Conflict(receipt_path)),
         };
         entries.insert(receipt_path, receipt_snapshot);
@@ -384,6 +414,7 @@ pub fn plan_install(
     let desired = desired(&release, &targets)?;
     let mut actions = Vec::new();
     let mut entries = Vec::new();
+    let mut manual_includes = Vec::new();
     for (path, want) in &desired {
         let previous = snapshots
             .entries
@@ -401,6 +432,18 @@ pub fn plan_install(
                 let adopt_binary = targets.adopt_existing
                     && want.selector == "binary"
                     && matches!(current.value, Value::File { .. });
+                if want.selector == "instruction"
+                    && !was_owned
+                    && matches!(current.value, Value::File { .. })
+                {
+                    if let Value::Link(include) = &want.value {
+                        manual_includes.push(ManualInclude {
+                            path: AbsolutePath::new(path)?,
+                            include: AbsolutePath::new(include)?,
+                        });
+                    }
+                    continue;
+                }
                 if immutable {
                     return Err(InstallError::Tampered(path.clone()));
                 }
@@ -434,7 +477,9 @@ pub fn plan_install(
     // later explicit uninstall can make an unchanged-only decision.
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
-            if !entries.iter().any(|e| e.path == entry.path) {
+            if !entries.iter().any(|e| e.path == entry.path)
+                && !manual_includes.iter().any(|i| i.path == entry.path)
+            {
                 entries.push(entry.clone());
             }
         }
@@ -497,6 +542,7 @@ pub fn plan_install(
         desired,
         receipt,
         actions,
+        manual_includes,
     })
 }
 
@@ -519,6 +565,7 @@ pub fn install(
     if dry_run {
         return Ok(InstallOutcome {
             actions: plan.actions.clone(),
+            manual_includes: plan.manual_includes.clone(),
             dry_run: true,
         });
     }
@@ -594,6 +641,7 @@ pub fn install(
     }
     Ok(InstallOutcome {
         actions: completed,
+        manual_includes: plan.manual_includes.clone(),
         dry_run: false,
     })
 }
@@ -689,32 +737,6 @@ pub(crate) fn directory(
     }
     Ok(dir)
 }
-pub(crate) fn file_bytes(
-    path: &Path,
-    limit: u64,
-    fs: &dyn SafeFs,
-) -> Result<Vec<u8>, InstallError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| InstallError::Path(path.into()))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| InstallError::Path(path.into()))?;
-    let mut file = directory(parent, false, fs)?.open_read(name)?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| FsError::Io {
-            operation: "read installation file",
-            path: path.into(),
-            source,
-        })?;
-    if bytes.len() as u64 > limit {
-        return Err(FsError::TooLarge { limit }.into());
-    }
-    Ok(bytes)
-}
 pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>, InstallError> {
     let Some(parent) = path.parent() else {
         return Err(InstallError::Path(path.into()));
@@ -732,6 +754,14 @@ pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>,
         Err(e) if e.is_not_found() => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    let limit = if name == "release.json" || name == "receipt.json" {
+        Limits::CONFIG.max_bytes
+    } else {
+        FILE_LIMIT
+    };
+    if metadata.kind == FileKind::Regular && metadata.size > limit {
+        return Err(FsError::TooLarge { limit }.into());
+    }
     let value = match metadata.kind {
         FileKind::Regular => {
             let mut file = dir.open_read(name)?;
@@ -740,15 +770,15 @@ pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>,
             }
             let mut bytes = Vec::new();
             file.by_ref()
-                .take(FILE_LIMIT + 1)
+                .take(limit + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|source| FsError::Io {
                     operation: "read snapshot",
                     path: path.into(),
                     source,
                 })?;
-            if bytes.len() as u64 > FILE_LIMIT {
-                return Err(FsError::TooLarge { limit: FILE_LIMIT }.into());
+            if bytes.len() as u64 > limit {
+                return Err(FsError::TooLarge { limit }.into());
             }
             if file.metadata()? != metadata {
                 return Err(InstallError::Drift(path.into()));
@@ -800,12 +830,28 @@ fn read_receipt(
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
             ..
-        }) => Ok(Some(provenant_records::decode_v1(
-            bytes.as_slice(),
-            Limits::CONFIG,
-        )?)),
+        }) => Ok(Some(decode_receipt(&bytes)?)),
         Some(_) => Err(InstallError::Conflict(path)),
     }
+}
+fn decode_receipt(bytes: &[u8]) -> Result<InstallReceipt, InstallError> {
+    let receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
+    let mut paths = BTreeSet::new();
+    for entry in &receipt.entries {
+        if !paths.insert(entry.path.to_path_buf()?) {
+            return Err(InstallError::Manifest("duplicate receipt path"));
+        }
+    }
+    if receipt
+        .entries
+        .iter()
+        .filter(|e| e.selector == "binary" && e.harness.is_none())
+        .count()
+        != 1
+    {
+        return Err(InstallError::Manifest("receipt requires one binary entry"));
+    }
+    Ok(receipt)
 }
 fn permitted_entry(entry: &OwnedEntry, targets: &Targets) -> Result<bool, InstallError> {
     let path = entry.path.to_path_buf()?;
@@ -861,7 +907,23 @@ pub fn check_install(
     match Release::read(&release_path, target, fs) {
         Ok(release)
             if release.manifest.source_digest == receipt.source_digest
-                && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest => {
+                && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest =>
+        {
+            let (bytes, mode) = release
+                .files
+                .get(Path::new("provenant"))
+                .ok_or(InstallError::Manifest("missing executable"))?;
+            let expected = OwnedValue::File {
+                digest: CanonicalV1::file_digest(bytes),
+                mode: *mode,
+            };
+            if !receipt.entries.iter().any(|entry| {
+                entry.selector == "binary" && entry.harness.is_none() && entry.expected == expected
+            }) {
+                return Err(InstallError::Manifest(
+                    "receipt binary differs from release",
+                ));
+            }
         }
         Ok(_) | Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
             findings.push(InstallFinding {
@@ -886,7 +948,7 @@ pub fn check_install(
     }
     for entry in &receipt.entries {
         if !permitted_entry(entry, targets)? {
-            continue;
+            return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
         if snapshot(&path, fs)?.is_none_or(|s| !matches_owned(&s.value, &entry.expected)) {
@@ -913,9 +975,11 @@ pub fn uninstall(
         reporter.preview(&[]).map_err(InstallError::Preview)?;
         return Ok(InstallOutcome {
             actions: Vec::new(),
+            manual_includes: Vec::new(),
             dry_run: false,
         });
     };
+    let mut settled = Vec::new();
     let mut removals = Vec::new();
     let mut actions = Vec::new();
     for entry in &receipt.entries {
@@ -923,9 +987,14 @@ pub fn uninstall(
             continue;
         }
         let path = entry.path.to_path_buf()?;
-        if let Some(before) = snapshot(&path, fs)?
+        let current = snapshot(&path, fs)?;
+        if current.is_none() {
+            settled.push(path.clone());
+        }
+        if let Some(before) = current
             && matches_owned(&before.value, &entry.expected)
         {
+            settled.push(path.clone());
             actions.push(Action {
                 path: entry.path.clone(),
                 disposition: Disposition::Remove,
@@ -940,12 +1009,12 @@ pub fn uninstall(
             removals.push((path, Some(before)));
         }
     }
-    if !removals.is_empty() {
+    if !settled.is_empty() {
         let mut next = receipt.clone();
         next.entries.retain(|e| {
-            !removals
+            !settled
                 .iter()
-                .any(|(p, _)| e.path.to_path_buf().is_ok_and(|path| &path == p))
+                .any(|p| e.path.to_path_buf().is_ok_and(|path| &path == p))
         });
         let bytes = provenant_records::encode(&next)?;
         actions.push(Action {
@@ -961,9 +1030,10 @@ pub fn uninstall(
         });
     }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
-    if removals.is_empty() {
+    if settled.is_empty() {
         return Ok(InstallOutcome {
             actions,
+            manual_includes: Vec::new(),
             dry_run: false,
         });
     }
@@ -1023,9 +1093,9 @@ pub fn uninstall(
         }
     }
     receipt.entries.retain(|e| {
-        !removals
+        !settled
             .iter()
-            .any(|(p, _)| e.path.to_path_buf().is_ok_and(|path| &path == p))
+            .any(|p| e.path.to_path_buf().is_ok_and(|path| &path == p))
     });
     let result = recheck(&receipt_path, &before_receipt, fs).and_then(|()| {
         publish(
@@ -1050,6 +1120,7 @@ pub fn uninstall(
     }
     Ok(InstallOutcome {
         actions: completed,
+        manual_includes: Vec::new(),
         dry_run: false,
     })
 }

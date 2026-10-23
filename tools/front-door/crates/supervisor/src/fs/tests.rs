@@ -819,7 +819,7 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
         dir.replace_link(name, Path::new("replacement")),
         Err(FsError::ReservedLockName { .. })
     ));
-    for alias in ["writer.LOCK", "writer.locK"] {
+    for alias in ["writer.LOCK", "writer.locK", "LOCK", "locK"] {
         assert!(matches!(
             dir.unlink(OsStr::new(alias)),
             Err(FsError::ReservedLockName { .. })
@@ -860,5 +860,57 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
             &clock
         ),
         Err(FsError::InvalidLockName { .. })
+    ));
+}
+
+#[test]
+fn publication_sets_mode_before_rename_and_accepts_stable_install_lock() {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    let root = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(root.path()).unwrap();
+    let clock = crate::clock::SystemClock::new();
+    let _lock = dir
+        .lock(
+            OsStr::new("lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+            &CancelToken::new(),
+            &clock,
+        )
+        .unwrap();
+    assert!(matches!(
+        dir.publish(
+            OsStr::new("provenant"),
+            b"first",
+            0o755,
+            PublishMode::NoReplace
+        )
+        .unwrap(),
+        Publication::Durable
+    ));
+    assert_eq!(
+        dir.metadata_at(OsStr::new("provenant"), false)
+            .unwrap()
+            .mode
+            & 0o777,
+        0o755
+    );
+    assert!(
+        dir.publish(
+            OsStr::new("provenant"),
+            b"second",
+            0o600,
+            PublishMode::NoReplace
+        )
+        .unwrap_err()
+        .is_exists()
+    );
+    assert_eq!(
+        dir.read_bounded(OsStr::new("provenant"), 10).unwrap(),
+        b"first"
+    );
+    assert!(matches!(
+        dir.unlink(OsStr::new("lock")),
+        Err(FsError::ReservedLockName { .. })
     ));
 }

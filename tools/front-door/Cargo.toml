@@ -55,7 +55,6 @@ ignored-paths = [
 ]
 ignored = [
   "provenant-cli",
-  "provenant-config",
   "provenant-confinement",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
@@ -96,7 +95,14 @@ license.workspace = true
 fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
+provenant-core = { workspace = true }
+provenant-records = { workspace = true }
+provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
+
+[build-dependencies]
+provenant-records = { workspace = true }
+toml_edit = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

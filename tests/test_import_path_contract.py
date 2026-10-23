@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # caller names, so the caller's `sys.path` is the subject under test inside a
 # quoted `-c` snippet, not a bootstrap in the test module itself.
 EXEMPT = {
-    "tests/test_install_skills.py",
     "tests/test_shared_library_bootstrap.py",
 }
 
@@ -58,7 +57,6 @@ def test_no_sys_path_mutation(directory):
 
 
 def test_declared_import_roots_make_the_helpers_importable():
-    import instance_installation  # noqa: F401  (scripts/ root)
     import _shared.review_ladder  # noqa: F401  (skills/ root)
     from scripts.lib import roots  # noqa: F401  (product root)
 

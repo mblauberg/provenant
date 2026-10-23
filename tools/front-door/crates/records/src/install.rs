@@ -77,3 +77,13 @@ pub struct InstallReceipt {
     pub harnesses: Vec<Harness>,
     pub entries: Vec<OwnedEntry>,
 }
+
+/// Build identity emitted at the binary edge without ambient source discovery.
+#[derive(Debug, Serialize)]
+pub struct VersionInfo<'a> {
+    pub source_digest: SourceDigest,
+    pub target: &'a str,
+    pub toolchain: &'a str,
+    pub record_schema_version: u64,
+    pub config_schema_version: u64,
+}

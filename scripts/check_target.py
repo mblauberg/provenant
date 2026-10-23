@@ -7,38 +7,8 @@ import os
 from pathlib import Path
 import sys
 
-from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 
 REPAIR = "repair: re-run install-harness from the product checkout, or set AGENT_FABRIC_PRODUCT_ROOT"
-
-
-def resolve_product_root() -> Path:
-    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or None
-    agents_home = os.environ.get("AGENTS_HOME") or None
-    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
-    instance = Path(configured_instance).expanduser() if configured_instance else Path.home() / ".agents"
-    if not instance.is_absolute():
-        raise ValueError(f"instance root must be an absolute path, got {instance}; {REPAIR}")
-    instance = instance.resolve()
-    pointer = instance / POINTER_RELATIVE_PATH
-    pointed = load_pointer_file(instance)
-    if configured is not None:
-        candidate = Path(configured).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError(f"AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got {configured}; {REPAIR}")
-        candidate = candidate.resolve()
-    elif pointer.exists() or pointer.is_symlink():
-        if pointed is None:
-            raise ValueError(f"product-root pointer is invalid or stale at {pointer}; {REPAIR}")
-        candidate = pointed.resolve()
-    elif agents_home is not None:
-        candidate = Path(agents_home).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError(f"AGENTS_HOME must be an absolute path, got {agents_home}; {REPAIR}")
-        candidate = candidate.resolve()
-    else:
-        candidate = (Path.home() / ".agents").resolve()
-    return candidate
 
 
 def nearest_git_metadata(root: Path) -> Path | None:
@@ -140,7 +110,7 @@ def check_target() -> tuple[Path, Path]:
     local_root = Path(__file__).resolve().parent.parent
     local_target = local_root / "scripts/check-harness"
     local_available = local_target.is_file()
-    product_root = local_root if local_available else resolve_product_root()
+    product_root = local_root
     caller_root = registered_caller_checkout(product_root)
     selected = caller_root or (local_root if local_available else product_root)
     return checked_target(selected), selected

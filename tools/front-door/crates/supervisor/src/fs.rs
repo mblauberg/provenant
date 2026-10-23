@@ -187,12 +187,6 @@ fn component(name: &OsStr) -> Result<&OsStr> {
 }
 
 fn is_lock_name(name: &OsStr) -> bool {
-    if name
-        .to_str()
-        .is_some_and(|s| s.eq_ignore_ascii_case("lock"))
-    {
-        return true;
-    }
     // Case-insensitive filesystems also accept case and Unicode spellings of
     // an existing leaf. Inspect just the extension so non-UTF-8 prefixes retain
     // their native bytes (e.g. Kelvin sign canonically aliases ASCII K).
@@ -490,8 +484,9 @@ impl Directory {
     ) -> Result<Publication> {
         mutable_component(name)?;
         let temporary = temporary_name()?;
+        // Creation failure must never trigger cleanup of somebody else's entry.
+        let mut file = self.create_new(&temporary)?;
         let result = (|| {
-            let mut file = self.create_new(&temporary)?;
             file.write_all(bytes)
                 .map_err(error("write staging file", &self.path.join(&temporary)))?;
             file.file
@@ -853,3 +848,38 @@ pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs};
 
 mod path_io;
 pub use path_io::*;
+
+/// Read-only binding for core's explicit root inputs. Existing ancestor aliases
+/// are resolved once, and only normal missing tail components are appended.
+pub struct RootPathResolver;
+impl provenant_core::PathResolver for RootPathResolver {
+    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+        let mut existing = path.to_path_buf();
+        let mut tail = Vec::new();
+        loop {
+            match std::fs::canonicalize(&existing) {
+                Ok(mut bound) => {
+                    for name in tail.iter().rev() {
+                        bound.push(name);
+                    }
+                    return Ok(bound);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // A dangling link is not an absent normal component.
+                    if std::fs::symlink_metadata(&existing).is_ok() {
+                        return Err(error);
+                    }
+                    let name = existing
+                        .file_name()
+                        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
+                        .to_os_string();
+                    tail.push(name);
+                    if !existing.pop() {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}

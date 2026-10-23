@@ -141,9 +141,12 @@ pub struct ConfigCheck {
 }
 
 pub use managed::{
-    Action, Disposition, HarnessTarget, InstallContext, InstallError, InstallFinding,
-    InstallOutcome, InstallPlan, InstallReporter, ReleaseSmoke, Snapshots, Targets, check_install,
-    install, plan_install, uninstall,
+    Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
+    InstallFinding, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
+    Snapshots, Targets, check_install, install, plan_install, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};
+
+/// Schema version accepted by the single-file configuration owner.
+pub const CONFIG_SCHEMA_VERSION: u64 = 1;

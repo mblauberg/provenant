@@ -1,26 +1,26 @@
 # Fabric MCP registration
 
-Status: legacy registration; Rust MCP owner pending
+Status: legacy registry editor; Rust CLI cut-over pending
 Applies to: `scripts/configure-fabric-mcp.py`
 
-`install-harness --platform all` registers Fabric MCP for Claude Code and Codex,
-plus OpenCode, Agy, Cursor and Kiro when their home directories are present.
-It also projects skills into each present client home, and installs an explicit
-bootstrap and HARNESS link for OpenCode and Agy. Add `--mcp-clients all` to
-configure all six registries even when the optional clients are absent.
-`scripts/configure-fabric-mcp.py --platform all` also configures
-all six directly; it does the registry writing and can be run on its own to
-add a client, check the registrations or repair one.
+The `provenant-config` crate owns release and managed-file operations; it does
+not configure client registries. The legacy `install-harness` and
+`install-skills` entrypoints refuse the retired install path. Harness-specific
+MCP, hook and link changes belong to the later Rust CLI cut-over.
+
+`scripts/configure-fabric-mcp.py` remains a separate legacy registry editor. It
+can add, check or repair registry entries when the stable shim is already
+installed. Its `--agents-home` argument selects instruction source paths; it
+does not add a checkout path to registrations or follow a product-root pointer.
+Pass `--instance-root` when the registration needs an explicit instance root.
 
 ## What gets registered
+## What gets registered
 
-The registered command is the managed stable shim at
-`${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant`. With no arguments and
-`AGENT_FABRIC_SEAT` set, that shim resolves the product root. The TS MCP entry point is retired;
-the Rust MCP owner will replace it. Registering the shim rather than the checkout
-path means moving the checkout does not invalidate six client registries: re-run
-`scripts/install-harness` from the new checkout and the pointer at
-`<instance-root>/.agent-fabric/product-root.json` is updated atomically.
+The legacy registration format names the stable shim at
+`${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant` and supplies the client seat.
+It stores no product checkout path. The old pointer-based relocation procedure
+is retired; Rust MCP registration will be defined at CLI cut-over.
 
 Every entry carries these three environment variables by default:
 
@@ -39,11 +39,9 @@ The registered client label is a shared default address. Give concurrently
 working agents distinct `AGENT_FABRIC_LABEL` values when they need separate
 inboxes; agents that intentionally share a label compete for the same claims.
 
-`AGENT_FABRIC_PRODUCT_ROOT` is a CLI-only control and is absent from global
-client registrations. When a non-default instance root is selected,
-`install-harness` also records that explicit `AGENT_FABRIC_INSTANCE_ROOT` in
-the registration so the stable shim resolves the same instance; default-root
-registrations need no extra variable.
+The standalone editor leaves `AGENT_FABRIC_PRODUCT_ROOT` out of registrations.
+Its optional `--instance-root` argument supplies `AGENT_FABRIC_INSTANCE_ROOT`;
+without it, that variable is absent.
 
 ## The six clients
 
@@ -79,27 +77,15 @@ cross-family review, count the model family only from the exact provider/model
 fields in the direct-dispatch receipt; a non-Google model selected through Agy
 is not a qualifying Gemini leg.
 
-OpenCode's `instructions[]` includes the instance `AGENTS.md` and the product
-`HARNESS.md`. The installer preserves unrelated entries, requires a string
-array, and rebinds a prior product path recorded by the instance's
-product-root pointer when the checkout moves. Standalone MCP configuration
-uses the pointer for the current product path when `--agents-home` is omitted.
-Re-run `install-harness` after
-relocation so the literal OpenCode paths and pointer agree.
+OpenCode's `instructions[]` can include the instance `AGENTS.md` and the
+product `HARNESS.md`. The standalone editor preserves unrelated entries and
+requires a string array; pass `--agents-home` and `--instance-root` to select
+those paths explicitly. It does not rebind paths from a product-root pointer.
 OpenCode JSONC with comments is read safely. If adding Fabric would require a
 rewrite that discards those comments, the installer leaves the file intact and
 prints the exact `instructions` and `mcp.fabric` entries to add manually.
 With `--platform all`, a detected client's configuration conflict produces a
 per-client skip warning; explicitly named clients still fail.
-
-`config/model-routing.json` remains instance-owned. Install and validation name
-product catalogue differences by key; run `install-harness --platform all
---refresh-routing` to back up the instance file to `model-routing.json.bak-<date>`
-and apply product sections while retaining instance-only adapters, endpoints,
-and extra alias models. On an older install without a merge base, the refresh
-lists retained keys that may be retired product keys, lists each product value
-that won, and writes the product catalogue as the new base. A fused checkout
-does not write a merge base during refresh.
 
     scripts/configure-fabric-mcp.py --platform all
     scripts/configure-fabric-mcp.py --platform codex

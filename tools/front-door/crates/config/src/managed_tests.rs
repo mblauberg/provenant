@@ -401,3 +401,594 @@ fn explicit_harnesses_platform_links_and_schema_refuse_before_mutation() {
         Err(InstallError::Tampered(_))
     ));
 }
+// Exercise the real filesystem seam so partial-apply accounting and recovery
+// are tested without adding production-only failure hooks.
+use provenant_core::{
+    CancelToken as TestCancelToken, Clock as TestClock, WaitBudget as TestWaitBudget,
+};
+use provenant_supervisor::fs::{
+    FsError as TestFsError, LockGuard, LockMode, Metadata, Publication, PublishMode,
+    Result as TestFsResult, SafeDir, SafeFile, SafeFs,
+};
+use std::{
+    ffi::{OsStr, OsString},
+    sync::{Arc, atomic::Ordering},
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultMode {
+    ReceiptPublish,
+    CancelAfterFirstPublication,
+    SkillLinkSync,
+}
+struct FaultState {
+    mode: FaultMode,
+    fired: std::sync::atomic::AtomicBool,
+    link_published: std::sync::atomic::AtomicBool,
+    cancel: Option<TestCancelToken>,
+}
+struct FaultFs {
+    state: Arc<FaultState>,
+}
+impl FaultFs {
+    fn new(mode: FaultMode, cancel: Option<TestCancelToken>) -> Self {
+        Self {
+            state: Arc::new(FaultState {
+                mode,
+                fired: std::sync::atomic::AtomicBool::new(false),
+                link_published: std::sync::atomic::AtomicBool::new(false),
+                cancel,
+            }),
+        }
+    }
+    fn wrap(&self, dir: Box<dyn SafeDir>) -> Box<dyn SafeDir> {
+        Box::new(FaultDir {
+            inner: dir,
+            state: self.state.clone(),
+        })
+    }
+}
+impl SafeFs for FaultFs {
+    fn root(&self, absolute: bool) -> TestFsResult<Box<dyn SafeDir>> {
+        Ok(self.wrap(LocalFs.root(absolute)?))
+    }
+    fn open_anchor(&self, path: &Path) -> TestFsResult<Box<dyn SafeDir>> {
+        Ok(self.wrap(LocalFs.open_anchor(path)?))
+    }
+    fn open_source(&self, path: &Path) -> TestFsResult<Box<dyn SafeFile>> {
+        LocalFs.open_source(path)
+    }
+    fn temporary_name(&self) -> TestFsResult<OsString> {
+        LocalFs.temporary_name()
+    }
+}
+struct FaultDir {
+    inner: Box<dyn SafeDir>,
+    state: Arc<FaultState>,
+}
+impl FaultDir {
+    fn child(&self, dir: Box<dyn SafeDir>) -> Box<dyn SafeDir> {
+        Box::new(Self {
+            inner: dir,
+            state: self.state.clone(),
+        })
+    }
+    fn link_changed(&self, result: TestFsResult<()>) -> TestFsResult<()> {
+        if result.is_ok() && self.state.mode == FaultMode::SkillLinkSync {
+            self.state.link_published.store(true, Ordering::Release);
+        }
+        result
+    }
+}
+impl SafeDir for FaultDir {
+    fn metadata(&self) -> TestFsResult<Metadata> {
+        self.inner.metadata()
+    }
+    fn metadata_at(&self, name: &OsStr, follow: bool) -> TestFsResult<Metadata> {
+        self.inner.metadata_at(name, follow)
+    }
+    fn open_directory(&self, name: &OsStr, follow: bool) -> TestFsResult<Box<dyn SafeDir>> {
+        Ok(self.child(self.inner.open_directory(name, follow)?))
+    }
+    fn open_verified_directory(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeDir>> {
+        Ok(self.child(self.inner.open_verified_directory(name)?))
+    }
+    fn open_read(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
+        self.inner.open_read(name)
+    }
+    fn create_new(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
+        self.inner.create_new(name)
+    }
+    fn mkdir(&self, name: &OsStr, mode: u32) -> TestFsResult<()> {
+        self.inner.mkdir(name, mode)
+    }
+    fn entries(&self) -> TestFsResult<Box<dyn Iterator<Item = TestFsResult<OsString>>>> {
+        self.inner.entries()
+    }
+    fn make_writable(&self) -> TestFsResult<()> {
+        self.inner.make_writable()
+    }
+    fn lock(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        budget: TestWaitBudget,
+        cancel: &TestCancelToken,
+        clock: &dyn TestClock,
+    ) -> TestFsResult<LockGuard> {
+        self.inner.lock(name, mode, budget, cancel, clock)
+    }
+    fn unlink(&self, name: &OsStr) -> TestFsResult<()> {
+        self.inner.unlink(name)
+    }
+    fn rmdir(&self, name: &OsStr) -> TestFsResult<()> {
+        self.inner.rmdir(name)
+    }
+    fn replace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
+        self.link_changed(self.inner.replace(source, destination))
+    }
+    fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
+        self.link_changed(self.inner.rename_noreplace(source, destination))
+    }
+    fn symlink(&self, target: &Path, name: &OsStr) -> TestFsResult<()> {
+        self.inner.symlink(target, name)
+    }
+    fn read_link(&self, name: &OsStr) -> TestFsResult<PathBuf> {
+        self.inner.read_link(name)
+    }
+    fn publish(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        permissions: u32,
+        mode: PublishMode,
+    ) -> TestFsResult<Publication> {
+        if self.state.mode == FaultMode::ReceiptPublish
+            && name == OsStr::new("receipt.json")
+            && !self.state.fired.swap(true, Ordering::AcqRel)
+        {
+            return Err(TestFsError::Io {
+                operation: "publish",
+                path: PathBuf::from("receipt.json"),
+                source: io::Error::other("injected receipt publication failure"),
+            });
+        }
+        let publication = self.inner.publish(name, bytes, permissions, mode)?;
+        if self.state.mode == FaultMode::CancelAfterFirstPublication
+            && !self.state.fired.swap(true, Ordering::AcqRel)
+            && let Some(cancel) = &self.state.cancel
+        {
+            cancel.cancel();
+        }
+        Ok(publication)
+    }
+    fn sync(&self) -> TestFsResult<()> {
+        if self.state.mode == FaultMode::SkillLinkSync
+            && self.state.link_published.swap(false, Ordering::AcqRel)
+        {
+            return Err(TestFsError::Io {
+                operation: "sync",
+                path: PathBuf::from("skill-link-parent"),
+                source: io::Error::other("injected skill link directory sync failure"),
+            });
+        }
+        self.inner.sync()
+    }
+    fn atomic_write(
+        &self,
+        name: &OsStr,
+        prefix: &str,
+        bytes: &[u8],
+        mode: PublishMode,
+    ) -> TestFsResult<Publication> {
+        self.inner.atomic_write(name, prefix, bytes, mode)
+    }
+    fn replace_link(&self, name: &OsStr, target: &Path) -> TestFsResult<Publication> {
+        self.inner.replace_link(name, target)
+    }
+}
+fn fault_context<'a>(
+    fs: &'a dyn SafeFs,
+    clock: &'a SystemClock,
+    cancel: &'a TestCancelToken,
+) -> InstallContext<'a> {
+    InstallContext {
+        fs,
+        clock,
+        budget: TestWaitBudget::cli(clock.mono_now(), 1).unwrap(),
+        cancel,
+    }
+}
+
+#[test]
+fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = TestCancelToken::new();
+    let fault_fs = FaultFs::new(FaultMode::ReceiptPublish, None);
+    let error = install(
+        &plan,
+        &fault_context(&fault_fs, &clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    let InstallError::Partial {
+        completed,
+        remaining,
+        source,
+    } = error
+    else {
+        panic!("expected partial install")
+    };
+    assert_eq!(completed, plan.actions()[..plan.actions().len() - 1]);
+    assert_eq!(remaining, vec![plan.actions().last().unwrap().clone()]);
+    assert_eq!(remaining[0].selector, "receipt");
+    assert_eq!(
+        source.to_string(),
+        "filesystem publish failed for \"receipt.json\""
+    );
+    assert!(!f.receipt().exists());
+
+    let recovery = f.plan();
+    assert_eq!(recovery.actions().len(), 1);
+    assert_eq!(recovery.actions()[0].selector, "receipt");
+    install(
+        &recovery,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(f.plan().actions().is_empty());
+    assert!(
+        check_install(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cancelled_apply_reports_completed_and_remaining_actions() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = TestCancelToken::new();
+    let fault_fs = FaultFs::new(FaultMode::CancelAfterFirstPublication, Some(cancel.clone()));
+    let error = install(
+        &plan,
+        &fault_context(&fault_fs, &clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    let InstallError::Partial {
+        completed,
+        remaining,
+        source,
+    } = error
+    else {
+        panic!("expected partial install")
+    };
+    assert_eq!(completed, vec![plan.actions()[0].clone()]);
+    assert_eq!(remaining, plan.actions()[1..]);
+    assert!(matches!(
+        *source,
+        InstallError::Fs(TestFsError::Cancelled { .. })
+    ));
+    assert!(!f.receipt().exists());
+
+    let recovery = f.plan();
+    let retry_cancel = TestCancelToken::new();
+    install(
+        &recovery,
+        &context(&clock, &retry_cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(f.plan().actions().is_empty());
+}
+
+#[test]
+fn visible_skill_link_with_failed_directory_sync_is_reconciled_on_retry() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = TestCancelToken::new();
+    let fault_fs = FaultFs::new(FaultMode::SkillLinkSync, None);
+    let error = install(
+        &plan,
+        &fault_context(&fault_fs, &clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    let InstallError::Partial {
+        completed,
+        remaining,
+        source,
+    } = error
+    else {
+        panic!("expected partial install")
+    };
+    assert!(completed.iter().any(|action| action.selector == "binary"));
+    assert_eq!(remaining.first().unwrap().selector, "skill");
+    assert_eq!(remaining.last().unwrap().selector, "receipt");
+    assert!(matches!(
+        *source,
+        InstallError::Fs(TestFsError::Io {
+            operation: "sync",
+            ..
+        })
+    ));
+    assert!(
+        fs::symlink_metadata(f.link())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!f.receipt().exists());
+
+    let recovery = f.plan();
+    assert_eq!(recovery.actions().len(), 1);
+    assert_eq!(recovery.actions()[0].selector, "receipt");
+    install(
+        &recovery,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(f.plan().actions().is_empty());
+}
+
+#[test]
+fn adopt_existing_binary_does_not_adopt_a_symlink() {
+    let f = Fixture::new();
+    fs::create_dir_all(&f.targets.bin_dir).unwrap();
+    let binary = f.targets.bin_dir.join("provenant");
+    symlink("/foreign/provenant", &binary).unwrap();
+    let mut targets = f.targets.clone();
+    targets.adopt_existing = true;
+    let release = f.release();
+    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    let error = plan_install(release, targets, snapshots).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("unmanaged destination conflicts: {}", binary.display())
+    );
+    assert_eq!(
+        fs::read_link(&binary).unwrap(),
+        PathBuf::from("/foreign/provenant")
+    );
+    assert!(!f.receipt().exists());
+}
+
+#[test]
+fn check_install_compares_the_requested_source_digest() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = TestCancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let other_digest = source_digest(&[SourceInput {
+        name: "src/lib.rs",
+        bytes: b"different fixture",
+    }])
+    .unwrap();
+    let other = Fixture::new();
+    let other_source = crate::package_release(
+        &other.source,
+        other_digest,
+        "fixture-target",
+        "fixture-toolchain",
+        &LocalFs,
+    )
+    .unwrap();
+    let findings =
+        check_install(&f.targets, Some(&other_source), "fixture-target", &LocalFs).unwrap();
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.rule == "source_digest")
+            .count(),
+        1
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .find(|finding| finding.rule == "source_digest")
+            .unwrap()
+            .path
+            .to_path_buf()
+            .unwrap(),
+        f.receipt()
+    );
+}
+
+#[test]
+fn uninstall_reconciles_entries_removed_before_receipt_publication() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    fs::remove_file(f.link()).unwrap();
+    let result = uninstall(
+        &f.targets,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
+    assert_eq!(result.actions.len(), 1);
+    assert_eq!(result.actions[0].selector, "receipt");
+    assert!(
+        read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .all(|e| e.harness != Some(Harness::Codex))
+    );
+    assert!(
+        check_install(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+    // Once removal is reconciled, a later recreated matching link is unmanaged.
+    let release = f.release();
+    let path = f
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(release.manifest.source_digest.to_string())
+        .join("assets/skills/example");
+    symlink(&path, f.link()).unwrap();
+    assert!(
+        uninstall(
+            &f.targets,
+            &context(&clock, &cancel),
+            &mut Reporter::default()
+        )
+        .unwrap()
+        .actions
+        .is_empty()
+    );
+    assert_eq!(fs::read_link(f.link()).unwrap(), path);
+}
+
+#[test]
+fn regular_user_instructions_are_preserved_with_manual_include_advice() {
+    let f = Fixture::new();
+    let assets = f.source.join("assets/instructions");
+    fs::create_dir_all(&assets).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let p = assets.join(name);
+        fs::write(&p, b"release instructions").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let instruction = f.home.join(".codex/AGENTS.md");
+    fs::create_dir_all(instruction.parent().unwrap()).unwrap();
+    fs::write(&instruction, b"my instructions").unwrap();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let result = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&instruction).unwrap(), b"my instructions");
+    assert_eq!(result.manual_includes.len(), 1);
+    assert_eq!(
+        result.manual_includes[0].path.to_path_buf().unwrap(),
+        instruction
+    );
+    assert!(
+        !read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.path.to_path_buf().unwrap() == instruction)
+    );
+}
+
+#[test]
+fn completed_immutable_release_missing_a_file_is_not_repaired() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let missing = f
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(plan.release.manifest.source_digest.to_string())
+        .join("provenant");
+    fs::remove_file(&missing).unwrap();
+    assert_eq!(
+        Snapshots::capture(&f.release(), &f.targets, &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        format!("release file bytes or mode differ: {}", missing.display())
+    );
+    assert!(!missing.exists());
+}
+#[test]
+fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let mut receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let original = receipt.clone();
+    receipt.entries.clear();
+    fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
+    assert_eq!(
+        check_install(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "invalid release manifest: receipt requires one binary entry"
+    );
+    let mut receipt = original;
+    let binary = f.targets.bin_dir.join("provenant");
+    fs::write(&binary, b"foreign").unwrap();
+    for entry in &mut receipt.entries {
+        if entry.selector == "binary" {
+            entry.expected = OwnedValue::File {
+                digest: CanonicalV1::file_digest(b"foreign"),
+                mode: 0o755,
+            };
+        }
+    }
+    fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
+    assert_eq!(
+        check_install(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "invalid release manifest: receipt binary differs from release"
+    );
+}

@@ -1,6 +1,6 @@
 //! Verified staged releases and bounded packaging. Build orchestration calls
 //! `package_release` after linking; runtime startup never builds itself.
-use crate::managed::{InstallError, directory, file_bytes, normal_absolute, path_wire, snapshot};
+use crate::managed::{InstallError, directory, normal_absolute, path_wire, snapshot};
 use provenant_records::{CanonicalV1, Limits, ReleaseFile, ReleaseManifest, SourceDigest};
 use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use std::{
@@ -31,11 +31,14 @@ impl Release {
     }
     pub fn read(source: &Path, target: &str, fs: &dyn SafeFs) -> Result<Self, InstallError> {
         normal_absolute(source)?;
-        let bytes = file_bytes(
-            source.join("release.json").as_path(),
-            Limits::CONFIG.max_bytes,
-            fs,
-        )?;
+        let manifest_path = source.join("release.json");
+        let Some(crate::managed::Snapshot {
+            value: crate::managed::Value::File { bytes, mode: 0o600 },
+            ..
+        }) = snapshot(&manifest_path, fs)?
+        else {
+            return Err(InstallError::Tampered(manifest_path));
+        };
         let manifest: ReleaseManifest =
             provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG)?;
         if manifest.target != target {
@@ -101,7 +104,7 @@ impl Release {
 fn validate_name(path: &Path, mode: u64) -> Result<(), InstallError> {
     let allowed_mode = if path == Path::new("provenant") {
         0o755
-    } else if path.starts_with("assets") {
+    } else if path.starts_with("assets") && path != Path::new("assets") {
         0o600
     } else {
         return Err(InstallError::Manifest("file outside release layout"));
@@ -184,7 +187,7 @@ pub fn package_release(
     }
     Release::read(source, target, fs)
 }
-fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
+pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
     fn walk(
         root: &Path,
         tail: &Path,
