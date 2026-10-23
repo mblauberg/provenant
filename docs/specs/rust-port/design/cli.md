@@ -60,14 +60,17 @@ provenant
   fabric …                                [messages/tasks/identity/peers/MCP]
     mcp
   telemetry stats
-  worktree create | list | remove          [supervisor freeze gate]
-  clean                                   [supervisor freeze gate]
+  quota show | tick                       [routing freeze gate]
+  worktree create | list | remove [--merged]  [supervisor freeze gate]
   workflow …                              [workflow freeze gate]
   check config | install | harness | release
   check writing PATHS… [--profile PROFILE]
-  hook claude PreToolUse | PreCompact | SessionStart
+  hook claude pre-tool-use | pre-compact | compact
   hook git pre-push REMOTE LOCATION
 ```
+
+state.md owns the flags of `root`, `install`, `uninstall` and `check install`;
+this tree lists only their verbs.
 
 The run grammar below is canonical even where area proposals still disagree.
 Other reserved leaves need owner request types, flags and bounds reconciled
@@ -138,7 +141,7 @@ authority; it does not inherit lane-selection defaults.
 | `reconcile` | Repeatable `--id RUN`, required `--operation-id ID`; otherwise selected project's recoverable runs. Ask run to recover queued/orphaned scheduler work idempotently; report repaired/unchanged/refused items. No healthy-provider signal, inferred completion or released custody without owner evidence. |
 
 Single-prompt dispatch takes exactly one `--model ADAPTER/ID` or `--route POOL`;
-optional `--effort VALUE`, `--account LABEL`, `--confidential`,
+optional `--effort VALUE`, `--confidential`,
 `--intent ordinary|assurance`, `--orchestrator-family FAMILY`,
 `--reviewer-id ID`, `--risk-tier TIER`. Routing validates assurance inputs and
 requested/applied route distinctions; its missing design gates final values.
@@ -220,12 +223,12 @@ state/config's installer list. Protocol event names are command names; workflow
 registers handlers here rather than adding verbs. The timeout column is a
 registration value, not a claim about an existing host default.
 
-| Harness | Protocol event | Matcher | Host timeout | Handler |
-| --- | --- | --- | --- | --- |
-| claude | `PreToolUse` | `Bash` | Unset; no outer host deadline | CLI stdin/deny codec; confinement shell-command policy, 1 s local read/policy budget. |
-| claude | `PreCompact` | None | 5 s | Workflow checkpoint validation; CLI codec, 1 s local budget. |
-| claude | `SessionStart` | `compact` | 5 s | Workflow new-root checkpoint context; CLI codec, 1 s local budget. |
-| git | `pre-push` | None | Not a Git protocol field | Supervisor/confinement trusted Git evidence and refusal policy. |
+| Harness | Command | Protocol event | Matcher | Host timeout | Handler |
+| --- | --- | --- | --- | --- | --- |
+| claude | `pre-tool-use` | `PreToolUse` | `Bash` | Unset; no outer host deadline | CLI stdin/deny codec; confinement shell-command policy, 1 s local read/policy budget. |
+| claude | `pre-compact` | `PreCompact` | None | 5 s | Workflow checkpoint validation; CLI codec, 1 s local budget. |
+| claude | `compact` | `SessionStart` | `compact` | 5 s | Workflow new-root checkpoint context; CLI codec, 1 s local budget. |
+| git | `pre-push` | `pre-push` | None | Not a Git protocol field | Supervisor/confinement trusted Git evidence and refusal policy. |
 
 Hook stdout carries only the protocol response, no ordinary result/logging.
 Claude input is at most 1 MiB, detected by a bounded read of cap+1 with a local
@@ -343,7 +346,7 @@ for config's installer; config never imports cli.
 | --- | --- |
 | Roots, project selection, install identity/assets, managed registrations | core/records/config (state) |
 | Safe bounded process/FS APIs, custody, cancellation, trusted Git/worktrees | supervisor/confinement; no cli `Command::new`, raw descriptors or unsafe |
-| Atomic admission/registry, attempts, waits, continuation, output and evidence packet | run; `completed_attempt(AttemptId) -> AttemptFact` includes all terminal/route/reviewer/output facts workflow needs |
+| Atomic admission/registry, attempts, waits, continuation, output and evidence packet | run; `AttemptReader::attempt(AttemptId) -> AttemptFact` and `attempts(filter)` carry all terminal/route/reviewer/output facts workflow needs; the CLI composes `attempts()` with `stats(facts, &PriceTable, window)` and adds the active count from `snapshot` |
 | Route listing/resolution | routing/providers/quota; execution-route design is a freeze gate |
 | Terminal-record reduction with bundled prices | telemetry; `telemetry stats`, no ledger |
 | Identity, federation, coordination and MCP lifecycle | fabric-runtime/fabric-mcp |
