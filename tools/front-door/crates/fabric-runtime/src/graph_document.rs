@@ -288,7 +288,7 @@ pub fn analyse_relations(
         if inherited && node.confidential == Some(false) {
             let source = parents[*index]
                 .iter()
-                .filter(|parent| confidential.contains(parent))
+                .filter(|parent| confidential.contains(*parent))
                 .map(|parent| nodes[*parent].id.as_str())
                 .collect::<Vec<_>>();
             result.faults.push(Fault {

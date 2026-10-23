@@ -66,12 +66,22 @@ pub fn apply_lane_response(
         if let Some(rewrite) = result.get("input").filter(|v| truthy(v)) {
             let replacement = match rewrite {
                 Value::Object(rewrite) => rewrite.clone(),
-                Value::Array(values) => values.iter().enumerate().map(|(index, value)| (index.to_string(), value.clone())).collect(),
+                Value::Array(values) => values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string(), value.clone()))
+                    .collect(),
                 Value::String(value) => {
                     // Object.assign enumerates UTF-16 code units. A lone
                     // surrogate needs a lossless JS value owner, not U+FFFD.
-                    if value.chars().any(|c| u32::from(c) > 0xffff) { return Err(UnsupportedRewrite); }
-                    value.chars().enumerate().map(|(index, value)| (index.to_string(), Value::String(value.to_string()))).collect()
+                    if value.chars().any(|c| u32::from(c) > 0xffff) {
+                        return Err(UnsupportedRewrite);
+                    }
+                    value
+                        .chars()
+                        .enumerate()
+                        .map(|(index, value)| (index.to_string(), Value::String(value.to_string())))
+                        .collect()
                 }
                 _ => Map::new(),
             };
@@ -243,12 +253,22 @@ mod trim_tests {
     }
     #[test]
     fn assign_rewrites_enumerate_arrays_and_strings_and_clear_primitive_inputs() {
-        for (rewrite, expected) in [(json!("aé"),json!({"0":"a","1":"é"})),
-            (json!([1,null]),json!({"0":1,"1":null})),(json!(1),json!({})),(json!(true),json!({}))] {
+        for (rewrite, expected) in [
+            (json!("aé"), json!({"0":"a","1":"é"})),
+            (json!([1, null]), json!({"0":1,"1":null})),
+            (json!(1), json!({})),
+            (json!(true), json!({})),
+        ] {
             let mut input = json!({"old":1}).as_object().unwrap().clone();
-            apply_lane_response(&mut input, json!({"local":true,"input":rewrite}).as_object().unwrap().clone()).unwrap();
+            apply_lane_response(
+                &mut input,
+                json!({"local":true,"input":rewrite})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
             assert_eq!(Value::Object(input), expected);
         }
     }
-
 }

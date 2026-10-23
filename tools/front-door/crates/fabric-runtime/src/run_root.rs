@@ -65,7 +65,9 @@ pub fn executable_owner(root: &Path, relative: &Path) -> Result<PathBuf, RunRoot
     // Node path.join concatenates an absolute second operand rather than
     // discarding the root as Path::join does.
     let mut spelling = root.as_os_str().to_os_string();
-    if !spelling.is_empty() { spelling.push("/"); }
+    if !spelling.is_empty() {
+        spelling.push("/");
+    }
     spelling.push(relative.as_os_str());
     let joined = PathBuf::from(spelling);
     let path = if joined.is_absolute() {
