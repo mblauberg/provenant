@@ -124,6 +124,13 @@ pub struct PatternRule {
     matcher: RuleMatcher,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PatternFlags {
+    pub case_insensitive: bool,
+    pub multiline: bool,
+    pub dot_all: bool,
+}
+
 #[derive(Clone, Debug)]
 enum RuleMatcher {
     Builtin(BuiltinRule),
@@ -139,13 +146,22 @@ enum BuiltinRule {
     ClosedCompound,
     StackedHyphen,
     VersusStack,
+    AcademicTripleHyphen,
+    AcademicUnescapedPercent,
 }
+
+const PYTHON_LOOKAROUND_OVERLAYS: &[(&str, BuiltinRule)] = &[
+    ("(?<!-)---(?!-)", BuiltinRule::AcademicTripleHyphen),
+    (r"(?<!\\)\d+%", BuiltinRule::AcademicUnescapedPercent),
+];
 
 #[derive(Clone, Copy)]
 enum Boundary {
     None,
     PythonWordBoth,
     PythonWordEnd,
+    NoAdjacentHyphen,
+    NotEscaped,
 }
 
 #[derive(Debug, Error)]
@@ -162,6 +178,12 @@ pub enum StyleError {
         #[source]
         source: std::io::Error,
     },
+    #[error("cannot decode style input {path} as UTF-8: {source}")]
+    UnicodeDecode {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl PatternRule {
@@ -172,6 +194,47 @@ impl PatternRule {
         Ok(Self {
             label: label.into(),
             matcher: RuleMatcher::Regex(compile(expression, false, false)?),
+        })
+    }
+
+    /// Compile a typed Python-style overlay from pattern text and flags.
+    ///
+    /// The allowlisted `regex` crate supports the common Python-compatible
+    /// subset used by overlays. Python-only lookaround and backreference
+    /// constructs return a typed compile error and remain outside this API.
+    pub fn python_regex(
+        label: impl Into<String>,
+        expression: &str,
+        flags: PatternFlags,
+    ) -> Result<Self, StyleError> {
+        let label = label.into();
+        let academic_rule = PYTHON_LOOKAROUND_OVERLAYS
+            .iter()
+            .find(|(pattern, _)| *pattern == expression)
+            .map(|(_, rule)| *rule);
+        if let Some(rule) = academic_rule {
+            return Ok(Self {
+                label,
+                matcher: RuleMatcher::Builtin(rule),
+            });
+        }
+        let translated = if flags.case_insensitive {
+            python_ignorecase_expression(expression)
+        } else {
+            expression.to_owned()
+        };
+        let regex = RegexBuilder::new(&translated)
+            .case_insensitive(flags.case_insensitive)
+            .multi_line(flags.multiline)
+            .dot_matches_new_line(flags.dot_all)
+            .build()
+            .map_err(|source| StyleError::Regex {
+                expression: expression.to_owned(),
+                source,
+            })?;
+        Ok(Self {
+            label,
+            matcher: RuleMatcher::Regex(regex),
         })
     }
 
@@ -343,6 +406,12 @@ fn builtin_expression(rule: BuiltinRule) -> (String, bool, bool, Boundary) {
             false,
             Boundary::PythonWordBoth,
         ),
+        BuiltinRule::AcademicTripleHyphen => {
+            ("---".to_owned(), false, false, Boundary::NoAdjacentHyphen)
+        }
+        BuiltinRule::AcademicUnescapedPercent => {
+            (r"\d+%".to_owned(), false, false, Boundary::NotEscaped)
+        }
     }
 }
 
@@ -402,6 +471,17 @@ fn boundary_matches(text: &str, start: usize, end: usize, boundary: Boundary) ->
             python_word_boundary(text, start) && python_word_boundary(text, end)
         }
         Boundary::PythonWordEnd => python_word_boundary(text, end),
+        Boundary::NoAdjacentHyphen => {
+            adjacent_chars(text, start)
+                .0
+                .is_none_or(|character| character != '-')
+                && adjacent_chars(text, end)
+                    .1
+                    .is_none_or(|character| character != '-')
+        }
+        Boundary::NotEscaped => adjacent_chars(text, start)
+            .0
+            .is_none_or(|character| character != '\\'),
     }
 }
 
@@ -919,10 +999,7 @@ pub fn scan(
     latex: bool,
 ) -> Result<Vec<(usize, usize, String, String)>, StyleError> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|source| StyleError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = read_utf8(path)?;
     let suffix = path
         .extension()
         .map(|extension| extension.to_string_lossy().to_lowercase())
@@ -956,10 +1033,7 @@ pub fn prose_word_count_text(text: &str, suffix: &str, latex: bool) -> Result<us
 
 pub fn prose_word_count(path: impl AsRef<Path>, latex: bool) -> Result<usize, StyleError> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|source| StyleError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = read_utf8(path)?;
     let suffix = path
         .extension()
         .map(|extension| extension.to_string_lossy().to_lowercase())
@@ -968,10 +1042,21 @@ pub fn prose_word_count(path: impl AsRef<Path>, latex: bool) -> Result<usize, St
     prose_word_count_text(&text, &suffix, latex)
 }
 
+fn read_utf8(path: &Path) -> Result<String, StyleError> {
+    std::fs::read_to_string(path).map_err(|source| {
+        let path = path.to_path_buf();
+        if source.kind() == std::io::ErrorKind::InvalidData {
+            StyleError::UnicodeDecode { path, source }
+        } else {
+            StyleError::Read { path, source }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn actual(case: &Value) -> Value {
         let text = case["text"].as_str().unwrap_or_default();
@@ -988,6 +1073,60 @@ mod tests {
         }
     }
 
+    fn fixture_phrases(case: &Value) -> Option<Vec<PhraseGroup>> {
+        case["phrases"].as_array().map(|groups| {
+            groups
+                .iter()
+                .map(|group| {
+                    PhraseGroup::new(
+                        group["label"].as_str().unwrap_or_default(),
+                        group["phrases"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn fixture_patterns(case: &Value) -> Option<Vec<PatternRule>> {
+        case["patterns"].as_array().map(|rules| {
+            rules
+                .iter()
+                .map(|rule| {
+                    let bits = rule["flags"].as_u64().unwrap_or_default();
+                    PatternRule::python_regex(
+                        rule["label"].as_str().unwrap_or_default(),
+                        rule["expression"].as_str().unwrap_or_default(),
+                        PatternFlags {
+                            case_insensitive: bits & 2 != 0,
+                            multiline: bits & 8 != 0,
+                            dot_all: bits & 16 != 0,
+                        },
+                    )
+                    .expect("fixture regex uses supported Python syntax")
+                })
+                .collect()
+        })
+    }
+
+    fn actual_overlay(case: &Value) -> Value {
+        let phrases = fixture_phrases(case);
+        let patterns = fixture_patterns(case);
+        json!(
+            scan_text(
+                case["text"].as_str().unwrap_or_default(),
+                case["suffix"].as_str().unwrap_or(".md"),
+                phrases.as_deref(),
+                patterns.as_deref(),
+                case["latex"].as_bool().unwrap_or(false),
+            )
+            .expect("overlay scans")
+        )
+    }
+
     #[test]
     fn python_boundaries_and_lookahead_unicode_match_oracle() {
         let cases = json!([
@@ -995,7 +1134,9 @@ mod tests {
             {"suffix":".md","text":"\u{345}not only highly-rated\u{345} data-set\u{5b0}"}
         ]);
         let actual_results: Vec<Value> = cases.as_array().unwrap().iter().map(actual).collect();
-        if let Some(expected) = crate::test_support::oracle("style_lint", &cases) {
+        if let Some(expected) =
+            crate::test_support::oracle_script("oracle_style_authority.py", "style_lint", &cases)
+        {
             assert_eq!(json!(actual_results), expected);
         }
     }
@@ -1054,7 +1195,9 @@ mod tests {
             {"op":"spans", "suffix":".tex", "latex":true, "text":"\\verb!a! \\lstinline[language=Rust]@b@ \\mintinline{c}|x|"}
         ]);
         let actual_results: Vec<Value> = cases.as_array().unwrap().iter().map(actual).collect();
-        if let Some(expected) = crate::test_support::oracle("style_lint", &cases) {
+        if let Some(expected) =
+            crate::test_support::oracle_script("oracle_style_authority.py", "style_lint", &cases)
+        {
             assert_eq!(json!(actual_results), expected);
         }
     }
@@ -1082,6 +1225,62 @@ mod tests {
         assert_eq!(findings[0].2, "custom");
         assert_eq!(findings[1].2, "first");
         assert_eq!(findings[2].2, "second");
+    }
+
+    #[test]
+    fn typed_python_overlay_flags_match_the_source_subset() {
+        let cases = json!([
+            {
+                "op":"scan", "suffix":".md", "latex":false,
+                "text":"ROBUST, robustly, not robust?\n",
+                "phrases":[],
+                "patterns":[{"label":"custom robust", "expression":"\\brobust\\b", "flags":2}]
+            }
+        ]);
+        let expected =
+            crate::test_support::oracle_script("oracle_style_authority.py", "style_lint", &cases);
+        if let Some(expected) = expected {
+            let actual: Vec<Value> = cases
+                .as_array()
+                .expect("overlay cases")
+                .iter()
+                .map(actual_overlay)
+                .collect();
+            assert_eq!(json!(actual), expected);
+        }
+    }
+
+    #[test]
+    fn academic_wrapper_patterns_match_python_boundaries_and_unicode_digits() {
+        let cases = json!([
+            {
+                "op":"scan", "suffix":".tex", "latex":true, "phrases":[],
+                "text":"x---y ---- z---w ----- p---q",
+                "patterns":[{
+                    "label":"LaTeX prose em dash marker",
+                    "expression":"(?<!-)---(?!-)"
+                }]
+            },
+            {
+                "op":"scan", "suffix":".tex", "latex":true, "phrases":[],
+                "text":"5% \\5% \\\\5% １２% ١٢%",
+                "patterns":[{
+                    "label":"Likely unescaped percent in prose",
+                    "expression":r"(?<!\\)\d+%"
+                }]
+            }
+        ]);
+        let expected =
+            crate::test_support::oracle_script("oracle_style_authority.py", "style_lint", &cases);
+        if let Some(expected) = expected {
+            let actual: Vec<Value> = cases
+                .as_array()
+                .expect("academic overlay cases")
+                .iter()
+                .map(actual_overlay)
+                .collect();
+            assert_eq!(json!(actual), expected);
+        }
     }
 
     #[test]
