@@ -303,6 +303,10 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
+      - name: Build Rust front door before parallel test collection
+        run: |
+          binary="$(.venv/bin/python scripts/lib/front_door_build.py build tools/front-door tools/front-door/target)"
+          printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
