@@ -20,9 +20,25 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from tests.support.git import git_repo, linked_worktree as make_linked_worktree
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills/orchestrate/scripts"
+
+
+def provider_home(monkeypatch, tmp_path, *, home=None, config_dir=None, state_root=None,
+                  instance_root=None):
+    """Set only the provider home variables requested by this test."""
+    values = {
+        "HOME": home,
+        "XDG_CONFIG_HOME": config_dir,
+        "AGENT_FABRIC_STATE_ROOT": state_root,
+        "AGENT_FABRIC_INSTANCE_ROOT": instance_root,
+    }
+    for name, value in values.items():
+        if value is not None:
+            monkeypatch.setenv(name, str(value))
+    return Path(home) if home is not None else None
 
 
 def test_plan_only_resolves_without_launch(tmp_path):
@@ -5829,11 +5845,9 @@ def codex_access(table, path):
 def nested_lanes(tmp_path):
     """This repository's layout: linked worktrees nested at <repo>/.worktrees/<name>."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    git(repo, "commit", "-q", "--allow-empty", "-m", "initial")
-    lane, other = repo / ".worktrees/lane", repo / ".worktrees/other"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
-    git(repo, "worktree", "add", "-q", "-b", "other", str(other))
+    git_repo(repo, branch="main")
+    lane = make_linked_worktree(repo, "lane", path=repo / ".worktrees/lane")
+    other = make_linked_worktree(repo, "other", path=repo / ".worktrees/other")
     return repo, lane, other
 
 
@@ -8863,9 +8877,8 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
     mod = supervisor()
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -8915,9 +8928,8 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
 def test_claude_ambient_account_preserves_inherited_config_environment(tmp_path, monkeypatch, inherited):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     if inherited is None:
         monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     else:
@@ -8935,9 +8947,8 @@ def test_claude_ambient_account_preserves_inherited_config_environment(tmp_path,
 def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, monkeypatch, accounts, inherited):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     if inherited:
         monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
     else:
@@ -8959,9 +8970,8 @@ def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, mo
 def test_claude_malformed_accounts_refuse_an_explicit_account(tmp_path, monkeypatch, accounts, account):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({'accounts': accounts}))
@@ -8988,9 +8998,8 @@ def test_claude_config_read_grants_follow_selected_identity(tmp_path, monkeypatc
 def test_claude_all_exhausted_refuses_plan_before_launch(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -9011,9 +9020,8 @@ def test_claude_all_exhausted_refuses_plan_before_launch(tmp_path, monkeypatch):
 def test_claude_switch_from_custom_ambient_to_default_unsets_config_dir(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
