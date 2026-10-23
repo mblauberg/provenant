@@ -8,7 +8,7 @@ use std::{
 pub const POLICY: &str = ".agents/fabric-policy.json";
 const INSTRUCTION_MODES: &[&str] = &["quarantine", "allow", "deny"];
 
-fn load(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
+fn load(workspace_root: &Path, field: &str) -> (Map<String, Value>, Vec<String>) {
     let path = workspace_root.join(POLICY);
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -29,8 +29,8 @@ fn load(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
             )
         }
     };
-    match crate::pending::checked_json(text) {
-        Ok(Value::Object(policy)) => (policy, vec![]),
+    match crate::policy_json::field(text, field) {
+        Ok(Some(policy)) => (policy, vec![]),
         Ok(_) => (
             Map::new(),
             vec![format!("{POLICY} is not an object; using defaults")],
@@ -43,7 +43,7 @@ fn load(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
 }
 
 pub fn instruction_changes(workspace_root: &Path) -> (String, Vec<String>) {
-    let (policy, mut warnings) = load(workspace_root);
+    let (policy, mut warnings) = load(workspace_root, "instruction_changes");
     match policy.get("instruction_changes") {
         None => ("quarantine".into(), warnings),
         Some(Value::String(value)) if INSTRUCTION_MODES.contains(&value.as_str()) => {
@@ -59,7 +59,7 @@ pub fn instruction_changes(workspace_root: &Path) -> (String, Vec<String>) {
 }
 
 pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let (policy, mut warnings) = load(workspace_root);
+    let (policy, mut warnings) = load(workspace_root, "secret_scan_exclude");
     let entries = match policy.get("secret_scan_exclude") {
         None => return (vec![], warnings),
         Some(Value::Array(entries)) => entries,
@@ -113,7 +113,7 @@ pub fn secret_scan_exclude(workspace_root: &Path) -> (Vec<PathBuf>, Vec<String>)
 const DEFAULT_BRANCH: &str = "main";
 
 pub fn tools_policy(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
-    let (policy, mut warnings) = load(workspace_root);
+    let (policy, mut warnings) = load(workspace_root, "tools");
     let configured = match policy.get("tools") {
         None => Map::new(),
         Some(Value::Object(configured)) => configured.clone(),
@@ -229,7 +229,10 @@ mod tests {
         );
         assert_eq!(instruction_changes(root.path()), ("deny".into(), vec![]));
         let (paths, warnings) = secret_scan_exclude(root.path());
-        assert_eq!(paths, [fs::canonicalize(root.path()).unwrap().join("allowed")]);
+        assert_eq!(
+            paths,
+            [fs::canonicalize(root.path()).unwrap().join("allowed")]
+        );
         assert_eq!(warnings.len(), 3);
         write_policy(root.path(), r#"{"instruction_changes":null}"#);
         assert_eq!(instruction_changes(root.path()), ("quarantine".into(), vec![format!("{POLICY} instruction_changes must be quarantine, allow or deny; using quarantine")]));
@@ -303,5 +306,38 @@ print(json.dumps({'instruction': instruction, 'excluded': [[str(p) for p in excl
             "tools": tools_policy(root.path()),
         });
         assert_eq!(actual, expected);
+    }
+    #[test]
+    fn unread_python_values_cannot_change_instruction_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../skills/orchestrate/scripts/fabric_policy.py"
+        );
+        for opaque in [
+            "18446744073709551616",
+            "1e999",
+            r#""\ud800""#,
+            "NaN",
+            r#"{"nested":[1e999,"\udfff"]}"#,
+        ] {
+            write_policy(
+                root.path(),
+                &format!(r#"{{"instruction_changes":"deny","unused":{opaque}}}"#),
+            );
+            assert_eq!(instruction_changes(root.path()), ("deny".into(), vec![]));
+            let Some(expected) = crate::test_support::python(
+                r#"import importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location('fabric_policy',sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.instruction_changes(pathlib.Path(sys.argv[2]))))"#,
+                &[source.into(), root.path().to_str().unwrap().into()],
+            ) else {
+                return;
+            };
+            assert_eq!(
+                serde_json::json!(instruction_changes(root.path())),
+                expected
+            );
+        }
     }
 }

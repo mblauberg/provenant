@@ -15,6 +15,7 @@ pub mod run_root;
 pub mod success_status;
 
 mod pending;
+mod policy_json;
 
 #[cfg(test)]
 mod test_support;
