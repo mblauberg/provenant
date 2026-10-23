@@ -163,4 +163,73 @@ mod tests {
             CommandOutput::default()
         );
     }
+    #[test]
+    fn advisory_matches_python_on_a_real_local_checkout() {
+        use std::{
+            fs::{self, File, FileTimes},
+            process::Command,
+            time::{Duration, UNIX_EPOCH},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::git_evidence::sanitized_environment(&std::env::vars_os().collect());
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .env_clear()
+                .envs(&env)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "feature"]);
+        fs::write(dir.path().join("file"), "first").unwrap();
+        git(&["add", "file"]);
+        git(&["commit", "-qm", "first"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        fs::write(dir.path().join("file"), "second").unwrap();
+        git(&["add", "file"]);
+        git(&["commit", "-qm", "second"]);
+        git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ]);
+        git(&["update-ref", "refs/heads/feature", &first]);
+        let fetch = dir.path().join(".git/FETCH_HEAD");
+        fs::write(&fetch, "").unwrap();
+        File::options()
+            .write(true)
+            .open(fetch)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(568000)))
+            .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let input = serde_json::json!({"root":root, "now":1000000.0});
+        let Some(expected): Option<Vec<String>> = crate::oracle::python(
+            "import json,sys; from pathlib import Path; sys.path.insert(0,'scripts'); from lib.stale_checkout import check_stale_checkout; x=json.load(sys.stdin); print(json.dumps(check_stale_checkout(Path(x['root']),now=x['now'])))", &input
+        ) else { return; };
+        let snapshot = Snapshot {
+            primary_checkout: true,
+            fetch_modified_at: Some(568000.0),
+            default_branch: Some("trunk".into()),
+            branch: Branch::Named("feature".into()),
+            counts: Some((0, 1)),
+        };
+        assert_eq!(warnings(&root, &snapshot, 1000000.0), expected);
+        assert_eq!(expected.len(), 3);
+    }
 }

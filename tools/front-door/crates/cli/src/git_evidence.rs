@@ -1,5 +1,4 @@
 //! Git evidence reads. Packet streaming/publication awaits the supervisor safe API.
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -30,21 +29,6 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-}
-
-/// Retained packet header. The encoder and atomic publisher are not ported here.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Metadata {
-    pub schema_version: u32,
-    pub record_type: String,
-    pub repository: String,
-    pub git_root: String,
-    pub head: String,
-    pub diff_base: String,
-    pub working_tree: String,
-    pub diff_from: String,
-    pub paths: Vec<String>,
-    pub encoding: String,
 }
 
 /// Closed environment; caller routing, injected config and replacement refs are dropped.
@@ -222,5 +206,23 @@ mod tests {
             String::from_utf8(output).unwrap().trim(),
             temp.path().canonicalize().unwrap().to_str().unwrap()
         );
+    }
+    #[test]
+    fn closed_environment_matches_python_source() {
+        use serde_json::json;
+        let source = json!({"PATH":"/bin", "HOME":"", "TMPDIR":"/tmp", "GIT_DIR":"/wrong", "GIT_CONFIG_COUNT":"broken", "LC_ALL":"bad", "TOKEN":"excluded"});
+        let Some(expected): Option<BTreeMap<String, String>> = crate::oracle::python(
+            "import json,sys; from scripts.git_evidence import sanitized_git_environment; print(json.dumps(sanitized_git_environment(json.load(sys.stdin))))", &source
+        ) else { return; };
+        let source: BTreeMap<String, String> = serde_json::from_value(source).unwrap();
+        let source = source
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let actual: BTreeMap<String, String> = sanitized_environment(&source)
+            .into_iter()
+            .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
+            .collect();
+        assert_eq!(actual, expected);
     }
 }

@@ -8,14 +8,14 @@ use thiserror::Error;
 pub const DEFAULT_INCLUDE: &str = "runs,scratch,worktrees";
 
 #[derive(Debug, Parser)]
-#[command(name = "clean")]
+#[command(name = "clean", args_override_self = true)]
 pub struct Arguments {
     #[arg(long)]
     pub repo: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_INCLUDE)]
     pub include: String,
     #[arg(long, value_parser = duration)]
-    pub older_than: Option<f64>,
+    pub older_than: Option<DurationDays>,
     #[arg(long)]
     pub apply: bool,
     #[arg(long, value_name = "sha256:DIGEST")]
@@ -58,7 +58,7 @@ pub enum Operation {
 pub struct Request {
     pub repo: PathBuf,
     pub include: BTreeSet<String>,
-    pub older_than_days: Option<f64>,
+    pub older_than_days: Option<DurationDays>,
     pub json: bool,
     pub operation: Operation,
 }
@@ -100,7 +100,7 @@ impl Arguments {
             include: self
                 .include
                 .split(',')
-                .map(str::trim)
+                .map(crate::pending::python_strip)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect(),
@@ -111,7 +111,14 @@ impl Arguments {
     }
 }
 
-pub fn duration(value: &str) -> Result<f64, String> {
+/// Day durations remain exact integers; hour durations retain Python's float result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DurationDays {
+    Integer(String),
+    Fractional(f64),
+}
+
+pub fn duration(value: &str) -> Result<DurationDays, String> {
     let error = || "duration must be like 7d or 24h".to_owned();
     let unit = value.chars().last().ok_or_else(error)?;
     if !matches!(unit, 'd' | 'h') {
@@ -121,17 +128,25 @@ pub fn duration(value: &str) -> Result<f64, String> {
     if digits.is_empty() {
         return Err(error());
     }
-    let mut number = 0.0;
+    let mut normalized = String::new();
     for c in digits.chars() {
         let digit = crate::pending::decimal_digit(c).ok_or_else(error)?;
-        number = number * 10.0 + f64::from(digit);
+        normalized.push(char::from(b'0' + digit));
     }
-    // Python converts to float when multiplying by 1/24, but keeps day values
-    // as integers; extremely large durations are not yet part of this interface.
+    let normalized = normalized.trim_start_matches('0');
+    let normalized = if normalized.is_empty() {
+        "0"
+    } else {
+        normalized
+    };
+    if unit == 'd' {
+        return Ok(DurationDays::Integer(normalized.to_owned()));
+    }
+    let number: f64 = normalized.parse().map_err(|_| error())?;
     if !number.is_finite() {
-        return Err(error());
+        return Err("int too large to convert to float".into());
     }
-    Ok(number * if unit == 'd' { 1.0 } else { 1.0 / 24.0 })
+    Ok(DurationDays::Fractional(number * (1.0 / 24.0)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -219,7 +234,7 @@ mod tests {
             request.include,
             BTreeSet::from(["runs".into(), "scratch".into()])
         );
-        assert_eq!(request.older_than_days, Some(1.0));
+        assert_eq!(request.older_than_days, Some(DurationDays::Fractional(1.0)));
         assert_eq!(
             args(&["--prune-merged", "--branch", "a", "--branch", "b"])
                 .request("/r".into())
@@ -237,8 +252,12 @@ mod tests {
         for value in ["7", "-1d", "1.5d", "d", "7w"] {
             assert!(duration(value).is_err());
         }
-        assert_eq!(duration("7d").unwrap(), 7.0);
-        assert_eq!(duration("٠٢٤h").unwrap(), 1.0);
+        assert_eq!(duration("7d").unwrap(), DurationDays::Integer("7".into()));
+        assert_eq!(
+            duration("9007199254740993d").unwrap(),
+            DurationDays::Integer("9007199254740993".into())
+        );
+        assert_eq!(duration("٠٢٤h").unwrap(), DurationDays::Fractional(1.0));
     }
 
     #[test]

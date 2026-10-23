@@ -274,7 +274,7 @@ fn unified_diff(before: &str, after: &str, from: &str, to: &str) -> Vec<String> 
         }
         group.push(code);
     }
-    if !group.is_empty() && !(group.len() == 1 && group[0].tag == '=') {
+    if !(group.is_empty() || group.len() == 1 && group[0].tag == '=') {
         groups.push(group);
     }
     let mut report = Vec::new();
@@ -417,6 +417,34 @@ mod tests {
                 expected,
                 "{before:?} => {after:?}"
             );
+        }
+    }
+    #[test]
+    fn project_matches_python_source_for_validation_reporting_and_write_effects() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        for current in [DOC.to_owned(), DOC.replace('\n', "\r\n"), "missing".into()] {
+            for rendered in [
+                DOC.to_owned(),
+                DOC.replace("old body", "é new body"),
+                "missing".into(),
+            ] {
+                for check in [true, false] {
+                    fs::write(&path, &current).unwrap();
+                    let Some(expected): Option<serde_json::Value> = crate::oracle::python(
+                        "import json,sys; from pathlib import Path; from scripts.lib.projection import project,ProjectionError; x=json.load(sys.stdin); p=Path(x['path']); p.write_bytes(x['current'].encode());\ntry: r={'report':project(p,'sample',x['rendered'],x['check'],source='skills/')}\nexcept ProjectionError as e: r={'error':str(e)}\nr['bytes']=list(p.read_bytes()); print(json.dumps(r))", &json!({"path":path, "current":current, "rendered":rendered, "check":check})
+                    ) else { return; };
+                    fs::write(&path, &current).unwrap();
+                    let actual = match project(&path, "sample", &rendered, check, Some("skills/")) {
+                        Ok(report) => json!({"report":report,"bytes":fs::read(&path).unwrap()}),
+                        Err(error) => {
+                            json!({"error":error.to_string(),"bytes":fs::read(&path).unwrap()})
+                        }
+                    };
+                    assert_eq!(actual, expected);
+                }
+            }
         }
     }
 }

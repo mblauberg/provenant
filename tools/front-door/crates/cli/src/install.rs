@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
-#[command(name = "check-provenant-install")]
+#[command(name = "check-provenant-install", args_override_self = true)]
 pub struct Arguments {
     /// Fail on routing or provider warnings.
     #[arg(long)]
@@ -176,5 +176,10 @@ mod tests {
                 .strict
         );
         assert!(Arguments::try_parse_from(["check", "--unknown"]).is_err());
+        assert!(
+            Arguments::try_parse_from(["check", "--strict", "--strict"])
+                .unwrap()
+                .strict
+        );
     }
 }

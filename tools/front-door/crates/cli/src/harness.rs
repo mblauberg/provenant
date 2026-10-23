@@ -19,13 +19,15 @@ pub fn sidecar_errors(
         if interface
             .get(field)
             .and_then(Value::as_str)
-            .is_none_or(|s| s.trim().is_empty())
+            .is_none_or(|s| crate::pending::python_strip(s).is_empty())
         {
             errors.push(format!("{prefix}: interface.{field} is required"));
         }
     }
     if let Some(short) = interface.get("short_description").and_then(Value::as_str) {
-        if !short.trim().is_empty() && !(25..=64).contains(&short.chars().count()) {
+        if !crate::pending::python_strip(short).is_empty()
+            && !(25..=64).contains(&short.chars().count())
+        {
             errors.push(format!(
                 "{prefix}: interface.short_description must be 25-64 characters"
             ));
@@ -35,7 +37,12 @@ pub fn sidecar_errors(
     // contain '$skill' in scalar non-string values; collections may contain it.
     let prompt = interface
         .get("default_prompt")
-        .map(Value::to_string)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string())
+        })
         .unwrap_or_default();
     if !prompt.contains(&format!("${skill}")) {
         errors.push(format!("{prefix}: default_prompt must invoke ${skill}"));

@@ -22,3 +22,6 @@ pub mod lane_safety;
 pub mod projection;
 
 pub mod stale_checkout;
+
+#[cfg(test)]
+mod oracle;

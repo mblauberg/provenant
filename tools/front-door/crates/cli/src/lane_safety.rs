@@ -245,4 +245,23 @@ mod tests {
             assert!(unwrap_command(&words(command)).0.is_empty());
         }
     }
+    #[test]
+    fn decisions_match_python_source_on_adversarial_argv() {
+        use serde_json::json;
+        let mut cases = Vec::new();
+        for signal in ["", "-9", "-TERM", "-s TERM", "--signal=TERM", "--"] {
+            for target in [
+                "42", "0", "-- -42", "-42", "$PID", "${PID}", "%1", "12 abc", "٠٠", "١٢", "²",
+                "'quoted'", "a\\b", "é", "\u{200b}",
+            ] {
+                cases.push(words(&format!("{signal} {target}")));
+            }
+        }
+        let Some(expected): Option<Vec<Option<String>>> = crate::oracle::python(
+            "import json,sys; from scripts.lane_safety_guard import _kill_reason; print(json.dumps([_kill_reason(a) for a in json.load(sys.stdin)]))", &json!(cases)
+        ) else { return; };
+        for (argv, expected) in cases.iter().zip(expected) {
+            assert_eq!(kill_reason(argv), expected, "{argv:?}");
+        }
+    }
 }

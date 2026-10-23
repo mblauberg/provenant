@@ -1,9 +1,11 @@
 //! Private compatibility primitives awaiting their owning crate.
+mod python_unicode;
 
 // port: belongs in provenant-core
 // Unicode decimal digits, as accepted by Python re \d and int.
 pub(crate) fn decimal_digit(c: char) -> Option<u8> {
     let code = u32::from(c);
+    // port: belongs in provenant-core
     const ZEROS: &[u32] = &[
         0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
         0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
@@ -36,12 +38,14 @@ pub(crate) fn python_repr(text: &str) -> String {
                 result.push('\\');
                 result.push(c);
             }
-            c if c.is_control() => {
+            c if !python_unicode::printable(c) => {
                 let code = u32::from(c);
                 if code < 256 {
                     result.push_str(&format!("\\x{code:02x}"));
-                } else {
+                } else if code <= 0xffff {
                     result.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    result.push_str(&format!("\\U{code:08x}"));
                 }
             }
             c => result.push(c),
@@ -184,4 +188,42 @@ pub(crate) fn python_digit(c: char) -> bool {
                 | 0x1f109
                 | 0x1f10a
         )
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_strip(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repr_and_strip_match_python_on_control_and_unicode_boundaries() {
+        let mut values: Vec<String> = (0..=255)
+            .chain(0x2000..=0x2070)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect();
+        values.extend(
+            [
+                "a'b",
+                "a\"b",
+                "a'\"b",
+                "\n\x1c text \x1f",
+                "é",
+                "🦀",
+                "\u{10ffff}",
+            ]
+            .map(str::to_owned),
+        );
+        let Some(expected): Option<Vec<(String, String)>> = crate::oracle::python(
+            "import json,sys; print(json.dumps([(repr(s),s.strip()) for s in json.load(sys.stdin)]))", &serde_json::json!(values)
+        ) else { return; };
+        for (value, (repr, strip)) in values.iter().zip(expected) {
+            assert_eq!(python_repr(value), repr, "{value:?}");
+            assert_eq!(python_strip(value), strip, "{value:?}");
+        }
+    }
 }
