@@ -9,6 +9,7 @@ pub mod fabric_policy;
 pub mod field;
 pub mod gates;
 pub mod git_transport;
+pub mod graph_document;
 pub mod host_protocol;
 pub mod hosts;
 pub mod identity;
