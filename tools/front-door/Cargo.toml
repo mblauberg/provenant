@@ -22,6 +22,24 @@ tempfile = "3"
 thiserror = "2.0"
 toml_edit = "0.25"
 
+# Internal crates. Each member may depend only on the crates PORTING.md R2
+# allows it, as `provenant-<name> = { workspace = true }`.
+provenant-core = { path = "crates/core" }
+provenant-records = { path = "crates/records" }
+provenant-config = { path = "crates/config" }
+provenant-supervisor = { path = "crates/supervisor" }
+provenant-confinement = { path = "crates/confinement" }
+provenant-providers = { path = "crates/providers" }
+provenant-quota = { path = "crates/quota" }
+provenant-telemetry = { path = "crates/telemetry" }
+provenant-routing = { path = "crates/routing" }
+provenant-run = { path = "crates/run" }
+provenant-fabric-store = { path = "crates/fabric-store" }
+provenant-fabric-runtime = { path = "crates/fabric-runtime" }
+provenant-fabric-mcp = { path = "crates/fabric-mcp" }
+provenant-workflow = { path = "crates/workflow" }
+provenant-cli = { path = "crates/cli" }
+
 [package]
 name = "provenant"
 version = "0.1.0"
