@@ -420,7 +420,7 @@ def test_skill_javascript_gate_checks_all_module_suffixes_and_prunes_dependencie
     assert failing.returncode != 0
 
 
-def test_skill_javascript_gate_rejects_an_empty_tree(tmp_path: Path):
+def test_skill_javascript_gate_accepts_an_empty_tree(tmp_path: Path):
     checker = ROOT / "scripts" / "check-skill-javascript"
     result = subprocess.run(
         [str(checker), str(tmp_path)],
@@ -428,7 +428,8 @@ def test_skill_javascript_gate_rejects_an_empty_tree(tmp_path: Path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stderr
+    assert "checked 0 skill JavaScript files" in result.stdout
 
 
 def test_root_harness_checker_never_trusts_git_from_path(tmp_path):
