@@ -7,6 +7,8 @@ import { scratchRoot } from "./helpers/temp-root.js";
 
 const root = realpathSync(scratchRoot("fabric-lanes-cli-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+// Recent stamps: lanes hides terminal rows older than its window.
+const hour = new Date(Date.now() - 2 * 3_600_000).toISOString().slice(0, 14);
 const cli = resolve(import.meta.dirname, "../src/cli.ts");
 const loader = createRequire(import.meta.url).resolve("tsx");
 
@@ -75,7 +77,7 @@ it("writes and parses the complete JSON listing when stdout is a pipe", () => {
   spawnSync("git", ["init", "-q", repo]);
   for (let i = 1; i <= 300; i++) {
     createAttempt(repo, `large-${String(i).padStart(4, "0")}`, "terminal", "ok",
-      `2026-10-22T00:10:${String(i % 60).padStart(2, "0")}.000Z`);
+      `${hour}10:${String(i % 60).padStart(2, "0")}.000Z`);
   }
 
   const listing = lanes(repo, "--all", "--json");
@@ -90,7 +92,7 @@ it.each(["failed", "cancelled", "interrupted", "usage_limited", "auth_required"]
     const repo = join(root, `repo-wait-${status}`);
     mkdirSync(repo, { recursive: true });
     spawnSync("git", ["init", "-q", repo]);
-    createAttempt(repo, "waited", "terminal", status, "2026-10-22T00:10:00.000Z");
+    createAttempt(repo, "waited", "terminal", status, `${hour}10:00.000Z`);
 
     const result = lanes(repo, "--wait", "--timeout", "0");
     expect(result.code).toBe(1);
@@ -102,7 +104,7 @@ it("fails a later wait only when it names the already-reported failed lane", () 
   const repo = join(root, "repo-wait-reported-failure");
   mkdirSync(repo, { recursive: true });
   spawnSync("git", ["init", "-q", repo]);
-  createAttempt(repo, "old-failure", "terminal", "failed", "2026-10-22T00:10:00.000Z");
+  createAttempt(repo, "old-failure", "terminal", "failed", `${hour}10:00.000Z`);
   expect(lanes(repo, "--wait", "--timeout", "0").code).toBe(1);
 
   const bare = lanes(repo, "--wait", "--timeout", "0");
@@ -115,7 +117,7 @@ it("keeps input-required lanes successful for --wait", () => {
   const repo = join(root, "repo-wait-input-required");
   mkdirSync(repo, { recursive: true });
   spawnSync("git", ["init", "-q", repo]);
-  createAttempt(repo, "needs-input", "input_required", "input_required", "2026-10-22T00:10:00.000Z");
+  createAttempt(repo, "needs-input", "input_required", "input_required", `${hour}10:00.000Z`);
 
   const result = lanes(repo, "--wait", "--timeout", "0");
   expect(result.code).toBe(0);
@@ -128,13 +130,13 @@ it("defaults to active lanes plus 5 most recent terminal ones, then N more; use 
   spawnSync("git", ["init", "-q", repo]);
 
   // Create 2 active lanes
-  createAttempt(repo, "active-1", "running", "running", "2026-10-22T00:01:00.000Z");
-  createAttempt(repo, "active-2", "running", "running", "2026-10-22T00:02:00.000Z");
+  createAttempt(repo, "active-1", "running", "running", `${hour}01:00.000Z`);
+  createAttempt(repo, "active-2", "running", "running", `${hour}02:00.000Z`);
 
   // Create 8 terminal lanes with ascending timestamps
   for (let i = 1; i <= 8; i++) {
     const minute = String(i).padStart(2, "0");
-    createAttempt(repo, `term-${String(i).padStart(2, "0")}`, "terminal", "ok", `2026-10-22T00:10:${minute}.000Z`);
+    createAttempt(repo, `term-${String(i).padStart(2, "0")}`, "terminal", "ok", `${hour}10:${minute}.000Z`);
   }
 
   const defaultListing = lanes(repo);
@@ -175,15 +177,15 @@ it("never truncates terminal lanes needing attention (quarantined, input_require
   // Create 6 terminal ok lanes with timestamps from 00:10:03 to 00:10:08
   for (let i = 3; i <= 8; i++) {
     const minute = String(i).padStart(2, "0");
-    createAttempt(repo, `term-${minute}`, "terminal", "ok", `2026-10-22T00:10:${minute}.000Z`);
+    createAttempt(repo, `term-${minute}`, "terminal", "ok", `${hour}10:${minute}.000Z`);
   }
   // Create an older quarantined lane at 00:10:02
-  createAttempt(repo, "term-quarantine", "terminal", "quarantined", "2026-10-22T00:10:02.000Z", {
+  createAttempt(repo, "term-quarantine", "terminal", "quarantined", `${hour}10:02.000Z`, {
     landable: false,
     quarantine: { reason: "protected_instructions_changed", patches: ["p.patch"] },
   });
   // Create an even older input_required lane at 00:10:01
-  createAttempt(repo, "term-input-req", "terminal", "input_required", "2026-10-22T00:10:01.000Z");
+  createAttempt(repo, "term-input-req", "terminal", "input_required", `${hour}10:01.000Z`);
 
   const defaultListing = lanes(repo);
   expect(defaultListing.code).toBe(0);
