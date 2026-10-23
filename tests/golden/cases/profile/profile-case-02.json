@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "profile",
+    "invalid-action"
+  ],
+  "class": "help",
+  "exit_code": 2,
+  "files": [],
+  "stderr": "usage: provenant profile [-h] {list,show,use,set,reset,diff} ...\nprovenant profile: error: argument command: invalid choice: 'invalid-action' (choose from list, show, use, set, reset, diff)\n",
+  "stdin": "",
+  "stdout": ""
+}
