@@ -15,22 +15,20 @@ import sys
 import threading
 import textwrap
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
+from tests.support.fake_cli import fake_codex, write_executable
+from tests.support.runs import make_run
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
-
-
-def write_executable(path: Path, body: str) -> None:
-    path.write_text(textwrap.dedent(body), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def write_success_adapter(path: Path) -> None:
@@ -99,10 +97,38 @@ def write_question_adapter(path: Path, *, exit_code: int = 0, result: str | None
     )
 
 
-def make_run(tmp_path: Path, name: str) -> Path:
-    return Path(
-        subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip()
-    ).resolve()
+def dispatch_args(**overrides):
+    profile = overrides.pop("_profile", "common")
+    profiles = {
+        "common": {
+            "tool": "codex", "alias": "senior", "model": "fixture", "effort": "low",
+            "task_id": "task-1", "access_mode": "read_only", "worktree": None,
+            "_last_plan": {},
+        },
+        "resume": {
+            "run_dir": None, "resume": "resume-me", "task_id": None,
+            "tool": None, "model": None, "effort": None, "access_mode": None,
+            "worktree": None, "provider_cwd": None, "sandbox": None, "network": None,
+            "add_dirs": [], "resume_session": None, "fallback": None,
+            "context_ceiling": None, "intent": "ordinary", "orchestrator_family": "",
+            "role": "worker", "risk_tier": "", "model_override_tier": "",
+            "reviewer_id": "", "preface": True,
+        },
+        "sequence": {"fallback": False, "resume": False, "timeout_seconds": 1000, "confidential": False},
+        "receipt": {
+            "tool": "opencode", "alias": "senior", "model": "gpt-6-luna",
+            "alias_supplied": True, "effort": None, "task_id": "dispatch-001",
+            "access_mode": "read_only", "worktree": None, "_phase_timings": {},
+            "reviewer_id": None, "risk_tier": None, "model_override_tier": None,
+        },
+    }
+    defaults = profiles[profile].copy()
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def timestamp(offset: timedelta = timedelta()) -> str:
+    return (datetime.now(UTC) + offset).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def load_dispatch_module():
@@ -666,38 +692,32 @@ def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
     assert scan.scan_bytes(content, '<prompt>') == []
 
 
-def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("legacy_status", "adapter", "expected"), [
+    ("ok", {"status": "ok", "spared": 2}, {"spared": 2}),
+    ("failed", {"status": "ok", "exit": None}, {"status": "failed", "error_class": "provider_error"}),
+], ids=[
+    "test_terminal_attempt_carries_nested_owner_spared_count",
+    "test_terminal_attempt_does_not_promote_an_invalid_success_receipt",
+])
+def test_terminal_attempt_carries_nested_owner_spared_count(
+    tmp_path: Path, legacy_status, adapter, expected,
+) -> None:
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="senior", model="fixture", effort="low",
-                           task_id="task-1", access_mode="read_only", worktree=None,
-                           _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
-              "outcome": "ok", "status": "ok", "result": "result.md",
+    args = dispatch_args()
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
+              "outcome": "ok", "status": legacy_status,
+              "result": "result.md" if legacy_status == "ok" else {"path": "result.md"},
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
-    row = module.terminal_contract(args, tmp_path, legacy,
-                                   {"status": "ok", "spared": 2}, 1,
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1,
                                    tmp_path / "tasks/task-1/attempt-001")
-    assert row["spared"] == 2
-
-
-def test_terminal_attempt_does_not_promote_an_invalid_success_receipt(tmp_path):
-    module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
-              "outcome": "ok", "status": "failed", "result": {"path": "result.md"},
-              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
-    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "exit": None},
-                                   1, tmp_path / "tasks/task-1/attempt-001")
-    assert row["status"] == "failed"
-    assert row["error_class"] == "provider_error"
+    for key, value in expected.items():
+        assert row[key] == value
 
 
 def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+    args = dispatch_args(alias="", effort="high")
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": "failed", "status": "failed", "result": {"path": "result.md"},
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     adapter = {"status": "failed", "result_partial": True, "evidence": {"signature": "provider_transport"}}
@@ -715,9 +735,8 @@ def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
 ])
 def test_terminal_attempt_keeps_provider_stop_evidence(tmp_path, status, outcome, signature):
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+    args = dispatch_args(alias="", effort="high")
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": outcome, "status": status, "process_error": outcome, "result": None,
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     adapter = {"status": status, "evidence": {"signature": signature, "excerpt": "provider diagnostic"}}
@@ -728,8 +747,7 @@ def test_terminal_attempt_keeps_provider_stop_evidence(tmp_path, status, outcome
 
 def test_terminal_attempt_measures_suffixed_capture_paths(tmp_path):
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    args = dispatch_args(alias="", effort="high")
     attempt = tmp_path / "tasks/task-1/attempt-001"
     attempt.mkdir(parents=True)
     (attempt / "events.jsonl").write_text("old events")
@@ -738,7 +756,7 @@ def test_terminal_attempt_measures_suffixed_capture_paths(tmp_path):
     stderr = attempt / "stderr.log.abcdef"
     events.write_text("new provider events")
     stderr.write_text("")
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": "ok", "status": "ok", "result": None,
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     adapter = {"status": "ok", "paths": {"events": str(events), "stderr": str(stderr)}}
@@ -759,9 +777,8 @@ def test_terminal_attempt_keeps_usage_and_classifies_final_status(
     tmp_path, adapter_status, legacy_status, signature, source, expected
 ):
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+    args = dispatch_args(alias="", effort="high")
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": legacy_status, "status": legacy_status, "result": None,
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     adapter = {"status": adapter_status, "evidence": {"signature": signature},
@@ -779,9 +796,8 @@ def test_terminal_attempt_keeps_usage_and_classifies_final_status(
 
 def test_terminalised_confidential_run_stays_confidential_on_resume(tmp_path: Path) -> None:
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="low", confidential=True,
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
-    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+    args = dispatch_args(alias="", confidential=True)
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": "ok", "status": "ok", "result": "result.md",
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     provider = {"requested": {"adapter": "codex", "alias": "", "model": "fixture", "effort": "low"},
@@ -801,13 +817,7 @@ def test_terminalised_confidential_run_stays_confidential_on_resume(tmp_path: Pa
         "paths": {"events": None}, "requested_route": {},
     }
     (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
-    resumed = SimpleNamespace(
-        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
-        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
-        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
-        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
-        model_override_tier="", reviewer_id="", preface=True,
-    )
+    resumed = dispatch_args(_profile="resume", run_dir=run_dir)
     module.prepare_resume(resumed)
     assert resumed.confidential is True
 
@@ -831,13 +841,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
         "paths": {"events": None}, "requested_route": {},
     }
     (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
-    args = SimpleNamespace(
-        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
-        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
-        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
-        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
-        model_override_tier="", reviewer_id="", preface=True,
-    )
+    args = dispatch_args(_profile="resume", run_dir=run_dir)
 
     module.prepare_resume(args)
 
@@ -868,13 +872,7 @@ def test_prepare_resume_drops_missing_add_dir_with_warning(tmp_path: Path):
         "paths": {"events": None}, "requested_route": {},
     }
     (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
-    args = SimpleNamespace(
-        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
-        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
-        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
-        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
-        model_override_tier="", reviewer_id="", preface=True,
-    )
+    args = dispatch_args(_profile="resume", run_dir=run_dir)
 
     module.prepare_resume(args)
 
@@ -910,18 +908,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(
-        bin_dir / "codex",
-        """#!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-          exit 0
-        fi
-        cat >/dev/null
-        printf 'OK\\n'
-        """,
-    )
+    fake_codex(bin_dir, body="cat >/dev/null\nprintf 'OK\\n'")
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
 
@@ -1000,14 +987,7 @@ def test_invalid_memory_floor_retains_failed_attempt_with_fix(tmp_path, monkeypa
     prompt.write_text("hello\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
-if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-  exit 0
-fi
-exit 99
-''')
+    fake_codex(bin_dir, body='exit 99')
     monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     policy = tmp_path / ".agents/fabric-policy.json"
     policy.parent.mkdir()
@@ -1039,14 +1019,7 @@ def test_memory_wait_expiry_is_typed_and_visible(tmp_path, monkeypatch, legacy):
     prompt.write_text("hello\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
-if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-  exit 0
-fi
-exit 99
-''')
+    fake_codex(bin_dir, body='exit 99')
     monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
@@ -1083,14 +1056,7 @@ def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch
     prompt.write_text("hello\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
-if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-  exit 0
-fi
-exit 99
-''')
+    fake_codex(bin_dir, body='exit 99')
     monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
@@ -1190,44 +1156,31 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     assert explicit_both["notes"] == ["alias and model both supplied; model won"]
 
 
-def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
+@pytest.mark.parametrize(("alias", "model", "alias_supplied", "expected_alias"), [
+    ("principal", "mimo", False, ""),
+    ("senior", "gpt-6-luna", True, "senior"),
+], ids=[
+    "test_explicit_model_receipt_does_not_record_an_implied_alias",
+    "test_explicit_model_and_alias_are_both_recorded_in_receipt",
+])
+def test_explicit_model_receipt_does_not_record_an_implied_alias(
+    tmp_path, alias, model, alias_supplied, expected_alias,
+):
     mod = load_dispatch_module()
-    args = SimpleNamespace(
-        tool="opencode", alias="principal", model="mimo", alias_supplied=False, effort=None,
-        task_id="dispatch-001", access_mode="read_only", worktree=None,
-        _phase_timings={}, reviewer_id=None, risk_tier=None,
-        model_override_tier=None,
-    )
+    args = dispatch_args(_profile="receipt", alias=alias, model=model, alias_supplied=alias_supplied)
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
-    assert row["provenance"]["requested"]["alias"] == ""
+    assert row["provenance"]["requested"]["alias"] == expected_alias
 
 
 def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
     mod = load_dispatch_module()
-    args = SimpleNamespace(
-        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
-        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
-        _phase_timings={}, reviewer_id=None, risk_tier=None,
-        model_override_tier=None,
-    )
+    args = dispatch_args()
     fallback = {"from_host": "hosts.json", "reason": "invalid_config", "detail": "Response deadline must be positive and finite"}
     monkeypatch.setenv("PROVENANT_PLACEMENT_FALLBACK", json.dumps(fallback))
     plan = {}
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", plan, "now")
     assert row["placement_fallback"] == fallback
     assert plan["warnings"] == ["local fallback from hosts.json: invalid_config: Response deadline must be positive and finite"]
-
-
-def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
-    mod = load_dispatch_module()
-    args = SimpleNamespace(
-        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
-        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
-        _phase_timings={}, reviewer_id=None, risk_tier=None,
-        model_override_tier=None,
-    )
-    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
-    assert row["provenance"]["requested"]["alias"] == "senior"
 
 
 def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
@@ -1612,33 +1565,47 @@ def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
     assert attempt["outcome"] == "result_integrity_error"
 
 
-def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "no-family")
+@pytest.mark.parametrize("coverage", ["no_family", "finalizer"], ids=[
+    "test_ordinary_dispatch_without_lead_family_is_not_certification",
+    "test_attempt_rows_are_accepted_by_existing_finalizer",
+])
+def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path, coverage) -> None:
+    task_id = "no-family" if coverage == "no_family" else "finalizer"
+    run_dir = make_run(tmp_path, task_id)
     prompt = tmp_path / "prompt.md"
-    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    prompt.write_text("Reply exactly OK\n" if coverage == "no_family" else "finalizer\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(bin_dir / "codex", """#!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-          exit 0
-        fi
-        cat >/dev/null
-        printf 'OK\\n'
-        """)
+    fake_codex(bin_dir, body="cat >/dev/null\nprintf 'OK\\n'")
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
-        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "no-family",
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id,
          "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode == 0, result.stderr + result.stdout
     record = json.loads(result.stdout)
-    assert record["route"]["orchestrator_family"] == ""
-    assert record["route"]["cross_family"] is False
-    assert record["route"]["certification_eligible"] is False
+    if coverage == "no_family":
+        assert record["route"]["orchestrator_family"] == ""
+        assert record["route"]["cross_family"] is False
+        assert record["route"]["certification_eligible"] is False
+    else:
+        finalized = subprocess.run(
+            [str(FINALIZE), str(run_dir), "--status", "failed", "--reason", "dispatch test"],
+            cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert finalized.returncode == 0, finalized.stderr
+        assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
+        rejected = subprocess.run(
+            [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
+             "--adapter", "codex", "--prompt-file", str(prompt),
+             "--alias", "senior", "--role", "worker"],
+            cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert rejected.returncode == 2
+        assert json.loads(rejected.stdout)["status"] == "run_custody_closed"
+        assert not (run_dir / "dispatch/tasks/after-close").exists()
 
 
 def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_path: Path) -> None:
@@ -1747,27 +1714,13 @@ def test_prompt_stdin_is_retained_by_dispatch_owner(tmp_path: Path, monkeypatch)
 
 
 def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> None:
-    run_dir = Path(
-        subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "route")], text=True).strip()
-    ).resolve()
+    run_dir = make_run(tmp_path, "route")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("route failure\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     invoked = tmp_path / "invoked"
-    write_executable(
-        bin_dir / "codex",
-        f"""
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
-          exit 0
-        fi
-        touch {invoked}
-        exit 9
-        """,
-    )
+    fake_codex(bin_dir, body=f"touch {invoked}\nexit 9\n")
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
 
@@ -1795,26 +1748,12 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
 
 
 def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) -> None:
-    run_dir = Path(
-        subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "exit")], text=True).strip()
-    ).resolve()
+    run_dir = make_run(tmp_path, "exit")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("provider failure\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_executable(
-        bin_dir / "codex",
-        """#!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-          exit 0
-        fi
-        cat >/dev/null
-        echo "provider failed" >&2
-        exit 9
-        """,
-    )
+    fake_codex(bin_dir, models={'gpt-6.1-sol': ('high',), 'gpt-6-luna': ('high',)}, body='cat >/dev/null\necho "provider failed" >&2\nexit 9')
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
 
@@ -2242,160 +2181,105 @@ def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Pa
     assert next_record["status"] == "ok"
 
 
-def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path, "finalizer")
+@pytest.mark.parametrize(("custody", "expected_status"), [
+    ("counterfeit", None),
+    ("missing", "run_custody_missing"),
+], ids=[
+    "test_counterfeit_active_receipt_is_rejected_before_launch",
+    "test_missing_run_receipt_reports_missing_custody",
+])
+def test_counterfeit_active_receipt_is_rejected_before_launch(
+    tmp_path: Path, monkeypatch, capsys, custody, expected_status,
+) -> None:
+    run_dir = make_run(tmp_path, "counterfeit-receipt" if custody == "counterfeit" else "missing-receipt")
+    if custody == "counterfeit":
+        (run_dir / "RUN_RECEIPT.json").write_text(
+            '{"status":"active","closed_at":null}\n', encoding="utf-8"
+        )
+    else:
+        (run_dir / "RUN_RECEIPT.json").unlink()
     prompt = tmp_path / "prompt.md"
-    prompt.write_text("finalizer\n", encoding="utf-8")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    write_executable(bin_dir / "codex", """#!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
-          exit 0
-        fi
-        cat >/dev/null
-        printf 'OK\\n'
-        """)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
-    result = subprocess.run(
-        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "finalizer", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
-        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    finalized = subprocess.run(
-        [str(FINALIZE), str(run_dir), "--status", "failed", "--reason", "dispatch test"],
-        cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    assert finalized.returncode == 0, finalized.stderr
-    assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
-
-    rejected = subprocess.run(
-        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
-         "--adapter", "codex", "--prompt-file", str(prompt),
-         "--alias", "senior", "--role", "worker"],
-        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    assert rejected.returncode == 2
-    assert json.loads(rejected.stdout)["status"] == "run_custody_closed"
-    assert not (run_dir / "dispatch/tasks/after-close").exists()
-
-
-def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, monkeypatch) -> None:
-    run_dir = make_run(tmp_path, "counterfeit-receipt")
-    (run_dir / "RUN_RECEIPT.json").write_text(
-        '{"status":"active","closed_at":null}\n', encoding="utf-8"
-    )
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("counterfeit\n", encoding="utf-8")
-    adapter = tmp_path / "adapter-never-run-receipt"
-    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    prompt.write_text("counterfeit\n" if custody == "counterfeit" else "missing receipt\n", encoding="utf-8")
     module = load_dispatch_module()
-    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    if custody == "counterfeit":
+        adapter = tmp_path / "adapter-never-run-receipt"
+        write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+        monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "codex",
+        "--run-dir", str(run_dir), "--task-id", "blocked" if custody == "counterfeit" else "missing-receipt", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
     assert module.dispatch(args) == 2
-    assert not (run_dir / "dispatch/tasks/blocked").exists()
+    if expected_status:
+        assert json.loads(capsys.readouterr().out)["status"] == expected_status
+    assert not (run_dir / "dispatch/tasks" / ("blocked" if custody == "counterfeit" else "missing-receipt")).exists()
 
 
-def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, monkeypatch) -> None:
-    run_dir = make_run(tmp_path, "hardlink")
+@pytest.mark.parametrize(("task_id", "expected_status"), [
+    ("hardlink", None),
+    ("hardlink-typed", "prompt_hard_link_denied"),
+], ids=[
+    "test_hard_linked_prompt_is_rejected_before_provider_launch",
+    "test_hard_linked_prompt_reports_typed_custody_error",
+])
+def test_hard_linked_prompt_is_rejected_before_provider_launch(
+    tmp_path: Path, monkeypatch, capsys, task_id, expected_status,
+) -> None:
+    run_dir = make_run(tmp_path, task_id)
     source = tmp_path / "prompt.md"
     source.write_text("secret boundary\n", encoding="utf-8")
     linked = tmp_path / "linked-prompt.md"
     linked.hardlink_to(source)
     module = load_dispatch_module()
     args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "hardlink", "--adapter", "codex",
+        "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", "codex",
         "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
+    if expected_status:
+        assert json.loads(capsys.readouterr().out)["status"] == expected_status
 
 
-def test_relative_protected_prompt_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(("protected_input", "expected_status"), [
+    ("prompt", "protected_path_denied"),
+    ("add_dir", None),
+], ids=[
+    "test_relative_protected_prompt_is_rejected_before_staging",
+    "test_relative_protected_add_dir_is_rejected_before_staging",
+])
+def test_relative_protected_prompt_is_rejected_before_staging(
+    tmp_path: Path, monkeypatch, capsys, protected_input, expected_status,
+) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / ".agents").mkdir()
     (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
     (repo / "private").mkdir()
-    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
-    run_dir = make_run(repo, "protected-direct")
+    if protected_input == "prompt":
+        (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    else:
+        (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    run_dir = make_run(repo, "protected-direct" if protected_input == "prompt" else "protected-add-dir")
     module = load_dispatch_module()
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
-        "--prompt-file", "private/prompt.md", "--model", "opencode/mimo-v2.6-flash-free",
-        "--role", "worker",
-    ])
-    assert module.dispatch(args) == 2
-    rejection = json.loads(capsys.readouterr().out)
-    assert rejection["status"] == "protected_path_denied"
-    assert "protected path" in str(rejection), rejection
-    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
-
-
-def test_relative_protected_add_dir_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / ".agents").mkdir()
-    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
-    (repo / "private").mkdir()
-    (repo / "prompt.md").write_text("safe", encoding="utf-8")
-    run_dir = make_run(repo, "protected-add-dir")
-    module = load_dispatch_module()
-    monkeypatch.chdir(repo)
-    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
-        "--prompt-file", "prompt.md", "--add-dir", "private",
+        "--prompt-file", "private/prompt.md" if protected_input == "prompt" else "prompt.md",
+        *(["--add-dir", "private"] if protected_input == "add_dir" else []),
         "--model", "opencode/mimo-v2.6-flash-free", "--role", "worker",
     ])
     assert module.dispatch(args) == 2
-    assert "protected path" in str(json.loads(capsys.readouterr().out))
+    rejection = json.loads(capsys.readouterr().out)
+    if expected_status:
+        assert rejection["status"] == expected_status
+    assert "protected path" in str(rejection), rejection
     assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
-
-
-def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypatch, capsys) -> None:
-    run_dir = make_run(tmp_path, "hardlink-typed")
-    source = tmp_path / "prompt.md"
-    source.write_text("secret boundary\n", encoding="utf-8")
-    linked = tmp_path / "linked-prompt.md"
-    linked.hardlink_to(source)
-    module = load_dispatch_module()
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "hardlink-typed", "--adapter", "codex",
-        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
-    ])
-    monkeypatch.chdir(tmp_path)
-    assert module.dispatch(args) == 2
-    assert json.loads(capsys.readouterr().out)["status"] == "prompt_hard_link_denied"
-
-
-def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch, capsys) -> None:
-    run_dir = make_run(tmp_path, "missing-receipt")
-    (run_dir / "RUN_RECEIPT.json").unlink()
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("missing receipt\n", encoding="utf-8")
-    module = load_dispatch_module()
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "missing-receipt", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-    ])
-    monkeypatch.chdir(tmp_path)
-    assert module.dispatch(args) == 2
-    assert json.loads(capsys.readouterr().out)["status"] == "run_custody_missing"
 
 
 @pytest.mark.parametrize('browser', [True, False])
@@ -2438,47 +2322,40 @@ def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
             raise AssertionError(f"accepted invalid timeout {value}")
 
 
-def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, monkeypatch) -> None:
-    run_dir = make_run(tmp_path, "manifest-readonly")
+@pytest.mark.parametrize("mode", ["appendability", "read_only"], ids=[
+    "test_manifest_appendability_failure_is_typed_before_launch",
+    "test_read_only_manifest_is_rejected_before_launch",
+])
+def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, monkeypatch, mode) -> None:
+    run_dir = make_run(tmp_path, "manifest-readonly" if mode == "appendability" else "manifest-mode")
     prompt = tmp_path / "prompt.md"
-    prompt.write_text("manifest\n", encoding="utf-8")
+    prompt.write_text("manifest\n" if mode == "appendability" else "manifest mode\n", encoding="utf-8")
     module = load_dispatch_module()
-
-    def refuse(_run_dir):
-        raise OSError("read-only fixture")
-
-    monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "manifest-readonly", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-    ])
-    monkeypatch.chdir(tmp_path)
-    assert module.dispatch(args) == 2
-
-
-def test_read_only_manifest_is_rejected_before_launch(tmp_path: Path, monkeypatch) -> None:
-    run_dir = make_run(tmp_path, "manifest-mode")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("manifest mode\n", encoding="utf-8")
     manifest = run_dir / "MANIFEST.md"
     original_mode = manifest.stat().st_mode
-    manifest.chmod(0o444)
-    try:
+    if mode == "appendability":
+        def refuse(_run_dir):
+            raise OSError("read-only fixture")
+        monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
+    else:
+        manifest.chmod(0o444)
         try:
             with manifest.open("a", encoding="utf-8"):
                 pass
         except OSError:
-            module = load_dispatch_module()
-            args = module.parser().parse_args([
-                "--run-dir", str(run_dir), "--task-id", "manifest-mode", "--adapter", "codex",
-                "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-            ])
-            monkeypatch.chdir(tmp_path)
-            assert module.dispatch(args) == 2
+            pass
         else:
             pytest.skip("test user can append to chmod 0444 files")
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "manifest-readonly" if mode == "appendability" else "manifest-mode", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    try:
+        assert module.dispatch(args) == 2
     finally:
-        manifest.chmod(original_mode)
+        if mode == "read_only":
+            manifest.chmod(original_mode)
 
 
 def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkeypatch) -> None:
@@ -2644,7 +2521,7 @@ def test_reentry_rejects_retained_paths_that_escape_the_run(tmp_path: Path, monk
         "attempt_path": "../../outside",
         "task_id": "old",
         "attempt_id": "attempt-001",
-        "finished_at": "2026-08-29T00:00:00Z",
+        "finished_at": timestamp(),
         "prompt": {"path": "../../outside"},
         "result": None,
         "route": {"adapter_receipt": {"path": "../../outside"}},
@@ -3457,13 +3334,7 @@ def test_prepare_resume_keeps_an_opencode_variant_as_model_hash_variant(tmp_path
         "paths": {"events": None}, "requested_route": {},
     }
     (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
-    args = SimpleNamespace(
-        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
-        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
-        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
-        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
-        model_override_tier="", reviewer_id="", preface=True,
-    )
+    args = dispatch_args(_profile="resume", run_dir=run_dir)
     module.prepare_resume(args)
     assert args.model == "opencode/deepseek-v4.1-flash-free#high" and args.effort == "high"
 
@@ -3593,7 +3464,7 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     instance = tmp_path / 'instance'
     (instance / 'config').mkdir(parents=True)
     (instance / 'config/model-routing.json').write_text(
-        json.dumps({'catalog_date': '2000-01-01', 'adapters': {},
+        json.dumps({'catalog_date': (datetime.now(UTC).date() - timedelta(days=3650)).isoformat(), 'adapters': {},
                     'families': {'anthropic': {'aliases': {'senior': ['claude-stale']}}}}))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
@@ -4760,7 +4631,11 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     assert 'resume: relaunched' in second['warnings']
 
 
-def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("named_session", [False, True], ids=[
+    "test_claude_resume_relaunches_when_saved_session_is_missing",
+    "test_named_session_resume_never_relaunches_a_missing_claude_session",
+])
+def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch, named_session):
     code = '''import json,sys
 prompt = sys.stdin.read()
 if '--resume' in sys.argv:
@@ -4774,37 +4649,24 @@ print(json.dumps({'type':'result','result':'DONE'}))
     assert first.returncode == 0, first.stdout + first.stderr
     previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
     assert previous['session_id'] == 'saved-session'
-    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
-                              '--prompt-file', str(prompt)], cwd=tmp_path, capture_output=True, text=True)
-    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
+               '--prompt-file', str(prompt)]
+    if named_session:
+        command += ['--resume-attempt', '1', '--require-session', 'saved-session']
+    resumed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
     row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
-    assert row['status'] == 'ok'
-    assert 'resumed_by_relaunch' in row['provenance']['notes']
-    assert 'resume: relaunched' in row['warnings']
-
-
-def test_named_session_resume_never_relaunches_a_missing_claude_session(tmp_path, monkeypatch):
-    code = '''import json,sys
-prompt = sys.stdin.read()
-if '--resume' in sys.argv:
- print('No conversation found with session ID', file=sys.stderr)
- sys.exit(1)
-print(json.dumps({'type':'system','subtype':'init','session_id':'saved-session','model':'opus'}))
-print(json.dumps({'type':'result','result':'DONE'}))
-'''
-    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
-    first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
-    assert first.returncode == 0, first.stdout + first.stderr
-    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
-    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
-                              '--prompt-file', str(prompt), '--resume-attempt', '1',
-                              '--require-session', 'saved-session'], cwd=tmp_path, capture_output=True, text=True)
-    row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
-    assert row['status'] == 'rejected', resumed.stdout + resumed.stderr
-    assert row['error'] == 'continuation_unsupported'
-    assert 'fresh: true' in row['fix']
-    assert 'resumed_by_relaunch' not in row['provenance']['notes']
-    assert not (run / 'tasks/dispatch-001/attempt-003').exists()
+    if named_session:
+        assert row['status'] == 'rejected', resumed.stdout + resumed.stderr
+        assert row['error'] == 'continuation_unsupported'
+        assert 'fresh: true' in row['fix']
+        assert 'resumed_by_relaunch' not in row['provenance']['notes']
+        assert not (run / 'tasks/dispatch-001/attempt-003').exists()
+    else:
+        assert previous['session_id'] == 'saved-session'
+        assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+        assert row['status'] == 'ok'
+        assert 'resumed_by_relaunch' in row['provenance']['notes']
+        assert 'resume: relaunched' in row['warnings']
 
 
 def test_named_session_resume_continues_the_pinned_attempt_session(tmp_path, monkeypatch):
@@ -5472,7 +5334,7 @@ print(json.dumps({{"status":"SUCCESS", "response":"DONE"}}))
 
 def _sequence_fixture(monkeypatch, plan, rows, alternatives):
     mod = load_dispatch_module()
-    args = SimpleNamespace(fallback=False, resume=False, timeout_seconds=1000, confidential=False)
+    args = dispatch_args(_profile="sequence")
     launches = []
 
     def fake_dispatch(args, custody=None):
@@ -5560,8 +5422,8 @@ def _claude_quota_accounts(tmp_path, monkeypatch, **usage):
 
 def test_paced_retry_uses_the_longer_account_wide_cooldown():
     mod = load_dispatch_module()
-    short = {"cooling_until": "2099-01-01T00:00:01Z", "status": "rate_limited"}
-    wide = {"cooling_until": "2099-01-01T02:00:00Z", "status": "quota_exhausted"}
+    short = {"cooling_until": timestamp(timedelta(seconds=1)), "status": "rate_limited"}
+    wide = {"cooling_until": timestamp(timedelta(hours=2)), "status": "quota_exhausted"}
     records = {"claude/claude-opus-5-5": short, "claude/*": wide}
     assert mod.exec_routing.cooling("claude", "claude-opus-5-5", records, account="pro") == wide
 
@@ -5652,11 +5514,10 @@ def test_nested_attempt_retains_parent_in_receipt_and_index(tmp_path, monkeypatc
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 2,
               'run_dir': str(tmp_path / 'parent')}
     monkeypatch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
-    args = SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
-                           task_id='child', access_mode='read_only', worktree=None)
-    row = mod.contract_row(args, tmp_path, 1, tmp_path / 'dispatch/tasks/child/attempt-001', {}, '2026-10-22T00:00:00Z')
+    args = dispatch_args(task_id='child')
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / 'dispatch/tasks/child/attempt-001', {}, timestamp())
     assert row['parent'] == parent
-    row.update(status='ok', ended_at='2026-10-22T00:00:01Z')
+    row.update(status='ok', ended_at=timestamp())
     mod.append_index(row, tmp_path, root=tmp_path / '.agent-run')
     entry = json.loads((tmp_path / '.agent-run/runs/index.jsonl').read_text())
     assert entry['parent'] == parent
@@ -5735,7 +5596,7 @@ raise SystemExit(batch.batch(batch.parser().parse_args()))
     assert child['parent'] == parent
     row = mod.contract_row(SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
                            task_id='writer', access_mode='read_only', worktree=None), parent_dir, 2,
-                           parent_path.parent, {}, '2026-10-22T00:00:00Z')
+                           parent_path.parent, {}, timestamp())
     assert [(item['run_id'], item['task_id'], item['attempt']) for item in row['children']] == [
         (child['run_id'], 'child', 1)]
 
@@ -5781,9 +5642,8 @@ def test_nested_failure_is_named_without_replacing_parent_provider_status(
         receipt_path = child_dir / 'RUN_RECEIPT.json'
         receipt_path.write_text(json.dumps({**json.loads(receipt_path.read_text()),
             'status': 'failed', 'terminal_reason': reason}))
-    args = SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
-                           task_id='writer', access_mode='read_only', worktree=None, _last_plan={})
-    legacy = {'started_at': '2026-10-22T00:00:00Z', 'finished_at': '2026-10-22T00:00:01Z',
+    args = dispatch_args(task_id='writer')
+    legacy = {'started_at': timestamp(), 'finished_at': timestamp(),
               'outcome': provider_status, 'status': provider_status, 'result': 'result.md',
               'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
     adapter = {'status': provider_status, 'error': None if provider_status == 'ok' else 'provider_exit'}
@@ -6243,8 +6103,7 @@ time.sleep(60)
 def test_terminal_contract_ignores_adapter_paths_outside_run(cancel_cascade, tmp_path):
     mod, parent_dir, child_dir, row = cancel_cascade
     attempt_dir = parent_dir / 'dispatch/tasks/writer/attempt-001'
-    args = SimpleNamespace(tool='claude', alias='senior', model='fixture', effort='high',
-                           task_id='writer', access_mode='read_only', worktree=None)
+    args = dispatch_args(tool='claude', effort='high', task_id='writer')
     legacy = {'started_at': row['started_at'], 'finished_at': row['ended_at'],
               'outcome': 'cancelled', 'status': 'cancelled', 'result': None,
               'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
@@ -6560,9 +6419,8 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
     # Their terminal child lookup must still reach the owning peer.
     monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
     monkeypatch.setattr(mod, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner))
-    args = SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
-                           task_id='writer', access_mode='read_only', worktree=None, _last_plan={})
-    legacy = {'started_at': '2026-10-22T00:00:00Z', 'finished_at': '2026-10-22T00:00:01Z',
+    args = dispatch_args(task_id='writer')
+    legacy = {'started_at': timestamp(), 'finished_at': timestamp(),
               'outcome': 'ok', 'status': 'ok', 'result': 'result.md',
               'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
     row = mod.terminal_contract(args, parent_dir, legacy, {'status': 'ok'}, 1, parent_path.parent)
@@ -6748,7 +6606,7 @@ def test_cross_adapter_fallback_plans_claude_before_checking_account_cooldown(mo
     alternatives = [{"adapter": "claude", "model": "sonnet"}]
     mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
     monkeypatch.setattr(mod.exec_routing, "cooling",
-                        lambda adapter, *a, **k: {"cooling_until": "2099-01-01T00:00:00Z"} if adapter == "claude" else None)
+                        lambda adapter, *a, **k: {"cooling_until": timestamp(timedelta(days=365))} if adapter == "claude" else None)
     mod.execute_attempt_sequence(args)
     assert launches == [(None, None, None), ("claude", "sonnet", None)]
 
@@ -7196,10 +7054,9 @@ def test_reaper_git_summaries_share_one_pass_budget(tmp_path, monkeypatch, mode)
 def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
     module = load_dispatch_module()
     run = make_run(tmp_path, "run")
-    args = SimpleNamespace(tool="agy", alias="", model="fixture", effort="",
-                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    args = dispatch_args(tool="agy", alias="", effort="")
     status = "model_unavailable" if check == "invalid" else "ok"
-    legacy = {"started_at": "2026-10-23T00:00:00Z", "finished_at": "2026-10-23T00:00:01Z",
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
               "outcome": status, "status": status, "result": None,
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     fields = {"model_check": check, "model_check_detail": "listing evidence",
