@@ -150,13 +150,28 @@ fn clock(s: &str) -> Option<(i16, i8, i8, i32)> {
     Some((hour, minute, second, micros))
 }
 
+/// CPython changed zero-second fractional UTC offsets in a 3.14 patch release.
+/// Keep the source runtime's semantics explicit; the default matches CI's 3.14.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsoformatSemantics {
+    Python3144,
+    Python3148,
+}
+
 /// Parse CPython ISO date/datetimes, including basic/week dates, any single
 /// Unicode separator, comma/long fractions, naive clocks and fractional offsets.
 /// Fractions require explicit seconds (CPython 3.14.8); leap seconds are invalid.
 pub fn python_fromisoformat(value: &str) -> Result<PythonDateTime, DateTimeError> {
-    parse(value).ok_or(DateTimeError::InvalidIso)
+    python_fromisoformat_with(value, IsoformatSemantics::Python3144)
 }
-fn parse(value: &str) -> Option<PythonDateTime> {
+
+pub fn python_fromisoformat_with(
+    value: &str,
+    semantics: IsoformatSemantics,
+) -> Result<PythonDateTime, DateTimeError> {
+    parse(value, semantics).ok_or(DateTimeError::InvalidIso)
+}
+fn parse(value: &str, semantics: IsoformatSemantics) -> Option<PythonDateTime> {
     // CPython disambiguates digit separators in ISO week dates before parsing.
     let chars: Vec<_> = value.chars().collect();
     let n = chars.len();
@@ -241,6 +256,12 @@ fn parse(value: &str) -> Option<PythonDateTime> {
             if total >= 86_400_000_000 {
                 return None;
             }
+            let total = if semantics == IsoformatSemantics::Python3144 && h == 0 && m == 0 && s == 0
+            {
+                0
+            } else {
+                total
+            };
             Some(if offset.starts_with('-') {
                 -total
             } else {

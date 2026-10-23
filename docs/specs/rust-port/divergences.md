@@ -1171,3 +1171,37 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   linkage; no Python loader seam is copied. No command is switched.
 - Evidence: five roots tests pass, including the two direct-facade
   differentials; default install paths use canonical paths on macOS.
+
+### RP-core-2-01 oracle patch-version clarification
+
+- CI uses CPython 3.14.4; local default is 3.14.8. Both accept midnight and
+  require explicit seconds before fractions, but disagree on `-00:00:00.5`:
+  3.14.4 discards the fractional offset, while 3.14.8 retains it. Requiring
+  >=3.14.8 initially caused the required CI differential to refuse its oracle.
+- Preserve both observed behaviors through `IsoformatSemantics` and
+  `python_fromisoformat_with`; the default matches pinned CI Python 3.14.4.
+  The exact differential chooses the source interpreter's explicit semantics
+  from an explicit datetime feature probe, never normalising timestamp results. Both 3.14.4 and
+  3.14.8 are installed/run locally. No Python bug is silently fixed.
+- The grammar fixture requires >=3.14; Python 3.12/3.13 remain valid for the
+  other oracle fixtures. A missing/incompatible required oracle still fails.
+
+### RP-1001 review correction — preserve slug input order
+
+The core-2 review found that the newly proposed `slug_value(&Value)` boundary
+would render sorted serde mappings rather than Python's insertion order
+(`{'z': 0, 'a': 0}` must slug to `z-0-a-0`). That generic API and its scalar-only
+fixture were removed before landing. The string/hostname slug API remains;
+generic Python input slugging awaits an ordered value representation and is
+explicitly part of this unit's remaining partial scope. The byte-encoding
+repair above is retained and independently covered.
+
+### RP-1003 review correction — unknown home errors
+
+A direct source differential exposed an ordinary pointer-loading error path:
+Python's `Path.expanduser` RuntimeError for an unknown user is not caught by the
+source reader. The old Rust reader discarded it as pointer absence. Both Rust
+load APIs now return `Result<Option<PathBuf>, PathError>` and preserve that error;
+malformed/missing pointers still return `Ok(None)`. No callers outside core use
+these inert APIs. The regression failed with `null` versus the source error,
+then passed after repair. Extended JSON/native-path reader gaps remain partial.

@@ -38,20 +38,34 @@ pub enum PointerError {
     Json(#[from] serde_json::Error),
 }
 
-pub fn load_pointer_path(instance_root: &Path, homes: &Homes) -> Option<PathBuf> {
+/// Invalid/missing JSON is absent; an unresolvable home retains Python's
+/// escaping RuntimeError as a typed path error instead of becoming absence.
+pub fn load_pointer_path(
+    instance_root: &Path,
+    homes: &Homes,
+) -> Result<Option<PathBuf>, PathError> {
     // read_text, unlike json.loads(bytes), does not accept a UTF-8 BOM.
-    let raw = fs::read_to_string(instance_root.join(POINTER_RELATIVE_PATH)).ok()?;
-    // Value preserves Python's last-member-wins policy before decoding the record.
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let pointer: ProductPointer = serde_json::from_value(value).ok()?;
+    let Ok(raw) = fs::read_to_string(instance_root.join(POINTER_RELATIVE_PATH)) else {
+        return Ok(None);
+    };
+    // Preserve Python's last-member-wins policy before decoding the typed record.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    let Ok(pointer) = serde_json::from_value::<ProductPointer>(value) else {
+        return Ok(None);
+    };
     if pointer.schema_version != SCHEMA_VERSION || pointer.product_root.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let candidate = expand_user(Path::new(&pointer.product_root), homes).ok()?;
-    candidate.is_absolute().then_some(candidate)
+    let candidate = expand_user(Path::new(&pointer.product_root), homes)?;
+    Ok(candidate.is_absolute().then_some(candidate))
 }
-pub fn load_pointer_file(instance_root: &Path, homes: &Homes) -> Option<PathBuf> {
-    load_pointer_path(instance_root, homes).filter(|v| v.exists())
+pub fn load_pointer_file(
+    instance_root: &Path,
+    homes: &Homes,
+) -> Result<Option<PathBuf>, PathError> {
+    Ok(load_pointer_path(instance_root, homes)?.filter(|v| v.exists()))
 }
 
 pub fn write_pointer_file(
@@ -117,7 +131,7 @@ mod tests {
         fs::create_dir(&product).unwrap();
         write_pointer_file(&instance, &product, &Homes::default()).unwrap();
         assert_eq!(
-            load_pointer_file(&instance, &Homes::default()),
+            load_pointer_file(&instance, &Homes::default()).unwrap(),
             Some(fs::canonicalize(&product).unwrap())
         );
         assert_eq!(
@@ -146,7 +160,7 @@ mod tests {
         let instance = dir.path();
         let path = instance.join(POINTER_RELATIVE_PATH);
         let homes = Homes::default();
-        assert!(load_pointer_file(instance, &homes).is_none());
+        assert!(load_pointer_file(instance, &homes).unwrap().is_none());
         fs::create_dir(path.parent().unwrap()).unwrap();
         for raw in [
             "{",
@@ -158,7 +172,10 @@ mod tests {
             r#"{"schema_version":1,"product_root":""}"#,
         ] {
             fs::write(&path, raw).unwrap();
-            assert!(load_pointer_path(instance, &homes).is_none(), "{raw}");
+            assert!(
+                load_pointer_path(instance, &homes).unwrap().is_none(),
+                "{raw}"
+            );
         }
         let stale = dir.path().join("old'\\product");
         fs::write(
@@ -166,8 +183,8 @@ mod tests {
             serde_json::json!({"schema_version":1,"product_root":stale,"extra":42}).to_string(),
         )
         .unwrap();
-        assert_eq!(load_pointer_path(instance, &homes), Some(stale));
-        assert!(load_pointer_file(instance, &homes).is_none());
+        assert_eq!(load_pointer_path(instance, &homes).unwrap(), Some(stale));
+        assert!(load_pointer_file(instance, &homes).unwrap().is_none());
     }
     #[test]
     fn concurrent_writes_leave_valid_complete_json() {
@@ -191,7 +208,11 @@ mod tests {
                 thread.join().unwrap().unwrap();
             }
         });
-        assert!(products.contains(&load_pointer_file(&instance, &Homes::default()).unwrap()));
+        assert!(products.contains(
+            &load_pointer_file(&instance, &Homes::default())
+                .unwrap()
+                .unwrap()
+        ));
         assert_eq!(
             fs::read_dir(instance.join(".agent-fabric"))
                 .unwrap()
@@ -282,7 +303,7 @@ print(json.dumps(str(m.load_pointer_file(p))))
             return;
         };
         let numeric_matches =
-            serde_json::json!(load_pointer_file(&instance, &Homes::default())) == expected;
+            serde_json::json!(load_pointer_file(&instance, &Homes::default()).unwrap()) == expected;
         let product = dir
             .path()
             .join(std::ffi::OsStr::from_bytes(b"product-\xff"));
@@ -314,7 +335,7 @@ print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
                     path_matches =
                         serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap())
                             == expected
-                            && load_pointer_file(&instance, &Homes::default())
+                            && load_pointer_file(&instance, &Homes::default()).unwrap()
                                 == Some(fs::canonicalize(&product).unwrap());
                 }
             }
@@ -391,5 +412,36 @@ print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
             serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap()),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod expansion_error_tests {
+    use super::*;
+    #[test]
+    fn unknown_home_error_matches_python_instead_of_missing_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(POINTER_RELATIVE_PATH);
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"schema_version":1,"product_root":"~provenant-no-such-user-192837/tree"}"#,
+        )
+        .unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/lib/product_root_resolver.py",
+            r#"
+try: print(json.dumps(m.load_pointer_path(pathlib.Path(sys.argv[3]))))
+except RuntimeError as e: print(json.dumps({'error':str(e)}))
+"#,
+            &[dir.path()],
+        ) else {
+            return;
+        };
+        let actual = match load_pointer_path(dir.path(), &Homes::default()) {
+            Ok(value) => serde_json::json!(value),
+            Err(error) => serde_json::json!({"error":error.to_string()}),
+        };
+        assert_eq!(actual, expected);
     }
 }

@@ -151,17 +151,6 @@ pub fn slug(raw: &str) -> String {
     }
 }
 
-/// Python's permissive slug input boundary for checked JSON values. Dictionary
-/// rendering follows the value's existing iteration order; callers retaining raw
-/// Python dictionaries must preserve that order before constructing this value.
-pub fn slug_value(value: &Value) -> String {
-    if crate::py::python_truth(value) {
-        slug(&crate::py::python_str(value))
-    } else {
-        slug("")
-    }
-}
-
 pub fn configured(path: &Path) -> Result<Option<String>, InvalidHost> {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -447,21 +436,5 @@ print(json.dumps(results))
             assert_eq!(actual, fixture[1], "{}", fixture[0]);
             assert_eq!(serde_json::json!(peer_ids(&path)), fixture[2]);
         }
-    }
-    #[test]
-    fn permissive_slug_boundary_uses_python_strings_and_truth() {
-        let values =
-            serde_json::json!([null,false,true,0,0.0,1,1.5,-1,[],{},[true],{"A":"B"},"İßK" ]);
-        let Some(expected) = crate::test_support::python(
-            "scripts/host_identity.py",
-            r#"
-print(json.dumps([m.slug(v) for v in [None,False,True,0,0.0,1,1.5,-1,[],{},[True],{'A':'B'},'İßK']]))
-"#,
-            &[],
-        ) else {
-            return;
-        };
-        let actual: Vec<_> = values.as_array().unwrap().iter().map(slug_value).collect();
-        assert_eq!(serde_json::json!(actual), expected);
     }
 }

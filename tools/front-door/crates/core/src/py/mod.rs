@@ -4,8 +4,8 @@ use serde_json::Value;
 mod datetime;
 mod unicode;
 pub use datetime::{
-    from_timestamp, python_fromisoformat, python_iso_timestamp, DateTimeError, PythonDateTime,
-    PythonTimestamp,
+    from_timestamp, python_fromisoformat, python_fromisoformat_with, python_iso_timestamp,
+    DateTimeError, IsoformatSemantics, PythonDateTime, PythonTimestamp,
 };
 pub fn python_truth(value: &Value) -> bool {
     match value {
@@ -362,6 +362,33 @@ print(json.dumps(out))
         }
     }
     #[test]
+    fn aware_adapter_defaults_to_pinned_python_and_checks_jiff_range() {
+        let value = "2026-10-23T12:00:00-00:00:00.5";
+        let pinned = python_fromisoformat(value).unwrap();
+        assert_eq!(pinned.offset_microseconds, Some(0));
+        assert_eq!(python_iso_timestamp(value), pinned.timestamp().ok());
+        let newer = python_fromisoformat_with(value, IsoformatSemantics::Python3148).unwrap();
+        assert_eq!(newer.offset_microseconds, Some(-500_000));
+        assert_eq!(
+            newer.timestamp().unwrap().as_microsecond()
+                - pinned.timestamp().unwrap().as_microsecond(),
+            500_000
+        );
+        assert!(python_iso_timestamp("2026-10-23T12:00:00").is_none());
+        assert_eq!(
+            python_fromisoformat("2026-10-23").unwrap().timestamp(),
+            Err(DateTimeError::Naive)
+        );
+        assert!(from_timestamp(0.0).unwrap().to_jiff().is_ok());
+        assert_eq!(
+            python_iso_timestamp("9999-12-31T23:59:59.999999Z")
+                .unwrap()
+                .to_jiff(),
+            Err(DateTimeError::TimeRange)
+        );
+    }
+
+    #[test]
     fn iso_grammar_and_offsets_match_python() {
         let mut fixtures = vec![
             "".to_owned(),
@@ -424,8 +451,8 @@ print(json.dumps(out))
         let Some(expected) = crate::test_support::python_values(
             r#"
 from datetime import datetime, UTC
-if sys.version_info < (3,14,8):
-    print('CPython 3.14.8 or newer required for ISO grammar oracle',file=sys.stderr)
+if sys.version_info < (3,14):
+    print('CPython 3.14 or newer required for ISO grammar oracle',file=sys.stderr)
     sys.exit(77)
 out=[]
 for s in values:
@@ -435,14 +462,21 @@ for s in values:
         d=dt.astimezone(UTC)-datetime(1970,1,1,tzinfo=UTC)
         out.append(['aware',(d.days*86400+d.seconds)*1000000+d.microseconds])
     except (ValueError,OverflowError): out.append(None)
-print(json.dumps(out))
+probe=datetime.fromisoformat('2026-10-23T12:00:00+00:00:00.5').utcoffset().microseconds
+print(json.dumps([probe,out]))
 "#,
             &json!(fixtures),
         ) else {
             return;
         };
-        for (s, expected) in fixtures.iter().zip(expected.as_array().unwrap()) {
-            let actual = match python_fromisoformat(s) {
+        let semantics = if expected[0] == 500000 {
+            IsoformatSemantics::Python3148
+        } else {
+            assert_eq!(expected[0], 0, "unrecognised CPython offset semantics");
+            IsoformatSemantics::Python3144
+        };
+        for (s, expected) in fixtures.iter().zip(expected[1].as_array().unwrap()) {
+            let actual = match python_fromisoformat_with(s, semantics) {
                 Ok(v) if v.offset_microseconds.is_none() => {
                     let d = v.datetime;
                     let mut text = format!(
