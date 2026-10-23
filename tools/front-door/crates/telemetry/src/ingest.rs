@@ -213,7 +213,7 @@ pub fn codex_record(
             let written = get("cache_write_input_tokens");
             let reasoning = get("reasoning_output_tokens");
             let owner = preferred(account, state.account.as_deref());
-            if delta.values().any(|v| number(v).is_some_and(|n| n != 0.0)) {
+            if delta.values().any(|v| number(v).is_some_and(|n| !n.is_zero())) {
                 sink.usage(
                     Usage {
                         source: "codex".into(),
@@ -296,11 +296,11 @@ pub fn otel_attributes(items: &Value) -> Result<BTreeMap<String, Value>> {
         let v = &item["value"];
         let value = if let Some(n) = v.get("intValue") {
             if n.is_string() {
-                json!(n
-                    .as_str()
-                    .unwrap_or("")
-                    .parse::<i64>()
-                    .map_err(|_| Error::Invalid("invalid OTLP intValue".into()))?)
+                let parsed: Value = pending::decode_json(n.as_str().unwrap_or("").as_bytes())?;
+                if parsed.as_i64().is_none() && parsed.as_u64().is_none() {
+                    return Err(Error::Invalid("invalid OTLP intValue".into()));
+                }
+                parsed
             } else if n.as_i64().is_some() || n.as_u64().is_some() {
                 n.clone()
             } else {
@@ -570,7 +570,7 @@ pub fn ingest_stream(
         if !line.ends_with(b"\n") {
             break;
         }
-        let row = serde_json::from_slice(&line)?;
+        let row = pending::decode_json(&line)?;
         parse(&row, &mut state, offset)?;
         offset += read as u64;
     }
@@ -715,4 +715,23 @@ pub(crate) mod tests {
         assert_eq!(parsed, vec![json!(1), json!(2), json!(3), json!(2)]);
         assert_eq!(store.clears, 1);
     }
+
+    #[test]
+    fn review_regression_observations_keep_integer_spelling() {
+        let mut sink = Capture::default();
+        codex_record(&mut sink, &json!({"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0,"window_minutes":300}}}}), &mut ParserState::default(), Path::new("fixture"), 0, None).unwrap();
+        let value = serde_json::to_value(&sink.observations[0]).unwrap();
+        assert_eq!(value["used_percent"].to_string(), "0");
+        assert_eq!(value["window_minutes"].to_string(), "300");
+    }
+    #[test]
+    fn review_regression_oversized_integer_is_a_typed_error() {
+        for text in ["{\"n\":18446744073709551616}\n", "{\"n\":-9223372036854775809}\n"] {
+            let mut stream = std::io::Cursor::new(text.as_bytes());
+            let result = ingest_stream(&mut MemoryCursor::default(), "test", Path::new("fixture"), &mut stream, Snapshot {device:1,inode:2,size:text.len() as u64,mtime_ns:1}, |_,_,_| Ok(()));
+            assert!(result.is_err(), "integer was silently rounded");
+            assert!(matches!(result, Err(Error::NumberOutOfRange)));
+        }
+    }
+
 }

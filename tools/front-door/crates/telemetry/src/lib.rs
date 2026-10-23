@@ -9,7 +9,7 @@ mod differential;
 pub mod hosts;
 pub mod ingest;
 mod pending;
-pub use pending::Numeric;
+pub use pending::{decode_json, Numeric};
 pub mod report;
 
 pub use pending::{Event, Observation, Usage};
@@ -28,6 +28,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
+    #[error("JSON integer outside i64/u64 range")]
+    NumberOutOfRange,
     #[error("invalid timestamp: {0}")]
     Timestamp(String),
     #[error("{0}")]
@@ -83,8 +85,8 @@ pub fn parse_time(value: &str) -> Result<jiff::Timestamp> {
 }
 
 /// Python's non-negative number check excludes booleans.
-pub fn number(value: &serde_json::Value) -> Option<f64> {
-    value.as_f64().filter(|v| *v >= 0.0)
+pub fn number(value: &serde_json::Value) -> Option<Numeric> {
+    Numeric::from_value(value)
 }
 
 #[cfg(test)]
@@ -113,4 +115,12 @@ mod tests {
         );
         assert_eq!(number(&serde_json::json!(true)), None);
     }
+
+    #[test]
+    fn review_regression_number_preserves_integer_spelling() {
+        for value in [serde_json::json!(0), serde_json::json!(300), serde_json::json!(9007199254740993u64), serde_json::json!(0.0)] {
+            assert_eq!(serde_json::to_string(&number(&value)).unwrap(), value.to_string());
+        }
+    }
+
 }

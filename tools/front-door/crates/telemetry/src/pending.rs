@@ -1,3 +1,5 @@
+mod decode;
+pub use decode::decode_json;
 mod numeric;
 pub use numeric::Numeric;
 // Temporary contracts until the records/core owners are ported.
@@ -74,8 +76,8 @@ pub struct Observation {
     pub session: Option<String>,
     pub timestamp: Option<String>,
     pub window: String,
-    pub used_percent: f64,
-    pub window_minutes: Option<f64>,
+    pub used_percent: crate::Numeric,
+    pub window_minutes: Option<crate::Numeric>,
     pub reset_at: Option<String>,
 }
 // port: belongs in provenant-core

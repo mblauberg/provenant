@@ -62,7 +62,7 @@ impl Prices {
             path: path.into(),
             source,
         })?;
-        Ok(serde_json::from_slice(&bytes)?)
+        crate::decode_json(&bytes)
     }
     pub fn entry(&self, row: &Usage) -> Result<Price> {
         let (adapter, model) = (
@@ -94,7 +94,7 @@ impl Prices {
 pub fn catalogue(path: &Path) -> Catalogue {
     std::fs::read(path)
         .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|b| crate::decode_json::<Value>(&b).ok())
         .and_then(|v| serde_json::from_value(v["adapters"].clone()).ok())
         .unwrap_or_default()
 }
@@ -221,7 +221,7 @@ pub fn estimated_cost(row: &Usage, entry: &Price) -> Option<f64> {
             continue;
         }
         let count = count?.as_f64();
-        let price = entry.usd_per_million.get(rate).and_then(number);
+        let price = entry.usd_per_million.get(rate).and_then(number).map(Numeric::as_f64);
         if count > 0.0 && price.is_none() {
             return None;
         }

@@ -215,7 +215,7 @@ pub fn attention(db: &rusqlite::Connection, since: &str) -> Result<Attention> {
         Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
     })? {
         let (session, attrs) = row?;
-        let attrs: serde_json::Value = serde_json::from_str(&attrs)?;
+        let attrs: serde_json::Value = crate::decode_json(attrs.as_bytes())?;
         if attrs["name"] != "claude_code.active_time.total" {
             continue;
         }
