@@ -10,10 +10,15 @@ Main's supervisor safe filesystem owner was adopted after merging
 
 ## Unit status
 
-- `runtime/fabric/src/store.ts#unit-01`: **ported**. Constructor bootstrap,
+- `runtime/fabric/src/store.ts#unit-01`: **partial**. Constructor bootstrap,
   safe mode-0700 parent creation, close, announcements, seat/project listing,
   issue/path work claims and generation-fenced renew/verify/release are
   implemented. `lane_task_id` is shared with the legacy terminal boundary.
+  Valid non-array persisted path JSON and overlap error ordering are preserved.
+  Remaining: `workClaims`/`acquireWork` parity for ordered object-valued path
+  JSON, ECMAScript JSON number spelling and JSON.parse syntax diagnostics.
+  Main's checked-JSON codec deliberately does not supply an ordered ECMAScript
+  value/diagnostic API; retain this coherent policy slice as partial.
 - `runtime/fabric/src/store.ts#unit-02`: **ported**. Landing leases, bounded
   waits, push cleanup, named sessions, send and inbox policy are implemented.
   UUID generation takes an injected `IdSource` at the source's system boundary,
@@ -34,6 +39,7 @@ Main's supervisor safe filesystem owner was adopted after merging
   also a compatibility gap (RP-FS3-003 and RP-FS3-006).
 
 No units were skipped. Only complete unit IDs are in `ported.txt`.
+Unit-01 was removed from this lane's temporary completion claim after review.
 The crate is inert; no command calls it. Tests open temporary databases only.
 Each connection has one owning thread at a time; Store is Send and not Sync.
 No transaction spans a wait or a push callback.
@@ -88,3 +94,18 @@ bounded captured output. Optional missing/old interpreters or missing loaders
 print `skip:`; required mode fails. Node is v24.15.0, better-sqlite3 13.0.3.
 J1/J2/J3 and platform cut-over conformance remain with their owners. CI gates
 this PR. The chair owns the cross-family review and auto-merge decision.
+
+## Native review and verification
+
+Native `code-review` inspected source units 01-04, schema, all crate modules and
+policy/differential fixtures at `0d6b6199`, route
+`codex/gpt-6.1-sol@high`. It found eager persisted-path shape validation; the
+repair retains dynamic JSON and source short-circuit/error order, with a new
+Node differential. The review also caught dropped ledger entries during merge
+resolution; main's ledger is restored in full and all eight lane sections are
+appended. Unit-01 stays partial for the wider ECMAScript JSON codec boundary.
+
+Local required checks: fmt, Clippy with `-D warnings`, the fabric-store suite
+(32 tests, including 16 Node differentials; zero doc tests), and both R2 layering
+checks. The layering functions were invoked directly because pytest is absent.
+The chair's cross-family review and exact-head CI remain pending.

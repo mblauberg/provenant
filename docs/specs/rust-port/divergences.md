@@ -1405,7 +1405,131 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
 
+## RP-WF2-001: authority budget diagnostic ordering (open)
 
+- Unit: `skills/deliver/scripts/authority_mapping.py#unit-01`, rulebook v4;
+  class `library`. The unit stays partial; no exception or cut-over is claimed.
+- Compared source/oracle: `600dec09bcda3b6a86272e391420e89d38777953`, unchanged
+  through main `d0027d7cd8de987b15c2f7c855691ca3ddf488aa`; candidate is the
+  workflow batch 2 PR head, pinned Rust 1.94.1 / CPython 3.14.3.
+- Reproducer: a valid authority record with budget
+  `{"turns":-1,"provider_calls":-1}`. Python reports the `turns` amount first;
+  serde_json's sorted `Value` object reports `provider_calls` first.
+- Expected/actual: rejection and authority bounds agree, but the first-invalid
+  field in the diagnostic differs. This is not an accepted behaviour change.
+- Evidence: source `budget` insertion-order iteration versus the explicitly
+  marked sorted-map iteration in `authority_mapping::budget`; policy tests
+  cover rejection and each single-field error, not parity for this ordering gap.
+- Follow-up: accept the shared ordered decoder at this boundary, retain raw
+  fixture order and add the multi-invalid-budget differential before completion.
+  RP-1003's non-finite/lone-surrogate JSON gap also applies to this raw boundary.
+
+## RP-WF2-002: actual cycle records versus draft schemas (open)
+
+- Units: lane launch/exit/observer interfaces; rulebook v4, class `library`.
+- Compared source/oracle: batch 2 revision above; draft schemas on merged main
+  above; Rust candidate is this PR head. Disposition: typed contracts follow
+  source records; schema integration remains open under J2.
+- Reproducer: the real launch builder returns `env` as an object and can return
+  `stdin: {}` and `progress: {}`. The draft launch schema uses an environment
+  array and requires inner stdin/progress members. Source supervisor exit
+  records can contain row arrays in `reaped` and `spared`; the draft schema
+  describes bool/count forms. Receipt mapping consumes further optional fields.
+- Expected/actual: real source records pass the translated Rust contracts;
+  stale schemas can refuse those records. No invented record fields or tagged
+  enum wrappers are added to make the schema appear green.
+- Evidence: `lane_launch` source-builder differentials, `lane_exit` receipt-field
+  differentials and `provider_observer` source summary differentials. Missing
+  members and explicit nulls have separate fixtures. No independent J2 mutant
+  receipt is claimed for these draft-schema discrepancies.
+- Follow-up: schema owner reconciles the actual producer/consumer contract and
+  supplies canonical-byte mutants before command cut-over. This lane changes
+  no schema or runtime owner.
+
+## RP-WF2-003: Python value and notification repairs (fixed)
+
+- Units: workflow batch 2 policy modules and cycle interfaces; rulebook v4,
+  class `bug`. Source/oracle is batch 2 revision above; repaired candidate is
+  this PR head. No intentional contract change is accepted.
+- Counterexamples: failure keys `usage_limited` then `auth_required` were sorted;
+  explicit route extension order was lost; absent nullable members became
+  null; false terminal notifications and a `stalled` semantic stop were admitted;
+  empty/null stdin paths were admitted. Native source review found these forms.
+- Unicode counterexamples: Python word boundaries do not treat U+0345 as a
+  word character, while Rust's default derived Alphabetic class does. Python
+  `re.I` additionally folds dotted/dotless I, long s and Kelvin sign. Built-in
+  phrase and negative-lookahead rules now use the Python predicate/folding.
+- Numeric counterexample: integer JSON `-0` decoded as floating negative zero,
+  and overflow could be rounded by an unchecked serde conversion. The copied
+  main checked codec normalises integer zero and returns typed range refusals.
+- Evidence: required raw-wire order tests, route duplicate/range/refusal
+  differentials, literal reply and stdin tests, required-nullable panel and
+  process tests, and Unicode style differentials. The final required suite has
+  52 passing tests with real source imports and no missing-interpreter skips.
+  The bounded oracle helper uses an explicit PATH even during version probing;
+  intermediate runs that selected an older system Python were rerun in required
+  mode and are not claimed as parity evidence.
+- Disposition: fixed within the implemented domains. Unknown non-finite JSON
+  and lone surrogates remain RP-1003, including the preflight companion decoder;
+  `dispatch_preflight.py#interface` remains partial. Out-of-range integers keep
+  rulebook v4's existing typed-refusal improvement (RP-1005), never f64 rounding.
+- Follow-up: remove pending compatibility/codec copies when workspace aliases
+  expose the landed core and records owners; extend core with the word predicate.
+
+## RP-WF2-004: arbitrary Python regex overlays (open)
+
+- Unit: `skills/natural-writing/scripts/style_lint.py#unit-01`, rulebook v4;
+  class `library`. Disposition: partial, excluded from the completed-unit ledger.
+- Source/oracle: batch 2 revision above; candidate is this PR head. Shared
+  vocabulary, built-in lookaround rules and Markdown/LaTeX spans have translated
+  matchers and passing source differentials. No default pattern is silently
+  passed to the Rust regex parser with incompatible Python syntax.
+- Reproducer: a caller overlay compiled with Python `re.compile(r"(?<=x)y")`
+  is accepted by the source scan operation. `PatternRule::regex` documents Rust
+  syntax and refuses that lookbehind through a typed `StyleError::Regex`.
+  Arbitrary overlay Unicode classes and regex flags can also differ.
+- Expected/actual: source accepts a compiled Python matcher; the current Rust
+  overlay constructor accepts only Rust regex syntax. This restriction is not
+  an approved contract change, despite default and simple overlay parity.
+- Evidence: source scan's arbitrary `re.Pattern` argument, the documented Rust
+  overlay constructor, and existing ordered/replacement overlay fixtures.
+- Follow-up: domain overlay owners supply equivalent typed matchers and retained
+  policy differentials, or agree an exact compatibility adapter, before this
+  unit is declared complete. `run_cli` is outside this assigned source unit.
+
+## RP-WF2-005: observer token integer boundary (improvement)
+
+`context_usage._int` emits non-negative Python ints without a size limit.
+Workflow `ContextUsage::from_json` checks every integer with the shared records
+codec and returns typed `NumberOutOfRange` above u64 (including
+1180591620717411303424), rather than rounding through f64. Token fields are
+`Option<u64>`; negative, bool and fractional retained tokens are rejected because
+Python never emits them. Only `context_percent` is floating point. This follows
+PORTING.md v4 R4; the Python source remains unchanged.
+
+## RP-WF2-006: supervisor rows and legacy receipt acceptance (bug, repaired)
+
+`src/lane/files.rs:367-403` emits `reaped` and `spared` as lists of rows
+(`pid`, `start_time`, `command`), plus numeric `observer_dropped` and
+`*_truncated` counts. `schemas/supervisor-exit.schema.json` instead declares
+boolean `reaped` and non-negative integer `spared`. The schema is unchanged.
+The workflow models real descendant rows separately from open legacy receipt
+inputs. Raw-input differentials preserve `spared: true`, negative counts,
+string length, string reaped evidence and character-wise warning iteration.
+The old output-fed-back oracle was removed. Observer restore/replay effects
+remain partial; `lane_exit.py#interface` will not be claimed complete.
+
+## RP-WF2-007: review-panel integer range (improvement)
+
+Python accepts `minimum_members = 10**30` and returns that exact minimum and
+shortfall. `PanelSpec::from_json` now returns the shared typed
+`DecodeError::NumberOutOfRange` before conversion/validation, instead of
+rounding it to f64 and reporting an invalid positive integer. The differential
+runs Python validation and public `panel_shortfall` on the raw integer and
+checks its exact output spelling. Rust `panel_shortfall` is public and supports
+all positive u64 minima. Already-decoded values cannot recover integers lost
+by an unchecked caller; raw input must use the checked boundary. This is the
+PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
 ## RP-CLI2-05: wrapper command boundaries and large literal PIDs
 
 - Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
@@ -1455,3 +1579,156 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   Rust dropped `prune_merged` and `since_revision`; `PlanContext` now retains
   both source fields. This updates only the retained shape, not cleanup policy
   or process/deletion ownership.
+### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
+
+- Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
+  rulebook v4. `process_info.processes()` consumes the `/proc` iterator outside
+  its open-error fallback. A later iteration OSError propagates to callers.
+- Rust used `ReadDir::flatten()`, silently converting an incomplete census to
+  success. It now preserves the underlying I/O error through the observation
+  decoder. A fixture with one readable PID followed by EACCES failed before
+  repair and passes afterwards; it runs on macOS as well as Linux.
+- No intentional source behavior change. The wider RP-1302 fallback error and
+  size-bound differences remain open; this does not complete the unit.
+
+### RP-SUP-PS-BUFFER: Fabric ps maxBuffer capture (open partial scope)
+
+- Class: `library`; not accepted. Source/oracle baseline:
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`, Node 24.21.0, rulebook v4.
+- Node `execFileSync` uses a pipe and exposes overflow-buffer bytes plus
+  `code`, `status`, `signal` and `stdout` on ENOBUFS. A 1,048,577-byte fixture
+  exposed status 0 and 1,048,577 captured bytes. The Rust utility runner uses
+  a file-backed spool, polls its size and retains a capped head/tail view.
+  It can overshoot the threshold on disk between polls and does not reproduce
+  Node's exact overflow stdout or associated termination observation.
+- Native review reproduced the mismatch and blocked a full claim for
+  `runtime/fabric/src/ps.mjs#unit-01`. Typed child errors now retain code,
+  exit status separately from signal, stdout size and truncation evidence;
+  signal/timeout fixtures compare directly against Node. This does not fix
+  the remaining maxBuffer mismatch. Signal-name mapping currently covers
+  common POSIX signals; platform-specific extensions also remain incomplete.
+- Disposition: keep the unit partial and absent from `ported.txt`/PR `Units:`.
+  No command uses the crate. Completing the unit requires a bounded pipe
+  adapter and exact overflow/failure differentials before cut-over; no
+  behavior change is accepted here.
+
+### RP-SUP-FS-ERRNO: portable filesystem error contract (fixed)
+
+- Class: `bug`; ungraphed supervisor filesystem foundation, PR #1328 repair.
+  Author route: `codex/gpt-6.1-sol@high`. Main baseline:
+  `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
+- Reproducer: no-follow directory open on a final symlink reports ENOTDIR on
+  Linux and ELOOP on macOS. The previous tests asserted only failure, leaving
+  consumers unable to distinguish links from ordinary non-directories.
+- Fixed contract: classify ENOTDIR/ELOOP with no-follow fstatat in the syscall
+  layer; a positively observed final symlink returns typed `FsError::Symlink`
+  and canonical ELOOP. Ordinary non-directories retain ENOTDIR. `io::Error`
+  conversion preserves the resulting errno/kind; typed errors retain complete
+  anchor-relative diagnostics. Observed anchor-device crossings report EXDEV.
+- Evidence: `directory_symlinks_have_a_portable_typed_errno_and_nested_context`,
+  `typed_error_predicates_and_io_conversion_preserve_errno_and_kind`, and
+  tightened final-link/anchor fixtures assert variants and errno. Publication
+  and regular-file flag regressions cover the same repair. Required local
+  supervisor tests pass on macOS; Linux execution remains a CI gate because
+  the cross-compilation target is not installed.
+- Scope: public filesystem traits and durable publication helpers now support
+  adapters for the pending confinement/records/config/core contracts. Consumers
+  remain unchanged; no graph unit or full conformance claim is added. README
+  maps the remaining pending run and UUID contracts explicitly.
+
+### RP-WF2-006 repair evidence and claim correction
+
+Independent repair review found two further bugs, now fixed with raw-wire
+Python comparisons: receipt warning dictionaries and nested reaped/capture
+objects retain insertion order; `signal: -9223372036854775808` negates to the
+valid unsigned integer 9223372036854775808. The checked ordered decoder also
+applies the shared owner's integer `-0` normalisation without sorting objects.
+The review-panel and authority-mapping unit claims hold. All three cycle
+interfaces are deliberately partial: observer.json restoration/replay,
+supervisor return codes 64 and 75, and the full dynamic observer record domain
+are not yet proved exact. Their IDs are removed from the completion ledger.
+
+## RP-FS3-001: bounded invalid landing waits (improvement)
+
+- Review repair 2, rulebook v4, source `c80d6a7c90c240a6272fdcea1ec4fdc6ce88c74a`.
+- `wait_landing` refuses NaN, infinities and seconds whose milliseconds exceed
+  i64 with `NumberOutOfRange`. TypeScript's NaN/positive-infinite deadlines
+  can poll forever. Rust retains this deliberate bounded-wait refusal.
+
+## RP-FS3-002: SQLite contention classification (bug, fixed)
+
+- Review repair 2. Match extended SQLite codes 5 and 6 exactly, as
+  better-sqlite3's `SQLITE_BUSY`/`SQLITE_LOCKED` strings do. Extended codes
+  such as `SQLITE_BUSY_SNAPSHOT` must not trigger bootstrap retries.
+
+## RP-FS3-003: SQLite binding diagnostics (library)
+
+- Review repair 2. SQLite engine messages are preserved from rusqlite's
+  `SqliteFailure` cause. Binding-specific conversion, parameter and connection
+  errors use rusqlite diagnostics rather than better-sqlite3's JavaScript
+  diagnostics. Engine failure fixtures compare exact text; binding-only
+  errors remain a cut-over compatibility gap, not a claim of byte parity.
+
+## RP-FS3-004: ECMAScript Number compatibility (library, deliberate exception)
+
+- Review repair 4, rulebook v4. This TypeScript store uses ECMAScript Number,
+  including fractional wait seconds and `Number(attempt)` in terminal notice
+  keys. These compatibility operations deliberately use f64: wait deadline
+  arithmetic, legacy parsed numeric keys and comparison with observed attempts.
+  They are exceptions to the integer rule for ECMAScript coercion only.
+- Retained integer IDs, generations, timestamps, cursors and serde records stay
+  i64/u64. Python values use `provenant_core::py`; its Python number and
+  whitespace semantics must not replace ECMAScript semantics. Checked JSON
+  integer decoding belongs to `provenant_records::checked_json`.
+
+## RP-FS3-005: clock-independent landing wait ceiling (improvement)
+
+- Review repair 8. `wait_landing` has both a monotonic deadline and a cumulative
+  poll budget, capped at one hour. A frozen/backwards injected clock or a wait
+  callback returning immediately cannot cause an unbounded loop. Each callback
+  must itself honour its duration/cancellation contract; the store cannot
+  pre-empt arbitrary caller code. Normal finite waits preserve source results.
+### RP-FS3-004 extension: dynamic terminal rows
+
+- The deliberate ECMAScript Number exception also covers `Number` coercion of
+  legacy terminal attempts, SQLite binding of those numbers and comparisons
+  against observation values. Fractional and infinite attempts are preserved;
+  NaN binds NULL and fails the source's NOT NULL constraint. Integer wire
+  fields remain serde integers. The legacy-row differential compares failures,
+  absent/null fallbacks, arrays, booleans, radix strings, decimal/scientific
+  String spellings, fractional cursor reads and all database rows.
+
+### RP-FS3-005 deterministic-clock refinement
+
+- The final implementation uses the cumulative poll budget as an iteration
+  ceiling (at most 3,600,000 one-millisecond polls). It does not use a real-time
+  deadline to shorten virtual-clock fixtures. This still bounds frozen or
+  backwards clocks and preserves deterministic finite-clock results.
+
+## RP-FS3-006: safe diagnostic copies and filesystem diagnostics (library, partial)
+
+- Unit-04 adopts supervisor's safe filesystem API from main at `7021182d`.
+  Stat errors for common errno values retain Node wording; snapshot version
+  checks exclude ctime and retries/cleanup match source policy.
+- The API can stat a final symlink with follow=true but its regular-file
+  read-open always uses O_NOFOLLOW. TypeScript copyFileSync follows the final
+  symlink. Unit-04 stays partial until supervisor exposes an explicitly
+  link-following regular-file read. Source/binding-only copy errors (including
+  destination-path text) also remain a cut-over gap. This is not an approved
+  symlink refusal or a claim of full error-text parity.
+
+## RP-FS3-007: persisted work-path JSON boundary (bug fixed; library partial)
+
+- Native review found that a Vec<String> decoder rejected valid persisted
+  scalar/null/mixed-array JSON before TypeScript's JSON.parse cast and later
+  short-circuit evaluation. Rust now returns the dynamic JSON value and reaches
+  the same .some/toLowerCase failures only when overlap evaluation needs them.
+  The differential covers scalars, null, mixed arrays, issue short-circuiting
+  and early matching paths, comparing failures and all rows.
+- Unit-01 nevertheless stays partial: generic object key order, ECMAScript JSON
+  number spelling and JSON.parse syntax diagnostics need the shared ordered
+  ECMAScript JSON value/diagnostic owner. The current checked-JSON codec validates
+  integer ranges faithfully to rulebook v4, but its serde Value uses sorted
+  object keys and its diagnostics are serde's. This is not accepted source parity.
+- Remove unit-01 from this lane's temporary completion claim. Main had no
+  completion ID for it; unit-02 and unit-03 remain complete. No runtime cut-over.

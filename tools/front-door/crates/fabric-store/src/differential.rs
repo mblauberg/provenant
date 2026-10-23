@@ -1438,3 +1438,91 @@ fn diagnostic_snapshot_retries_version_changes_and_has_a_three_attempt_bound() {
     );
     compare("snapshot-races", snapshot(&store, out));
 }
+
+#[test]
+fn persisted_work_paths_keep_dynamic_json_and_short_circuit_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store
+        .acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                issue: Some("x"),
+                paths: &["valid".into()],
+            },
+            60,
+            1000,
+            &ids,
+        )
+        .unwrap();
+    for value in [
+        Value::Null,
+        json!(false),
+        json!("text"),
+        json!({"x":1}),
+        json!([null]),
+        json!([false]),
+        json!(["elsewhere", false]),
+        json!(["match", false]),
+    ] {
+        store
+            .db
+            .execute(
+                "UPDATE work_claims SET paths=? WHERE id=?",
+                params![serde_json::to_string(&value).unwrap(), "fixture-1"],
+            )
+            .unwrap();
+        capture(&mut out, store.work_claims("p", 1000));
+        capture(
+            &mut out,
+            store.acquire_work(
+                &b(),
+                "s",
+                WorkScope {
+                    issue: Some("x"),
+                    ..Default::default()
+                },
+                60,
+                1000,
+                &ids,
+            ),
+        );
+        capture(
+            &mut out,
+            store.acquire_work(
+                &b(),
+                "s",
+                WorkScope {
+                    issue: Some("y"),
+                    ..Default::default()
+                },
+                60,
+                1000,
+                &ids,
+            ),
+        );
+        capture(
+            &mut out,
+            store.acquire_work(
+                &b(),
+                "s",
+                WorkScope {
+                    paths: &["match".into()],
+                    ..Default::default()
+                },
+                60,
+                1000,
+                &ids,
+            ),
+        );
+        store
+            .db
+            .execute("DELETE FROM work_claims WHERE id != 'fixture-1'", [])
+            .unwrap();
+    }
+    compare("work-path-json", snapshot(&store, out));
+}

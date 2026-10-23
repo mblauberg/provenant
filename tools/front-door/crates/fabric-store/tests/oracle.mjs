@@ -41,7 +41,17 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if(scenario==='diagnostic-paths') {
+if(scenario==='work-path-json') {
+  store.acquireWork(a,'s',{issue:'x',paths:['valid']},60,1000);
+  for (const value of [null, false, 'text', {x:1}, [null], [false], ['elsewhere',false], ['match',false]]) {
+    raw.prepare('UPDATE work_claims SET paths=? WHERE id=?').run(JSON.stringify(value),'fixture-1');
+    capture(()=>store.workClaims('p',1000));
+    capture(()=>store.acquireWork(b,'s',{issue:'x'},60,1000));
+    capture(()=>store.acquireWork(b,'s',{issue:'y'},60,1000));
+    capture(()=>store.acquireWork(b,'s',{paths:['match']},60,1000));
+    raw.prepare("DELETE FROM work_claims WHERE id != 'fixture-1'").run();
+  }
+} else if(scenario==='diagnostic-paths') {
   store.announce(a);store.note(a,'in WAL');
   capture(()=>inspectDatabase(database,'p','status'));
   capture(()=>inspectDatabase(database,'p','doctor'));

@@ -35,6 +35,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Cannot read properties of null (reading 'some')")]
+    NullClaimPaths,
+    #[error("existing.paths.some is not a function")]
+    ClaimPathsNotArray,
+    #[error("Cannot read properties of null (reading 'toLowerCase')")]
+    NullClaimPath,
+    #[error("right.toLowerCase is not a function")]
+    ClaimPathNotString,
     #[error("database changed while creating a diagnostic snapshot")]
     SnapshotChanged,
     #[error("could not reserve a private diagnostic snapshot directory")]

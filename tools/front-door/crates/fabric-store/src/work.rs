@@ -8,7 +8,7 @@ pub struct WorkClaim {
     pub generation: i64,
     pub holder: String,
     pub issue: Option<String>,
-    pub paths: Vec<String>,
+    pub paths: serde_json::Value,
     pub expires_at_ms: i64,
 }
 #[derive(Default)]
@@ -50,12 +50,11 @@ impl Store {
     }
     pub fn work_claims(&self, project: &str, now: i64) -> Result<Vec<WorkClaim>> {
         let rows=self.db.prepare("SELECT id, generation, holder, issue, paths, expires_at FROM work_claims WHERE project = ? AND released_at IS NULL AND expires_at > ? ORDER BY generation")?
-            .query_map(params![project,now], |r| Ok((WorkClaim {id:r.get(0)?,generation:r.get(1)?,holder:r.get(2)?,issue:r.get(3)?,paths:Vec::new(),expires_at_ms:r.get(5)?},r.get::<_,String>(4)?)))?
+            .query_map(params![project,now], |r| Ok((WorkClaim {id:r.get(0)?,generation:r.get(1)?,holder:r.get(2)?,issue:r.get(3)?,paths:serde_json::Value::Null,expires_at_ms:r.get(5)?},r.get::<_,String>(4)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;
         rows.into_iter()
             .map(|(mut claim, paths)| {
-                claim.paths =
-                    serde_json::from_value(provenant_records::checked_json::from_str(&paths)?)?;
+                claim.paths = provenant_records::checked_json::from_str(&paths)?;
                 Ok(claim)
             })
             .collect()
@@ -79,14 +78,14 @@ impl Store {
         let id = ids.uuid()?;
         self.transaction(true,|| {
             for existing in self.work_claims(&who.project,now)? {
-                if (issue.is_some() && issue==normal_issue(existing.issue.as_deref())) || paths.iter().any(|p|existing.paths.iter().any(|q|overlaps(p,q))) {
+                if (issue.is_some() && issue==normal_issue(existing.issue.as_deref())) || paths_overlap(&paths, &existing.paths)? {
                     return Err(Error::WorkHeld { holder:existing.holder, until:iso(existing.expires_at_ms)? });
                 }
             }
             self.db.execute("INSERT INTO work_claims(id, project, holder, issue, paths, expires_at) VALUES (?, ?, ?, ?, ?, ?)",params![id,who.project,owner,issue,serde_json::to_string(&paths)?,until])?;
             let generation=self.db.last_insert_rowid();
             self.log(who,"work_claim",&format!("{owner} {} {}",issue.as_deref().unwrap_or(""),paths.join(",")))?;
-            Ok(WorkClaim {id,generation,holder:owner,issue,paths,expires_at_ms:until})
+            Ok(WorkClaim {id,generation,holder:owner,issue,paths:serde_json::to_value(paths)?,expires_at_ms:until})
         })
     }
     pub fn renew_work(
@@ -172,4 +171,30 @@ fn overlaps(left: &str, right: &str) -> bool {
     left == right
         || left.starts_with(&format!("{right}/"))
         || right.starts_with(&format!("{left}/"))
+}
+
+/// Preserve the source's short-circuit evaluation over persisted JSON. A caller
+/// with no paths never invokes .some on an older row's paths value.
+fn paths_overlap(paths: &[String], existing: &serde_json::Value) -> Result<bool> {
+    use serde_json::Value;
+    for path in paths {
+        let Some(values) = existing.as_array() else {
+            return Err(if existing.is_null() {
+                Error::NullClaimPaths
+            } else {
+                Error::ClaimPathsNotArray
+            });
+        };
+        for value in values {
+            let other = match value {
+                Value::String(s) => s,
+                Value::Null => return Err(Error::NullClaimPath),
+                _ => return Err(Error::ClaimPathNotString),
+            };
+            if overlaps(path, other) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
