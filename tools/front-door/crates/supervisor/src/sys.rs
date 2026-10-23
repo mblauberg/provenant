@@ -245,3 +245,5 @@ pub use child::ChildWaitError;
 pub(crate) use child::{anonymous_spool, OwnedChild};
 
 pub mod process;
+
+pub(crate) mod fs;

@@ -91,3 +91,33 @@ Process lookup, start-time and census APIs carry `Result<Option<_>, ProcessError
 remain absent, while `NumberOutOfRange` survives every caller instead of
 silently omitting a process. The Linux filesystem fixture covers this lookup
 boundary on macOS too.
+
+## Batch 2: descriptor-relative filesystem foundation
+
+`fs::Directory` is an owning anchor and `fs::FileHandle` is an owning file
+capability; neither exports a raw descriptor. Relative operations accept one
+normal OS component, refusing empty names, `.`, `..`, separators and NULs before
+any syscall. The initial anchor/source path is trusted and may contain symlink
+ancestors (including macOS `/var`); its final component is never followed.
+
+The API supplies no-follow/cloexec opens, exclusive 0600 creation, mkdirat,
+file/directory unlinkat, metadata, independent descriptor enumeration, shared-
+offset duplication, bounded reads, file/directory fsync, nonblocking locks,
+OS-entropy temporary names, symlink creation and atomic replacement. No-replace
+and exchange use Linux renameat2 and Darwin renameatx_np with EXCL/SWAP flags;
+unsupported filesystems return the OS error, without an unsafe fallback.
+Verified directory opens compare before/opened/after identity and the parent's
+device. Explicit final-link following is a separate opt-in directory operation.
+
+These primitives satisfy the pending confinement custody and records storage
+contracts without changing their crates. Policy adapters, recursive traversal,
+staging/cleanup transactions and application-specific lease/marker formats
+remain with their owners. An untrusted directory writer can still change an
+entry between syscalls; no atomic conditional-unlink or checked-rename promise
+is made. Directory permissions and held handles remain part of custody.
+
+macOS fixtures exercise anchor replacement by a symlink, no-follow refusal,
+concurrent no-replace publication, exchange/replace across held directories,
+metadata, duplicate offsets, bounded reads, FIFO refusal and lock contention.
+Invalid UTF-8 names are passed unchanged to the OS; when macOS refuses one,
+the fixture verifies the same refusal from direct standard-library creation.
