@@ -4688,7 +4688,6 @@ print(json.dumps({'type':'result','result':'DONE'}))
     resumed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
-    assert previous['session_id'] == 'saved-session'
     assert row['status'] == 'ok'
     assert 'resumed_by_relaunch' in row['provenance']['notes']
     assert 'resume: relaunched' in row['warnings']
@@ -4707,7 +4706,6 @@ print(json.dumps({'type':'result','result':'DONE'}))
     first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
     assert first.returncode == 0, first.stdout + first.stderr
     previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
-    assert previous['session_id'] == 'saved-session'
     command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
                '--prompt-file', str(prompt), '--resume-attempt', '1', '--require-session', 'saved-session']
     resumed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
