@@ -510,10 +510,9 @@ impl Overrides<'_> {
                     &join(base, "0"),
                     &source,
                     &target,
-                ) {
-                    if let Ok(value) = value.into_value() {
-                        result.push(value);
-                    }
+                ) && let Ok(value) = value.into_value()
+                {
+                    result.push(value);
                 }
             }
             return Some(Item::Value(Value::Array(result)));
