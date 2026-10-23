@@ -16,7 +16,7 @@
 > **Purpose.** Capstone for taking `{{MISSION}}` from *adversarially
 > validated* to *carried forward*. Synthesis only — no new decisions.
 >
-> **Run status:** <LIVE refresh | ⛔ FINISHED (human-authorized STOP)>. The
+> **Run status:** <LIVE refresh | ⛔ FINISHED (human-authorised STOP)>. The
 > mission sits at its `{{BUILD_CEILING}}` build-ceiling. <One line: what is
 > complete vs what remains.>
 >

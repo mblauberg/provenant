@@ -44,7 +44,7 @@ cover worktree create/list/remove, route listing, branch lint, event reading
 and Fabric dispatch listing. Worktree list/remove
 cases have fixture-local setup commands, and events reads a seeded terminal
 attempt receipt in `run.py`. Route resolution uses `resolve --help` as a help
-case, avoiding byte comparisons against the changing live catalog. Gate's only
+case, avoiding byte comparisons against the changing live catalogue. Gate's only
 execution mode runs the heavy composite suite, so it has help coverage only.
 Fabric dispatch has no public plan/dry-run mode: `fabric-dispatch-invalid-option`
 covers an invalid flag and `fabric-dispatch-list` is a real read-only query.

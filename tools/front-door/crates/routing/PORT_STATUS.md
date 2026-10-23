@@ -51,7 +51,7 @@ injected discovery edge still needs the process probe owner before use by a CLI.
   executable/version-bound metadata. No live provider is run by this batch.
 - `scripts/model_route_probe.py#unit-02`: snapshot loading/refusals, source and
   Claude provenance trust, exact age cutoffs, effort checks, case-folded identity
-  collision checks, and normalized-key insertion order are implemented and
+  collision checks, and normalised-key insertion order are implemented and
   differentially tested. Remains partial because family alias validation inherits
   RP-130402. The ISO reader in pending is also awaiting its core owner.
 

@@ -20,7 +20,7 @@ Fill these once, in `GOAL.md`, before the first iteration. They are settled inpu
 
 | Knob | What it pins |
 |---|---|
-| `{{DOMAIN}}` / `{{MISSION}}` | What this run produces and its north star (e.g. "exhaustively design and scaffold X", "synthesize the literature on Y", "audit Z for class-W vulnerabilities"). |
+| `{{DOMAIN}}` / `{{MISSION}}` | What this run produces and its north star (e.g. "exhaustively design and scaffold X", "synthesise the literature on Y", "audit Z for class-W vulnerabilities"). |
 | `{{LOCKED_CONSTRAINTS}}` | A do-not-re-litigate list the run designs **around**, not toward. Settled inputs. |
 | `{{ESCALATION_GATES}}` | Which work routes to which gate when the run cannot finish it autonomously. The taxonomy is generic (see §4); the specific gates are knobs. |
 | `{{BUILD_CEILING}}` | The line between what the run may build/produce autonomously and what requires explicit user authorisation (e.g. "scaffold + local/mocked only; no real infra, no irreversible side effects"). |
@@ -111,7 +111,7 @@ RESUMABLE MISSION LOOP until GOAL STATUS == STOP (a dry frontier PAUSES it):
   3. DISPATCH    BEFORE launching, flip the QUEUE.md row to LEASED with
                    { lease-owner, lease-expiry, what, expected output path }
                  filled. THEN launch the workflow / fan out the agents.
-                 Run INDEPENDENT units concurrently up to caps — do NOT serialize.
+                 Run INDEPENDENT units concurrently up to caps — do NOT serialise.
 
   4. RECORD      preserve returned artifacts/receipts; delegate any durable
                  decision to implement/deliver (its receipt lands under the
@@ -154,7 +154,7 @@ The loop is **self-paced**. When all selectable work is in-flight:
 | Tool | Use for | Notes |
 |---|---|---|
 | **Workflow** | Anything multi-stage or fan-out: deterministic orchestration of many agents with pipelines, parallelism, judge panels, loops. | Runs in the background, notifies on completion. **Run several concurrently** across independent units. Prefer this for breadth-then-depth on a single unit. |
-| **Single agent** | One read/research/design delegation. | **Batch independent agent calls in one message** so they run concurrently. One call = one serialization point; never serialize independent reads. |
+| **Single agent** | One read/research/design delegation. | **Batch independent agent calls in one message** so they run concurrently. One call = one serialisation point; never serialise independent reads. |
 | **Cross-family verifier** | Independent second opinions, adversarial verification, alternative implementations. | A different model family, routed through `orchestrate`. **Cross-family agreement materially raises confidence on one-way-doors.** See `cross-family-review.md`. |
 
 Fan-out topology, workflow archetypes and provider routing are `orchestrate`'s
@@ -200,7 +200,7 @@ The escalation taxonomy this routes into is generic — **user tie-break / exper
 Do not:
 
 - **Do deep analysis in your own context.** Delegate it and record the return.
-- **Serialize independent work.** Fan out; batch independent agent calls in one message.
+- **Serialise independent work.** Fan out; batch independent agent calls in one message.
 - **Pick a one-way-door from one agent's opinion.** Fork it, judge it adversarially, cross-family-verify it.
 - **Let the tree sprawl.** Reorg on cadence and run the integrity sweep.
 - **Inherit prior scoping numbers as decisions.** They are priors to test, not settled outputs.

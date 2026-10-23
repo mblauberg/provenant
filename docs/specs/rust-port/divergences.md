@@ -528,7 +528,7 @@ They form the current baseline; they are not newly discovered port mismatches.
   macOS arm64, using the configured Python >=3.12 with `-I`. No path-valued
   fixtures or live providers are involved.
 - Expected / actual: fallback policy null was `"default"`; lists were tagged
-  and normalized; parsed candidates dropped null effort and dictionary order;
+  and normalised; parsed candidates dropped null effort and dictionary order;
   execution plan fields did not match `candidates()` inputs; family scans used
   unordered maps; empty models read missing patterns; cache snapshots used
   caller-supplied age rather than `observed_at`.
@@ -548,7 +548,7 @@ They form the current baseline; they are not newly discovered port mismatches.
 ## RP-130402 - Lazy alias re-expansion across adapters sharing a family
 
 - Unit: `scripts/model_route_catalog.py#unit-01`, rulebook version 4.
-- Class: `bug` (open Rust mismatch; catalog unit remains partial).
+- Class: `bug` (open Rust mismatch; catalogue unit remains partial).
 - Compared revisions: Python source at `6aa0097083aa0e9f2f69d2d60fe9f8023dcae594`,
   Rust in PR #1304.
 - Reproducer: family aliases `{"senior":["sonnet"]}` with adapters `a` and `b`
@@ -1079,7 +1079,7 @@ The source revision above is unchanged; CLI rendering remains an edge task.
 - Repair re-review also found sorted JSON maps losing Python dict insertion
   order in this same tolerant observation field. `PythonValue` now retains
   its Python representation while decoding, including nested objects and
-  duplicate-key replacement in the original position. Its wire serialization
+  duplicate-key replacement in the original position. Its wire serialisation
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
@@ -1202,13 +1202,13 @@ The source revision above is unchanged; CLI rendering remains an edge task.
 - Rulebook v4; source/policy oracle revision
   `7475ff01e437ec51c760b852516c21a5281cf9c6`; author route
   `codex/gpt-6.1-sol@high`. Candidate: the port/routing-2 PR head.
-- Class: `bug` (fixed): batch-1 preference normalization converted truthy
+- Class: `bug` (fixed): batch-1 preference normalisation converted truthy
   non-string route statuses to `hard_route_rejected`; Python uses `str(status)`.
   The candidate differentials cover booleans, integers, lists, empty values,
   duplicate candidate IDs, availability observations and hard-admissibility.
 - Class: `bug` (fixed): batch-1 catalogue override validation swallowed invalid
   model-pattern regex errors and returned false. The library now propagates a
-  typed CatalogError, with a dedicated malformed-pattern regression.
+  typed `CatalogError`, with a dedicated malformed-pattern regression.
 - No new intentional divergence. RP-130402 remains open: both the catalogue
   and capability loader remain partial for multi-adapter family aliases.
   Partial preference ingress and pool migration still need Python dictionary
@@ -1699,7 +1699,7 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   such as `1e400`. CPython's default decoder accepts these as non-finite floats.
   This existing strict boundary is now explicit in the shared owner API; it is
   not a complete replacement for Python's dynamic JSON value model.
-- No normalization to null is implied: that behavior belongs to the Fabric
+- No normalisation to null is implied: that behavior belongs to the Fabric
   runtime's JavaScript adapter. Source-compatible preservation requires a
   dynamic number representation and error policy not yet exposed by the owner.
   Rejection fixtures cover this boundary; the encoder separately supports

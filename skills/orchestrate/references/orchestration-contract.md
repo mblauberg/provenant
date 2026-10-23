@@ -82,7 +82,7 @@ role names) live only in the adapters.
 
 ## Worker contract
 
-Every dispatched worker states task class, route tier, catalog model identity,
+Every dispatched worker states task class, route tier, catalogue model identity,
 effort, route receipt, identity, objective, authority, paths, output, checks,
 stop condition and budget. A worker that changes code or other observable
 behaviour also names its governing skill (for example, `tdd` under
@@ -90,7 +90,7 @@ behaviour also names its governing skill (for example, `tdd` under
 The binding is invalid if any route field is absent;
 validate payloads and never infer permission. When the native Codex surface
 exposes model and effort overrides, its worker binds both to the resolved route
-and records the catalog identity and effective effort. Claude records the runtime-discovered effective model and the admitted
+and records the catalogue identity and effective effort. Claude records the runtime-discovered effective model and the admitted
 probed effort, marked `provider-unverified`; its canary cannot observe effective
 effort.
 Forbid unpartitioned edits and out-of-scope git restore/checkout/stash. Stop

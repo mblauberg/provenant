@@ -83,10 +83,10 @@ Private pending items, each marked with its owner:
 - core: IntegerError/int coercion, timeout clamp/integer rendering, Unicode
   decimal digit lookup, isprintable (core's exact table remains private), and
   splitlines with/without endings. Adopt owner APIs when publicly available.
-- records: only negative integer zero normalization for ordered typed decoding.
-  Integer validation stays with checked_json; its normalize function is
+- records: only negative integer zero normalisation for ordered typed decoding.
+  Integer validation stays with checked_json; its normalise function is
   private and its public Value result loses dictionary order. Delete the
-  small normalization bridge when records exports checked typed decoding.
+  small normalisation bridge when records exports checked typed decoding.
 
 ## Evidence
 

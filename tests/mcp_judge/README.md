@@ -30,7 +30,7 @@ working directory. The default command is the Rust binary built by test support.
 
 ## Coverage
 
-`transcripts/protocol.jsonl` records initialization and `tools/list`, including
+`transcripts/protocol.jsonl` records initialisation and `tools/list`, including
 every tool name and input schema. `core.scenario.jsonl` drives tool calls and
 their expected replies. It covers every listed tool with a callback response and
 an error path. `fabric_dispatch` is limited to safe validation errors as
