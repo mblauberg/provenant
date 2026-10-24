@@ -104,6 +104,13 @@ enum Kind {
     HeadingGap,
     SentenceWords,
 }
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExclusionCheck {
+    #[default]
+    WholeMatch,
+    Start,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Rule {
@@ -123,6 +130,8 @@ struct Rule {
     reject_adjacent: Option<char>,
     #[serde(default)]
     words: usize,
+    #[serde(default)]
+    exclusion_check: ExclusionCheck,
 }
 struct CompiledRule {
     data: Rule,
@@ -343,9 +352,14 @@ impl Matcher {
                 }
             }
             for range in hits {
-                if rule.data.kind != Kind::SentenceWords
-                    && excluded[range.clone()].iter().any(|b| *b)
+                let ignored = if rule.data.kind == Kind::SentenceWords
+                    || matches!(rule.data.exclusion_check, ExclusionCheck::Start)
                 {
+                    excluded.get(range.start).copied().unwrap_or(false)
+                } else {
+                    excluded[range.clone()].iter().any(|b| *b)
+                };
+                if ignored {
                     continue;
                 }
                 let matched = &text[range.clone()];

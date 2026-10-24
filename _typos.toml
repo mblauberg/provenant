@@ -121,6 +121,22 @@ run_dir_finalize = "run_dir_finalize"
 "unparseable" = "unparseable"
 "unrecognized" = "unrecognized"
 
+# Literal US-spelling candidates and a real LaTeX environment in writing rules.
+"multline" = "multline"
+"analyze" = "analyze"
+"analyzed" = "analyzed"
+"analyzing" = "analyzing"
+"organize" = "organize"
+"organized" = "organized"
+"organizing" = "organizing"
+"recognize" = "recognize"
+"recognized" = "recognized"
+"recognizing" = "recognizing"
+"labeling" = "labeling"
+"center" = "center"
+"paralyze" = "paralyze"
+"catalyze" = "catalyze"
+
 [type.py.extend-identifiers]
 "Authorization" = "Authorization"
 "CATALOG" = "CATALOG"

@@ -96,7 +96,7 @@
         {"id": "academic.008", "message": "LaTeX prose em dash marker", "severity": "warning", "kind": "regex", "pattern": "---", "case_insensitive": false, "reject_adjacent": "-"},
         {"id": "academic.009", "message": "Generic placeholder", "severity": "warning", "kind": "regex", "pattern": "\\b(TODO|TBD|FIXME|insert result|citation needed)\\b", "case_insensitive": true},
         {"id": "academic.010", "message": "Citation placeholder", "severity": "warning", "kind": "regex", "pattern": "\\\\cite\\{(?:todo|TODO|missing|source|citation|ref)\\}", "case_insensitive": false},
-        {"id": "academic.011", "message": "Likely unescaped percent in prose", "severity": "warning", "kind": "regex", "pattern": "\\d+%", "case_insensitive": false}
+        {"id": "academic.011", "message": "Likely unescaped percent in prose", "severity": "warning", "kind": "regex", "pattern": "\\d+%", "case_insensitive": false, "exclusion_check": "start"}
       ]
     }
   }

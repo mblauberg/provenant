@@ -263,3 +263,24 @@ fn declared_minted_delimiters_exclude_the_payload_and_keep_following_prose() {
         assert_eq!(findings[0].start, source.len() + 1);
     }
 }
+
+#[test]
+fn academic_unescaped_percent_warns_only_when_number_starts_in_prose() {
+    let m = matcher(RuleSet::Academic);
+    let found = m
+        .scan(Path::new("chapter.tex"), "At 50% confidence.\n")
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    for source in [
+        r"At 50\% confidence.",
+        "$50%$",
+        r"\texttt{50%}",
+        "`50%`",
+        "% 50% comment\n",
+    ] {
+        assert!(
+            m.scan(Path::new("chapter.tex"), source).unwrap().is_empty(),
+            "{source}"
+        );
+    }
+}

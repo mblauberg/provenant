@@ -201,7 +201,6 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
         vec!["worktree", "create", "fixture"],
         vec!["worktree", "list"],
         vec!["worktree", "remove", "fixture"],
-        vec!["check", "writing", "fixture.md"],
         vec!["hook", "claude", "pre-tool-use"],
         vec!["hook", "claude", "pre-compact"],
         vec!["hook", "claude", "compact"],
