@@ -147,10 +147,14 @@ impl Default for ByteRange {
 pub enum ArtifactPart {
     Prompt,
     Result,
+    /// Supervisor's bounded stderr capture; possibly not UTF-8.
+    Stderr,
 }
 #[derive(Debug)]
 pub struct OutputChunk {
     pub bytes: Vec<u8>,
+    /// Total length of the artifact, for tail reads.
+    pub len: u64,
     pub offset: u64,
     pub next_offset: u64,
     pub eof: bool,
@@ -158,6 +162,28 @@ pub struct OutputChunk {
     pub complete: bool,
     pub encoding: &'static str,
     pub digest: provenant_records::FileDigest,
+}
+/// Exact lane selectors; task and attempt narrow a run.
+#[derive(Clone, Copy, Debug)]
+pub struct LaneTarget {
+    pub run: RunId,
+    pub task: Option<TaskId>,
+    pub attempt: Option<AttemptId>,
+}
+#[derive(Clone, Debug)]
+pub struct LaneQuery {
+    /// Exact selections include terminal lanes. Without them the page holds
+    /// active lanes, or every retained lane when `all` is set.
+    pub targets: Vec<LaneTarget>,
+    pub all: bool,
+    pub limit: u64,
+    /// Exclusive attempt-sequence cursor.
+    pub after: u64,
+}
+#[derive(Debug)]
+pub struct LanePage {
+    pub lanes: Vec<AttemptRecord>,
+    pub next: Option<u64>,
 }
 #[derive(Debug)]
 pub struct RunWorkSnapshot {
@@ -249,17 +275,29 @@ impl RunStore {
             });
         }
         let record = self.record(id, call)?;
-        let (artifact, limit) = match part {
-            ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
-            ArtifactPart::Result => (
-                record.result.as_ref().ok_or(RunError::Nonterminal)?,
-                RESULT_LIMIT,
-            ),
+        let (bytes, complete, digest) = match part {
+            ArtifactPart::Stderr => {
+                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let bytes = crate::artifacts::read_sealed(&dir, "stderr.log", CAPTURE_LIMIT)?
+                    .ok_or(RunError::Nonterminal)?;
+                let digest = provenant_records::CanonicalV1::file_digest(&bytes);
+                (bytes, true, digest)
+            }
+            ArtifactPart::Prompt | ArtifactPart::Result => {
+                let (artifact, limit) = match part {
+                    ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
+                    _ => (
+                        record.result.as_ref().ok_or(RunError::Nonterminal)?,
+                        RESULT_LIMIT,
+                    ),
+                };
+                let bytes = self.artifact_bytes(record.run_id, artifact, limit)?;
+                if std::str::from_utf8(&bytes).is_err() {
+                    return Err(RunError::Validation("prompt/result is not UTF-8"));
+                }
+                (bytes, artifact.complete, artifact.digest)
+            }
         };
-        let bytes = self.artifact_bytes(record.run_id, artifact, limit)?;
-        if std::str::from_utf8(&bytes).is_err() {
-            return Err(RunError::Validation("prompt/result is not UTF-8"));
-        }
         if range.offset > bytes.len() as u64 {
             return Err(RunError::Validation("offset past EOF"));
         }
@@ -279,19 +317,60 @@ impl RunStore {
             .to_vec();
         let encoding = if std::str::from_utf8(&chunk).is_ok() {
             "utf8"
+        } else if matches!(part, ArtifactPart::Stderr) {
+            "utf8-lossy"
         } else {
             "utf8-fragment"
         };
         Ok(OutputChunk {
             bytes: chunk,
+            len: bytes.len() as u64,
             offset: range.offset,
             next_offset: end,
             eof: end == bytes.len() as u64,
             clipped: end < bytes.len() as u64,
-            complete: artifact.complete,
+            complete,
             encoding,
-            digest: artifact.digest,
+            digest,
         })
+    }
+    pub fn lanes(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
+        if !(1..=100).contains(&query.limit) {
+            return Err(RunError::Validation("lane page bounds"));
+        }
+        let project = self.context.project_id.to_string();
+        let after = sql_int(query.after)?;
+        let fetch = sql_int(query.limit + 1)?;
+        let mut rows: Vec<(i64, String)> = call.retry(|| {
+            let mut found = Vec::new();
+            if query.targets.is_empty() {
+                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0) ORDER BY sequence LIMIT ?4")?;
+                let page = statement.query_map(params![project, after, query.all, fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for row in page { found.push(row?); }
+            }
+            for target in &query.targets {
+                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence LIMIT ?6")?;
+                let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for row in page { found.push(row?); }
+            }
+            Ok(found)
+        })?;
+        rows.sort();
+        rows.dedup();
+        let more = rows.len() as u64 > query.limit;
+        rows.truncate(query.limit as usize);
+        let next = more
+            .then(|| rows.last().map(|(sequence, _)| *sequence as u64))
+            .flatten();
+        let lanes = rows
+            .into_iter()
+            .map(|(_, id)| {
+                AttemptId::parse(&id)
+                    .map_err(|_| RunError::Validation("attempt index ID"))
+                    .and_then(|id| self.record(id, call))
+            })
+            .collect::<Result<_>>()?;
+        Ok(LanePage { lanes, next })
     }
     pub fn events(&self, after: u64, limit: usize, call: &Request<'_>) -> Result<Vec<RunEvent>> {
         if !(1..=64).contains(&limit) {
