@@ -1142,6 +1142,78 @@ fn regular_user_instructions_are_preserved_with_manual_include_advice() {
 }
 
 #[test]
+fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenced() {
+    let mut f = Fixture::new();
+    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
+    let shared = f.home.join(".agents/AGENTS.md");
+    fs::create_dir_all(shared.parent().unwrap()).unwrap();
+    fs::create_dir_all(f.targets.legacy_checkout.as_ref().unwrap()).unwrap();
+    fs::write(
+        f.targets
+            .legacy_checkout
+            .as_ref()
+            .unwrap()
+            .join("AGENTS.md"),
+        "legacy instructions",
+    )
+    .unwrap();
+    symlink(
+        f.targets
+            .legacy_checkout
+            .as_ref()
+            .unwrap()
+            .join("AGENTS.md"),
+        &shared,
+    )
+    .unwrap();
+    let instruction = f.home.join(".codex/AGENTS.md");
+    fs::create_dir_all(instruction.parent().unwrap()).unwrap();
+    fs::write(
+        &instruction,
+        "See ~/.agents/AGENTS.md for shared instructions",
+    )
+    .unwrap();
+
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let outcome = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    assert!(outcome.manual_includes.is_empty());
+    assert!(shared.is_symlink());
+    assert_eq!(
+        fs::read_to_string(&instruction).unwrap(),
+        "See ~/.agents/AGENTS.md for shared instructions"
+    );
+}
+
+#[test]
+fn legacy_link_targets_match_after_canonicalization() {
+    let f = Fixture::new();
+    let checkout = f.home.join("LegacyCheckout");
+    fs::create_dir_all(&checkout).unwrap();
+    let alias = f.home.join("checkout-alias");
+    symlink(&checkout, &alias).unwrap();
+
+    let actual = alias.join("AGENTS.md");
+    let expected = checkout.join("AGENTS.md");
+    fs::write(&expected, "legacy instructions").unwrap();
+    assert!(crate::managed::same_link_target(&actual, &expected));
+
+    let case_variant = f.home.join("legacycheckout/AGENTS.md");
+    if case_variant.exists() {
+        assert!(crate::managed::same_link_target(&case_variant, &expected));
+    }
+}
+
+#[test]
 fn completed_immutable_release_missing_a_file_is_not_repaired() {
     let f = Fixture::new();
     let plan = f.plan();
@@ -1893,12 +1965,38 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     assert_eq!(
         err.to_string(),
         format!(
-            "symlinked or non-regular harness config refused: {}",
+            "symlinked or non-regular harness config refused: {}; replace the link with a regular copy, then rerun install",
             config.display()
         )
     );
     assert_eq!(fs::read_to_string(&regular).unwrap(), "model='keep'\n");
     assert!(!f.targets.roots.state.as_path().exists());
+
+    let mut claude = Fixture::new();
+    claude.targets = Targets::new(
+        claude.targets.roots.clone(),
+        &claude.home,
+        &[Harness::Claude],
+    );
+    let settings = claude.home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let regular_settings = claude.home.join("regular-settings.json");
+    fs::write(&regular_settings, "{\"keep\":true}\n").unwrap();
+    symlink(&regular_settings, &settings).unwrap();
+    let release = claude.release();
+    let err = Snapshots::capture(&release, &claude.targets, &LocalFs).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "symlinked or non-regular harness config refused: {}; replace the link with a regular copy, then rerun install",
+            settings.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(&regular_settings).unwrap(),
+        "{\"keep\":true}\n"
+    );
+    assert!(!claude.targets.roots.state.as_path().exists());
 }
 
 #[test]

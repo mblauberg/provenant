@@ -623,7 +623,7 @@ pub(crate) fn snapshot_target(
                         ..
                     }) = managed::snapshot(&directory, fs)?
                 {
-                    if actual == link.target {
+                    if managed::same_link_target(actual, &link.target) {
                         return Ok(None);
                     }
                     return Err(InstallError::Conflict(directory));
@@ -1032,7 +1032,7 @@ fn legacy_links(
                     Some(Snapshot {
                         value: Value::Link(actual),
                         ..
-                    }) if actual == link.target => {
+                    }) if managed::same_link_target(&actual, &link.target) => {
                         if link.retained {
                             if targets.hooks {
                                 if let Some(spec) = targets
@@ -1104,7 +1104,7 @@ fn legacy_links(
                 value: Value::Link(actual),
                 ..
             }) = snap
-                && actual == link.target
+                && managed::same_link_target(&actual, &link.target)
             {
                 plan.authorised.insert(path.clone());
                 if !link.retained {
@@ -1204,7 +1204,7 @@ pub(crate) fn check_legacy(
                 if link.name.is_empty() {
                     blocked.push(path.clone());
                 }
-                if actual == link.target {
+                if managed::same_link_target(&actual, &link.target) {
                     add_finding(findings, "legacy_entry", &path)?;
                 }
             }
@@ -1264,7 +1264,7 @@ pub(crate) fn check_legacy(
                 Some(Snapshot {
                     value: Value::Link(actual),
                     ..
-                }) if actual == link.target => {
+                }) if managed::same_link_target(&actual, &link.target) => {
                     add_finding(findings, "legacy_entry", &path)?;
                 }
                 Some(current)
@@ -1281,7 +1281,7 @@ pub(crate) fn check_legacy(
     }
     let path = home.join(".agents/AGENTS.md");
     let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
-    if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if link==&checkout.join("AGENTS.md"))
+    if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if managed::same_link_target(link, &checkout.join("AGENTS.md")))
     {
         add_finding(findings, "legacy_entry", &path)?;
     }

@@ -387,7 +387,7 @@ fn output_install(
             let mut human = format!("{command}:\n");
             for (target, count) in counts {
                 human.push_str(&format!(
-                    "  {target}: {} links, {} hooks, {} MCP, {} notes; {} findings; {} other\n",
+                    "  {target}: {} changed links, {} changed hooks, {} changed MCP, {} notes; {} findings; {} other\n",
                     count.links, count.hooks, count.mcp, count.notes, count.findings, count.other
                 ));
             }
