@@ -1,5 +1,9 @@
 # Spec: harness operating model for routing, cache, quota and telemetry
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **accepted** by the user on 2026-10-21 (r2, after a
 `codex/gpt-6.1-sol@high` review); r3 folds in the user's review answers. GitHub owns delivery state; this file owns
 the durable requirements. It grants no authority beyond what the user approves

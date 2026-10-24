@@ -105,15 +105,3 @@ that the root `SKILL.md` branch selector, the shared doctrine section, or
 `references/author.md` derive from this source — `references/author.md`
 continues the harness-original lineage of the former `skill-authoring` skill,
 which carried no third-party attribution.
-
-
-
-## Token Meter
-
-`scripts/provider_quota.py` and `scripts/quota_providers/` adapt quota acquisition,
-window parsing and pace calculations from
-[Token Meter](https://github.com/splunk/token-meter), copyright 2026 Galileo Agent
-Labs, under the MIT License. The reference snapshot's model catalogue was also
-cross-checked as a secondary pricing source. The licence text is
-`LICENSES/token-meter-MIT.txt`. Provenant uses Python's standard library on demand;
-it does not depend on Token Meter's application, server or updater.
