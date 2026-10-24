@@ -91,10 +91,21 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
     )
 }
 fn show_config(globals: &provenant_cli::Globals) -> u8 {
+    config_command("config show", None, globals)
+}
+/// Apply an optional knob edit, then print the effective config read back.
+fn config_command(
+    command: &str,
+    edit: Option<provenant_config::KnobEdit>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let assets = roots::product_root()?;
         let project = roots::selected_project(globals.project.as_deref(), false)?;
         let roots = roots::roots(globals, &assets, &project)?;
+        if let Some(edit) = edit {
+            provenant_config::edit_config(&roots, &provenant_supervisor::fs::LocalFs, edit)?;
+        }
         Ok(provenant_config::config_show(
             &roots,
             &provenant_supervisor::fs::LocalFs,
@@ -104,13 +115,13 @@ fn show_config(globals: &provenant_cli::Globals) -> u8 {
     match result {
         Ok(config) => match serde_json::to_string_pretty(&config) {
             Ok(text) => emit(
-                &CommandResult::new("config show", Outcome::Ok, config),
+                &CommandResult::new(command, Outcome::Ok, config),
                 globals,
                 &format!("{text}\n"),
                 true,
             ),
             Err(_) => fail(
-                "config show",
+                command,
                 Outcome::Error,
                 "ENCODE",
                 "cannot encode config",
@@ -126,7 +137,7 @@ fn show_config(globals: &provenant_cli::Globals) -> u8 {
                 | None => Outcome::Error,
                 Some(_) => Outcome::Invalid,
             };
-            fail("config show", status, "CONFIG", &error.to_string(), globals)
+            fail(command, status, "CONFIG", &error.to_string(), globals)
         }
     }
 }
@@ -212,6 +223,23 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             globals,
         ),
         Command::Config(provenant_cli::Config::Show) => show_config(globals),
+        Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
+            "config set",
+            Some(if name == "profile" {
+                provenant_config::KnobEdit::Profile(&value)
+            } else {
+                provenant_config::KnobEdit::Set {
+                    name: &name,
+                    value: &value,
+                }
+            }),
+            globals,
+        ),
+        Command::Config(provenant_cli::Config::Unset { name }) => config_command(
+            "config unset",
+            Some(provenant_config::KnobEdit::Unset(&name)),
+            globals,
+        ),
         Command::Fabric(provenant_cli::Fabric::Mcp { client }) => fabric::mcp(client, globals),
         Command::Fabric(provenant_cli::Fabric::Peer) => fabric::peer(globals),
         Command::Fabric(provenant_cli::Fabric::Host(_)) => fabric::hosts(globals),

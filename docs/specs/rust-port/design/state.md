@@ -34,7 +34,7 @@ requirement.
 | Drop | Reason and consequence |
 | --- | --- |
 | Fused/split roots, root pointers, seeded defaults and three-way refresh | Fresh state and immutable release assets remove copied catalogue reconciliation. No `AGENTS_HOME`, `AGENT_FABRIC_*` root fallback or per-command stale-checkout probe. |
-| Profile mutation, overlays and knob registry | No `config set/reset/profiles`, project `.provenant.toml`, task-class tables, `PROVENANT_PROFILE` or `PROVENANT_KNOB_*`; no strengthen-only re-resolution. Domain policy still enforces authority, confinement and review minima. |
+| Profile mutation, overlays and knob registry | `config set` and `unset` return (user decision, #1118) over the embedded registry and a `[knobs]` table; still no `config reset/profiles`, project `.provenant.toml`, task-class tables, `PROVENANT_PROFILE` or `PROVENANT_KNOB_*`; no strengthen-only re-resolution. Domain policy still enforces authority, confinement and review minima. |
 | Generic installer transactions | No bundle/plan/apply/recover commands, plan digest, rollback journal, exchange primitive or binary backup. Re-apply `install` after failure; rollback reinstalls `pre-rust-rewrite`. |
 | Kiro registration | No observed use; do not carry another unsupported client. |
 | `_shared`, JS workflows and old link layouts | Replace retained skills individually; remove exact retired links at cut-over. Do not migrate custom skill contents or read old receipts. |
@@ -574,8 +574,9 @@ fast and targeted; full workspace/harness and platform checks run in CI.
 
 `config show` now binds `config_show` with the complete registered domain
 aggregate. Compiled `Profile` and the single typed `config.toml` replace the
-profile CLI's layered JSON knob registry and mutation commands. There is no
-replacement for profile mutation; edit the user-owned TOML explicitly.
+profile CLI's layered JSON knob layers. `config set`/`unset` edit `profile` and
+the `[knobs]` table (default, then profile preset, then override) against the
+embedded `config/harness-knobs.json`.
 
 `config::bind_host` owns the random host ID in the selected state's `host-id`.
 The old hostname slug, `hosts.json` alias migration and telemetry host aliases

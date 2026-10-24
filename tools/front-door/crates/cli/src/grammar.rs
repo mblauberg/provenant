@@ -93,7 +93,13 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 }
 #[derive(Debug, Subcommand)]
 pub enum Config {
+    /// Print the effective configuration and knobs with their source layer.
     Show,
+    /// Set `profile` (balanced, economy or rigorous) or a registry knob such
+    /// as `lanes.max_concurrency`; `null` clears a nullable knob.
+    Set { name: String, value: String },
+    /// Remove a knob override so the profile preset or default applies.
+    Unset { name: String },
 }
 
 pub use crate::install::{Install, Uninstall};

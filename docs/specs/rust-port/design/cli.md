@@ -48,6 +48,8 @@ provenant
   help [COMMAND…]
   root
   config show
+  config set NAME VALUE
+  config unset KNOB
   install
   uninstall
   route list | resolve
@@ -98,8 +100,11 @@ through as those tools define them; there are no other `PROVENANT_*` or
 `AGENT_FABRIC_*` inputs. For an uninstalled development binary only, state's explicit `PROVENANT_ROOT`
 selects asset fixtures; an installed binary ignores it.
 Config is one user-owned `config.toml`, optionally
-with `profile =`; no overlays, layering, mutation verbs or per-knob variables.
-`config show` renders the resolved typed config with secrets redacted.
+with `profile =` and a `[knobs]` override table; no overlays, layering or
+per-knob variables. `config show` renders the resolved typed config with
+secrets redacted and each registry knob with its source (default, profile or
+override). `config set` and `config unset` validate against
+`config/harness-knobs.json` and atomically rewrite `config.toml`.
 
 Unknown/duplicate singleton/conflicting options fail. Only explicitly marked
 selectors repeat. Durations/counts are bounded integers; IDs are newtypes;
@@ -192,6 +197,8 @@ satisfied as the run grammar states. Two shorthands recur:
 | `help` | `help [COMMAND…]` | records `HelpCatalogue` | Pure; no root, SQLite, threads or probes. |
 | `root` | `root` | core `Roots` plus config installation identity | No flags. Reports asset root, state directory, selected project and installation together; state's `--kind` is dropped because `--json` already separates fields and global `--project` selects. |
 | `config show` | `config show` | config `load` → `ResolvedConfig` | No flags; secrets redacted. |
+| `config set` | `config set NAME VALUE` | config `edit_config` | `NAME` is `profile` or a registry knob; `null` clears a nullable knob. Unknown knobs list close matches. Prints the config read back. |
+| `config unset` | `config unset KNOB` | config `edit_config` | Removes the `[knobs]` override. |
 | `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
 | `uninstall` | `uninstall --harness NAME…` | config `uninstall` | At least one harness; unchanged owned entries only. |
 | `route list` | `route list [--adapter ADAPTER]` | routing `RouteListQuery { adapter }` | Unpaged bounded catalogue; no probe. |

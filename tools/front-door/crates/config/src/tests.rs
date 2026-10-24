@@ -129,7 +129,7 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
             "schema_version=1\ninclude='private-sentinel'",
             "unknown_key",
         ),
-        ("schema_version=1\n[knobs]", "unknown_key"),
+        ("schema_version=1\n[knobs]\nnope=1", "unknown_key"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=18446744073709551616", "syntax"),
@@ -952,4 +952,68 @@ fn empty_compiled_closed_section_rejects_unknown_keys() {
         )
         .is_err()
     );
+}
+
+fn state_roots(dir: &Path) -> Roots {
+    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+    inputs.state_dir = Some(dir.into());
+    inputs.resolve(&Resolver).unwrap()
+}
+#[test]
+fn set_knob_is_written_atomically_and_shown_with_its_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let fs = provenant_supervisor::fs::LocalFs;
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "schema_version = 1 # keep\n").unwrap();
+    edit_config(&roots, &fs, KnobEdit::Profile("economy")).unwrap();
+    edit_config(
+        &roots,
+        &fs,
+        KnobEdit::Set {
+            name: "lanes.max_concurrency",
+            value: "2",
+        },
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("# keep"));
+    let shown = read(&roots, &fs).unwrap();
+    assert_eq!(shown.profile, Profile::Economy);
+    let knob = &shown.knobs["lanes.max_concurrency"];
+    assert_eq!(
+        (knob.value.as_i64(), knob.source),
+        (Some(2), KnobSource::Override)
+    );
+    assert_eq!(
+        shown.knobs["context.ceiling_tokens"].source,
+        KnobSource::Profile
+    );
+    edit_config(&roots, &fs, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
+    let shown = read(&roots, &fs).unwrap();
+    assert_eq!(
+        shown.knobs["lanes.max_concurrency"].source,
+        KnobSource::Profile
+    );
+}
+#[test]
+fn set_rejects_out_of_range_values_and_unknown_knobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let fs = provenant_supervisor::fs::LocalFs;
+    let set = |name, value| edit_config(&roots, &fs, KnobEdit::Set { name, value });
+    assert!(matches!(
+        set("lanes.max_concurrency", "99"),
+        Err(ConfigError::KnobValue {
+            rule: "outside_allowed_range",
+            ..
+        })
+    ));
+    match set("lanes.max_concurency", "2") {
+        Err(ConfigError::UnknownKnob { close, .. }) => {
+            assert_eq!(close, ["lanes.max_concurrency"]);
+        }
+        other => panic!("expected unknown knob, got {other:?}"),
+    }
+    assert!(!dir.path().join("config.toml").exists());
 }

@@ -153,7 +153,7 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         input_digest,
     })
 }
-fn open(
+pub(crate) fn open(
     roots: &Roots,
     fs: &impl SafeFs,
 ) -> Result<Option<Box<dyn provenant_supervisor::fs::SafeFile>>, ConfigError> {
@@ -219,6 +219,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         crate::InstallSettings::default()
     };
 
+    let knobs_item = user.remove("knobs");
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -236,6 +237,15 @@ fn inspect<T: DeserializeOwned + Serialize>(
         Some("rigorous") => Profile::Rigorous,
         _ => Profile::Balanced,
     };
+    let overrides = knobs_item.as_ref().map(Item::as_table_like);
+    let not_table = matches!(overrides, Some(None));
+    let knobs = crate::knobs::resolve(profile, overrides.flatten()).map_err(|(key, rule)| {
+        let key = if not_table { "knobs" } else { &key };
+        ConfigError::Schema {
+            location: site(&user_sites, key, &user_origin, false),
+            rule: if not_table { "type" } else { rule },
+        }
+    })?;
     let compiled = Origin::Compiled { profile };
     let header = match profile {
         Profile::Balanced => "schema_version=1\nprofile='balanced'",
@@ -352,6 +362,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             profile: header.profile,
             domains,
             install,
+            knobs,
             origins,
         },
         issues,
@@ -717,7 +728,7 @@ fn same_kind(a: &Item, b: &Item) -> bool {
     )
 }
 
-fn bounded_text(reader: impl Read, path: &Path) -> Result<String, ConfigError> {
+pub(crate) fn bounded_text(reader: impl Read, path: &Path) -> Result<String, ConfigError> {
     let mut bytes = Vec::new();
     reader
         .take(Limits::CONFIG.max_bytes + 1)
