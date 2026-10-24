@@ -1089,9 +1089,6 @@ impl RunOwner for BinaryRunOwner<'_> {
                 &self.factory.cwd,
             )
             .map_err(fail_error)?;
-            if !task.inputs.is_empty() {
-                return Err(FacadeError::InvalidInput);
-            }
             let route = &task.route;
             let model = match (&route.adapter, &route.model) {
                 (_, Some(model)) if model.contains('/') => Some(model.clone()),
@@ -1101,7 +1098,11 @@ impl RunOwner for BinaryRunOwner<'_> {
             };
             let name = match model {
                 Some(_) => None,
-                None => route.role.as_deref().or(route.task_class.as_deref()),
+                None => route
+                    .route
+                    .as_deref()
+                    .or(route.role.as_deref())
+                    .or(route.task_class.as_deref()),
             };
             submitted.push(Submitted {
                 task_class: route.task_class.clone(),
@@ -1503,7 +1504,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 access,
                 worktree: worktree.map(str::to_owned),
                 prompt: prompt.into(),
-                inputs: vec![],
                 route: RoutePreference {
                     adapter: Some(route.adapter.clone()),
                     model: route.model.clone(),

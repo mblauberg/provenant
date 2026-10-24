@@ -398,15 +398,6 @@ impl ValidateInput for SubmitInput {
                     let path = format!("tasks[{index}]");
                     task_text(&task.prompt, &format!("{path}.prompt"))?;
                     optional_text(task.account.as_deref(), &format!("{path}.account"), 64)?;
-                    if task.inputs.len() > 100 {
-                        return Err(field(&format!("{path}.inputs")));
-                    }
-                    for (input_index, reference) in task.inputs.iter().enumerate() {
-                        artifact(
-                            reference,
-                            &format!("{path}.inputs[{input_index}].path.path"),
-                        )?;
-                    }
                     optional_text(
                         task.worktree.as_deref(),
                         &format!("{path}.worktree"),
