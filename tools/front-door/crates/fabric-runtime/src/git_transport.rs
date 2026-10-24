@@ -30,12 +30,27 @@ const PATH_VALUE: &str = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/opt/lo
 const BUNDLE_DIR_MODE: u32 = 0o700;
 const LANDING_REMOTE: &str = "origin";
 
+pub fn discover_git_executable() -> Option<PathBuf> {
+    [
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+        "/opt/local/bin/git",
+        "/usr/bin/git",
+        "/bin/git",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| provenant_supervisor::sys::is_executable(path))
+}
+
 #[derive(Debug, Error)]
 pub enum GitTransportError {
     #[error("invalid Git transport input: {0}")]
     Invalid(&'static str),
     #[error("no supported executable Git was found")]
     GitUnavailable,
+    #[error("no supported executable SSH was found")]
+    SshUnavailable,
     #[error("Git transport process failed during {command}")]
     GitCommand { command: &'static str },
     #[error("Git process output was incomplete during {command}")]
@@ -50,7 +65,7 @@ pub enum GitTransportError {
     OidMismatch,
     #[error("candidate is not a fast-forward from the expected commit")]
     NonFastForward,
-    #[error("Git bundle exceeds the 64 MiB transport bound")]
+    #[error("Git bundle exceeds the configured transport bound")]
     BundleTooLarge,
     #[error("Git bundle publication is visible but its directory sync failed")]
     BundleDurabilityUnconfirmed,
@@ -133,7 +148,7 @@ impl BundleArea {
         self.path.join(name)
     }
 
-    fn read_bundle(&self, name: &OsStr) -> Result<Vec<u8>> {
+    fn read_bundle(&self, name: &OsStr, max_bytes: usize) -> Result<Vec<u8>> {
         let mut file = self.directory.open_read(name)?;
         let metadata = file.metadata()?;
         let area = self.directory.metadata()?;
@@ -143,7 +158,12 @@ impl BundleArea {
         {
             return Err(GitTransportError::Invalid("bundle file identity"));
         }
-        let bytes = file.read_bounded(MAX_BUNDLE_BYTES as u64)?;
+        let bytes = file
+            .read_bounded(max_bytes as u64)
+            .map_err(|error| match error {
+                FsError::TooLarge { .. } => GitTransportError::BundleTooLarge,
+                other => GitTransportError::Filesystem(other),
+            })?;
         if bytes.is_empty() {
             return Err(GitTransportError::Invalid("empty Git bundle"));
         }
@@ -185,7 +205,9 @@ pub struct TransportedHead {
 pub struct GitTransport<'a> {
     executor: &'a dyn Executor,
     git_executable: PathBuf,
+    ssh_executable: PathBuf,
     ssh_auth_sock: Option<PathBuf>,
+    max_bundle_bytes: usize,
 }
 impl<'a> GitTransport<'a> {
     pub fn new(
@@ -193,10 +215,36 @@ impl<'a> GitTransport<'a> {
         git_executable: PathBuf,
         ssh_auth_sock: Option<PathBuf>,
     ) -> Result<Self> {
+        let ssh_executable = crate::hosts::discover_ssh_executable(None)
+            .map_err(|_| GitTransportError::SshUnavailable)?;
+        Self::new_with_policy(
+            executor,
+            git_executable,
+            ssh_executable,
+            ssh_auth_sock,
+            MAX_BUNDLE_BYTES,
+        )
+    }
+
+    fn new_with_policy(
+        executor: &'a dyn Executor,
+        git_executable: PathBuf,
+        ssh_executable: PathBuf,
+        ssh_auth_sock: Option<PathBuf>,
+        max_bundle_bytes: usize,
+    ) -> Result<Self> {
         if !git_executable.is_absolute()
             || !provenant_supervisor::sys::is_executable(&git_executable)
         {
             return Err(GitTransportError::GitUnavailable);
+        }
+        if !crate::config::valid_executable_override(&ssh_executable)
+            || !provenant_supervisor::sys::is_executable(&ssh_executable)
+        {
+            return Err(GitTransportError::SshUnavailable);
+        }
+        if max_bundle_bytes == 0 || max_bundle_bytes > MAX_BUNDLE_BYTES {
+            return Err(GitTransportError::Invalid("Git bundle limit"));
         }
         if ssh_auth_sock
             .as_ref()
@@ -207,24 +255,34 @@ impl<'a> GitTransport<'a> {
         Ok(Self {
             executor,
             git_executable,
+            ssh_executable,
             ssh_auth_sock,
+            max_bundle_bytes,
         })
     }
 
     pub fn discover(executor: &'a dyn Executor, ssh_auth_sock: Option<PathBuf>) -> Result<Self> {
-        let candidates = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/opt/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ];
-        let git = candidates
-            .iter()
-            .map(PathBuf::from)
-            .find(|path| provenant_supervisor::sys::is_executable(path))
-            .ok_or(GitTransportError::GitUnavailable)?;
-        Self::new(executor, git, ssh_auth_sock)
+        Self::discover_with_policy(executor, ssh_auth_sock, None, MAX_BUNDLE_BYTES as u64)
+    }
+
+    pub fn discover_with_policy(
+        executor: &'a dyn Executor,
+        ssh_auth_sock: Option<PathBuf>,
+        ssh_executable: Option<&Path>,
+        bundle_bytes: u64,
+    ) -> Result<Self> {
+        if bundle_bytes == 0 || bundle_bytes > MAX_BUNDLE_BYTES as u64 {
+            return Err(GitTransportError::Invalid("Git bundle limit"));
+        }
+        let git = discover_git_executable().ok_or(GitTransportError::GitUnavailable)?;
+        let ssh = crate::hosts::discover_ssh_executable(ssh_executable).map_err(|_| {
+            if ssh_executable.is_some() {
+                GitTransportError::Invalid("SSH executable")
+            } else {
+                GitTransportError::SshUnavailable
+            }
+        })?;
+        Self::new_with_policy(executor, git, ssh, ssh_auth_sock, bundle_bytes as usize)
     }
 
     /// Create and retain a bounded bundle containing the exact committed range
@@ -250,7 +308,7 @@ impl<'a> GitTransport<'a> {
         let name = bundle_name(operation);
         match area.directory.metadata_at(&name, false) {
             Ok(_) => {
-                let bytes = area.read_bundle(&name)?;
+                let bytes = area.read_bundle(&name, self.max_bundle_bytes)?;
                 self.verify_bundle(repository, area, &name, base, head, cancel)?;
                 return Ok(GitBundle {
                     operation: operation.clone(),
@@ -298,7 +356,7 @@ impl<'a> GitTransport<'a> {
             repository,
             &args,
             None,
-            MAX_BUNDLE_BYTES,
+            self.max_bundle_bytes,
             cancel,
         )?;
         if outcome.termination != Termination::Exit(0) {
@@ -306,7 +364,7 @@ impl<'a> GitTransport<'a> {
                 command: "bundle create",
             });
         }
-        if outcome.stdout.bytes.is_empty() || outcome.stdout.bytes.len() > MAX_BUNDLE_BYTES {
+        if outcome.stdout.bytes.is_empty() || outcome.stdout.bytes.len() > self.max_bundle_bytes {
             return Err(GitTransportError::BundleTooLarge);
         }
         match area.directory.atomic_write(
@@ -320,7 +378,7 @@ impl<'a> GitTransport<'a> {
                 return Err(GitTransportError::BundleDurabilityUnconfirmed);
             }
             Err(error) if error.is_exists() => {
-                if area.read_bundle(&name)? != outcome.stdout.bytes {
+                if area.read_bundle(&name, self.max_bundle_bytes)? != outcome.stdout.bytes {
                     return Err(GitTransportError::TransportConflict);
                 }
             }
@@ -356,7 +414,7 @@ impl<'a> GitTransport<'a> {
         // inode and retains its descriptor. The owner never unlinks these
         // lock files; Store separately binds the landing guard to its directory.
         let _held_writer = writer;
-        if bytes.is_empty() || bytes.len() > MAX_BUNDLE_BYTES {
+        if bytes.is_empty() || bytes.len() > self.max_bundle_bytes {
             return Err(GitTransportError::BundleTooLarge);
         }
         self.ensure_clean_worktree(repository, cancel)?;
@@ -373,7 +431,7 @@ impl<'a> GitTransport<'a> {
                 return Err(GitTransportError::BundleDurabilityUnconfirmed);
             }
             Err(error) if error.is_exists() => {
-                if area.read_bundle(&name)? != bytes {
+                if area.read_bundle(&name, self.max_bundle_bytes)? != bytes {
                     return Err(GitTransportError::TransportConflict);
                 }
             }
@@ -582,20 +640,24 @@ impl<'a> GitTransport<'a> {
             OsString::from("--no-replace-objects"),
             OsString::from("--literal-pathspecs"),
         ];
+        let ssh_command = format!(
+            "core.sshCommand={} -oBatchMode=yes",
+            self.ssh_executable.display()
+        );
         for setting in [
-            "core.hooksPath=/dev/null",
-            "core.sshCommand=/usr/bin/ssh -oBatchMode=yes",
-            "core.fsmonitor=false",
-            "core.attributesFile=/dev/null",
-            "core.fsmonitorHookVersion=0",
-            "credential.helper=",
-            "credential.interactive=false",
-            "protocol.allow=never",
-            "protocol.file.allow=always",
-            "protocol.ssh.allow=always",
-            "protocol.https.allow=always",
-            "protocol.http.allow=always",
-            "core.bare=false",
+            "core.hooksPath=/dev/null".to_owned(),
+            ssh_command,
+            "core.fsmonitor=false".to_owned(),
+            "core.attributesFile=/dev/null".to_owned(),
+            "core.fsmonitorHookVersion=0".to_owned(),
+            "credential.helper=".to_owned(),
+            "credential.interactive=false".to_owned(),
+            "protocol.allow=never".to_owned(),
+            "protocol.file.allow=always".to_owned(),
+            "protocol.ssh.allow=always".to_owned(),
+            "protocol.https.allow=always".to_owned(),
+            "protocol.http.allow=always".to_owned(),
+            "core.bare=false".to_owned(),
         ] {
             argv.push(OsString::from("-c"));
             argv.push(OsString::from(setting));
@@ -648,6 +710,9 @@ impl<'a> GitTransport<'a> {
         options.cancel = Some(cancel);
         options.stop_on_output_limit = true;
         let outcome = self.executor.execute(options)?;
+        if command == "bundle create" && outcome.overflow_stopped {
+            return Err(GitTransportError::BundleTooLarge);
+        }
         if outcome.timed_out
             || outcome.cancelled
             || outcome.overflow_stopped
@@ -1206,7 +1271,10 @@ fn validate_remote_url(remote: &str) -> Result<()> {
 mod tests {
     use super::*;
     use provenant_core::{CancelToken, Clock, MonoTime, TestClock, WaitBudget, WallTime};
-    use provenant_supervisor::{exec::SystemExecutor, fs::Directory};
+    use provenant_supervisor::{
+        exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, SystemExecutor},
+        fs::Directory,
+    };
     use std::{fs, os::unix::fs::PermissionsExt};
 
     struct Fixture {
@@ -1234,6 +1302,48 @@ mod tests {
 
     fn transport_with_executor(executor: &SystemExecutor) -> GitTransport<'_> {
         GitTransport::discover(executor, None).unwrap()
+    }
+
+    struct OverflowBundleExecutor {
+        inner: SystemExecutor,
+    }
+    impl Executor for OverflowBundleExecutor {
+        fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
+            if options.argv.iter().any(|arg| arg == "bundle")
+                && options.argv.iter().any(|arg| arg == "create")
+            {
+                return Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: CapturedStream::default(),
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: true,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                });
+            }
+            self.inner.execute(options)
+        }
+    }
+
+    struct CaptureCommandExecutor {
+        argv: std::sync::Mutex<Option<Vec<OsString>>>,
+    }
+    impl Executor for CaptureCommandExecutor {
+        fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
+            *self.argv.lock().unwrap() = Some(options.argv.to_vec());
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream::default(),
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
     }
 
     fn git(transport: &GitTransport<'_>, cwd: &Path, args: &[&str]) -> String {
@@ -1362,6 +1472,159 @@ mod tests {
                 .read_ref(&receiver, &transported.reference, &fixture.cancel)
                 .unwrap(),
             Some(head)
+        );
+    }
+
+    #[test]
+    fn bundle_output_overflow_maps_to_bundle_too_large() {
+        let fixture = Fixture::new();
+        let executor = SystemExecutor::new(2).unwrap();
+        let setup = transport_with_executor(&executor);
+        let repo = fixture.root.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(
+            &setup,
+            fixture.root.path(),
+            &["init", "-b", "main", repo.to_str().unwrap()],
+        );
+        git(
+            &setup,
+            &repo,
+            &[
+                "-c",
+                "user.name=Fabric Test",
+                "-c",
+                "user.email=fabric@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let base = setup.head(&repo, &fixture.cancel).unwrap();
+        git(
+            &setup,
+            &repo,
+            &[
+                "-c",
+                "user.name=Fabric Test",
+                "-c",
+                "user.email=fabric@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "head",
+            ],
+        );
+        let head = setup.head(&repo, &fixture.cancel).unwrap();
+        let overflow = OverflowBundleExecutor {
+            inner: SystemExecutor::new(2).unwrap(),
+        };
+        let transport = GitTransport::discover(&overflow, None).unwrap();
+
+        assert!(matches!(
+            transport.create_bundle(
+                &repo,
+                &fixture.area("bundles"),
+                &OperationId::parse("overflow").unwrap(),
+                base,
+                head,
+                &fixture.cancel,
+            ),
+            Err(GitTransportError::BundleTooLarge)
+        ));
+    }
+
+    #[test]
+    fn configured_bundle_byte_limit_is_enforced() {
+        let fixture = Fixture::new();
+        let executor = SystemExecutor::new(2).unwrap();
+        let setup = transport_with_executor(&executor);
+        let repo = fixture.root.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(
+            &setup,
+            fixture.root.path(),
+            &["init", "-b", "main", repo.to_str().unwrap()],
+        );
+        git(
+            &setup,
+            &repo,
+            &[
+                "-c",
+                "user.name=Fabric Test",
+                "-c",
+                "user.email=fabric@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let base = setup.head(&repo, &fixture.cancel).unwrap();
+        git(
+            &setup,
+            &repo,
+            &[
+                "-c",
+                "user.name=Fabric Test",
+                "-c",
+                "user.email=fabric@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "head",
+            ],
+        );
+        let head = setup.head(&repo, &fixture.cancel).unwrap();
+        let transport = GitTransport::discover_with_policy(&executor, None, None, 1).unwrap();
+
+        assert!(matches!(
+            transport.create_bundle(
+                &repo,
+                &fixture.area("bundles"),
+                &OperationId::parse("small-limit").unwrap(),
+                base,
+                head,
+                &fixture.cancel,
+            ),
+            Err(GitTransportError::BundleTooLarge)
+        ));
+    }
+
+    #[test]
+    fn configured_ssh_executable_is_used_for_git_remotes() {
+        let executor = CaptureCommandExecutor {
+            argv: std::sync::Mutex::new(None),
+        };
+        let transport = GitTransport::discover_with_policy(
+            &executor,
+            None,
+            Some(Path::new("/bin/sh")),
+            MAX_BUNDLE_BYTES as u64,
+        )
+        .unwrap();
+
+        transport
+            .run_git(
+                "test",
+                Path::new("/"),
+                &[OsString::from("--version")],
+                None,
+                MAX_TEXT_BYTES,
+                &CancelToken::new(),
+            )
+            .unwrap();
+
+        assert!(
+            executor
+                .argv
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "core.sshCommand=/bin/sh -oBatchMode=yes")
         );
     }
 

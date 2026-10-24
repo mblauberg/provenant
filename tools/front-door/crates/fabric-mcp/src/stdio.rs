@@ -31,7 +31,7 @@ const TIMEOUTS: Timeouts = Timeouts {
     event: Duration::from_secs(1),
     // The design bounds synchronous peer calls and stdout backpressure to 30s.
     write: Duration::from_secs(30),
-    shutdown: Duration::from_secs(56),
+    shutdown: Duration::from_millis(crate::MAX_WAIT_MS + 1_000),
     cancel_grace: Duration::from_secs(1),
 };
 
@@ -153,6 +153,7 @@ fn failure(code: &str) -> Value {
 fn service_error(error: &ServiceError) -> Value {
     tools::tool_error(error.code(), error.structured_error())
 }
+
 fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> Result<(), Error> {
     let mut bytes = serde_json::to_vec(value)?;
     if bytes.len() > MAX_FRAME {
@@ -315,7 +316,7 @@ fn serve_with_timeouts(
     for _ in 0..WORKERS {
         let (factory, receive, events) = (factory.clone(), receive.clone(), events_tx.clone());
         workers.push(thread::spawn(move || {
-            let mut service = factory.open();
+            let mut service = None;
             loop {
                 let received = match receive.lock() {
                     Ok(reader) => reader.recv(),
@@ -333,15 +334,24 @@ fn serve_with_timeouts(
                 let response = if job.cancel.is_cancelled() {
                     failure("cancelled")
                 } else {
+                    if service.is_none() {
+                        match factory.open() {
+                            Ok(opened) => service = Some(opened),
+                            Err(error) => {
+                                completion.response = Some(service_error(&error));
+                                continue;
+                            }
+                        }
+                    }
                     match service.as_mut() {
-                        Ok(service) => match job.call.execute(service, &job.cancel) {
+                        Some(service) => match job.call.execute(service, &job.cancel) {
                             Ok(response) => match serde_json::to_value(response) {
                                 Ok(value) => value,
                                 Err(_) => failure("state_corrupt"),
                             },
                             Err(error) => service_error(&error),
                         },
-                        Err(error) => service_error(error),
+                        None => failure("state_corrupt"),
                     }
                 };
                 completion.response = Some(response);

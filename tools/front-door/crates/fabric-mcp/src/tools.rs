@@ -38,39 +38,28 @@ pub enum InvalidInput {
 
 impl ToolCall {
     pub fn name(&self) -> &'static str {
+        schema::tool_name(self.kind())
+    }
+
+    fn kind(&self) -> schema::ToolKind {
         match self {
-            Self::Identity(_) => "fabric_identity",
-            Self::Mail(_) => "fabric_mail",
-            Self::Task(_) => "fabric_task",
-            Self::Events(_) => "fabric_events",
-            Self::Claim(_) => "fabric_claim",
-            Self::Landing(_) => "fabric_landing",
-            Self::Submit(_) => "fabric_submit",
-            Self::Run(_) => "fabric_run",
-            Self::Output(_) => "fabric_output",
-            Self::Hosts(_) => "fabric_hosts",
-            Self::Graph(_) => "fabric_graph",
+            Self::Identity(_) => schema::ToolKind::Identity,
+            Self::Mail(_) => schema::ToolKind::Mail,
+            Self::Task(_) => schema::ToolKind::Task,
+            Self::Events(_) => schema::ToolKind::Events,
+            Self::Claim(_) => schema::ToolKind::Claim,
+            Self::Landing(_) => schema::ToolKind::Landing,
+            Self::Submit(_) => schema::ToolKind::Submit,
+            Self::Run(_) => schema::ToolKind::Run,
+            Self::Output(_) => schema::ToolKind::Output,
+            Self::Hosts(_) => schema::ToolKind::Hosts,
+            Self::Graph(_) => schema::ToolKind::Graph,
         }
     }
     // Never persist arbitrary caller-supplied tool names.
     pub(crate) fn usage_name(name: &str) -> &'static str {
-        const NAMES: &[&str] = &[
-            "fabric_identity",
-            "fabric_mail",
-            "fabric_task",
-            "fabric_events",
-            "fabric_claim",
-            "fabric_landing",
-            "fabric_submit",
-            "fabric_run",
-            "fabric_output",
-            "fabric_hosts",
-            "fabric_graph",
-        ];
-        NAMES
-            .iter()
-            .copied()
-            .find(|known| *known == name)
+        schema::tool_kind(name)
+            .map(schema::tool_name)
             .unwrap_or("unknown")
     }
 
@@ -203,18 +192,18 @@ impl ToolCall {
                     })
             };
         }
-        match name {
-            "fabric_identity" => parse!(IdentityInput, Identity),
-            "fabric_mail" => parse!(MailInput, Mail),
-            "fabric_task" => parse!(TaskInput, Task),
-            "fabric_events" => parse!(EventsInput, Events),
-            "fabric_claim" => parse!(ClaimInput, Claim),
-            "fabric_landing" => parse!(LandingInput, Landing),
-            "fabric_submit" => parse!(SubmitInput, Submit),
-            "fabric_run" => parse!(RunInput, Run),
-            "fabric_output" => parse!(OutputInput, Output),
-            "fabric_hosts" => parse!(HostsInput, Hosts),
-            "fabric_graph" => parse!(GraphInput, Graph),
+        match schema::tool_kind(name) {
+            Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
+            Some(schema::ToolKind::Mail) => parse!(MailInput, Mail),
+            Some(schema::ToolKind::Task) => parse!(TaskInput, Task),
+            Some(schema::ToolKind::Events) => parse!(EventsInput, Events),
+            Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim),
+            Some(schema::ToolKind::Landing) => parse!(LandingInput, Landing),
+            Some(schema::ToolKind::Submit) => parse!(SubmitInput, Submit),
+            Some(schema::ToolKind::Run) => parse!(RunInput, Run),
+            Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
+            Some(schema::ToolKind::Hosts) => parse!(HostsInput, Hosts),
+            Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
             _ => Err(InvalidInput::UnknownTool),
         }
     }
@@ -248,117 +237,124 @@ impl ToolCall {
         }
         let mutation = self.is_mutation();
         let output = matches!(&self, Self::Output(_));
+        let tool_name = self.name();
         let budget = service.budget(match &self {
             Self::Run(RunInput::Wait { wait_ms, .. }) => *wait_ms,
             Self::Events(EventsInput::Read {
                 wait_ms: Some(wait_ms),
                 ..
             }) => *wait_ms,
-            _ => 55_000,
+            _ => crate::MAX_WAIT_MS,
         })?;
         macro_rules! call {
-            ($owner:ident, $method:ident, $input:ident, $tool:literal) => {{ response($tool, service.$owner.$method($input, budget, cancel)?) }};
+            ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Identity(input) => call!(facade, identity, input, "fabric_identity"),
-            Self::Mail(input) => response(
-                "fabric_mail",
-                service.coordination.mail(input, budget, cancel)?,
-            ),
-            Self::Task(input) => response(
-                "fabric_task",
-                service.coordination.task(input, budget, cancel)?,
-            ),
+            Self::Identity(input) => call!(facade, identity, input),
+            Self::Mail(input) => {
+                response(tool_name, service.coordination.mail(input, budget, cancel)?)
+            }
+            Self::Task(input) => {
+                response(tool_name, service.coordination.task(input, budget, cancel)?)
+            }
             Self::Events(EventsInput::Read {
                 after,
                 limit,
                 wait_ms,
-            }) => loop {
-                let coverage = if budget.remaining(service.clock.mono_now()).as_micros() > 0 {
-                    match service.facade.refresh_events(budget, cancel) {
-                        Ok(value) => value,
-                        Err(_)
-                            if wait_ms.is_some()
-                                && budget.remaining(service.clock.mono_now()).as_micros() == 0 =>
-                        {
-                            EventCoverage::default()
+            }) => {
+                let mut last_good_coverage = None;
+                loop {
+                    let coverage = if budget.remaining(service.clock.mono_now()).as_micros() > 0 {
+                        match service.facade.refresh_events(budget, cancel) {
+                            Ok(value) => {
+                                last_good_coverage = Some(value.clone());
+                                value
+                            }
+                            Err(error)
+                                if wait_ms.is_some()
+                                    && budget.remaining(service.clock.mono_now()).as_micros()
+                                        == 0 =>
+                            {
+                                coverage_after_timeout(last_good_coverage.as_ref(), error)?
+                            }
+                            Err(error) => return Err(error.into()),
                         }
-                        Err(error) => return Err(error.into()),
-                    }
-                } else {
-                    EventCoverage::default()
-                };
-                let result = if budget.remaining(service.clock.mono_now()).as_micros() == 0 {
-                    provenant_fabric_runtime::coordination::EventsResult::empty_timeout(after)
-                } else {
-                    match service.coordination.events(
-                        EventsInput::Read {
-                            after,
-                            limit,
-                            wait_ms: None,
-                        },
-                        budget,
-                        cancel,
-                    ) {
-                        Ok(value) => value,
-                        Err(_)
-                            if wait_ms.is_some()
-                                && budget.remaining(service.clock.mono_now()).as_micros() == 0 =>
-                        {
-                            provenant_fabric_runtime::coordination::EventsResult::empty_timeout(
+                    } else {
+                        last_good_coverage.clone().unwrap_or_default()
+                    };
+                    let result = if budget.remaining(service.clock.mono_now()).as_micros() == 0 {
+                        provenant_fabric_runtime::coordination::EventsResult::empty_timeout(after)
+                    } else {
+                        match service.coordination.events(
+                            EventsInput::Read {
                                 after,
-                            )
+                                limit,
+                                wait_ms: None,
+                            },
+                            budget,
+                            cancel,
+                        ) {
+                            Ok(value) => value,
+                            Err(_)
+                                if wait_ms.is_some()
+                                    && budget.remaining(service.clock.mono_now()).as_micros()
+                                        == 0 =>
+                            {
+                                provenant_fabric_runtime::coordination::EventsResult::empty_timeout(
+                                    after,
+                                )
+                            }
+                            Err(error) => return Err(error.into()),
                         }
-                        Err(error) => return Err(error.into()),
+                    };
+                    let provenant_fabric_runtime::coordination::EventsResult::Read {
+                        page,
+                        cursor,
+                        unknown_hosts,
+                        run_events_pending,
+                        ..
+                    } = result
+                    else {
+                        return Err(ServiceError::Facade(FacadeError::StateCorrupt));
+                    };
+                    let timed_out = wait_ms.is_some()
+                        && budget.remaining(service.clock.mono_now()).as_micros() == 0;
+                    if !page.items.is_empty() || wait_ms.is_none() || timed_out {
+                        let mut unknown_hosts = unknown_hosts;
+                        unknown_hosts.extend(coverage.unknown_hosts);
+                        unknown_hosts.sort();
+                        unknown_hosts.dedup();
+                        break response(
+                            tool_name,
+                            provenant_fabric_runtime::coordination::EventsResult::Read {
+                                page,
+                                cursor,
+                                timed_out,
+                                unknown_hosts,
+                                run_events_pending: run_events_pending || coverage.more_events,
+                            },
+                        );
                     }
-                };
-                let provenant_fabric_runtime::coordination::EventsResult::Read {
-                    page,
-                    cursor,
-                    unknown_hosts,
-                    run_events_pending,
-                    ..
-                } = result
-                else {
-                    return Err(ServiceError::Facade(FacadeError::StateCorrupt));
-                };
-                let timed_out = wait_ms.is_some()
-                    && budget.remaining(service.clock.mono_now()).as_micros() == 0;
-                if !page.items.is_empty() || wait_ms.is_none() || timed_out {
-                    let mut unknown_hosts = unknown_hosts;
-                    unknown_hosts.extend(coverage.unknown_hosts);
-                    unknown_hosts.sort();
-                    unknown_hosts.dedup();
-                    break response(
-                        "fabric_events",
-                        provenant_fabric_runtime::coordination::EventsResult::Read {
-                            page,
-                            cursor,
-                            timed_out,
-                            unknown_hosts,
-                            run_events_pending: run_events_pending || coverage.more_events,
-                        },
-                    );
+                    service.coordination.pause_observation(budget, cancel);
                 }
-                service.coordination.pause_observation(budget, cancel);
-            },
+            }
             Self::Events(input) => response(
-                "fabric_events",
+                tool_name,
                 service.coordination.events(input, budget, cancel)?,
             ),
             Self::Claim(input) => response(
-                "fabric_claim",
+                tool_name,
                 service.coordination.claim(input, budget, cancel)?,
             ),
             Self::Landing(input) => response(
-                "fabric_landing",
+                tool_name,
                 service.coordination.landing(input, budget, cancel)?,
             ),
-            Self::Submit(input) => call!(facade, submit, input, "fabric_submit"),
-            Self::Run(input) => call!(facade, run, input, "fabric_run"),
-            Self::Output(input) => call!(facade, output, input, "fabric_output"),
-            Self::Hosts(input) => call!(facade, hosts, input, "fabric_hosts"),
-            Self::Graph(input) => call!(facade, graph, input, "fabric_graph"),
+            Self::Submit(input) => call!(facade, submit, input),
+            Self::Run(input) => call!(facade, run, input),
+            Self::Output(input) => call!(facade, output, input),
+            Self::Hosts(input) => call!(facade, hosts, input),
+            Self::Graph(input) => call!(facade, graph, input),
         };
         service.limit_response(result, mutation, output)
     }
@@ -411,6 +407,13 @@ impl ServiceError {
             _ => serde_json::json!({"code":self.code()}),
         }
     }
+}
+
+fn coverage_after_timeout(
+    last_good: Option<&EventCoverage>,
+    error: FacadeError,
+) -> Result<EventCoverage, FacadeError> {
+    last_good.cloned().ok_or(error)
 }
 
 /// One worker's concrete runtime composition. The clock is sampled for each

@@ -83,8 +83,12 @@ pub(crate) fn insert_message(tx: &rusqlite::Connection, message: &Message) -> Re
     let bytes = encode(message)?;
     let previous: Option<Vec<u8>> = tx
         .query_row(
-            "SELECT substr(record,1,262145) FROM messages WHERE project=? AND id=?",
-            params![message.project.to_string(), message.id.to_string()],
+            "SELECT substr(record,1,?3) FROM messages WHERE project=?1 AND id=?2",
+            params![
+                message.project.to_string(),
+                message.id.to_string(),
+                MAX_RECORD_READ_BYTES
+            ],
             |r| r.get(0),
         )
         .optional()?;
@@ -165,9 +169,9 @@ impl Store {
     ) -> Result<Page<Delivery>> {
         let limit = page(after.unwrap_or(0), limit)?;
         request.retry(|| {
-            let mut statement=self.db.prepare("SELECT d.seq,substr(m.record,1,262145),m.id FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
-            let mut rows=statement.query(params![project.to_string(),recipient.to_string(),after,limit])?; let mut output=Vec::new();let mut total=0; let mut truncated=false;
-            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(1)?;total+=bytes.len();if total>1_048_576 { truncated=true; break; }
+            let mut statement=self.db.prepare("SELECT d.seq,substr(m.record,1,?5),m.id FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
+            let mut rows=statement.query(params![project.to_string(),recipient.to_string(),after,limit,MAX_RECORD_READ_BYTES])?; let mut output=Vec::new();let mut total=0; let mut truncated=false;
+            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(1)?;total+=bytes.len();if total>MAX_PAGE_BYTES { truncated=true; break; }
                 let message: Message=decode(&bytes)?;
                 let id: String=row.get(2)?;
                 if message.project != project || message.id.to_string() != id { return Err(Error::Invalid("stored message identity")); }

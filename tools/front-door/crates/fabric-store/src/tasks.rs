@@ -22,19 +22,11 @@ impl TaskState {
     }
     /// Historical state mapping is data for the one-shot importer, not a live
     /// compatibility API. Only Open and blocked rows are eligible for import.
-    pub fn from_old(state: &str) -> Result<Self> {
-        const STATES: [(&str, TaskState); 6] = [
-            ("open", TaskState::Open),
-            ("blocked", TaskState::Open),
-            ("claimed", TaskState::Active),
-            ("active", TaskState::Active),
-            ("done", TaskState::Done),
-            ("cancelled", TaskState::Cancelled),
-        ];
-        STATES
-            .iter()
-            .find_map(|(name, state_value)| (*name == state).then_some(*state_value))
-            .ok_or(Error::Invalid("old task state"))
+    pub(crate) fn from_old(state: &str) -> Result<Self> {
+        match state {
+            "open" | "blocked" => Ok(Self::Open),
+            _ => Err(Error::Invalid("old task state")),
+        }
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,8 +87,12 @@ pub(crate) fn insert_task(tx: &rusqlite::Connection, task: &Task) -> Result<bool
     let bytes = encode(task)?;
     if let Some(previous) = tx
         .query_row(
-            "SELECT substr(record,1,262145) FROM tasks WHERE project=? AND id=?",
-            params![task.project.to_string(), task.id.to_string()],
+            "SELECT substr(record,1,?3) FROM tasks WHERE project=?1 AND id=?2",
+            params![
+                task.project.to_string(),
+                task.id.to_string(),
+                MAX_RECORD_READ_BYTES
+            ],
             |r| r.get::<_, Vec<u8>>(0),
         )
         .optional()?
@@ -127,8 +123,8 @@ pub(crate) fn insert_task(tx: &rusqlite::Connection, task: &Task) -> Result<bool
 fn load(db: &rusqlite::Connection, project: ProjectId, id: TaskId) -> Result<Task> {
     let bytes: Vec<u8> = db
         .query_row(
-            "SELECT substr(record,1,262145) FROM tasks WHERE project=? AND id=?",
-            params![project.to_string(), id.to_string()],
+            "SELECT substr(record,1,?3) FROM tasks WHERE project=?1 AND id=?2",
+            params![project.to_string(), id.to_string(), MAX_RECORD_READ_BYTES],
             |r| r.get(0),
         )
         .optional()?
@@ -175,6 +171,7 @@ impl Store {
     pub fn task(&self, project: ProjectId, id: TaskId, request: &Request<'_>) -> Result<Task> {
         request.retry(|| load(&self.db, project, id))
     }
+    /// Lists in ID order; resume a truncated page after its last task ID.
     pub fn tasks(
         &self,
         project: ProjectId,
@@ -182,14 +179,14 @@ impl Store {
         after: Option<TaskId>,
         limit: u64,
         request: &Request<'_>,
-    ) -> Result<Vec<Task>> {
+    ) -> Result<Page<Task>> {
         let limit = page(0, limit)?;
         request.retry(|| {
-            let mut statement=self.db.prepare("SELECT substr(record,1,262145) FROM tasks WHERE project=? AND (? IS NULL OR state=?) AND (? IS NULL OR id>?) ORDER BY id LIMIT ?")?;
-            let state=state.map(TaskState::sql);let after=after.map(|id|id.to_string());let mut rows=statement.query(params![project.to_string(),state,state,after,after,limit])?;
-            let mut output=Vec::new();let mut total=0;
-            while let Some(row)=rows.next()? {let bytes:Vec<u8>=row.get(0)?;total+=bytes.len();if total>1_048_576 {break;} output.push(decode(&bytes)?);}
-            Ok(output)
+            let mut statement=self.db.prepare("SELECT substr(record,1,?7) FROM tasks WHERE project=?1 AND (?2 IS NULL OR state=?3) AND (?4 IS NULL OR id>?5) ORDER BY id LIMIT ?6")?;
+            let state=state.map(TaskState::sql);let after=after.map(|id|id.to_string());let mut rows=statement.query(params![project.to_string(),state,state,after,after,limit,MAX_RECORD_READ_BYTES])?;
+            let mut items=Vec::new();let mut total=0;let mut truncated=false;
+            while let Some(row)=rows.next()? {let bytes:Vec<u8>=row.get(0)?;total+=bytes.len();if total>MAX_PAGE_BYTES {truncated=true;break;} items.push(decode(&bytes)?);}
+            Ok(Page {items,truncated})
         })
     }
     pub fn claim_task(&self, claim: &TaskClaim, request: &Request<'_>) -> Result<TaskFence> {

@@ -138,7 +138,6 @@ pub enum AttemptState {
     Terminal,
 }
 
-/// Only these three typed terminal results advance to the next route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
@@ -155,6 +154,7 @@ fn assume_launched() -> bool {
 }
 
 impl AttemptOutcome {
+    /// Only these three typed terminal results advance to the next route.
     fn allows_route_fallback(self, access: AccessMode, launched: bool) -> bool {
         matches!(
             self,

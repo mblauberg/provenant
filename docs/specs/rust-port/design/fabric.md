@@ -190,9 +190,12 @@ placeholder owner.
 The binary binds status, frozen-target waits and run events to the scoped run
 store. Input-required wakes either wait condition; observation timeout does not
 cancel work. Submit, active-run listing, cancel, resume and exported output are
-bound to their owners. Graph tick persists its starting key before execution;
-graph status can read the checkpoint. Aliases retain the facade's named-role
-preference rather than fabricating an explicit model.
+bound to their owners; remote-host list cursors remain `owner_unavailable`.
+Graph tick persists its starting key before execution; graph status can read
+the checkpoint. Aliases retain the facade's named-role preference rather than
+fabricating an explicit model. Output reads expose `stdout` (the published
+result) and `stderr`. The run files keep those streams separately without
+cross-stream ordering, so the API does not advertise a combined stream.
 
 CLI `fabric host list`, hidden `fabric peer`, `fabric graph run/status/cancel/resume`, and
 `fabric landing push/reconcile` bind in `src/`. CLI and MCP event reads lazily
@@ -220,6 +223,8 @@ acceptance: exact-head CI and the chair's authorised host smoke remain required.
 Committed Git bundles and digest-checked chunk fetches have typed runtime owners.
 Attaching transfer to a dispatched remote writer still belongs at Lane B's run
 binding, where the writer lease and attempt result can be supplied together.
+The Git transport applies the configured `limits.bundle_bytes` cap to bundle
+creation and receipt.
 Fabric does not create a second writer registry or reconstruct a launch.
 
 
@@ -591,9 +596,12 @@ owner's established custody rules can stop it.
 
 Each configured peer is the same user's trusted host, accessed through system
 SSH, no listener. Supervisor captures bounded stdin/stdout/stderr using a fixed
-argv and deadline. The forced remote command is `provenant fabric peer`; it
-accepts one versioned request, not a command string. SSH destination comes only
-from validated config. Provider credentials stay on the executing host.
+argv and deadline. The default remote command is `provenant fabric peer`; it
+accepts one versioned request, not a caller-supplied command string. The existing
+Fabric config can select an absolute SSH executable and, per peer, an absolute
+remote Provenant executable and a bounded connection timeout. SSH destination
+and executable overrides come only from validated config. Provider credentials
+stay on the executing host.
 Handshake verifies protocol major, host ID and cross-host ProjectKey. Version mismatch
 refuses writes and reports incompatible reads. Peer fan-out uses at most
 four transport threads, never holds a DB transaction, and never recursively fans

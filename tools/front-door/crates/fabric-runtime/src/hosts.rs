@@ -16,6 +16,25 @@ use std::{
 
 pub const MAX_FRAME: usize = 1_048_576;
 
+pub fn discover_ssh_executable(
+    override_path: Option<&Path>,
+) -> Result<std::path::PathBuf, PeerError> {
+    if let Some(path) = override_path {
+        if !crate::config::valid_executable_override(path)
+            || !provenant_supervisor::sys::is_executable(path)
+        {
+            return Err(PeerError::Unavailable);
+        }
+        return Ok(path.to_path_buf());
+    }
+    ["/usr/bin/ssh", "/bin/ssh"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| provenant_supervisor::sys::is_executable(path))
+        .map(Path::to_path_buf)
+        .ok_or(PeerError::Unavailable)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PeerError {
     #[error("peer protocol version or identity mismatch")]
@@ -42,17 +61,9 @@ impl PeerError {
             Self::Unknown { .. } => "launch_unknown",
             Self::Cancelled => "cancelled",
             Self::Frame => "state_corrupt",
-            Self::Refused { code } => match code.as_str() {
-                "invalid_input" => "invalid_input",
-                "not_found" => "not_found",
-                "conflict" => "conflict",
-                "busy" => "busy",
-                "stale_fence" => "stale_fence",
-                "cancelled" => "cancelled",
-                "timeout" => "timeout",
-                "home_unavailable" => "home_unavailable",
-                _ => "peer_refused",
-            },
+            Self::Refused { code } => {
+                crate::coordination::facade::FacadeError::from_code(code, None).code()
+            }
         }
     }
 }
@@ -192,6 +203,9 @@ impl From<MutationResult> for CoordinationResult {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerAction {
     Health,
+    RunStatuses {
+        targets: Vec<crate::coordination::facade::AttemptTarget>,
+    },
     Run {
         input: crate::coordination::facade::RunInput,
     },
@@ -241,6 +255,7 @@ impl PeerRequest {
                     facade::RunInput::Cancel { operation_id, .. }
                     | facade::RunInput::Resume { operation_id, .. },
             } => Some(operation_id.clone()),
+            PeerAction::RunStatuses { .. } => None,
             _ => None,
         }
     }
@@ -291,6 +306,7 @@ pub struct HostHealth {
 )]
 pub enum PeerResult {
     Run(Box<crate::runs::RunResult>),
+    RunStatuses(Vec<provenant_records::run::AttemptRecord>),
     Submitted(crate::runs::SubmissionReceipt),
     Output(crate::coordination::facade::OutputResult),
     RunEvents(crate::runs::RunEventsPage),
@@ -328,16 +344,17 @@ pub struct SshTransport<'a> {
     pub home: &'a Path,
     pub cwd: &'a Path,
     /// Absolute, resolved system SSH executable, chosen by composition.
-    pub executable: &'a Path,
+    pub executable: std::path::PathBuf,
     pub seconds: u64,
 }
-impl PeerTransport for SshTransport<'_> {
-    fn exchange(
+impl SshTransport<'_> {
+    pub fn exchange_with_cap(
         &self,
         peer: &Peer,
         request: &PeerRequest,
         budget: WaitBudget,
         cancel: &CancelToken,
+        cap: Duration,
     ) -> Result<PeerResponse, PeerError> {
         if cancel.is_cancelled() {
             return Err(PeerError::Cancelled);
@@ -351,6 +368,11 @@ impl PeerTransport for SshTransport<'_> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-@".contains(&b))
             || !self.executable.is_absolute()
+            || peer
+                .remote_executable
+                .as_deref()
+                .is_some_and(|path| !crate::config::valid_executable_override(path))
+            || !(1..=30).contains(&peer.connect_timeout_seconds)
         {
             return Err(PeerError::Project);
         }
@@ -360,18 +382,25 @@ impl PeerTransport for SshTransport<'_> {
         }
         input.push(b'\n');
         let timeout = Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
-            .min(Duration::from_secs(self.seconds.min(30)));
+            .min(Duration::from_secs(self.seconds))
+            .min(cap);
         if timeout.is_zero() {
             return Err(PeerError::Unavailable);
         }
+        let remote_executable = peer
+            .remote_executable
+            .as_deref()
+            .and_then(Path::to_str)
+            .unwrap_or("provenant");
+        let remote_command = format!("{remote_executable} fabric peer");
         let argv: Vec<OsString> = vec![
-            self.executable.into(),
+            self.executable.as_os_str().to_owned(),
             "-T".into(),
             "-oBatchMode=yes".into(),
-            "-oConnectTimeout=10".into(),
+            format!("-oConnectTimeout={}", peer.connect_timeout_seconds).into(),
             "--".into(),
             peer.destination.clone().into(),
-            "provenant fabric peer".into(),
+            remote_command.into(),
         ];
         let mut env = vec![
             ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
@@ -423,6 +452,23 @@ impl PeerTransport for SshTransport<'_> {
         Ok(response)
     }
 }
+impl PeerTransport for SshTransport<'_> {
+    fn exchange(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResponse, PeerError> {
+        self.exchange_with_cap(
+            peer,
+            request,
+            budget,
+            cancel,
+            Duration::from_secs(self.seconds),
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -437,15 +483,26 @@ mod tests {
         request: Mutex<Option<PeerRequest>>,
         lose_reply: bool,
         calls: AtomicUsize,
+        expected_executable: OsString,
+        expected_connect_timeout: OsString,
+        expected_remote_command: OsString,
+        expected_timeout: Option<Duration>,
     }
     impl Executor for Ssh {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(
-                options.argv.last(),
-                Some(&OsString::from("provenant fabric peer"))
-            );
+            assert_eq!(options.argv.first(), Some(&self.expected_executable));
             assert!(options.argv.iter().any(|a| a == "-oBatchMode=yes"));
+            assert!(
+                options
+                    .argv
+                    .iter()
+                    .any(|a| a == &self.expected_connect_timeout)
+            );
+            assert_eq!(options.argv.last(), Some(&self.expected_remote_command));
+            if let Some(expected_timeout) = self.expected_timeout {
+                assert_eq!(options.timeout, expected_timeout);
+            }
             let request = decode_request(options.stdin.unwrap()).unwrap();
             let response = PeerResponse {
                 version: 1,
@@ -505,18 +562,24 @@ mod tests {
         let peer = Peer {
             host,
             destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
         };
         let ssh = Ssh {
             request: Mutex::new(None),
             lose_reply: true,
             calls: AtomicUsize::new(0),
+            expected_executable: "/usr/bin/ssh".into(),
+            expected_connect_timeout: "-oConnectTimeout=10".into(),
+            expected_remote_command: "provenant fabric peer".into(),
+            expected_timeout: None,
         };
         let transport = SshTransport {
             executor: &ssh,
             clock: &clock,
             home: Path::new("/home/a"),
             cwd: Path::new("/home/a/repo"),
-            executable: Path::new("/usr/bin/ssh"),
+            executable: "/usr/bin/ssh".into(),
             seconds: 30,
         };
         assert!(
@@ -528,5 +591,121 @@ mod tests {
             Some(operation)
         );
         assert!(request.project.resolve(Path::new("/home/b")).is_ok());
+    }
+
+    #[test]
+    fn peer_policy_overrides_remote_executable_and_connect_timeout() {
+        let ssh_path = Path::new("/bin/sh");
+        assert_eq!(
+            discover_ssh_executable(Some(ssh_path)).unwrap(),
+            ssh_path.to_path_buf()
+        );
+
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let local = HostId::from_bytes([1; 16]);
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: local,
+            agent: "chair".into(),
+            project,
+            action: PeerAction::Health,
+        };
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: Some("/opt/provenant/bin/provenant".into()),
+            connect_timeout_seconds: 7,
+        };
+        let ssh = Ssh {
+            request: Mutex::new(None),
+            lose_reply: false,
+            calls: AtomicUsize::new(0),
+            expected_executable: ssh_path.into(),
+            expected_connect_timeout: "-oConnectTimeout=7".into(),
+            expected_remote_command: "/opt/provenant/bin/provenant fabric peer".into(),
+            expected_timeout: None,
+        };
+        let transport = SshTransport {
+            executor: &ssh,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: ssh_path.to_path_buf(),
+            seconds: 30,
+        };
+
+        transport
+            .exchange(&peer, &request, budget, &CancelToken::new())
+            .unwrap();
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn peer_exchange_respects_a_fair_probe_cap() {
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let local = HostId::from_bytes([1; 16]);
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: local,
+            agent: "chair".into(),
+            project,
+            action: PeerAction::Health,
+        };
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        };
+        let ssh = Ssh {
+            request: Mutex::new(None),
+            lose_reply: false,
+            calls: AtomicUsize::new(0),
+            expected_executable: "/usr/bin/ssh".into(),
+            expected_connect_timeout: "-oConnectTimeout=10".into(),
+            expected_remote_command: "provenant fabric peer".into(),
+            expected_timeout: Some(Duration::from_millis(250)),
+        };
+        let transport = SshTransport {
+            executor: &ssh,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: "/usr/bin/ssh".into(),
+            seconds: 30,
+        };
+
+        transport
+            .exchange_with_cap(
+                &peer,
+                &request,
+                budget,
+                &CancelToken::new(),
+                Duration::from_millis(250),
+            )
+            .unwrap();
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
     }
 }

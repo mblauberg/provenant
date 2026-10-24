@@ -92,8 +92,10 @@ fn route(value: &Value) -> Option<String> {
         let object = value.as_object()?;
         let adapter = object.get("adapter")?.as_str()?;
         let model = object.get("model")?.as_str()?;
-        let effort = object.get("effort")?.as_str()?;
-        format!("{adapter}/{model}@{effort}")
+        match object.get("effort").and_then(Value::as_str) {
+            Some(effort) => format!("{adapter}/{model}@{effort}"),
+            None => format!("{adapter}/{model}"),
+        }
     };
     (exact.len() <= 180).then_some(exact)
 }

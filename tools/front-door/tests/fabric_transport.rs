@@ -1,7 +1,11 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
 use serde_json::{Value, json};
-use std::{ffi::OsString, os::unix::fs::DirBuilderExt, path::Path};
+use std::{
+    ffi::OsString,
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    path::Path,
+};
 use support::{Result, TestRig, code};
 
 fn mcp(rig: &TestRig, frames: &[Value]) -> Result<Vec<Value>> {
@@ -45,6 +49,215 @@ fn mcp(rig: &TestRig, frames: &[Value]) -> Result<Vec<Value>> {
         .map(serde_json::from_slice)
         .collect::<std::result::Result<Vec<Value>, _>>()?;
     Ok(replies)
+}
+
+fn federated_identity(rig: &mut TestRig) -> Result<Value> {
+    let moved = rig.home.join("repo");
+    std::fs::rename(&rig.project, &moved)?;
+    rig.project = moved;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = rig.project.clone().into();
+        }
+    }
+    let output = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&output), 0);
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
+    let mut bytes = *host.as_bytes();
+    for index in (0..bytes.len()).rev() {
+        if bytes[index] < u8::MAX {
+            bytes[index] += 1;
+            bytes[index + 1..].fill(0);
+            return Ok(provenant_core::HostId::from_bytes(bytes));
+        }
+    }
+    Err("test host ID has no successor".into())
+}
+
+#[test]
+fn hosts_probe_only_the_requested_page() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
+    let project_key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let first = next_host(local)?;
+    let second = next_host(first)?;
+    let ssh = rig.root.join("ssh");
+    let calls = rig.root.join("ssh-calls");
+    let response = rig.root.join("ssh-response.json");
+    std::fs::write(
+        &response,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "host": first.to_string(),
+            "project": project_key,
+            "result": {"result":"health","data":{
+                "host":first.to_string(),"available":true,"execution":true
+            }}
+        }))?,
+    )?;
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
+            calls.display(),
+            response.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+             [domains.fabric.peers.first]\nhost='{}'\ndestination='127.0.0.1'\n\
+             [domains.fabric.peers.second]\nhost='{}'\ndestination='127.0.0.1'\n",
+            ssh.to_string_lossy(),
+            first,
+            second
+        ),
+    )?;
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"fabric_hosts","arguments":{"op":"list","after":local.to_string(),"limit":1}
+            }}),
+        ],
+    )?;
+    let hosts = &replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("hosts")?["result"]["structuredContent"];
+    assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
+    assert_eq!(hosts[0]["host"], first.to_string());
+    assert_eq!(hosts[0]["available"], true);
+    let calls = std::fs::read_to_string(calls)?;
+    let calls = calls
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["target_host"], first.to_string());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let request = json!({
+        "version": 1,
+        "target_host": host,
+        "source_host": host,
+        "agent": "fixture",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "action": {"action":"landing_push","proof":{
+            "reference":"refs/heads/main",
+            "id":"11111111111111111111111111111111",
+            "generation":1,
+            "token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        },"operation_id":"landing-refusal","reconcile":false}
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(code(&output), 0);
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["result"]["result"], "error");
+    assert_eq!(response["result"]["data"]["code"], "stale_fence");
+    assert_ne!(response["result"]["data"]["code"], "launch_unknown");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_run_statuses_refuses_more_than_one_page() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let targets = (0..101)
+        .map(|index| json!({"host":host,"attempt":format!("{index:032x}")}))
+        .collect::<Vec<_>>();
+    let request = json!({
+        "version": 1,
+        "target_host": host,
+        "source_host": host,
+        "agent": "fixture",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "action": {"action":"run_statuses","targets":targets}
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(code(&output), 0);
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["result"]["result"], "error");
+    assert_eq!(response["result"]["data"]["code"], "invalid_input");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_wait_refuses_remote_fanout() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
+    let remote = next_host(local)?;
+    let request = json!({
+        "version": 1,
+        "target_host": local.to_string(),
+        "source_host": local.to_string(),
+        "agent": "fixture",
+        "project": {
+            "key": identity["data"]["federation"]["key"],
+            "common_dir": "repo/.git"
+        },
+        "action": {"action":"run","input":{
+            "op":"wait",
+            "targets":[{"host":remote.to_string(),"attempt":"11111111111111111111111111111111"}],
+            "condition":"all",
+            "wait_ms":1000
+        }}
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(code(&output), 0);
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["result"]["result"], "error");
+    assert_eq!(response["result"]["data"]["code"], "confinement_refused");
+    rig.assert_legacy_unchanged()
 }
 #[test]
 fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> Result {
@@ -243,10 +456,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         run::{CanonicalRequest, RequestedRoute, TaskRequest},
     };
     use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
-    let rig = TestRig::new()?;
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    assert_eq!(code(&identity), 0);
-    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
     let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
     let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -408,24 +619,178 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     // A cancel operation is bound to its target: a replay is answered, the
     // same ID for another target is a conflict.
     let other = json!({"host":null,"attempt":"00000000000000000000000000000001"});
-    let cancel = |id: u64, target: &Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":target,"operation_id":"stop"}}});
+    let cancel_request = |id: u64, target: &Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":target,"operation_id":"stop"}}});
+    let bound = mcp(&rig, &[cancel_request(1, &target)])?;
+    let bound = &bound.iter().find(|r| r["id"] == 1).ok_or("cancel")?["result"];
+    assert_ne!(bound["isError"], true, "{bound}");
+    assert_eq!(
+        bound["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
+        "{bound}"
+    );
     let replies = mcp(
         &rig,
-        &[cancel(1, &target), cancel(2, &target), cancel(3, &other)],
+        &[cancel_request(2, &target), cancel_request(3, &other)],
     )?;
-    for id in [1, 2] {
-        let reply = &replies.iter().find(|r| r["id"] == id).ok_or("cancel")?["result"];
-        assert_ne!(reply["isError"], true, "{reply}");
-        assert_eq!(
-            reply["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
-            "{reply}"
-        );
-    }
+    let replay = &replies.iter().find(|r| r["id"] == 2).ok_or("replay")?["result"];
+    assert_ne!(replay["isError"], true, "{replay}");
+    assert_eq!(
+        replay["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
+        "{replay}"
+    );
     let conflict = &replies.iter().find(|r| r["id"] == 3).ok_or("conflict")?["result"];
     assert_eq!(
         conflict["structuredContent"]["code"], "conflict",
         "{conflict}"
     );
+
+    let remote_host = next_host(local_host)?;
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let records = {
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        attempts[..2]
+            .iter()
+            .map(|attempt| store.record(*attempt, &call))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let project_key_value: provenant_fabric_runtime::identity::CrossHostProjectKey =
+        serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
+    let ingress_request = json!({
+        "version": 1,
+        "target_host": local_host.to_string(),
+        "source_host": local_host.to_string(),
+        "agent": "fixture",
+        "project": {"key": project_key_value, "common_dir": "repo/.git"},
+        "action": {"action":"run_statuses","targets":attempts[..2]
+            .iter()
+            .map(|attempt| json!({"host":local_host.to_string(),"attempt":attempt.to_string()}))
+            .collect::<Vec<_>>()}
+    });
+    let ingress = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&ingress_request)?),
+    )?;
+    assert_eq!(code(&ingress), 0);
+    let ingress: Value = serde_json::from_slice(&ingress.stdout.bytes)?;
+    assert_eq!(ingress["result"]["result"], "run_statuses");
+    assert_eq!(
+        ingress["result"]["data"]
+            .as_array()
+            .ok_or("statuses")?
+            .len(),
+        2
+    );
+
+    let project_key: provenant_fabric_runtime::identity::CrossHostProjectKey =
+        serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
+    let response = provenant_fabric_runtime::hosts::PeerResponse {
+        version: 1,
+        host: remote_host,
+        project: project_key,
+        result: provenant_fabric_runtime::hosts::PeerResult::RunStatuses(records),
+    };
+    let response_path = rig.root.join("ssh-response.json");
+    let requests_path = rig.root.join("ssh-requests.jsonl");
+    let ssh = rig.root.join("ssh");
+    std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
+            requests_path.display(),
+            response_path.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+             [domains.fabric.peers.fixture]\nhost='{}'\ndestination='fixture'\n",
+            ssh.to_string_lossy(),
+            remote_host
+        ),
+    )?;
+    let remote_targets = attempts[..2]
+        .iter()
+        .map(|attempt| json!({"host":remote_host.to_string(),"attempt":attempt.to_string()}))
+        .collect::<Vec<_>>();
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"fabric_run","arguments":{"op":"wait","targets":remote_targets,"condition":"all","wait_ms":1000}
+            }}),
+        ],
+    )?;
+    let wait_result = &replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("remote wait")?["result"];
+    assert_ne!(wait_result["isError"], true, "{wait_result}");
+    let wait = &wait_result["structuredContent"];
+    assert_eq!(wait["timed_out"], true, "{wait}");
+    assert_eq!(
+        wait["attempts"].as_array().ok_or("attempts")?.len(),
+        2,
+        "{wait}"
+    );
+    let requests = std::fs::read_to_string(requests_path)?;
+    let requests = requests
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert!(!requests.is_empty());
+    assert!(requests.iter().all(|request| {
+        request["action"]["targets"]
+            .as_array()
+            .is_some_and(|targets| targets.len() == 2)
+    }));
+
+    let event_limit = {
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        let events = store.events(0, 64, None, &call)?;
+        assert!(events.len() < 64);
+        u16::try_from(events.len())?
+    };
+    assert!((1..=64).contains(&event_limit));
+    let run_events_request = json!({
+        "version": 1,
+        "target_host": local_host.to_string(),
+        "source_host": local_host.to_string(),
+        "agent": "fixture",
+        "project": {"key": identity["data"]["federation"]["key"], "common_dir": "repo/.git"},
+        "action": {"action":"run_events","after":0,"limit":event_limit}
+    });
+    let run_events = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&run_events_request)?),
+    )?;
+    assert_eq!(code(&run_events), 0);
+    let run_events: Value = serde_json::from_slice(&run_events.stdout.bytes)?;
+    assert_eq!(
+        run_events["result"]["data"]["items"]
+            .as_array()
+            .ok_or("run events")?
+            .len(),
+        usize::from(event_limit)
+    );
+    assert_eq!(run_events["result"]["data"]["truncated"], false);
     rig.assert_legacy_unchanged()
 }
 

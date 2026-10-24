@@ -78,19 +78,11 @@ impl Context {
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
-        .ok_or(EdgeError::Invalid)?;
+        let git = provenant_fabric_runtime::git_transport::discover_git_executable()
+            .ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),
-            canonical(git)?,
+            canonical(&git)?,
             &utility_home,
         )?;
         let executor = SystemExecutor::new(1)?;

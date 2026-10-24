@@ -1,4 +1,3 @@
-// Add `#[cfg(test)] mod landing_tests;` to git_transport.rs.
 use super::*;
 use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, DurationMicros, MonoTime, PathResolver, ProjectId,

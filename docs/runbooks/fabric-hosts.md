@@ -44,27 +44,40 @@ Peer configuration is under `domains.fabric`, not a separate `hosts.json`:
 schema_version = 1
 profile = "balanced"
 
+[domains.fabric]
+ssh_executable = "/opt/homebrew/bin/ssh" # optional; empty selects system discovery
+
 [domains.fabric.peers.workshop]
 host = "<peer host ID from fabric identity>"
 destination = "workshop"
+remote_executable = "/Users/user/.cargo/bin/provenant" # optional
+connect_timeout_seconds = 10
 ```
 
 Replace the placeholder with the peer's actual host ID. Configure the reverse
 peer on the other host. `home_hosts` maps cross-host project keys to home host
 IDs. Peer destinations are bounded SSH aliases or `user@alias`, with no shell
-options. `domains.fabric.limits.peer_seconds` bounds a call to at most 30
-seconds. The complete field validation and compiled defaults live in
+options. `ssh_executable` overrides system SSH discovery. A peer's
+`remote_executable` selects the installed `provenant` binary; the transport
+always appends the fixed `fabric peer` entrypoint. `connect_timeout_seconds`
+must be between 1 and 30; `limits.peer_seconds` separately bounds the full peer
+call. Executable overrides must be absolute, executable paths
+without whitespace or shell metacharacters. `remote_executable` must exist
+and be executable on the peer. The complete field validation and compiled
+defaults live in
 `tools/front-door/crates/fabric-runtime/src/config.rs` and its `assets/`.
 
 ## SSH and peer protocol
 
 Configure SSH aliases and keys in the user's OpenSSH configuration. The Rust
-transport discovers `/usr/bin/ssh` or `/bin/ssh` and sends the fixed remote
-command `provenant fabric peer`. It accepts no configurable peer command or
-SSH-program environment override. A restricted key can use:
+transport uses `domains.fabric.ssh_executable`, which defaults to
+system discovery and is resolved through the shared runtime helper. It sends the
+fixed remote command `provenant fabric peer`, using the peer's
+`remote_executable` when configured. Set an override when SSH is installed
+elsewhere. A restricted key can use:
 
 ```text
-command="provenant fabric peer",restrict ssh-ed25519 <public-key> user
+command="/absolute/path/to/provenant fabric peer",restrict ssh-ed25519 <public-key> user
 ```
 
 Verify that the receiving host can resolve the binary in this non-interactive

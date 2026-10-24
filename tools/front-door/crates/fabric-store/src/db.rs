@@ -71,6 +71,15 @@ pub struct Request<'a> {
     pub backoff: &'a dyn RetryWait,
 }
 impl Request<'_> {
+    pub fn check(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+            return Err(Error::Busy);
+        }
+        Ok(())
+    }
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
         // The real elapsed cap also bounds a frozen/inaccurate injected clock.
         let started = Instant::now();
@@ -114,7 +123,7 @@ pub struct Store {
 }
 impl Store {
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
-        request.retry(|| Ok(()))?;
+        request.check()?;
         let mut directory = Directory::root(true)?;
         for part in root.as_path().components() {
             if let Component::Normal(name) = part {

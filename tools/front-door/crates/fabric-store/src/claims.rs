@@ -159,7 +159,7 @@ pub(crate) fn by_scope(
     kind: &str,
     key: &str,
 ) -> Result<Option<StoredClaim>> {
-    db.query_row("SELECT n.id,n.generation,c.holder,c.token,c.expires,coalesce(substr(c.record,1,262145),x'') FROM claim_counters n LEFT JOIN claims c ON c.project=n.project AND c.id=n.id WHERE n.project=? AND n.kind=? AND n.scope_key=?", params![project.to_string(), kind, key], stored).optional()?.map(checked).transpose()
+    db.query_row("SELECT n.id,n.generation,c.holder,c.token,c.expires,coalesce(substr(c.record,1,?4),x'') FROM claim_counters n LEFT JOIN claims c ON c.project=n.project AND c.id=n.id WHERE n.project=?1 AND n.kind=?2 AND n.scope_key=?3", params![project.to_string(), kind, key, MAX_RECORD_READ_BYTES], stored).optional()?.map(checked).transpose()
 }
 pub(crate) fn by_fence(
     db: &rusqlite::Connection,
@@ -168,7 +168,7 @@ pub(crate) fn by_fence(
     kind: &str,
     live: Option<WallTime>,
 ) -> Result<StoredClaim> {
-    let row = db.query_row("SELECT id,generation,holder,token,expires,substr(record,1,262145) FROM claims WHERE project=? AND id=? AND kind=?", params![project.to_string(), fence.id.to_string(), kind], stored).optional()?.ok_or(Error::StaleFence)?;
+    let row = db.query_row("SELECT id,generation,holder,token,expires,substr(record,1,?4) FROM claims WHERE project=?1 AND id=?2 AND kind=?3", params![project.to_string(), fence.id.to_string(), kind, MAX_RECORD_READ_BYTES], stored).optional()?.ok_or(Error::StaleFence)?;
     let row = checked(row)?;
     if row.holder != Some(fence.actor)
         || row.generation != fence.generation
@@ -470,10 +470,10 @@ impl Store {
     ) -> Result<Page<WorkClaim>> {
         let limit = page(0, limit)?;
         request.retry(|| {
-            let mut stmt=self.db.prepare("SELECT substr(record,1,262145) FROM claims WHERE project=? AND kind='work' AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT ?3")?;
-            let mut rows=stmt.query(params![project.to_string(),after.map(|id|id.to_string()),limit])?;
+            let mut stmt=self.db.prepare("SELECT substr(record,1,?4) FROM claims WHERE project=?1 AND kind='work' AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT ?3")?;
+            let mut rows=stmt.query(params![project.to_string(),after.map(|id|id.to_string()),limit,MAX_RECORD_READ_BYTES])?;
             let mut items=Vec::new(); let mut total=0; let mut truncated=false;
-            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(0)?; total+=bytes.len(); if total>1_048_576 {truncated=true;break;} items.push(decode(&bytes)?); }
+            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(0)?; total+=bytes.len(); if total>MAX_PAGE_BYTES {truncated=true;break;} items.push(decode(&bytes)?); }
             Ok(Page {items,truncated})
         })
     }

@@ -19,6 +19,17 @@ fn digest_keeps_route_provenance_exact_and_skips_long_routes() {
 }
 
 #[test]
+fn digest_keeps_routes_without_effort() {
+    assert_eq!(
+        digest(
+            "fabric_run",
+            &json!({"route":{"adapter":"codex","model":"o3"}})
+        ),
+        "fabric_run route=codex/o3"
+    );
+}
+
+#[test]
 fn digest_does_not_repeat_message_bodies_or_output_data() {
     let text = digest(
         "fabric_mail",

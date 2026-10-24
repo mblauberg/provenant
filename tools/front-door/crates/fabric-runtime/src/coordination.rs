@@ -53,7 +53,8 @@ impl CoordinationError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Peer(error) => error.code(),
-            Self::InvalidInput(_) | Self::Input(_) | Self::Time(_) => "invalid_input",
+            Self::InvalidInput(_) | Self::Input(_) => "invalid_input",
+            Self::Time(_) => "state_corrupt",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
             Self::Busy => "busy",
@@ -582,6 +583,7 @@ impl CoordinationApi for LocalCoordination<'_> {
         let request = self.request(budget, cancel);
         match input {
             TaskInput::Create { objective, note } => {
+                let now = self.clock.wall_now()?;
                 let task = Task {
                     header: RecordHeader::V1,
                     project: self.project,
@@ -592,8 +594,8 @@ impl CoordinationApi for LocalCoordination<'_> {
                     owner: None,
                     generation: 0,
                     expires_at: None,
-                    created_at: self.clock.wall_now()?,
-                    updated_at: self.clock.wall_now()?,
+                    created_at: now,
+                    updated_at: now,
                     legacy: None,
                 };
                 self.store.create_task(&task, &request)?;
@@ -604,11 +606,11 @@ impl CoordinationApi for LocalCoordination<'_> {
                 after,
                 limit,
             } => {
-                let tasks = self
+                let page = self
                     .store
                     .tasks(self.project, state, after, limit, &request)?;
                 Ok(TaskResult::Listed {
-                    page: bounded_page(tasks, false)?,
+                    page: bounded_page(page.items, page.truncated)?,
                 })
             }
             TaskInput::Claim { id, lease_ms } => {
@@ -848,8 +850,13 @@ impl CoordinationApi for LocalCoordination<'_> {
                     current = self
                         .store
                         .landing(self.project, &reference, &poll_request)?;
+                    let now = self.clock.wall_now()?;
                     let changed = current.as_ref().is_none_or(|landing| {
-                        landing.generation != generation || landing.holder.is_none()
+                        landing.generation != generation
+                            || landing.holder.is_none()
+                            || landing
+                                .expires_at
+                                .is_some_and(|expires_at| expires_at <= now)
                     });
                     if changed {
                         return Ok(LandingResult::Waited {
@@ -1097,6 +1104,102 @@ mod tests {
         }
         fn budget(&self) -> WaitBudget {
             WaitBudget::mcp(self.clock.mono_now(), 5).expect("test MCP budget")
+        }
+    }
+
+    struct TickingClock(std::cell::Cell<i64>);
+    impl Clock for TickingClock {
+        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+            let now = self.0.get();
+            self.0.set(now + 1);
+            WallTime::from_micros(now)
+        }
+        fn mono_now(&self) -> MonoTime {
+            MonoTime::from_micros(0)
+        }
+    }
+
+    #[test]
+    fn coordination_time_errors_are_state_corrupt() {
+        assert_eq!(
+            CoordinationError::Time(provenant_core::TimeError::WallRange).code(),
+            "state_corrupt"
+        );
+    }
+
+    #[test]
+    fn task_create_uses_one_timestamp() {
+        let temporary = tempfile::tempdir_in(std::fs::canonicalize("/tmp").expect("tmp path"))
+            .expect("temp root");
+        let base = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temp root");
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        let root = inputs
+            .resolve(&Resolver)
+            .expect("isolated state root")
+            .state;
+        let clock = TickingClock(std::cell::Cell::new(2_000_000_000_000_000));
+        let backoff = ThreadWait;
+        let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
+        let cancel = CancelToken::new();
+        let service = CoordinationService::open(
+            &root,
+            ProjectId::from_bytes([31; 16]),
+            ActorId::from_bytes([32; 16]),
+            &clock,
+            &backoff,
+            budget,
+            &cancel,
+        )
+        .expect("open service");
+
+        let TaskResult::Created { task } = service
+            .task(
+                TaskInput::Create {
+                    objective: "single timestamp".into(),
+                    note: None,
+                },
+                budget,
+                &cancel,
+            )
+            .expect("create task")
+        else {
+            panic!("create result")
+        };
+
+        assert_eq!(task.created_at, task.updated_at);
+    }
+
+    struct AdvancingClock {
+        wall: std::cell::Cell<i64>,
+        mono: std::cell::Cell<u64>,
+    }
+    impl AdvancingClock {
+        fn new() -> Self {
+            Self {
+                wall: std::cell::Cell::new(2_000_000_000_000_000),
+                mono: std::cell::Cell::new(0),
+            }
+        }
+        fn budget(&self) -> WaitBudget {
+            WaitBudget::cli(MonoTime::from_micros(self.mono.get()), 10).expect("wait budget")
+        }
+    }
+    impl Clock for AdvancingClock {
+        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+            WallTime::from_micros(self.wall.get())
+        }
+        fn mono_now(&self) -> MonoTime {
+            MonoTime::from_micros(self.mono.get())
+        }
+    }
+    impl RetryWait for AdvancingClock {
+        fn wait(&self, duration: DurationMicros, _: &CancelToken) {
+            self.wall.set(self.wall.get() + duration.as_micros() as i64);
+            self.mono.set(self.mono.get() + duration.as_micros());
         }
     }
 
@@ -1355,6 +1458,57 @@ mod tests {
         assert!(matches!(
             service.landing(LandingInput::Release { proof }, fixture.budget(), &cancel),
             Ok(LandingResult::Released { .. })
+        ));
+    }
+
+    #[test]
+    fn landing_wait_returns_on_expired_holder() {
+        let fixture = Fixture::new();
+        let clock = AdvancingClock::new();
+        let cancel = CancelToken::new();
+        let service = CoordinationService::open(
+            &fixture.root,
+            fixture.project,
+            fixture.actor,
+            &clock,
+            &clock,
+            clock.budget(),
+            &cancel,
+        )
+        .expect("open service");
+        let LandingResult::Acquired { landing, .. } = service
+            .landing(
+                LandingInput::Acquire {
+                    reference: "refs/heads/expired-wait".into(),
+                    expected: GitOid::parse(&"a".repeat(40)).expect("expected oid"),
+                    candidate: GitOid::parse(&"b".repeat(40)).expect("candidate oid"),
+                    lease_ms: 1_000,
+                },
+                clock.budget(),
+                &cancel,
+            )
+            .expect("acquire lease")
+        else {
+            panic!("landing acquire result")
+        };
+        clock
+            .wall
+            .set(landing.expires_at.expect("lease expiry").as_micros());
+
+        assert!(matches!(
+            service.landing(
+                LandingInput::Wait {
+                    reference: landing.reference,
+                    generation: landing.generation,
+                    wait_ms: 5_000,
+                },
+                clock.budget(),
+                &cancel,
+            ),
+            Ok(LandingResult::Waited {
+                landing: Some(_),
+                timed_out: false,
+            })
         ));
     }
 

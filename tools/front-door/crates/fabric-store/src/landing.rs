@@ -130,8 +130,8 @@ fn load_operation(
 ) -> Result<PushOperation> {
     let bytes: Vec<u8> = db
         .query_row(
-            "SELECT substr(record,1,262145) FROM operations WHERE project=? AND id=?",
-            params![project.to_string(), id.as_str()],
+            "SELECT substr(record,1,?3) FROM operations WHERE project=?1 AND id=?2",
+            params![project.to_string(), id.as_str(), MAX_RECORD_READ_BYTES],
             |r| r.get(0),
         )
         .optional()?
@@ -163,7 +163,7 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<LandingGuard> {
         reference(branch)?;
-        request.retry(|| Ok(()))?;
+        request.check()?;
         let key = scope_key("fabric-landing-lock", &(project, branch))?;
         // Digest's fixed ASCII hex is safe as a single filesystem component.
         let name = format!(
@@ -326,8 +326,8 @@ impl Store {
         reference(branch)?;
         request.retry(|| {
             let bytes: Option<Vec<u8>> = self.db.query_row(
-                "SELECT substr(record,1,262145) FROM claims WHERE project=? AND kind='landing' AND scope_key=?",
-                params![project.to_string(), branch], |row| row.get(0),
+                "SELECT substr(record,1,?3) FROM claims WHERE project=?1 AND kind='landing' AND scope_key=?2",
+                params![project.to_string(), branch, MAX_RECORD_READ_BYTES], |row| row.get(0),
             ).optional()?;
             bytes.map(|bytes| decode(&bytes)).transpose()
         })

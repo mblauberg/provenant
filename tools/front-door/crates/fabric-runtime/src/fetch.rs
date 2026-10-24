@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, ffi::OsStr};
 use thiserror::Error;
 
 pub const MAX_FETCH_FILES: usize = 16;
-pub const MAX_FETCH_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_FETCH_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_FETCH_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_FETCH_CHUNKS: usize = 4096;
 pub const MAX_FETCH_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -132,7 +132,7 @@ impl FetchManifest {
             }
             total = total
                 .checked_add(file.size)
-                .filter(|bytes| *bytes <= MAX_FETCH_BYTES as u64)
+                .filter(|bytes| *bytes <= MAX_FETCH_ARTIFACT_BYTES as u64)
                 .ok_or(FetchError::Invalid("total file bytes"))?;
             prior = Some(&file.path);
         }

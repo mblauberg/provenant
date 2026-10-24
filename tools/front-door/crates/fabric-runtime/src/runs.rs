@@ -1,15 +1,7 @@
-//! Typed F3 run-owner seam and the run-only adapter used by the binary facade.
-//!
-//! The runtime owns the request and response contracts. The binary composition
-//! layer implements `RunOwner` by binding the local run store, dispatcher and
-//! home-host router. This module does not launch processes or invent records.
-//! Submit, cancel and resume bind to Run's shared launch path; a durable
-//! queued record alone is not proof that work was dispatched.
+//! Typed F3 run records and helpers consumed by the binary facade.
 
-use super::coordination::facade::{
-    AttemptTarget, FacadeError, OutputInput, OutputResult, RunInput, SubmitInput, WaitCondition,
-};
-use provenant_core::{CancelToken, OperationId, WaitBudget};
+use super::coordination::facade::{AttemptTarget, WaitCondition};
+use provenant_core::OperationId;
 use provenant_records::run::{AttemptRecord, RunEvent};
 use serde::{Deserialize, Serialize};
 
@@ -79,54 +71,6 @@ pub struct RunCapabilities {
     pub resume: bool,
     pub output: bool,
     pub events: bool,
-}
-
-/// The narrow execution boundary implemented by front-door composition.
-///
-/// Implementations scope every lookup and mutation to the authenticated
-/// project and actor. Before launching a submitted task, the owner must enforce
-/// its access mode and bind a writer to its verified registered worktree, or
-/// refuse the submission. Declaring read-only access never grants write access.
-/// Mutations use the supplied operation id for idempotency;
-/// an uncertain launch returns `FacadeError::LaunchUnknown` with that id and
-/// is reconciled by a receipt lookup, never by blindly retrying launch.
-///
-/// `Wait` snapshots its target set at entry, preserves that order, and only
-/// observes those attempts for the requested Any/All condition. Cancelling an
-/// observation does not cancel a launched attempt. `Cancel` is the explicit
-/// run mutation. `Fetch` accepts only an artifact reference already bound to
-/// the target attempt, not an arbitrary filesystem path.
-pub trait RunOwner {
-    fn capabilities(&self) -> RunCapabilities;
-
-    fn submit(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<SubmissionReceipt, FacadeError>;
-
-    fn run(
-        &mut self,
-        input: RunInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<RunResult, FacadeError>;
-
-    fn output(
-        &mut self,
-        input: OutputInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<OutputResult, FacadeError>;
-
-    fn events(
-        &mut self,
-        after: u64,
-        limit: u16,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<RunEventsPage, FacadeError>;
 }
 
 /// Input-required wakes either condition; other outcomes remain result data.

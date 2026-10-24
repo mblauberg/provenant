@@ -29,8 +29,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const MAX_BODY_BYTES: usize = 65_536;
 pub const MAX_RECORD_BYTES: usize = 262_144;
 pub const MAX_PAGE_ROWS: u64 = 100;
+pub(crate) const MAX_RECORD_READ_BYTES: i64 = (MAX_RECORD_BYTES + 1) as i64;
+pub(crate) const MAX_PAGE_BYTES: usize = 1_048_576;
 
-/// Sequence pages expose byte-bound truncation. Resume after the last item's seq.
+/// Bounded reads expose byte-cap truncation; resume after the last item's cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Page<T> {
