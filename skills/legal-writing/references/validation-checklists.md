@@ -211,7 +211,7 @@ Project build tooling should pass its filing-facing source, correspondence and a
 To scan this skill's own reference files, select the product checkout as the project. The skill-owned JSON declares its quoted-example paths and exclusions:
 
 ```bash
-provenant --project "$(provenant root)" check writing skills/legal-writing --rules legal
+provenant check writing skills/legal-writing --rules legal
 ```
 
 Treat failures as blockers for filing-facing documents. Treat warnings as review prompts.

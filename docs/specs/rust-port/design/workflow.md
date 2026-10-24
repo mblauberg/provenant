@@ -61,8 +61,9 @@ Evidence of a call in a skill is evidence of a supported path, not a measured
 invocation count. State sampling is read-only, bounded and excludes prompt,
 message and credential contents.
 
-At the evidence baseline, the legacy telemetry ledger at
-`~/.local/state/agent-harness/fabric/telemetry.sqlite3` exists: about 565 MB,
+At the evidence baseline, the historical survey telemetry ledger at
+`~/.local/state/agent-harness/fabric/telemetry.sqlite3`, distinct from the v1
+state root `~/.local/share/provenant/v1`, exists: about 565 MB,
 566,185 usage rows, 566,877 usage-file rows, 111,191 observations, 46,923 events,
 13 deliveries and zero changes at the baseline inspection. A repair-pass
 read-only aggregate query confirms **13 deliveries, none accepted**, no

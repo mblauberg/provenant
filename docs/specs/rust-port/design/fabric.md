@@ -56,8 +56,9 @@ and the resulting retention decisions are recorded below; static references do
 not establish that a feature is used. Local inspection reads metadata only,
 never credentials, prompt bodies or transcript content.
 
-Rechecked on 24 October 2026 with one read-only SQLite snapshot of
-`~/.local/state/agent-harness/fabric/fabric.sqlite3`. Counts below exclude
+Rechecked on 24 October 2026 with one read-only SQLite snapshot of the
+historical survey database `~/.local/state/agent-harness/fabric/fabric.sqlite3`,
+distinct from the v1 state root `~/.local/share/provenant/v1`. Counts below exclude
 projects matching `project LIKE '%/T/%' OR project LIKE '%/tmp/%' OR
 project='/private/tmp'`, unless labelled raw. These temporary projects include
 lifecycle tests that wrote to the live root; they are not product adoption.
@@ -478,8 +479,8 @@ the chair. Missing launch evidence counts as launched. Graph attempts use
 
 Cancellation persists the admission fence before asking the run owner to cancel
 accepted attempts. Resume checks the same document digest and reuses each
-attempt key. The `fabric_run` operation `list` remains unavailable; graph run,
-status, cancel and resume use the bound graph owner.
+attempt key. The `fabric_run` operation `list` is available; graph run, status,
+cancel and resume use the bound graph owner.
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
 exact route if known, and next cursor/artefact references. Do not repeat result

@@ -42,9 +42,10 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 5. Respect bounded retry and escalation rules from the owning lifecycle. Do
    not bypass a user gate, widen the build ceiling, or infer authority from a
    worker's result.
-6. When work is interrupted, use `provenant resume` and `provenant reconcile`
-   with the run's existing identity. Preserve partial outputs and verify the
-   target before retrying.
+6. When work is interrupted, use `provenant reconcile --id RUN`, then resume
+   the exact attempt with `provenant resume RUN/TASK/ATTEMPT --operation-id ID
+   (--prompt-file PATH | --prompt-stdin)`. Preserve partial outputs and verify
+   the target before retrying.
 7. Before compaction or a substantial handoff, save a bounded Markdown
    checkpoint for the actual host session with
    `provenant workflow session save <session-id> --file <checkpoint.md>`.

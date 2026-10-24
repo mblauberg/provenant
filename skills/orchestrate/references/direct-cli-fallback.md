@@ -5,7 +5,7 @@ Use this path only when Fabric cannot express the task or is unavailable. Record
 ## Preflight
 
 1. Confirm the requested workspace, read or write scope, disclosure boundary and provider authentication without exposing credentials in argv or logs.
-2. Create a unique run directory under the primary checkout's `.agent-run/runs/`. Put prompts, full output and diagnostics there. Place disposable one-shot files under `.agent-run/scratch/`, never a system temporary directory.
+2. Put prompts, full output and diagnostics in the Provenant state root's run directory. Place disposable one-shot files in the session scratchpad.
 3. Use the same model and effort that the task requested. If the CLI substitutes either, record requested and applied values. [codex-capabilities.md](codex-capabilities.md) describes Codex probes.
 4. For a writer, require an owned registered worktree and one writer. A read-only run needs an enforced boundary before it can certify an assurance claim; label `best_effort` or `prompt_only` honestly.
 

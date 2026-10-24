@@ -195,10 +195,8 @@ distinct families, are dispatched through Fabric MCP or the direct command
 line. Both front doors delegate to the same `orchestrate` owners; Fabric does
 not implement provider mechanics. Dispatching a worker and claiming
 independence are separate things: ordinary dispatch records that it makes no
-independence claim, and the Fabric MCP execution tools reject an assurance
-selector as a typed input error, so a review leg that must carry an
-independence claim runs the assurance path in
-`provenant dispatch` ([ADR
+independence claim. A review leg that must carry an independence claim uses
+`--delivery-id` and `provenant workflow review` ([ADR
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 

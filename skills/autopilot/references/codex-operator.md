@@ -12,10 +12,11 @@ loop driver.
 - Use `provenant lanes` and Fabric tasks to see what is active, ready, blocked,
   or complete. Dispatch bounded work with `provenant dispatch` through
   `orchestrate`; read results with `provenant output`.
-- After an interruption, run `provenant reconcile`, inspect the exact task and
-  artifact, and use `provenant resume` for the existing run. Preserve partial
-  work and retry only missing or failed tasks within their owner's retry
-  bounds.
+- After an interruption, run `provenant reconcile --id RUN`, inspect the exact
+  task and artifact, and resume the exact attempt with
+  `provenant resume RUN/TASK/ATTEMPT --operation-id ID (--prompt-file PATH |
+  --prompt-stdin)`. Preserve partial work and retry only missing or failed
+  tasks within their owner's retry bounds.
 - Use native subagents for independent work when the governing orchestration
   contract allows it. Preserve task scope, write authority, artifact paths,
   checks, and return format. Synthesis and acceptance stay with the accountable

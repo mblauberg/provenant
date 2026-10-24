@@ -18,6 +18,7 @@ Never signal a PID inferred from a stale record or an empty observation.
 
 ## Detached work
 
-Run owns detached custody and recovery. Use `provenant reconcile RUN` for
-recovery and `provenant resume RUN/TASK/ATTEMPT` with an authorised prompt for
-continuation. Consult `provenant help` for operation IDs and prompt flags.
+Run owns detached custody and recovery. Use `provenant reconcile --id RUN` for
+recovery. Resume an attempt with `provenant resume RUN/TASK/ATTEMPT
+--operation-id ID (--prompt-file PATH | --prompt-stdin)` and an authorised
+prompt for continuation.
