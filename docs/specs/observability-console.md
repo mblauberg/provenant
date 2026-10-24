@@ -1,5 +1,8 @@
 # Spec: observability layer and native macOS console
 
+> Pre-rewrite design history. The [accepted Rust designs](rust-port/design/README.md)
+> own current behaviour; use `provenant help` for executable commands.
+
 Status: **proposed**, 2026-10-22, workstream W6. GitHub owns delivery state;
 this file owns the durable requirements once accepted. It grants no authority
 and relaxes no gate in `HARNESS.md`. It builds on

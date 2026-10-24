@@ -4,6 +4,8 @@ An optional macOS menu-bar app that displays account quota snapshots from Proven
 
 The status item shows the highest-use available account and its percentage. The panel lists accounts by status, shows reported usage windows and reset times, and keeps the last good report visible if a refresh fails. Rows without a snapshot show their reported status and error. When the CLI has no account snapshots, the panel shows how many quota report rows have known account data.
 
+Binding limits must have a reset time and must not be advisory. Rust `credit_only` accounts have spent their plan allowance and appear as "Exhausted, drawing on credits", with the allowance reset time when known.
+
 The app reads all quota data from the CLI. It does not read credentials, tokens or the Keychain. Quota probes stay disabled unless a provider has a qualifying activation recording and recorded runtime authority. Until then, the CLI reports the provider status without inventing an account identity.
 
 ## Build and run

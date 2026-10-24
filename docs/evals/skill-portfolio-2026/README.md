@@ -35,13 +35,9 @@ every terminal action without retrying or relabelling failures.
 
 ## Current dispatch infrastructure fixture
 
-The provider-free [dispatch fixture](../../../tests/fixtures/current-routing-eval/dispatch_fixture.py)
-is exercised by the batch contract tests. It proves the current `batch_run.py`
-and `dispatch_run.py` path retains a fixed bounded task set, fixture-emitted
-route metadata for same- and mixed-family cases, an intentional partial
-failure, and reducer inputs.
-This is an infrastructure contract pass, not a semantic routing result: the
-18-case holdout above remains unrun.
+The old Python dispatch fixture and batch contract tests were removed in the
+Rust cut. Current boundary coverage lives with the Rust run/CLI owners. The
+18-case holdout above remains unrun; deletion is not new semantic evidence.
 
 ## Predecessor routing evidence
 

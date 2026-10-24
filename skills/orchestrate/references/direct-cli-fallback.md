@@ -23,4 +23,4 @@ Classify usage limit, rate limit, authentication, unavailable model, permission 
 
 Report the result status, path, route and guarantee. The route should be `adapter/model@effort` from the observed or resolved invocation, with provider and identity stated. A native Claude subagent route is `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model parameter. Keep the exact receipt beside the output. The chair verifies the live tree and uses the [HARNESS.md](../../../HARNESS.md) review ladder.
 
-`cf_dispatch.py` remains the low-level direct adapter when needed. It is a degraded execution path, not a Fabric request/reply. Global provider config edits require explicit authority; prefer per-run flags.
+Use `provenant dispatch` for a direct CLI invocation of the same Rust run owner. Retain its attempt record and identify the missing Fabric exchange. Global provider config edits require explicit authority; prefer per-run flags.

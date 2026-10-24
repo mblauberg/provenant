@@ -83,13 +83,9 @@ needs durable peer exchange. Only the chair mutates shared pair state.
   assume ownership and verify the referenced artifacts; Fabric does not
   transfer chair authority or provider custody automatically.
 
-Use `skills/orchestrate/scripts/lease.py` only where its local lease mechanism
-is explicitly selected for an autonomous loop. It serialises local ownership;
-it is not Fabric state, provider custody, a liveness signal or an automatic
-takeover mechanism.
-
-Autonomous labs have exactly one active loop driver/orchestrator lease. The
-other primary owns bounded stages, workflows or audits, never a competing loop.
+The run-directory driver lease is retired. The chair owns one active loop;
+other primaries own bounded stages. Rust run/supervisor owns writer custody,
+and `provenant fabric landing` owns the separate advisory landing fence.
 
 ## Default rotation
 

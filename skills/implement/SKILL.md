@@ -25,13 +25,10 @@ reconciliation run.
 
 ## Loop
 
-1. For substantial+ work, create the canonical `delivery-run` with profile
-   `software` through the complete installed-producer command in `deliver`,
-   then follow [run-contract.md](references/run-contract.md). Routine minor work may proceed
-   without `RUN.json` unless the user or project policy requests one.
-   Pass that `RUN.json` run_id as `delivery_run_id` on every new lane
-   dispatch for the delivery, reviewers included; retries, resumes and handoffs
-   inherit the id.
+1. For substantial+ work, retain approved scope, authority, artifact identity,
+   checks and independent review through the Rust workflow owner. Follow
+   [run-contract.md](references/run-contract.md). Bind dispatched lanes to the
+   same delivery identity. Routine minor work needs no separate run record.
 2. Keep an adaptive plan. Name the governing skill in the worker contract
    before changing code. Invoke `tdd` for every new or changed observable
    behaviour, and use `refactor`
@@ -65,15 +62,13 @@ reconciliation run.
    `repair --failing CHECK_ID`.
    Every gate still passes before merge. Return
    evidence to user or `scope` on drift. `review.rereview_scope` and the other
-   `review.*` knobs in `scripts/provenant-profile show --resolved` adjust this step.
+   `review.*` knobs in `provenant config show` adjust this step.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
-   artifacts in `RUN.json`.
-7. When a receipt exists, validate with
-   `"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
-   .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes`.
-   Hand off only after this machine gate.
+   artifacts in the delivery record.
+7. Verify retained artifact identities and deterministic evidence through the
+   Rust workflow owner before handoff. Do not create a Python RUN.json scaffold.
 8. Objective checks and the review required by the tier meet final acceptance;
    the chair reports the outcome and the user may still reject it. Require
    explicit user acceptance only for `terminal` work or when the approved

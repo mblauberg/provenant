@@ -103,25 +103,16 @@ Name the branch `<type>/<area>-<slug>` per
 [`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
 for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
-branch with `/` replaced by `-`, as `scripts/worktree` already defaults. The
+branch with `/` replaced by `-`, as `provenant worktree` already defaults. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. Removing a clean worktree also needs no extra authority;
 dirty worktrees are refused and unmerged branches are kept.
 
 ```sh
-scripts/worktree create \
-  --new-branch fix/repo-runbook-mechanics --start-point main
+provenant worktree create fix/repo-runbook-mechanics --base origin/main
 ```
 
-To also record the issue-to-branch link on GitHub, create the branch with
-`gh issue develop` first, then point the helper at it:
-
-```sh
-gh issue develop 148 --name fix/repo-runbook-mechanics --base main
-git fetch origin
-scripts/worktree create \
-  --existing-branch fix/repo-runbook-mechanics
-```
+Record the issue-to-branch link in the pull request.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -259,7 +250,7 @@ forced branch deletion, deletion of a branch that is not merged, history
 rewrites, credential or connector setup, pushes to shared branches outside
 authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
-[post-merge pruning](../worktrees.md#post-merge-pruning).
+[post-merge pruning](../worktrees.md#ownership-and-cleanup).
 
 Branch protection requires the head to be strictly up to date with `main`, so
 concurrent pull requests still integrate as a serialised merge train: merge
@@ -306,41 +297,15 @@ reports green; that gate is the whole review pressure for these PRs.
 
 Afterwards:
 
-1. For a software delivery, sync the primary checkout; the run already lives under its
-   workspace-relative `.agent-run/runs/<run-dir>/` location.
-   After the merge commit's main-branch `ci-status` succeeds, bind the exact
-   merge, PR and review evidence before human acceptance is recorded:
+1. Record the merged PR, exact merge commit, CI result and independent review
+   evidence in the delivery record through the Rust workflow owner. The old
+   Python binder and RUN.json scaffold are retired. Promotion remains a
+   separate authorised action against the accepted artifact.
 
-   ```sh
-   skills/implement/scripts/bind_merged_delivery.py \
-     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" \
-     --repository owner/repository --pr-number <number> \
-     --review-artifact <targeted-review.json> \
-     --review-artifact <other-primary-review.json>
-   skills/deliver/scripts/validate_delivery.py \
-     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" --verify-hashes
-   ```
-
-   The binder reads the merged PR and exact merge-commit `ci-status` from the
-   authenticated GitHub API; it does not accept caller-authored success flags.
-   Review arguments are pre-existing typed exact-head artifacts, not verdicts
-   created by the binder. It holds an exclusive receipt lock, stages the whole
-   update and fails if the reviewed and merged trees differ. The source artifact
-   records the exact full-width native Git commit and resolved tree without a
-   second archive or per-file hash. Git evidence reads discard inherited
-   repository, object and config routing, replacements and grafts, and never
-   lazy-fetch missing promisor objects; local PR, CI and review JSON remain
-   SHA-256 verified. Do not
-   request any required user acceptance or promotion authority until validation
-   passes. The current receipt code still requires explicit user acceptance
-   to record `human_gates.acceptance` on this receipt. Release
-   records its separate gate against the same exact artifact identity and never
-   reconstructs it. This code constraint is listed in the
-   [issue #1025](https://github.com/mblauberg/provenant/issues/1025); do not fabricate approval.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not
-   a later sweep. [Post-merge pruning](../worktrees.md#post-merge-pruning) owns
+   a later sweep. [Post-merge pruning](../worktrees.md#ownership-and-cleanup) owns
    the standing authority, the method-specific proof gates and the deletion
    commands; run the complete repository, branch and merge gate first, and do
    not run the merge-commit and squash-merge paths as one sequence.
