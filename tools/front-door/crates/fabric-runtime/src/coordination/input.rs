@@ -382,7 +382,7 @@ impl ValidateInput for SubmitInput {
                 knobs,
                 ..
             } => {
-                if tasks.is_empty() || tasks.len() > 100 {
+                if tasks.is_empty() || tasks.len() > 64 {
                     return Err(field("tasks"));
                 }
                 if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
@@ -520,6 +520,11 @@ mod tests {
         rejects::<ClaimInput>(
             json!({"op":"acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_ms":1_000}),
             "scope.paths[0]",
+        );
+        let task = json!({"prompt":"do work","route":{},"timeout_ms":1_000});
+        rejects::<SubmitInput>(
+            json!({"op":"submission","operation_id":"work-1","tasks":vec![task; 65]}),
+            "tasks",
         );
         for name in ["adapter", "model", "route", "role", "task_class", "effort"] {
             let mut route = json!({});
