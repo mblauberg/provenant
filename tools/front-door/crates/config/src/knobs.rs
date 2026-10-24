@@ -65,23 +65,69 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Resolve a task's final policy without changing the config file.
+    pub fn dispatch_profile(
+        &self,
+        class: Option<&str>,
+        overrides: &[String],
+    ) -> Result<provenant_records::run::HarnessProfile, ConfigError> {
+        let registry = registry()?;
+        let mut knobs = self.knobs.clone();
+        if let Some(class) = class {
+            apply_class(&registry, self.profile, &mut knobs, class);
+        }
+        for entry in overrides {
+            let (name, text) = entry
+                .split_once('=')
+                .ok_or_else(|| invalid(entry, "expected_name_value"))?;
+            let spec = spec(&registry, name)?;
+            let value = parse_cli(spec, text).map_err(|rule| invalid(name, rule))?;
+            check(spec, &value).map_err(|rule| invalid(name, rule))?;
+            knobs.insert(
+                name.into(),
+                KnobValue {
+                    value,
+                    source: KnobSource::Override,
+                },
+            );
+        }
+        Ok(provenant_records::run::HarnessProfile {
+            name: profile_name(self.profile).into(),
+            task_class: class.map(str::to_owned),
+            knobs: knobs
+                .into_iter()
+                .map(|(name, knob)| (name, knob.value))
+                .collect(),
+            overrides: overrides.to_vec(),
+        })
+    }
+
     /// Layer the profile preset's per-task-class knobs over the base preset.
     /// A user `[knobs]` override still wins. An unlisted class changes nothing.
     pub fn apply_task_class(&mut self, class: &str) -> Result<(), ConfigError> {
         let registry = registry()?;
-        let preset = registry.presets.get(profile_name(self.profile));
-        let layer = preset.and_then(|p| p.task_classes.get(class));
-        for (name, value) in layer.into_iter().flat_map(|c| &c.knobs) {
-            if let Some(knob) = self.knobs.get_mut(name)
-                && knob.source != KnobSource::Override
-            {
-                *knob = KnobValue {
-                    value: value.clone(),
-                    source: KnobSource::Profile,
-                };
-            }
-        }
+        apply_class(&registry, self.profile, &mut self.knobs, class);
         Ok(())
+    }
+}
+
+fn apply_class(
+    registry: &Registry,
+    profile: Profile,
+    knobs: &mut BTreeMap<String, KnobValue>,
+    class: &str,
+) {
+    let preset = registry.presets.get(profile_name(profile));
+    let layer = preset.and_then(|p| p.task_classes.get(class));
+    for (name, value) in layer.into_iter().flat_map(|c| &c.knobs) {
+        if let Some(knob) = knobs.get_mut(name)
+            && knob.source != KnobSource::Override
+        {
+            *knob = KnobValue {
+                value: value.clone(),
+                source: KnobSource::Profile,
+            };
+        }
     }
 }
 

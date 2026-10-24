@@ -1,7 +1,7 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
 use serde_json::{Value, json};
-use std::{ffi::OsString, path::Path};
+use std::{ffi::OsString, os::unix::fs::DirBuilderExt, path::Path};
 use support::{Result, TestRig, code};
 
 fn mcp(rig: &TestRig, frames: &[Value]) -> Result<Vec<Value>> {
@@ -276,6 +276,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             request: CanonicalRequest {
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    profile: provenant_records::run::HarnessProfile::default(),
                     task_id: task,
                     prompt_digest: CanonicalV1::file_digest(b"prompt"),
                     route: RequestedRoute::Model {
@@ -377,5 +378,108 @@ fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
     assert_eq!(result["isError"], true);
     assert_eq!(result["structuredContent"]["code"], "lane_depth");
     assert!(!rig.state.join("runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+// Providers remain disabled. Submission still seals policy and admission tickets,
+// so this fixture exercises the real Fabric-to-Run path without a provider run.
+fn submitted_policy(
+    rig: &TestRig,
+    operation: &str,
+    concurrency: Option<u64>,
+    knobs: &[&str],
+) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
+    let task = json!({"prompt":"fixture", "route":{"model":"codex/fixture","task_class":"mechanical"},"timeout_ms":60000});
+    let mut arguments = json!({"op":"submission","operation_id":operation,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
+    if let Some(n) = concurrency {
+        arguments["concurrency"] = n.into();
+    }
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_submit","arguments":arguments}}),
+        ],
+    )?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
+    assert_ne!(result["isError"], true, "{result}");
+    let target = result["structuredContent"]["targets"][0].clone();
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","target":target}}}),
+        ],
+    )?;
+    let attempt = replies.iter().find(|r| r["id"] == 2).ok_or("status")?["result"]["structuredContent"]["attempt"].clone();
+    let run = attempt["run_id"].as_str().ok_or("run ID")?;
+    let request = serde_json::from_slice(&std::fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    Ok((request, attempt))
+}
+
+#[test]
+fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
+    let rig = TestRig::new()?;
+    std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\nprofile='rigorous'\n[knobs]\n'lanes.max_concurrency'=3\n",
+    )?;
+    for (operation, explicit, knobs, expected) in [
+        ("config-capacity", None, vec![], 3),
+        (
+            "dispatch-capacity",
+            None,
+            vec![
+                "lanes.max_concurrency=2",
+                "effort.shift=-1",
+                "routing.pool_mode=rotate",
+            ],
+            2,
+        ),
+        (
+            "explicit-capacity",
+            Some(1),
+            vec!["lanes.max_concurrency=2"],
+            1,
+        ),
+    ] {
+        let (request, attempt) = submitted_policy(&rig, operation, explicit, &knobs)?;
+        assert_eq!(request.concurrency, expected);
+        let task = &request.tasks[0];
+        assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
+        assert_eq!(task.profile.overrides, knobs);
+        assert_eq!(task.profile.task_class.as_deref(), Some("mechanical"));
+        assert_eq!(
+            task.profile.knobs["effort.shift"],
+            if operation == "dispatch-capacity" {
+                -1
+            } else {
+                0
+            }
+        );
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn silence_knob_controls_capture_plan_observations() -> Result {
+    let rig = TestRig::new()?;
+    std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.silence_seconds'=2\n",
+    )?;
+    for (operation, knobs, threshold) in [
+        ("config-silence", vec![], 2000),
+        ("dispatch-silence", vec!["lanes.silence_seconds=1"], 1000),
+    ] {
+        let (request, _) = submitted_policy(&rig, operation, None, &knobs)?;
+        let plan = provenant_run::capture_plan(&request.tasks[0]);
+        assert_eq!(plan.silence_ms, threshold);
+        assert!(!plan.silent(threshold - 1, Some(0)));
+        assert!(plan.silent(threshold, Some(0)));
+        assert!(!plan.silent(threshold, Some(threshold)));
+    }
     rig.assert_legacy_unchanged()
 }

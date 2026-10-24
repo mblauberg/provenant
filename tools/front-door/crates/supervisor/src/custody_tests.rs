@@ -5,6 +5,18 @@ use std::os::unix::fs::PermissionsExt;
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 #[test]
+fn capture_plan_without_silence_uses_registry_default() -> TestResult {
+    let mut stored = serde_json::to_value(CapturePlan::default())?;
+    stored
+        .as_object_mut()
+        .ok_or("capture plan object")?
+        .remove("silence_ms");
+    let plan: CapturePlan = serde_json::from_value(stored)?;
+    assert_eq!(plan.silence_ms, 300_000);
+    Ok(())
+}
+
+#[test]
 fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResult {
     let identity = ProcessIdentity {
         boot: "ffffffff-ffff-ffff-ffff-ffffffffffff".into(),

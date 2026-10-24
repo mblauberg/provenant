@@ -471,6 +471,8 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Res
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    /// Fabric's route.task_class, retained separately from the resolved route.
+    pub task_class: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
     pub route: run::RequestedRoute,
@@ -481,7 +483,8 @@ pub struct Submitted {
 pub struct Submission {
     pub operation_id: OperationId,
     pub tasks: Vec<Submitted>,
-    pub concurrency: u64,
+    pub concurrency: Option<u64>,
+    pub knobs: Vec<String>,
 }
 /// Scan, record and launch read-only work: the one path the CLI and Fabric
 /// share. Replaying an operation returns its run and launches nothing new.
@@ -510,9 +513,22 @@ pub fn submit(
     .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
+    let config = provenant_config::read_with_domains(
+        edge.roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )
+    .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
+    let profile = |class: Option<&str>| {
+        config
+            .dispatch_profile(class, &submission.knobs)
+            .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))
+    };
+    let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
     for task in submission.tasks {
         scan(&task.prompt)?;
         requests.push(run::TaskRequest {
+            profile: profile(task.task_class.as_deref())?,
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
             route: task.route,
@@ -533,7 +549,7 @@ pub fn submit(
         request: run::CanonicalRequest {
             schema_version: 1,
             tasks: requests,
-            concurrency: submission.concurrency,
+            concurrency,
             parent: None,
             lane_depth,
             parent_attempt,
@@ -678,12 +694,13 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     let concurrency = if command.input.manifest.is_some() {
         command.concurrency
     } else {
-        1
+        Some(1)
     };
     let tasks = tasks
         .into_iter()
         .map(
             |(task_id, prompt, route, fallback, delivery_id)| Submitted {
+                task_class: None,
                 task_id,
                 prompt,
                 route,
@@ -701,6 +718,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             operation_id: command.operation_id,
             tasks,
             concurrency,
+            knobs: command.knobs,
         },
         &call,
     )?;

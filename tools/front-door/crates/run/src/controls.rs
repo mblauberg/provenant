@@ -168,6 +168,7 @@ impl RunStore {
             request: CanonicalRequest {
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    profile: task.profile.clone(),
                     task_id: prior.task_id,
                     prompt_digest: provenant_records::CanonicalV1::file_digest(
                         input.prompt.as_bytes(),
