@@ -373,12 +373,27 @@ fn account_reason<'q>(
         && let Some(q) = quota
     {
         reason = match q.snapshot.status {
-            QuotaStatus::Exhausted => Some(RouteExclusionReason::Exhausted),
+            QuotaStatus::Exhausted if !exhaustion_lapsed(&q.snapshot, context.now_seconds()) => {
+                Some(RouteExclusionReason::Exhausted)
+            }
             QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
             _ => None,
         };
     }
     (reason, quota)
+}
+/// An exhausted snapshot stops binding once every full window has reset.
+fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64) -> bool {
+    let mut full = snapshot
+        .windows
+        .iter()
+        .filter(|w| w.used_basis_points >= 10_000)
+        .peekable();
+    full.peek().is_some()
+        && full.all(|w| {
+            w.resets_unix_seconds
+                .is_some_and(|reset| reset <= now_seconds)
+        })
 }
 fn candidate(
     model: &ModelId,
