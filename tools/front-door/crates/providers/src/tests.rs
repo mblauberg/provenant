@@ -1017,24 +1017,155 @@ fn claude_signin_does_not_call_a_locked_or_present_identity_signed_out() {
     assert!(!report.contains("never-publish"));
 }
 
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+
+/// One recorded call: argv, environment and working directory.
+type Call = (Vec<String>, Vec<String>, std::path::PathBuf);
+
+/// Answers keychain reads from a script and records every call.
+struct KeychainScript {
+    items: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+    calls: std::sync::Mutex<Vec<Call>>,
+}
+
+impl provenant_supervisor::exec::Executor for KeychainScript {
+    fn execute(
+        &self,
+        options: provenant_supervisor::exec::ExecOptions<'_>,
+    ) -> Result<provenant_supervisor::exec::ExecOutcome, provenant_supervisor::exec::ExecError>
+    {
+        let text = |items: &[OsString]| {
+            items
+                .iter()
+                .map(|item| item.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let argv = text(options.argv);
+        let env = options
+            .env
+            .unwrap_or_default()
+            .iter()
+            .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+            .collect();
+        let stdout = if argv[0] == "/usr/bin/security" {
+            self.items.lock().unwrap().pop_front().unwrap()
+        } else {
+            vec![]
+        };
+        self.calls
+            .lock()
+            .unwrap()
+            .push((argv, env, options.cwd.to_owned()));
+        Ok(provenant_supervisor::exec::ExecOutcome {
+            termination: provenant_supervisor::exec::Termination::Exit(0),
+            stdout: provenant_supervisor::exec::CapturedStream {
+                bytes: stdout,
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        })
+    }
+}
+
 #[test]
-fn claude_token_keeps_only_a_live_access_token_and_never_prints_it() {
-    use crate::claude::OauthToken;
+fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token() {
+    use crate::claude::{Login, refresh_if_expiring};
+    let now = 1_000_000_000_u64;
     let item = |token: &str, expires: u64| {
         format!(
             r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"fixture-refresh","expiresAt":{expires}}}}}"#
         )
+        .into_bytes()
     };
-    let now = 1_000_000_000;
-    let token = OauthToken::parse(item("fixture-access", now + 3_600_000).as_bytes(), now)
-        .expect("live token");
+    let run = |config: &str, items: Vec<Vec<u8>>| {
+        let script = KeychainScript {
+            items: std::sync::Mutex::new(items.into()),
+            calls: std::sync::Mutex::new(vec![]),
+        };
+        let login = Login {
+            executable: Path::new("/opt/homebrew/bin/claude"),
+            home: Path::new("/home/u"),
+            user: OsStr::new("u"),
+            config_dir: Path::new(config),
+            scratch: Path::new("/scratch/empty"),
+        };
+        let result = refresh_if_expiring(&script, &login, &|| now);
+        (result, script.calls.into_inner().unwrap())
+    };
+    let hour = 3_600_000;
+
+    // A live token is used as read: no refresh, and Debug never shows it.
+    let (token, calls) = run("/home/u/.claude", vec![item("fixture-access", now + hour)]);
+    let token = token.expect("live token");
     let printed = format!("{token:?}");
     assert!(!printed.contains("fixture-access") && !printed.contains("fixture-refresh"));
-    assert!(!token.needs_refresh(now));
-    // Inside the refresh window, the host refreshes before launching.
-    assert!(token.needs_refresh(now + 3_600_000 - 14 * 60 * 1000));
-    for refused in [item("fixture-access", now), item("", now + 3_600_000)] {
-        assert!(OauthToken::parse(refused.as_bytes(), now).is_err());
+    assert_eq!(calls.len(), 1);
+    let (argv, env, cwd) = &calls[0];
+    assert_eq!(
+        argv[1..],
+        [
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            "u",
+            "-w"
+        ]
+    );
+    assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
+    assert_eq!(cwd, Path::new("/scratch/empty"));
+
+    // Inside the window the CLI refreshes once, in the empty scratch directory
+    // with hooks, MCP servers, slash commands and session files off.
+    let expiring = item("fixture-access", now + 14 * 60 * 1000);
+    let (token, calls) = run(
+        "/home/u/.claude",
+        vec![expiring.clone(), item("fixture-renewed", now + hour)],
+    );
+    token.expect("refreshed token");
+    let (argv, _, cwd) = &calls[1];
+    assert_eq!(argv[0], "/opt/homebrew/bin/claude");
+    for flag in [
+        "--safe-mode",
+        "--strict-mcp-config",
+        r#"{"disableAllHooks":true}"#,
+        "--disable-slash-commands",
+        "--no-session-persistence",
+    ] {
+        assert!(argv.iter().any(|a| a == flag), "{flag}");
     }
-    assert!(OauthToken::parse(b"not json", now).is_err());
+    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(calls.len(), 3);
+
+    // The CLI may keep a token inside the window; one with a minute left is
+    // accepted, one about to expire is refused.
+    let (token, _) = run("/home/u/.claude", vec![expiring.clone(), expiring.clone()]);
+    token.expect("still usable");
+    let (token, _) = run(
+        "/home/u/.claude",
+        vec![expiring, item("fixture-access", now + 30_000)],
+    );
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+
+    // Another identity's directory names its own keychain item and config.
+    let (token, calls) = run(
+        "/home/u/.claude-work",
+        vec![b"not json".to_vec(), b"not json".to_vec()],
+    );
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    let (argv, env, _) = &calls[0];
+    let suffix = crate::claude::keychain_suffix(b"/home/u/.claude-work");
+    assert_eq!(argv[3], format!("Claude Code-credentials-{suffix}"));
+    assert!(env.contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned()));
+    assert!(
+        calls[1]
+            .1
+            .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
+    );
 }

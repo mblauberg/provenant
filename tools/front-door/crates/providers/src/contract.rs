@@ -22,6 +22,8 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
+    #[error("provider login token is unavailable, unreadable or expired")]
+    CredentialUnavailable,
 }
 
 /// No preflight probe form is recorded yet. An uninhabited plan cannot be

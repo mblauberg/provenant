@@ -4,9 +4,13 @@ use crate::launch::{
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_records::CanonicalV1;
+use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::Duration;
 pub struct Claude;
 crate::adapter!(Claude, "claude", prepare);
 const MODEL_ON_WIRE: bool = true;
@@ -16,11 +20,14 @@ const OBSERVATIONS: &str = include_str!(concat!(
     "/../../tests/fixtures/providers/claude/confinement.json"
 ));
 
-/// The default config directory's keychain item. Other identities (a
-/// `CLAUDE_CONFIG_DIR` adds a suffix) are never read.
+/// The default config directory's keychain service. A non-default
+/// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// Refresh when the access token expires within this window.
 const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
+/// After a refresh, the CLI may keep a token that is inside the window; accept
+/// it while this much life remains.
+const MIN_LIFETIME_MS: u64 = 60 * 1000;
 
 /// A short-lived OAuth access token for the default identity, read by the host
 /// outside the sandbox. It is never logged, persisted or printed: `Debug` is
@@ -39,7 +46,7 @@ impl std::fmt::Debug for OauthToken {
 impl OauthToken {
     /// Parses the keychain item's JSON, keeping only the access token and its
     /// expiry. An empty or expired token is refused.
-    pub fn parse(item: &[u8], now_ms: u64) -> Result<Self, ProviderError> {
+    pub(crate) fn parse(item: &[u8], now_ms: u64) -> Result<Self, ProviderError> {
         #[derive(Deserialize)]
         struct Item {
             #[serde(rename = "claudeAiOauth")]
@@ -70,42 +77,114 @@ impl OauthToken {
     }
 
     /// True when the host should refresh before launching.
-    pub fn needs_refresh(&self, now_ms: u64) -> bool {
+    fn needs_refresh(&self, now_ms: u64) -> bool {
         self.expires_at_ms.saturating_sub(now_ms) < REFRESH_WINDOW_MS
     }
 }
 
-/// The host's keychain read for the default identity, run outside the sandbox
-/// with stdout captured and never logged; parse it with [`OauthToken::parse`].
-pub fn token_argv(user: &OsStr) -> Vec<OsString> {
-    [
-        "/usr/bin/security".as_ref(),
-        "find-generic-password".as_ref(),
-        "-s".as_ref(),
-        KEYCHAIN_SERVICE.as_ref(),
-        "-a".as_ref(),
-        user,
-        "-w".as_ref(),
-    ]
-    .map(OsString::from)
-    .to_vec()
+/// Where the host finds one Claude identity's login. The account is never
+/// inferred: the caller names the config directory it is entitled to use.
+pub struct Login<'a> {
+    pub executable: &'a Path,
+    pub home: &'a Path,
+    pub user: &'a OsStr,
+    pub config_dir: &'a Path,
+    /// An empty private directory: the refresh's working directory, so no
+    /// project settings, hooks or instructions apply.
+    pub scratch: &'a Path,
 }
 
-/// Zero-cost refresh, run by the host outside the sandbox with the default
-/// config directory and stdin null: the CLI refreshes its stored token, then
-/// the API rejects the model, so no usage is spent. Re-read the token after.
-pub fn refresh_argv(executable: &Path) -> Vec<OsString> {
-    [
-        executable.as_os_str(),
+/// Keychain service suffix for a non-default `CLAUDE_CONFIG_DIR`: the first
+/// eight hex digits of the directory path's digest.
+pub fn keychain_suffix(config_dir: &[u8]) -> String {
+    let digest = CanonicalV1::file_digest(config_dir).to_string();
+    let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    hex.get(..8).unwrap_or(hex).to_owned()
+}
+
+/// Reads one identity's login token outside the sandbox. When it expires
+/// within the refresh window, runs the CLI once at zero cost to refresh it,
+/// then reads again and accepts a token with at least a minute left. The
+/// refresh runs with every customisation off (safe mode, no hooks, no MCP
+/// servers, no slash commands, no session file) in the empty scratch
+/// directory. The token is never logged, printed or persisted.
+pub fn refresh_if_expiring(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+) -> Result<OauthToken, ProviderError> {
+    let default = login.config_dir == login.home.join(".claude");
+    let mut service = KEYCHAIN_SERVICE.to_owned();
+    let mut env: Vec<(OsString, OsString)> = vec![
+        ("HOME".into(), login.home.into()),
+        ("USER".into(), login.user.into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    if !default {
+        service.push('-');
+        service.push_str(&keychain_suffix(login.config_dir.as_os_str().as_bytes()));
+        env.push(("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()));
+    }
+    let read = || -> Result<OauthToken, ProviderError> {
+        let argv: Vec<OsString> = [
+            "/usr/bin/security".as_ref(),
+            "find-generic-password".as_ref(),
+            "-s".as_ref(),
+            OsStr::new(&service),
+            "-a".as_ref(),
+            login.user,
+            "-w".as_ref(),
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let mut options = ExecOptions::new(&argv, login.scratch, Duration::from_secs(10));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = StreamPolicy::Discard;
+        let out = executor
+            .execute(options)
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+        if out.termination != Termination::Exit(0) || out.stdout.truncated {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        OauthToken::parse(&out.stdout.bytes, now_ms())
+            .map_err(|_| ProviderError::CredentialUnavailable)
+    };
+    match read() {
+        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(_) | Err(_) => {}
+    }
+    let argv: Vec<OsString> = [
+        login.executable.as_os_str(),
         "-p".as_ref(),
         "x".as_ref(),
+        // The API rejects this model after the CLI refreshes its stored
+        // token, so no usage is spent.
         "--model".as_ref(),
         "provenant-refresh-probe".as_ref(),
         "--max-turns".as_ref(),
         "1".as_ref(),
+        "--safe-mode".as_ref(),
+        "--strict-mcp-config".as_ref(),
+        "--settings".as_ref(),
+        r#"{"disableAllHooks":true}"#.as_ref(),
+        "--disable-slash-commands".as_ref(),
+        "--no-session-persistence".as_ref(),
     ]
     .map(OsString::from)
-    .to_vec()
+    .to_vec();
+    let mut options = ExecOptions::new(&argv, login.scratch, Duration::from_secs(60));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Discard;
+    executor
+        .execute(options)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let token = read()?;
+    if token.expires_at_ms.saturating_sub(now_ms()) < MIN_LIFETIME_MS {
+        return Err(ProviderError::CredentialUnavailable);
+    }
+    Ok(token)
 }
 
 /// Claude uses the default config directory. The host reads its login token

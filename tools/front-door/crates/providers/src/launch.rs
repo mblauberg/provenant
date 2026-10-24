@@ -25,8 +25,11 @@ pub enum Stdin {
 /// compiling, all inside roots the plan or profile already names.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetupStep {
-    /// Create this directory and any missing parents with mode 0700. Refuse
-    /// any symbolic link component, so creation and chmod stay inside it.
+    /// Create this directory and any missing parents by descriptor-relative
+    /// traversal from `/`, opening each component without following links,
+    /// so a swapped entry fails instead of redirecting creation. Only
+    /// directories created here get mode 0700; existing ones are never
+    /// chmodded.
     CreateDir(PathBuf),
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },

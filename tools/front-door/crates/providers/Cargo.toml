@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 provenant-records = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-quota = { workspace = true }
+provenant-supervisor = { workspace = true }
 
 [features]
 # Lets the activation recorder prepare unrecorded modes. Never enabled by a
@@ -21,7 +22,6 @@ recording = []
 
 [dev-dependencies]
 provenant-core = { workspace = true }
-provenant-supervisor = { workspace = true }
 sha2 = { workspace = true }
 
 [[example]]

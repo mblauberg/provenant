@@ -311,16 +311,24 @@ macOS 27.0.1 arm64, 2026-10-24):
   It cannot read other credentials: the login keychain file is not readable,
   and a probe showed `security` finds nothing in a keychain the profile cannot
   read.
-- Claude: the keychain file is not readable. Before launch the host reads the
-  default identity's access token (`claude::token_argv`, the
-  `Claude Code-credentials` item for `USER`, stdout captured in memory and
-  never logged or stored; only `accessToken` and `expiresAt` are kept) and
-  passes it as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15 minutes the
-  host first runs `claude::refresh_argv` outside the sandbox (`claude -p x
-  --model provenant-refresh-probe --max-turns 1`, stdin null: the CLI
-  refreshes its stored token, then the API rejects the model, so no usage is
-  spent) and reads again. Same identity only; other config directories are
-  never read. The model still gets no shell, only file tools.
+- Claude: the keychain file is not readable. Before launch the host calls
+  `claude::refresh_if_expiring` for the config directory it was given (the
+  default `~/.claude` reads `Claude Code-credentials` for `USER`; another
+  directory reads that service with its path-digest suffix and sets
+  `CLAUDE_CONFIG_DIR`, so accounts never cross). Stdout is captured in memory
+  and never logged or stored; only `accessToken` and `expiresAt` are kept, and
+  the token is passed as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15
+  minutes the host first runs the CLI once outside the sandbox (`claude -p x
+  --model provenant-refresh-probe --max-turns 1`: the CLI refreshes its stored
+  token, then the API rejects the model, so no usage is spent) and reads
+  again, accepting a token with at least a minute left. That refresh is not
+  confined, so it runs with every customisation off (`--safe-mode
+  --strict-mcp-config --settings {"disableAllHooks":true}
+  --disable-slash-commands --no-session-persistence`, not `--bare`, which
+  skips the keychain) in an empty scratch directory. A probe with a
+  `SessionStart` hook in the working directory's `.claude/settings.json` fired
+  without these flags and did not fire with them. The model still gets no
+  shell, only file tools.
   `~/.claude.json` is not readable (it can hold MCP secrets and the launch
   does not need it). The only writable state is this session's transcript
   under `~/.claude/projects`.

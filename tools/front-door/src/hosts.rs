@@ -2,7 +2,7 @@
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Hosts};
 use provenant_providers::claude::{CredentialPresence, SigninStatus, signin_status};
-use provenant_records::{CanonicalV1, CommandResult, Outcome};
+use provenant_records::{CommandResult, Outcome};
 use provenant_supervisor::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
@@ -240,9 +240,7 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
 /// Claude Code names a non-default identity's keychain item after the first
 /// eight hex digits of the SHA-256 of its config directory path.
 fn keychain_suffix(config_dir: &[u8]) -> String {
-    let digest = CanonicalV1::file_digest(config_dir).to_string();
-    let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
-    hex[..8].to_owned()
+    provenant_providers::claude::keychain_suffix(config_dir)
 }
 
 #[cfg(test)]

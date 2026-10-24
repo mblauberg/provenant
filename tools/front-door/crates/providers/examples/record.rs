@@ -26,7 +26,7 @@ use provenant_confinement::{
     verify_worktree,
 };
 use provenant_core::{CancelToken, ProjectId, WorkScope};
-use provenant_providers::claude::OauthToken;
+use provenant_providers::claude::{Login, refresh_if_expiring};
 use provenant_providers::{
     Adapter, ExitObservation, LaunchSpec, OutcomeStatus, PrepareInput, Prompt, REGISTRY, SetupStep,
     Stdin,
@@ -35,14 +35,13 @@ use provenant_records::ResolvedRoute;
 use provenant_supervisor::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
-use provenant_supervisor::fs::{LocalFs, SafeFs};
+use provenant_supervisor::fs::{Directory, LocalFs, SafeFs};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::ffi::{OsStr, OsString};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,28 +124,30 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// Creates `path` and missing parents with mode 0700, refusing any symbolic
-/// link component so neither creation nor chmod can land outside it.
+/// Creates `path` and missing parents by descriptor-relative traversal from
+/// `/`, never following a symbolic link. Only directories created here get
+/// mode 0700; existing ones are never chmodded, so a swapped entry cannot
+/// redirect either step.
 fn private_dir(path: &Path) -> Result<()> {
     if !path.is_absolute() {
         return Err("private directory must be absolute".into());
     }
-    let mut current = PathBuf::new();
+    let mut dir = Directory::root(true)?;
     for component in path.components() {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(format!("symbolic link in {}", current.display()).into());
-            }
-            Ok(meta) if !meta.is_dir() => return Err("not a directory".into()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::DirBuilder::new().mode(0o700).create(&current)?;
+        let name = match component {
+            Component::RootDir => continue,
+            Component::Normal(name) => name,
+            _ => return Err("private directory must be normalised".into()),
+        };
+        dir = match dir.open_directory(name) {
+            Ok(child) => child,
+            Err(error) if error.is_not_found() => {
+                dir.mkdir(name, 0o700)?;
+                dir.open_directory(name)?
             }
             Err(error) => return Err(error.into()),
-        }
+        };
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -156,50 +157,6 @@ fn now_ms() -> Result<u64> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis(),
     )?)
-}
-
-/// Reads Claude's default login token outside the sandbox, refreshing it
-/// first at zero cost when it is close to expiry. Never printed or stored.
-fn claude_token(
-    executor: &SystemExecutor,
-    executable: &Path,
-    home: &Path,
-    user: &OsStr,
-) -> Result<OauthToken> {
-    let env: Vec<(OsString, OsString)> = vec![
-        ("HOME".into(), home.into()),
-        ("USER".into(), user.into()),
-        ("PATH".into(), "/usr/bin:/bin".into()),
-    ];
-    let read = || -> Result<Vec<u8>> {
-        let argv = provenant_providers::claude::token_argv(user);
-        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-        options.stderr = StreamPolicy::Discard;
-        let out = executor.execute(options)?;
-        if out.termination != Termination::Exit(0) || out.stdout.truncated {
-            return Err("Claude login token is unavailable".into());
-        }
-        Ok(out.stdout.bytes)
-    };
-    let token = OauthToken::parse(&read()?, now_ms()?)
-        .map_err(|_| "Claude login token is unreadable or expired")?;
-    if !token.needs_refresh(now_ms()?) {
-        return Ok(token);
-    }
-    let argv = provenant_providers::claude::refresh_argv(executable);
-    let mut options = ExecOptions::new(&argv, home, Duration::from_secs(60));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Discard;
-    options.stderr = StreamPolicy::Discard;
-    executor.execute(options)?;
-    let token = OauthToken::parse(&read()?, now_ms()?)
-        .map_err(|_| "Claude login token is unreadable or expired")?;
-    if token.needs_refresh(now_ms()?) {
-        return Err("Claude login token did not refresh".into());
-    }
-    Ok(token)
 }
 
 fn subtree(path: &Path) -> PathGrant {
@@ -802,7 +759,19 @@ fn main() -> Result<()> {
         })?)
     };
     let token = match args.adapter.as_str() {
-        "claude" => Some(claude_token(&executor, &args.executable, &home, &user)?),
+        "claude" => {
+            let scratch = args.root.join("refresh");
+            private_dir(&scratch)?;
+            let login = Login {
+                executable: &args.executable,
+                home: &home,
+                user: &user,
+                config_dir: &home.join(".claude"),
+                scratch: &scratch,
+            };
+            let now = || now_ms().unwrap_or(u64::MAX);
+            Some(refresh_if_expiring(&executor, &login, &now)?)
+        }
         _ => None,
     };
     let route = route(&args);
