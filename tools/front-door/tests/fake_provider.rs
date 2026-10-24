@@ -279,6 +279,11 @@ fn account_placement() -> Result {
             match step {
                 SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
                 SetupStep::WriteFile { path, bytes } => std::fs::write(path, bytes)?,
+                SetupStep::WriteExecutable { path, bytes } => {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::write(path, bytes)?;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                }
                 SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
             }
         }
