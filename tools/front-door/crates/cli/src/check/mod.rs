@@ -1,14 +1,15 @@
 //! Check composition and stateless, evidence-bound pagination.
 use crate::grammar::{Page, Rules, absolute};
 use clap::{Subcommand, builder::TypedValueParser};
+use provenant_confinement::utility::run_release_read_utility;
 use provenant_confinement::{
     GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime, run_read_utility,
 };
 use provenant_core::{CancelToken, GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, Finding, Outcome, PathWire};
 use provenant_supervisor::{
-    exec::{Executor, Termination},
-    fs::{FileKind, FsError, SafeDir},
+    exec::{ExecOutcome, Executor, Termination},
+    fs::{FileKind, FsError, Metadata, SafeDir},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -63,14 +64,11 @@ pub enum CheckError {
     Path(#[from] provenant_records::PathWireError),
     #[error(transparent)]
     Canonical(#[from] provenant_records::CanonicalError),
-    #[error("check owner is unavailable: {0}")]
-    Unavailable(&'static str),
 }
 impl CheckError {
     pub fn outcome(&self) -> Outcome {
         match self {
             Self::Invalid(_) => Outcome::Invalid,
-            Self::Unavailable(_) => Outcome::Unavailable,
             _ => Outcome::Error,
         }
     }
@@ -244,6 +242,12 @@ pub struct GitContext<'a> {
 }
 impl GitContext<'_> {
     pub(super) fn read(&self, op: GitRead) -> Result<Vec<u8>, CheckError> {
+        checked_bytes(self.read_mode(op, false)?)
+    }
+    pub(super) fn read_release(&self, op: GitRead) -> Result<ExecOutcome, CheckError> {
+        self.read_mode(op, true)
+    }
+    fn read_mode(&self, op: GitRead, release: bool) -> Result<ExecOutcome, CheckError> {
         let budget = UtilityBudget::new(
             Duration::from_secs(5),
             Duration::from_millis(250),
@@ -251,64 +255,180 @@ impl GitContext<'_> {
             64 * 1024 * 1024,
             64 * 1024,
         )?;
-        let output = run_read_utility(
+        let read = if release {
+            run_release_read_utility
+        } else {
+            run_read_utility
+        };
+        Ok(read(
             self.executor,
             op,
             self.repo,
             self.runtime,
             budget,
             self.cancel,
-        )?;
-        if output.termination != Termination::Exit(0) {
-            return Err(CheckError::Evidence("Git read failed"));
-        }
-        Ok(output.stdout.bytes)
+        )?)
     }
 }
-/// Descend only through held supervisor directory capabilities, never links.
-/// Compare metadata around the read so changing evidence cannot look clean.
+fn checked_bytes(output: ExecOutcome) -> Result<Vec<u8>, CheckError> {
+    if output.termination != Termination::Exit(0) {
+        return Err(CheckError::Evidence("Git read failed"));
+    }
+    Ok(output.stdout.bytes)
+}
+
+/// A tracked input is read without following links and with metadata checked
+/// around every component and the final byte read.
+pub(super) enum WorkingFile {
+    Bytes(Vec<u8>),
+    Symlink(Vec<u8>),
+    Missing,
+}
 pub(super) fn read_file(
     root: &dyn SafeDir,
     path: &Path,
     limit: u64,
-) -> Result<Vec<u8>, CheckError> {
+) -> Result<WorkingFile, CheckError> {
     let relative = RelativePath::parse(path).map_err(provenant_records::PathWireError::from)?;
-    let mut components = relative.as_path().iter().peekable();
-    let mut directory: Option<Box<dyn SafeDir>> = None;
-    while let Some(component) = components.next() {
-        let current = directory.as_deref().unwrap_or(root);
-        if components.peek().is_some() {
-            directory = Some(current.open_directory(component, false)?);
-        } else {
-            let before = current.metadata_at(component, false)?;
-            if before.kind != FileKind::Regular {
-                return Err(CheckError::Evidence("tracked input is not a regular file"));
-            }
-            if before.size > limit {
-                return Err(CheckError::Evidence("tracked input exceeds its byte bound"));
-            }
-            let mut file = current.open_read(component)?;
-            let opened = file.metadata()?;
-            let mut bytes = Vec::new();
-            Read::by_ref(&mut file)
-                .take(limit + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| CheckError::Evidence("file read failed"))?;
-            let after = current.metadata_at(component, false)?;
-            if !before.same_identity(&opened)
-                || !opened.same_identity(&after)
-                || before != after
-                || bytes.len() as u64 != after.size
-                || bytes.len() as u64 > limit
-            {
-                return Err(CheckError::Evidence(
-                    "tracked input changed during inspection",
-                ));
-            }
-            return Ok(bytes);
-        }
+    let mut components = relative.as_path().components().peekable();
+    read_file_at(root, &mut components, limit, 0)
+}
+fn read_file_at<'a>(
+    directory: &dyn SafeDir,
+    components: &mut std::iter::Peekable<std::path::Components<'a>>,
+    limit: u64,
+    depth: usize,
+) -> Result<WorkingFile, CheckError> {
+    if depth > 128 {
+        return Err(CheckError::Evidence("tracked path exceeds depth bound"));
     }
-    Err(CheckError::Evidence("empty tracked path"))
+    let component = components
+        .next()
+        .ok_or(CheckError::Evidence("empty tracked path"))?;
+    let name = match component {
+        std::path::Component::Normal(name) => name,
+        _ => return Err(CheckError::Evidence("invalid tracked path component")),
+    };
+    let before = match directory.metadata_at(name, false) {
+        Ok(value) => value,
+        Err(error) if error.is_not_found() => return Ok(WorkingFile::Missing),
+        Err(error) => return Err(error.into()),
+    };
+    if before.kind == FileKind::Symlink {
+        let target = directory.read_link(name)?;
+        if !same_metadata(&before, &directory.metadata_at(name, false)?) {
+            return Err(CheckError::Evidence("tracked symlink changed"));
+        }
+        return Ok(WorkingFile::Symlink(
+            target.as_os_str().as_encoded_bytes().to_vec(),
+        ));
+    }
+    if components.peek().is_some() {
+        if before.kind != FileKind::Directory {
+            return Err(CheckError::Evidence(
+                "tracked path component is not a directory",
+            ));
+        }
+        let child = directory.open_verified_directory(name)?;
+        if !before.same_identity(&child.metadata()?) {
+            return Err(CheckError::Evidence("tracked directory changed"));
+        }
+        let result = read_file_at(child.as_ref(), components, limit, depth + 1)?;
+        if !same_metadata(&before, &directory.metadata_at(name, false)?) {
+            return Err(CheckError::Evidence("tracked directory changed"));
+        }
+        return Ok(result);
+    }
+    if before.kind != FileKind::Regular {
+        return Err(CheckError::Evidence("tracked input is not a regular file"));
+    }
+    if before.size > limit {
+        return Err(CheckError::Evidence("tracked input exceeds its byte bound"));
+    }
+    let mut file = directory.open_read(name)?;
+    let opened = file.metadata()?;
+    if !same_metadata(&before, &opened) {
+        return Err(CheckError::Evidence(
+            "tracked input changed during inspection",
+        ));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CheckError::Evidence("file read failed"))?;
+    if bytes.len() as u64 > limit
+        || bytes.len() as u64 != before.size
+        || !same_metadata(&before, &file.metadata()?)
+        || !same_metadata(&before, &directory.metadata_at(name, false)?)
+    {
+        return Err(CheckError::Evidence(
+            "tracked input changed during inspection",
+        ));
+    }
+    Ok(WorkingFile::Bytes(bytes))
+}
+fn same_metadata(a: &Metadata, b: &Metadata) -> bool {
+    a.same_identity(b)
+        && a.kind == b.kind
+        && a.size == b.size
+        && a.modified_ns == b.modified_ns
+        && a.mode == b.mode
+        && a.uid == b.uid
+        && a.links == b.links
+}
+
+/// Parse NUL-delimited `git ls-files --stage -z` records once for all checks.
+pub(super) struct IndexRecord<'a> {
+    pub mode: &'a [u8],
+    pub oid: &'a [u8],
+    pub stage: &'a [u8],
+    pub path: &'a [u8],
+}
+pub(super) fn index_records(bytes: &[u8]) -> Result<Vec<IndexRecord<'_>>, CheckError> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        return Err(CheckError::Evidence(
+            "Git returned unterminated index records",
+        ));
+    }
+    let content = if bytes.ends_with(&[0]) {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    };
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for record in content.split(|byte| *byte == 0) {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(CheckError::Evidence("malformed Git index"))?;
+        let header = &record[..tab];
+        let mut fields = header
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let mode = fields
+            .next()
+            .ok_or(CheckError::Evidence("malformed Git index"))?;
+        let oid = fields
+            .next()
+            .ok_or(CheckError::Evidence("malformed Git index"))?;
+        let stage = fields
+            .next()
+            .ok_or(CheckError::Evidence("malformed Git index"))?;
+        if fields.next().is_some() {
+            return Err(CheckError::Evidence("malformed Git index"));
+        }
+        entries.push(IndexRecord {
+            mode,
+            oid,
+            stage,
+            path: &record[tab + 1..],
+        });
+    }
+    Ok(entries)
 }
 /// Library owners supply config/install inspections. CLI retains only a page.
 pub fn config_page(

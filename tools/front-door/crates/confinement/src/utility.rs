@@ -523,7 +523,29 @@ pub fn run_utility(
         runtime,
         budget,
         cancel,
+        false,
         |attribute_source| Ok((git_args(operation, repo, attribute_source)?, None)),
+    )
+}
+
+/// Run a read for the release scan, where shallow boundaries must not hide
+/// commits from the publication history check.
+pub fn run_release_read_utility(
+    executor: &dyn Executor,
+    operation: GitRead,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    execute_git(
+        executor,
+        &repo.0,
+        runtime,
+        budget,
+        cancel,
+        true,
+        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, None)),
     )
 }
 
@@ -547,6 +569,7 @@ fn execute_git(
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
+    release_scan: bool,
     command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
 ) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
@@ -566,6 +589,9 @@ fn execute_git(
     argv.push(runtime.git.path.as_os_str().to_owned());
     argv.extend(args);
     let mut env = environment(runtime, repo);
+    if release_scan {
+        env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
+    }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
     runtime.git.verify(runtime.fs.as_ref())?;
     let options = exec_options(
@@ -863,7 +889,6 @@ pub(crate) fn environment(
         ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
         ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
-        ("GIT_SHALLOW_FILE".into(), "/dev/null".into()),
         ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_PAGER".into(), "cat".into()),
@@ -922,6 +947,7 @@ pub(crate) fn execute_git_mutation(
         runtime,
         budget,
         cancel,
+        false,
         |attribute_source| {
             let (mut args, stdin) = mutation_args(mutation)?;
             args.insert(0, format!("--attr-source={attribute_source}").into());
@@ -1167,6 +1193,66 @@ pub(crate) mod tests {
                 &CancelToken::new()
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_reads_respect_shallow_history_while_release_reads_include_it()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["commit", "--allow-empty", "-m", "shallow parent"])?;
+        fixture.run(&["commit", "--allow-empty", "-m", "shallow tip"])?;
+        let tip = fixture.head()?;
+        let parent = fixture.run(&["rev-parse", "HEAD^"])?;
+        let parent = std::str::from_utf8(&parent.stdout.bytes)?.trim();
+        fs::write(
+            fixture.repo.private_git_dir().join("shallow"),
+            format!("{parent}\n"),
+        )?;
+
+        let read_only = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let ordinary = run_read_utility(
+            &fixture.executor,
+            GitRead::FirstParentHistory { tip },
+            &read_only,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(ordinary.termination, Termination::Exit(0));
+        assert_eq!(
+            ordinary
+                .stdout
+                .bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            2
+        );
+
+        let release = run_release_read_utility(
+            &fixture.executor,
+            GitRead::FirstParentHistory { tip },
+            &read_only,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(release.termination, Termination::Exit(0));
+        assert_eq!(
+            release
+                .stdout
+                .bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            3
         );
         Ok(())
     }

@@ -34,7 +34,7 @@ FROZEN_CURRENT_ROUTING_PROTOCOL = {
 
 
 def load(path: Path):
-    return yaml.safe_load(path.read_text())
+    return json.loads(path.read_text()) if path.suffix == ".json" else yaml.safe_load(path.read_text())
 
 
 def test_every_skill_has_canonical_positive_negative_and_boundary_routes():
@@ -43,7 +43,7 @@ def test_every_skill_has_canonical_positive_negative_and_boundary_routes():
     seen_prompts = set()
 
     for skill in sorted(skills):
-        path = ROOT / "skills" / skill / "evals" / "trigger_cases.yaml"
+        path = ROOT / "skills" / skill / "evals" / "trigger_cases.json"
         assert path.is_file(), f"missing trigger fixture: {skill}"
         data = load(path)
         assert set(data) == {"schema_version", "target_skill", "cases"}

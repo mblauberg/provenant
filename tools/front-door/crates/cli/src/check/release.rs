@@ -1,16 +1,20 @@
 //! Publication checks use the same byte rules for files, raw blobs and commits.
-use super::{CheckError, GitContext, Scan};
-use provenant_confinement::utility::{GitObjectKind, GitRead, UtilityBudget, run_read_utility};
+use super::{CheckError, GitContext, Scan, WorkingFile, checked_bytes, index_records, read_file};
+use provenant_confinement::utility::{GitObjectKind, GitRead};
 use provenant_core::GitOid;
 use provenant_supervisor::exec::Termination;
-use provenant_supervisor::fs::{FileKind, Metadata, SafeDir};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::OsStr;
-use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
 
 const MAX_FILE: u64 = 5 * 1024 * 1024;
+const PUBLIC: &[&str] = &[
+    "ACKNOWLEDGEMENTS.md",
+    "README.md",
+    "MAINTAINING.md",
+    "SECURITY.md",
+    "docs/ARCHITECTURE.md",
+    "docs/worktrees.md",
+];
 const LEGAL: &[&str] = &[
     "LICENSE",
     "NOTICE",
@@ -29,7 +33,7 @@ pub(super) fn inspect(
         findings: Vec::new(),
         evidence: Vec::new(),
     };
-    let head_bytes = git.read(GitRead::RevParseHead)?;
+    let head_bytes = release_read(git, GitRead::RevParseHead)?;
     let head = oid_line(&head_bytes)?;
     scan.note("release:head", &head_bytes);
     let mut commits = vec![head];
@@ -42,7 +46,7 @@ pub(super) fn inspect(
                 "release base must be an ancestor of head",
             ));
         }
-        let bytes = git.read(GitRead::AncestorRange { base, head: tip })?;
+        let bytes = release_read(git, GitRead::AncestorRange { base, head: tip })?;
         scan.note(format!("release:range:{base}:{tip}"), &bytes);
         let text = utf8(&bytes)?;
         let selected = text.lines().map(parse_oid).collect::<Result<Vec<_>, _>>()?;
@@ -53,9 +57,28 @@ pub(super) fn inspect(
         }
         commits.extend(selected);
     }
-    let index = git.read(GitRead::IndexEntries { paths: Vec::new() })?;
+    let index = release_read(git, GitRead::IndexEntries { paths: Vec::new() })?;
     scan.note("release:index", &index);
-    let tracked = index_entries(&index)?;
+    let mut tracked = BTreeMap::new();
+    for entry in index_records(&index)? {
+        if entry.stage != b"0"
+            || entry.mode != b"100644" && entry.mode != b"100755" && entry.mode != b"120000"
+        {
+            return Err(CheckError::Evidence(
+                "unmerged or unsupported Git index entry",
+            ));
+        }
+        let oid = utf8(entry.oid)?;
+        parse_oid(oid)?;
+        let path = utf8(entry.path)?.to_owned();
+        valid_path(&path)?;
+        let mode = std::str::from_utf8(entry.mode)
+            .map_err(|_| CheckError::Evidence("malformed Git index mode"))?
+            .to_owned();
+        if tracked.insert(path, mode).is_some() {
+            return Err(CheckError::Evidence("duplicate Git index entry"));
+        }
+    }
     for required in LEGAL {
         if !tracked.contains_key(*required) {
             scan.finding(
@@ -66,43 +89,44 @@ pub(super) fn inspect(
             )?;
         }
     }
+    for required in PUBLIC {
+        if !tracked.contains_key(*required) {
+            scan.finding(
+                "release.public",
+                Path::new(required),
+                1,
+                "required public file is not tracked",
+            )?;
+        }
+    }
     for (path, mode) in tracked {
         path_rules(&mut scan, &path)?;
-        if mode == "120000" {
+        let mut symlink = mode == "120000";
+        match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
+            WorkingFile::Bytes(bytes) => {
+                scan.note(format!("release:working:{path}"), &bytes);
+                emit_matches(&mut scan, &path, &byte_matches(&bytes)?)?;
+            }
+            WorkingFile::Symlink(target) => {
+                symlink = true;
+                scan.note(format!("release:working-symlink:{path}"), &target);
+                emit_matches(&mut scan, &path, &byte_matches(&target)?)?;
+            }
+            WorkingFile::Missing => {
+                let Some((rule, message)) = required_file(&path) else {
+                    return Err(CheckError::Evidence("tracked working file is missing"));
+                };
+                scan.note(format!("release:working-missing:{path}"), b"missing");
+                scan.finding(rule, Path::new(&path), 1, message)?;
+            }
+        }
+        if symlink {
             scan.finding(
                 "release.symlink",
                 Path::new(&path),
                 1,
                 "tracked symlink is not portable",
             )?;
-        }
-        match read_working(git.repo.root_dir(), &path, 0)? {
-            Working::Bytes(bytes) => {
-                scan.note(format!("release:working:{path}"), &bytes);
-                emit_matches(&mut scan, &path, &byte_matches(&bytes)?)?;
-            }
-            Working::Symlink(target) => {
-                scan.note(format!("release:working-symlink:{path}"), &target);
-                emit_matches(&mut scan, &path, &byte_matches(&target)?)?;
-                scan.finding(
-                    "release.symlink",
-                    Path::new(&path),
-                    1,
-                    "tracked symlink is not portable",
-                )?;
-            }
-            Working::Missing if LEGAL.contains(&path.as_str()) => {
-                scan.note(format!("release:working-missing:{path}"), b"missing");
-                scan.finding(
-                    "release.legal",
-                    Path::new(&path),
-                    1,
-                    "required legal file is missing",
-                )?;
-            }
-            Working::Missing => {
-                return Err(CheckError::Evidence("tracked working file is missing"));
-            }
         }
     }
     let mut seen_commits = BTreeSet::new();
@@ -111,29 +135,37 @@ pub(super) fn inspect(
         if !seen_commits.insert(commit.to_string()) {
             continue;
         }
-        let raw = git.read(GitRead::RawObject {
-            kind: GitObjectKind::Commit,
-            oid: commit,
-        })?;
+        let raw = release_read(
+            git,
+            GitRead::RawObject {
+                kind: GitObjectKind::Commit,
+                oid: commit,
+            },
+        )?;
         scan.note(format!("release:commit:{commit}"), &raw);
         let commit_path = format!("@commit/{commit}");
         emit_matches(&mut scan, &commit_path, &byte_matches(&raw)?)?;
-        let bytes = git.read(GitRead::AllTreeEntries { oid: commit })?;
+        emit_matches(&mut scan, &commit_path, &identity_matches(&raw)?)?;
+        let bytes = release_read(git, GitRead::AllTreeEntries { oid: commit })?;
         scan.note(format!("release:tree:{commit}"), &bytes);
         let entries = tree_entries(&bytes)?;
         // Legal-file completeness applies to publication heads, not every
         // intermediate historical snapshot in a range.
         if commit == head || range.is_some_and(|(_, tip)| tip == commit) {
-            for required in LEGAL {
+            for (required, rule) in LEGAL
+                .iter()
+                .map(|path| (*path, "release.legal"))
+                .chain(PUBLIC.iter().map(|path| (*path, "release.public")))
+            {
                 if !entries
                     .iter()
-                    .any(|entry| entry.path == *required && entry.regular())
+                    .any(|entry| entry.path == required && entry.regular())
                 {
                     scan.finding(
-                        "release.legal",
+                        rule,
                         Path::new(required),
                         1,
-                        "required legal file is missing from publication tree",
+                        "required file is missing from publication tree",
                     )?;
                 }
             }
@@ -145,7 +177,7 @@ pub(super) fn inspect(
                     "release.symlink",
                     Path::new(&entry.path),
                     1,
-                    "publication tree contains a symlink",
+                    "tracked symlink is not portable",
                 )?;
             } else if !entry.regular() {
                 return Err(CheckError::Evidence(
@@ -156,10 +188,13 @@ pub(super) fn inspect(
                 return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
             }
             if let std::collections::hash_map::Entry::Vacant(slot) = blobs.entry(entry.oid) {
-                let raw = git.read(GitRead::RawObject {
-                    kind: GitObjectKind::Blob,
-                    oid: entry.oid,
-                })?;
+                let raw = release_read(
+                    git,
+                    GitRead::RawObject {
+                        kind: GitObjectKind::Blob,
+                        oid: entry.oid,
+                    },
+                )?;
                 if raw.len() as u64 != entry.size {
                     return Err(CheckError::Evidence(
                         "publication blob size does not match tree",
@@ -185,18 +220,15 @@ pub(super) fn inspect(
     Ok(scan)
 }
 
+fn release_read(git: &GitContext<'_>, operation: GitRead) -> Result<Vec<u8>, CheckError> {
+    checked_bytes(git.read_release(operation)?)
+}
+
 fn is_ancestor(git: &GitContext<'_>, base: GitOid, head: GitOid) -> Result<bool, CheckError> {
-    let outcome = run_read_utility(
-        git.executor,
-        GitRead::MergeBaseIsAncestor {
-            ancestor: base,
-            tip: head,
-        },
-        git.repo,
-        git.runtime,
-        UtilityBudget::bounded(Duration::from_secs(5))?,
-        git.cancel,
-    )?;
+    let outcome = git.read_release(GitRead::MergeBaseIsAncestor {
+        ancestor: base,
+        tip: head,
+    })?;
     match outcome.termination {
         Termination::Exit(0) => Ok(true),
         Termination::Exit(1) => Ok(false),
@@ -236,31 +268,14 @@ fn records(bytes: &[u8]) -> Result<impl Iterator<Item = &str>, CheckError> {
     }
     Ok(utf8(bytes)?.split_terminator('\0'))
 }
-fn index_entries(bytes: &[u8]) -> Result<BTreeMap<String, String>, CheckError> {
-    let mut entries = BTreeMap::new();
-    for record in records(bytes)? {
-        let (header, path) = record
-            .split_once('\t')
-            .ok_or(CheckError::Evidence("malformed Git index"))?;
-        valid_path(path)?;
-        let parts: Vec<_> = header.split(' ').collect();
-        if parts.len() != 3
-            || parts[2] != "0"
-            || !matches!(parts[0], "100644" | "100755" | "120000")
-        {
-            return Err(CheckError::Evidence(
-                "unmerged or unsupported Git index entry",
-            ));
-        }
-        parse_oid(parts[1])?;
-        if entries
-            .insert(path.to_owned(), parts[0].to_owned())
-            .is_some()
-        {
-            return Err(CheckError::Evidence("duplicate Git index entry"));
-        }
+fn required_file(path: &str) -> Option<(&'static str, &'static str)> {
+    if LEGAL.contains(&path) {
+        Some(("release.legal", "required legal file is missing"))
+    } else if PUBLIC.contains(&path) {
+        Some(("release.public", "required public file is missing"))
+    } else {
+        None
     }
-    Ok(entries)
 }
 struct Entry {
     mode: String,
@@ -323,120 +338,27 @@ fn path_rules(scan: &mut Scan, path: &str) -> Result<(), CheckError> {
     Ok(())
 }
 
-enum Working {
-    Bytes(Vec<u8>),
-    Symlink(Vec<u8>),
-    Missing,
-}
-fn read_working(dir: &dyn SafeDir, path: &str, depth: usize) -> Result<Working, CheckError> {
-    if depth > 128 {
-        return Err(CheckError::Evidence("tracked path exceeds depth bound"));
-    }
-    let (part, rest) = match path.split_once('/') {
-        Some((part, rest)) => (part, Some(rest)),
-        None => (path, None),
-    };
-    let name = OsStr::new(part);
-    let before = match dir.metadata_at(name, false) {
-        Ok(value) => value,
-        Err(error) if error.is_not_found() => return Ok(Working::Missing),
-        Err(error) => return Err(error.into()),
-    };
-    if before.kind == FileKind::Symlink {
-        let target = dir.read_link(name)?;
-        if !same_metadata(&before, &dir.metadata_at(name, false)?) {
-            return Err(CheckError::Evidence("tracked symlink changed"));
-        }
-        return Ok(Working::Symlink(
-            target.as_os_str().as_encoded_bytes().to_vec(),
-        ));
-    }
-    if let Some(rest) = rest {
-        let child = dir.open_verified_directory(name)?;
-        if !before.same_identity(&child.metadata()?) {
-            return Err(CheckError::Evidence("tracked directory changed"));
-        }
-        let result = read_working(child.as_ref(), rest, depth + 1)?;
-        if !before.same_identity(&dir.metadata_at(name, false)?) {
-            return Err(CheckError::Evidence("tracked directory changed"));
-        }
-        return Ok(result);
-    }
-    if before.kind != FileKind::Regular {
-        return Err(CheckError::Evidence(
-            "tracked working entry is not a regular file",
-        ));
-    }
-    if before.size > MAX_FILE {
-        return Err(CheckError::Evidence("tracked working file exceeds 5 MiB"));
-    }
-    let mut file = dir.open_read(name)?;
-    if !same_metadata(&before, &file.metadata()?) {
-        return Err(CheckError::Evidence("tracked file changed"));
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(MAX_FILE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| CheckError::Evidence("tracked file could not be read"))?;
-    if bytes.len() as u64 > MAX_FILE {
-        return Err(CheckError::Evidence("tracked working file exceeds 5 MiB"));
-    }
-    if bytes.len() as u64 != before.size
-        || !same_metadata(&before, &file.metadata()?)
-        || !same_metadata(&before, &dir.metadata_at(name, false)?)
-    {
-        return Err(CheckError::Evidence("tracked file changed"));
-    }
-    Ok(Working::Bytes(bytes))
-}
-fn same_metadata(a: &Metadata, b: &Metadata) -> bool {
-    a.same_identity(b)
-        && a.kind == b.kind
-        && a.size == b.size
-        && a.modified_ns == b.modified_ns
-        && a.mode == b.mode
-        && a.uid == b.uid
-        && a.links == b.links
-}
-
-struct ByteRule {
-    id: &'static str,
-    message: &'static str,
-    matches: fn(&[u8]) -> bool,
-}
 type Match = (&'static str, usize, &'static str);
+type ByteRule = (&'static str, &'static str, fn(&[u8]) -> bool);
 const RULES: &[ByteRule] = &[
-    ByteRule {
-        id: "release.home-path",
-        message: "personal absolute home path",
-        matches: home_path,
-    },
-    ByteRule {
-        id: "release.private-key",
-        message: "possible private key",
-        matches: private_key,
-    },
-    ByteRule {
-        id: "release.github-token",
-        message: "possible GitHub token",
-        matches: github_token,
-    },
-    ByteRule {
-        id: "release.openai-key",
-        message: "possible OpenAI key",
-        matches: openai_key,
-    },
-    ByteRule {
-        id: "release.anthropic-key",
-        message: "possible Anthropic key",
-        matches: anthropic_key,
-    },
-    ByteRule {
-        id: "release.aws-key",
-        message: "possible AWS access key",
-        matches: aws_key,
-    },
+    (
+        "release.home-path",
+        "personal absolute home path",
+        home_path,
+    ),
+    ("release.private-key", "possible private key", private_key),
+    (
+        "release.github-token",
+        "possible GitHub token",
+        github_token,
+    ),
+    ("release.openai-key", "possible OpenAI key", openai_key),
+    (
+        "release.anthropic-key",
+        "possible Anthropic key",
+        anthropic_key,
+    ),
+    ("release.aws-key", "possible AWS access key", aws_key),
 ];
 fn byte_matches(bytes: &[u8]) -> Result<Vec<Match>, CheckError> {
     if bytes.len() as u64 > MAX_FILE {
@@ -445,13 +367,59 @@ fn byte_matches(bytes: &[u8]) -> Result<Vec<Match>, CheckError> {
     utf8(bytes)?;
     let mut matches = Vec::new();
     for (line, bytes) in bytes.split(|b| *b == b'\n').enumerate() {
-        for rule in RULES {
-            if (rule.matches)(bytes) {
-                matches.push((rule.id, line + 1, rule.message));
+        for &(id, message, matches_rule) in RULES {
+            if matches_rule(bytes) {
+                matches.push((id, line + 1, message));
             }
         }
     }
     Ok(matches)
+}
+fn identity_matches(raw: &[u8]) -> Result<Vec<Match>, CheckError> {
+    let text = utf8(raw)?;
+    let mut matches = Vec::new();
+    for (line_number, line) in text.lines().take_while(|line| !line.is_empty()).enumerate() {
+        let (role, identity) = if let Some(identity) = line.strip_prefix("author ") {
+            ("author", identity)
+        } else if let Some(identity) = line.strip_prefix("committer ") {
+            ("committer", identity)
+        } else {
+            continue;
+        };
+        if identity_email(identity).is_some_and(personal_email) {
+            matches.push((
+                "release.personal-email",
+                line_number + 1,
+                if role == "author" {
+                    "commit author exposes a personal email"
+                } else {
+                    "commit committer exposes a personal email"
+                },
+            ));
+        }
+    }
+    Ok(matches)
+}
+fn identity_email(identity: &str) -> Option<&str> {
+    let open = identity.rfind('<')?;
+    let close = identity[open + 1..].find('>')? + open + 1;
+    Some(&identity[open + 1..close])
+}
+fn personal_email(email: &str) -> bool {
+    let Some((_, domain)) = email.rsplit_once('@') else {
+        return false;
+    };
+    let domain = domain.to_ascii_lowercase();
+    ["gmail", "outlook", "hotmail", "icloud", "yahoo"]
+        .into_iter()
+        .any(|provider| {
+            domain.strip_prefix(provider).is_some_and(|rest| {
+                rest.strip_prefix('.').is_some_and(|suffix| {
+                    !suffix.is_empty()
+                        && suffix.bytes().all(|b| b.is_ascii_alphabetic() || b == b'.')
+                })
+            })
+        })
 }
 fn emit_matches(scan: &mut Scan, path: &str, matches: &[Match]) -> Result<(), CheckError> {
     for &(rule, line, message) in matches {
@@ -552,11 +520,55 @@ mod tests {
         assert!(byte_matches(&[0xff]).is_err());
     }
     #[test]
-    fn tree_parser_preserves_tabs_and_newlines_in_names() {
+    fn tree_and_index_parsers_preserve_tabs_and_newlines_in_names() {
         let input = format!("100644 blob {} 2\tname\twith\nspaces\0", "a".repeat(40));
         let entries = tree_entries(input.as_bytes()).unwrap();
         assert_eq!(entries[0].path, "name\twith\nspaces");
         assert!(tree_entries(input.trim_end_matches('\0').as_bytes()).is_err());
-        assert!(index_entries(format!("100644 {} 1\tname\0", "a".repeat(40)).as_bytes()).is_err());
+        let index = format!("100644 {} 0\tname\twith\nspaces\0", "a".repeat(40));
+        let entries = index_records(index.as_bytes()).unwrap();
+        assert_eq!(entries[0].path, b"name\twith\nspaces");
+        assert!(index_records(index.trim_end_matches('\0').as_bytes()).is_err());
+        let unmerged = format!("100644 {} 1\tname\0", "a".repeat(40));
+        assert_eq!(index_records(unmerged.as_bytes()).unwrap()[0].stage, b"1");
+    }
+
+    #[test]
+    fn commit_identity_rule_matches_the_previous_personal_provider_set() {
+        let raw = b"tree 0000000000000000000000000000000000000000\nauthor Fixture <Person@GMAIL.com> 1 +0000\ncommitter Fixture <person@gmail.com> 1 +0000\n\nmessage\n";
+        let found = identity_matches(raw).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found[0],
+            (
+                "release.personal-email",
+                2,
+                "commit author exposes a personal email"
+            )
+        );
+        assert_eq!(
+            found[1],
+            (
+                "release.personal-email",
+                3,
+                "commit committer exposes a personal email"
+            )
+        );
+        for email in [
+            "person@gmail.example",
+            "person@outlook.co.uk",
+            "person@hotmail.com",
+            "person@icloud.com",
+            "person@yahoo.co.nz",
+        ] {
+            assert!(personal_email(email));
+        }
+        for email in [
+            "person@notgmail.example",
+            "person@company.com",
+            "not-an-email",
+        ] {
+            assert!(!personal_email(email));
+        }
     }
 }

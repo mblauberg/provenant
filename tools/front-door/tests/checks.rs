@@ -8,10 +8,11 @@ fn check_rig() -> Result<TestRig> {
 }
 
 #[test]
-fn config_defects_are_findings_and_install_absence_is_not_success() -> Result {
+fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
+    use std::fs;
     let rig = check_rig()?;
-    std::fs::create_dir_all(&rig.state)?;
-    std::fs::write(
+    fs::create_dir_all(rig.state.join("install"))?;
+    fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\nunknown=true\n",
     )?;
@@ -22,16 +23,143 @@ fn config_defects_are_findings_and_install_absence_is_not_success() -> Result {
         "{}",
         String::from_utf8_lossy(&config.stdout.bytes)
     );
-    let value: serde_json::Value = serde_json::from_slice(&config.stdout.bytes)?;
-    assert_eq!(value["data"]["count"], 1);
-    let install = rig.command(&["check", "install", "--json"])?;
-    assert_eq!(
-        code(&install),
-        1,
-        "{}",
-        String::from_utf8_lossy(&install.stdout.bytes)
-    );
+    assert_eq!(json(&config)?["data"]["count"], 1);
+    assert_eq!(code(&rig.command(&["check", "install", "--json"])?), 1);
+
+    fs::write(rig.state.join("config.toml"), "schema_version = [")?;
+    assert_eq!(code(&rig.command(&["check", "config", "--json"])?), 1);
+    fs::write(rig.state.join("install/receipt.json"), "{")?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(
+        rig.state.join("install/receipt.json"),
+        fs::Permissions::from_mode(0o600),
+    )?;
+    assert_eq!(code(&rig.command(&["check", "install", "--json"])?), 1);
+
+    fs::remove_file(rig.state.join("config.toml"))?;
+    fs::write(rig.home.join("outside"), "must never be read")?;
+    std::os::unix::fs::symlink(rig.home.join("outside"), rig.state.join("config.toml"))?;
+    let escaped = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&escaped), 3);
+    assert!(!String::from_utf8_lossy(&escaped.stdout.bytes).contains("must never be read"));
     rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status() -> Result {
+    use provenant_config::{
+        InstallContext, InstallReporter, ReleaseSmoke, Snapshots, Targets, package_release,
+        plan_install,
+    };
+    use provenant_core::{CancelToken, Clock, PathResolver, RootInputs, WaitBudget};
+    use provenant_records::{SourceInput, VersionInfo, source_digest};
+    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    use std::os::unix::fs::PermissionsExt;
+    use std::{
+        fs, io,
+        path::{Path, PathBuf},
+    };
+
+    struct Resolver;
+    impl PathResolver for Resolver {
+        fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+    }
+    struct FixedSmoke(VersionInfo);
+    impl ReleaseSmoke for FixedSmoke {
+        fn check(&self, _: &provenant_config::Release, _: &CancelToken) -> io::Result<VersionInfo> {
+            Ok(self.0.clone())
+        }
+    }
+    struct Reporter;
+    impl InstallReporter for Reporter {
+        fn preview(&mut self, _: &[provenant_config::Action]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let rig = check_rig()?;
+    let source = rig.root.join("staged-release");
+    fs::create_dir_all(source.join("bin"))?;
+    fs::create_dir_all(source.join("skills/example"))?;
+    let skill = b"---\nname: example\ndescription: fixture\n---\n";
+    fs::write(source.join("skills/example/SKILL.md"), skill)?;
+    let mut asset_bytes = vec![0];
+    asset_bytes.extend_from_slice(skill);
+    let version = VersionInfo {
+        source_digest: source_digest(&[SourceInput {
+            name: "src/fixture.rs",
+            bytes: b"fixture source",
+        }])?,
+        asset_digest: source_digest(&[SourceInput {
+            name: "skills/example/SKILL.md",
+            bytes: &asset_bytes,
+        }])?,
+        target: env!("PROVENANT_TARGET_TRIPLE").into(),
+        toolchain: env!("PROVENANT_TOOLCHAIN").into(),
+        record_schema_version: 1,
+        config_schema_version: 1,
+    };
+    let marker = rig.root.join("smoke-home.txt");
+    let version_json = serde_json::to_string(&serde_json::json!({
+        "command": "version",
+        "status": "ok",
+        "data": version,
+    }))?;
+    let executable = source.join("bin/provenant");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$HOME\" > '{}'\nprintf '%s\\n' smoke > \"$HOME/keep\"\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            marker.display(),
+            version_json,
+        ),
+    )?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
+    let release = package_release(
+        &source,
+        &version,
+        &LocalFs,
+        &FixedSmoke(version.clone()),
+        &CancelToken::new(),
+    )?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&Resolver)?;
+    let targets = Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
+    let snapshots = Snapshots::capture(&release, &targets, &LocalFs)?;
+    let plan = plan_install(release, targets, snapshots)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = InstallContext {
+        fs: &LocalFs,
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 1)?,
+        cancel: &cancel,
+    };
+    provenant_config::install(&plan, &context, &mut Reporter, &FixedSmoke(version), false)?;
+
+    let output = rig.command(&["check", "install", "--json"])?;
+    let home = PathBuf::from(fs::read_to_string(&marker)?.trim());
+    assert_ne!(home, rig.home);
+    assert!(home.starts_with(fs::canonicalize("/tmp")?));
+    assert!(home.join("keep").is_file());
+    fs::remove_file(home.join("keep"))?;
+    fs::remove_dir(&home)?;
+    fs::remove_file(&marker)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(
+        stderr.contains("warning") && stderr.contains("private check directory"),
+        "{stderr}"
+    );
+    Ok(())
 }
 
 fn json(output: &provenant_supervisor::exec::ExecOutcome) -> Result<serde_json::Value> {
@@ -74,6 +202,12 @@ fn legal(rig: &TestRig) -> Result {
         "LICENSES/impeccable-APACHE-2.0.txt",
         "LICENSES/skill-optimizer-MIT.txt",
         "LICENSES/ui-ux-pro-max-MIT.txt",
+        "README.md",
+        "MAINTAINING.md",
+        "SECURITY.md",
+        "ACKNOWLEDGEMENTS.md",
+        "docs/ARCHITECTURE.md",
+        "docs/worktrees.md",
     ] {
         let path = rig.project.join(name);
         std::fs::create_dir_all(path.parent().ok_or("legal parent")?)?;
@@ -135,28 +269,6 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn malformed_inspected_config_and_install_are_findings_but_escape_is_error() -> Result {
-    use std::fs;
-    let rig = check_rig()?;
-    fs::create_dir_all(rig.state.join("install"))?;
-    fs::write(rig.state.join("config.toml"), "schema_version = [")?;
-    assert_eq!(code(&rig.command(&["check", "config", "--json"])?), 1);
-    fs::write(rig.state.join("install/receipt.json"), "{")?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(
-        rig.state.join("install/receipt.json"),
-        fs::Permissions::from_mode(0o600),
-    )?;
-    assert_eq!(code(&rig.command(&["check", "install", "--json"])?), 1);
-    fs::remove_file(rig.state.join("config.toml"))?;
-    fs::write(rig.home.join("outside"), "must never be read")?;
-    std::os::unix::fs::symlink(rig.home.join("outside"), rig.state.join("config.toml"))?;
-    let escaped = rig.command(&["check", "config", "--json"])?;
-    assert_eq!(code(&escaped), 3);
-    assert!(!String::from_utf8_lossy(&escaped.stdout.bytes).contains("must never be read"));
-    rig.assert_legacy_unchanged()
-}
-#[test]
 fn harness_uses_tracked_yaml_links_anchors_and_json_routes() -> Result {
     use std::fs;
     let rig = check_rig()?;
@@ -167,7 +279,7 @@ fn harness_uses_tracked_yaml_links_anchors_and_json_routes() -> Result {
     )?;
     fs::write(
         rig.project.join("skills/example/evals/trigger_cases.json"),
-        r#"{"schema_version":1,"target_skill":"example","cases":[{"id":"positive","relation":"positive","prompt":"use this skill","tags":["direct"],"expected":{"primary_skill":"example","companion_skills":[]}}]}"#,
+        r#"{"schema_version":1,"target_skill":"example","cases":[{"id":"q1","relation":"positive","prompt":"use this skill","tags":["direct"],"expected":{"primary_skill":"example","companion_skills":[]}}]}"#,
     )?;
     git(&rig, &["add", "."])?;
     fs::write(rig.project.join("untracked.md"), "[untracked](missing)")?;
@@ -264,6 +376,118 @@ fn release_scans_added_then_deleted_blobs_and_commit_identity_bytes() -> Result 
                 .as_str()
                 .is_some_and(|p| p.starts_with("@commit/")))
     );
+    rig.assert_legacy_unchanged()
+}
+#[test]
+fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
+    let rig = check_rig()?;
+    legal(&rig)?;
+    commit(&rig, "public baseline")?;
+    git(
+        &rig,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=person@gmail.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "personal identity",
+        ],
+    )?;
+    let output = rig.command(&["check", "release", "--json"])?;
+    assert_eq!(code(&output), 1);
+    let result = json(&output)?;
+    let findings = result["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    let identities: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding["rule"] == "release.personal-email")
+        .cloned()
+        .collect();
+    assert_eq!(
+        identities,
+        serde_json::json!([
+            {
+                "rule": "release.personal-email",
+                "path": {"encoding": "utf8", "path": format!("@commit/{head}")},
+                "line": 3,
+                "message": "commit author exposes a personal email"
+            },
+            {
+                "rule": "release.personal-email",
+                "path": {"encoding": "utf8", "path": format!("@commit/{head}")},
+                "line": 4,
+                "message": "commit committer exposes a personal email"
+            }
+        ])
+        .as_array()
+        .ok_or("expected identities")?
+        .to_vec()
+    );
+    rig.assert_legacy_unchanged()
+}
+#[test]
+fn release_ranges_read_history_behind_a_shallow_boundary() -> Result {
+    use std::fs;
+    let rig = check_rig()?;
+    legal(&rig)?;
+    let base = commit(&rig, "public baseline")?;
+    fs::write(
+        rig.project.join("temporary.txt"),
+        format!("{}\\n", "/Users/fixture/private-path/"),
+    )?;
+    commit(&rig, "private history /Users/fixture/private-path/")?;
+    fs::write(rig.project.join("middle.txt"), "middle")?;
+    let middle = commit(&rig, "middle")?;
+    fs::remove_file(rig.project.join("temporary.txt"))?;
+    fs::write(rig.project.join("tip.txt"), "tip")?;
+    let tip = commit(&rig, "tip")?;
+    fs::write(rig.project.join(".git/shallow"), format!("{middle}\\n"))?;
+
+    let output = rig.command(&[
+        "check", "release", "--base", &base, "--head", &tip, "--json",
+    ])?;
+    assert_eq!(
+        code(&output),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let result = json(&output)?;
+    let findings = result["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(findings.iter().any(|finding| {
+        finding["rule"] == "release.home-path"
+            && finding["path"]["path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("@commit/"))
+    }));
+    rig.assert_legacy_unchanged()
+}
+#[test]
+fn release_requires_tracked_public_files() -> Result {
+    let rig = check_rig()?;
+    legal(&rig)?;
+    commit(&rig, "public baseline")?;
+    git(&rig, &["rm", "README.md"])?;
+    let output = rig.command(&["check", "release", "--json"])?;
+    assert_eq!(code(&output), 1);
+    let result = json(&output)?;
+    let findings = result["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(findings.iter().any(|finding| {
+        finding["rule"] == "release.public"
+            && finding["path"]["path"] == "README.md"
+            && finding["line"] == 1
+            && finding["message"] == "required public file is not tracked"
+    }));
     rig.assert_legacy_unchanged()
 }
 #[test]

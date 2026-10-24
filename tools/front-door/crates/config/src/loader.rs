@@ -86,33 +86,6 @@ pub fn config_show<T: DeserializeOwned + Serialize>(
     read_with_domains(roots, fs, sections)
 }
 
-/// Return at most `limit` ordered findings (1..=100), with the total count.
-/// Malformed TOML remains a distinct `Syntax` error, never a finding. Unknown
-/// schema versions are refused before decoding any header/domain fields.
-pub fn check_config<T: DeserializeOwned + Serialize>(
-    roots: &Roots,
-    fs: &impl SafeFs,
-    sections: &DomainSections<T>,
-    limit: usize,
-) -> Result<ConfigCheck, ConfigError> {
-    if !(1..=100).contains(&limit) {
-        return Err(ConfigError::InvalidLimit);
-    }
-    let inspection = inspect_config(roots, fs, sections)?;
-    if let Some(error) = inspection.error {
-        return Err(error);
-    }
-    let inspection = inspection.check;
-    let count = inspection.findings.len();
-    Ok(ConfigCheck {
-        schema_version: inspection.schema_version,
-        profile: inspection.profile,
-        findings: inspection.findings.into_iter().take(limit).collect(),
-        count,
-        truncated: count > limit,
-    })
-}
-
 /// Inspect every finding within the existing config bounds. The digest binds
 /// exact file bytes and presence, including edits that preserve every finding.
 pub fn inspect_config<T: DeserializeOwned + Serialize>(
@@ -146,7 +119,6 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
                     profile: Profile::Balanced,
                     findings: Vec::new(),
                     count: 0,
-                    truncated: false,
                 },
                 error: Some(error),
                 input_digest,
@@ -177,7 +149,6 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
             profile: inspection.snapshot.profile,
             count: findings.len(),
             findings,
-            truncated: false,
         },
         input_digest,
     })

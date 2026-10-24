@@ -18,9 +18,7 @@ pub mod test_support;
 mod tests;
 
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
-pub use loader::{
-    check_config, config_show, inspect_config, load, load_with_domains, read, read_with_domains,
-};
+pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{ProjectBinding, ProjectLocation, bind_host, bind_project};
 pub use provenant_records::Finding;
@@ -67,8 +65,6 @@ pub enum ConfigError {
         #[source]
         source: SectionError,
     },
-    #[error("finding limit must be between 1 and 100")]
-    InvalidLimit,
     #[error("project location must be an absolute canonical directory path")]
     InvalidProjectLocation,
     #[error("project binding state is invalid")]
@@ -150,7 +146,6 @@ pub struct ConfigCheck {
     pub profile: Profile,
     pub findings: Vec<Finding>,
     pub count: usize,
-    pub truncated: bool,
 }
 
 /// Complete, ordered findings and the exact configuration input identity.
@@ -166,8 +161,7 @@ pub struct ConfigInspection {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
-    ReleaseSmoke, Snapshots, Targets, check_install, inspect_install, install, plan_install,
-    uninstall,
+    ReleaseSmoke, Snapshots, Targets, inspect_install, install, plan_install, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

@@ -622,3 +622,32 @@ def test_work_item_form_exposes_intake_fields() -> None:
     )
     field_ids = {item.get("id") for item in form["body"] if "id" in item}
     assert {"problem-evidence", "outcome", "scope", "acceptance", "dependencies", "risk-authority-gates"} <= field_ids
+
+
+def test_rust_harness_and_surviving_ordinary_checks_remain_required() -> None:
+    document = _workflow()
+    asset = next(
+        step for step in _steps(_job(document, "docs"))
+        if step.get("name") == "Check harness assets"
+    )
+    assert asset.get("working-directory") == "tools/front-door"
+    assert asset.get("env", {}).get("PROVENANT_ROOT") == "${{ github.workspace }}"
+    assert asset.get("run") == (
+        'cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"'
+    )
+    ordinary = next(
+        step for step in _steps(_job(document, "harness-checks"))
+        if step.get("name") == "Run ordinary checks"
+    )
+    commands = str(ordinary.get("run", ""))
+    for required in (
+        "find skills -type f -name '*.sh' ! -name '*cross-family.sh' -print0 | xargs -0 -r -n1 bash -n",
+        "find skills -type f -name '*cross-family.sh' -print0 | xargs -0 -r -n1 sh -n",
+        "find skills -type d -name node_modules -prune -o -type f \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -print0",
+        "| xargs -0 -r -n1 node --check",
+        "find skills runtime -type d -name node_modules -prune -o -type f -name '*.test.mjs' -print0",
+        "| xargs -0 -r node --test",
+        ".venv/bin/python scripts/static-security-check.py",
+        ".venv/bin/python scripts/lint-timebomb-fixtures.py",
+    ):
+        assert required in commands

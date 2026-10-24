@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "target_skill": "deliver",
+  "cases": [
+    {
+      "id": "q055",
+      "relation": "positive",
+      "prompt": "Deliver this approved non-interactive static HTML briefing through link-integrity, render and tier-required review for acceptance; it has no browser interaction or runtime source change.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q056",
+      "relation": "positive",
+      "prompt": "Complete this approved analysis autonomously and verify every acceptance criterion before handoff.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q057",
+      "relation": "positive",
+      "prompt": "Deliver this approved agent product with typed evidence and tier-required review; its approved scope explicitly asks for user acceptance.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q058",
+      "relation": "negative",
+      "prompt": "Implement this approved web application that processes consequential user data at terminal risk and stop for explicit user acceptance.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q059",
+      "relation": "negative",
+      "prompt": "The outcome is vague; turn it into a spec with decided acceptance criteria.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q060",
+      "relation": "negative",
+      "prompt": "Deploy the already accepted build to production and observe the rollout.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "release",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q061",
+      "relation": "boundary",
+      "prompt": "Deliver the approved research synthesis using parallel agents and cross-family review.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": [
+          "orchestrate"
+        ]
+      }
+    },
+    {
+      "id": "q062",
+      "relation": "boundary",
+      "prompt": "Deliver this approved prompt-ranking report and attach a repeatable quality evaluation.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": [
+          "evaluate"
+        ]
+      }
+    },
+    {
+      "id": "q063",
+      "relation": "boundary",
+      "prompt": "Finish the accepted report, then publish that exact artifact to the named audience after approval.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "release",
+        "companion_skills": [
+          "deliver"
+        ]
+      }
+    }
+  ]
+}

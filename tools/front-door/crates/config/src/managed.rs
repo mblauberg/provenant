@@ -1166,22 +1166,6 @@ fn permitted_entry(
     }
     Ok(false)
 }
-/// Read-only digest comparison, without locks, repair or initialisation.
-pub fn check_install(
-    targets: &Targets,
-    source: Option<&Release>,
-    target: &str,
-    fs: &dyn SafeFs,
-    smoke: &dyn ReleaseSmoke,
-    cancel: &CancelToken,
-) -> Result<Vec<InstallFinding>, InstallError> {
-    let inspection = inspect_install(targets, source, target, fs, smoke, cancel)?;
-    match inspection.error {
-        Some(error) => Err(error),
-        None => Ok(inspection.findings),
-    }
-}
-
 /// Complete findings plus the bytes, metadata, links, absence and inventory
 /// actually inspected. No locks, repair, extra filesystem reads or state writes.
 #[derive(Debug)]

@@ -132,14 +132,14 @@ impl ReleaseSmoke for Smoke {
         })
     }
 }
-fn check_install_for(
+fn inspect_install_for(
     targets: &Targets,
     source: Option<&Release>,
     target: &str,
     fs: &dyn SafeFs,
-) -> Result<Vec<InstallFinding>, InstallError> {
+) -> Result<InstallInspection, InstallError> {
     let cancel = CancelToken::new();
-    check_install(targets, source, target, fs, &Smoke, &cancel)
+    inspect_install(targets, source, target, fs, &Smoke, &cancel)
 }
 #[derive(Clone, Copy)]
 enum IdentityField {
@@ -250,8 +250,9 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
     )
     .unwrap();
     assert!(
-        check_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
+        inspect_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .is_empty()
     );
     let binary = f.targets.bin_dir.join("provenant");
@@ -359,8 +360,9 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
         format!("release file bytes or mode differ: {}", path.display())
     );
     assert_eq!(
-        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
+        inspect_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .first()
             .unwrap()
             .rule,
@@ -726,8 +728,9 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     .unwrap();
     assert!(f.plan().actions().is_empty());
     assert!(
-        check_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
+        inspect_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .is_empty()
     );
 }
@@ -879,7 +882,7 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             digest: installed_digest,
             field,
         };
-        let error = check_install(
+        let error = inspect_install(
             &f.targets,
             None,
             "fixture-target",
@@ -887,7 +890,9 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             &smoke,
             &cancel,
         )
-        .unwrap_err();
+        .unwrap()
+        .error
+        .unwrap();
         assert_eq!(
             error.to_string(),
             "invalid release manifest: binary identity differs from release manifest"
@@ -911,7 +916,7 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             digest: other_source.manifest.source_digest,
             field,
         };
-        let error = check_install(
+        let error = inspect_install(
             &f.targets,
             Some(&other_source),
             "fixture-target",
@@ -919,7 +924,9 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             &smoke,
             &cancel,
         )
-        .unwrap_err();
+        .unwrap()
+        .error
+        .unwrap();
         assert_eq!(
             error.to_string(),
             "invalid release manifest: binary identity differs from release manifest"
@@ -947,8 +954,9 @@ fn check_install_compares_the_requested_source_digest() {
     .unwrap();
     let other = Fixture::new();
     let other_source = package_fixture_release(&other.source, other_digest);
-    let findings =
-        check_install_for(&f.targets, Some(&other_source), "fixture-target", &LocalFs).unwrap();
+    let findings = inspect_install_for(&f.targets, Some(&other_source), "fixture-target", &LocalFs)
+        .unwrap()
+        .findings;
     assert_eq!(
         findings
             .iter()
@@ -999,8 +1007,9 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
             .all(|e| e.harness != Some(Harness::Codex))
     );
     assert!(
-        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
+        inspect_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .is_empty()
     );
     // Once removal is reconciled, a later recreated matching link is unmanaged.
@@ -1116,8 +1125,10 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
     receipt.entries.clear();
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
     assert_eq!(
-        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
-            .unwrap_err()
+        inspect_install_for(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .error
+            .unwrap()
             .to_string(),
         "invalid release manifest: receipt requires one binary entry"
     );
@@ -1131,8 +1142,10 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
     }
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
     assert_eq!(
-        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
-            .unwrap_err()
+        inspect_install_for(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .error
+            .unwrap()
             .to_string(),
         "invalid release manifest: receipt entry outside resolved targets"
     );
@@ -1388,8 +1401,9 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         target.instruction = None;
     }
     assert!(
-        check_install_for(&changed, None, "fixture-target", &LocalFs)
+        inspect_install_for(&changed, None, "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .is_empty()
     );
 
@@ -1413,8 +1427,9 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     assert_eq!(shrunk.harness_targets.len(), 1);
     assert_eq!(shrunk.harness_targets[0].harness, Harness::Codex);
     assert!(
-        check_install_for(&changed, None, "fixture-target", &LocalFs)
+        inspect_install_for(&changed, None, "fixture-target", &LocalFs)
             .unwrap()
+            .findings
             .is_empty()
     );
 }
@@ -1456,8 +1471,9 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
     changed_targets.harnesses[0].instruction = Some(f.home.join("elsewhere/AGENTS.md"));
     assert!(
-        check_install_for(&changed_targets, Some(&release), "fixture-target", &LocalFs,)
+        inspect_install_for(&changed_targets, Some(&release), "fixture-target", &LocalFs,)
             .unwrap()
+            .findings
             .is_empty()
     );
     let outcome = uninstall(

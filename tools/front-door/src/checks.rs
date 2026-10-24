@@ -13,7 +13,7 @@ use provenant_supervisor::{
 };
 use std::{
     ffi::OsString,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -47,17 +47,29 @@ impl Error {
         }
     }
 }
+enum Inspectable {
+    Config(provenant_cli::Page),
+    Install {
+        source: Option<PathBuf>,
+        page: provenant_cli::Page,
+    },
+    Harness(provenant_cli::Page),
+    Release {
+        base: Option<provenant_core::GitOid>,
+        head: Option<provenant_core::GitOid>,
+        page: provenant_cli::Page,
+    },
+}
 pub fn run(check: Check, globals: &Globals) -> u8 {
-    let name = match check {
-        Check::Config(_) => "check config",
-        Check::Install { .. } => "check install",
-        Check::Harness(_) => "check harness",
-        Check::Release { .. } => "check release",
-        Check::Writing { .. } => "check writing",
+    let (name, check) = match check {
+        Check::Config(page) => ("check config", Inspectable::Config(page)),
+        Check::Install { source, page } => ("check install", Inspectable::Install { source, page }),
+        Check::Harness(page) => ("check harness", Inspectable::Harness(page)),
+        Check::Release { base, head, page } => {
+            ("check release", Inspectable::Release { base, head, page })
+        }
+        Check::Writing { .. } => return crate::unavailable("check writing", "workflow", globals),
     };
-    if matches!(check, Check::Writing { .. }) {
-        return crate::unavailable(name, "workflow", globals);
-    }
     let result = inspect(check, globals);
     match result {
         Ok(page) => match page.human() {
@@ -88,11 +100,11 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
         ),
     }
 }
-fn inspect(check: Check, globals: &Globals) -> Result<CheckPage, Error> {
+fn inspect(check: Inspectable, globals: &Globals) -> Result<CheckPage, Error> {
     let assets = roots::product_root()?;
     let project = roots::selected_project(
         globals.project.as_deref(),
-        matches!(check, Check::Harness(_) | Check::Release { .. }),
+        matches!(check, Inspectable::Harness(_) | Inspectable::Release { .. }),
     )?;
     let roots = roots::roots(globals, &assets, &project)?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(roots::RootError::Home)?);
@@ -103,7 +115,7 @@ fn inspect(check: Check, globals: &Globals) -> Result<CheckPage, Error> {
         project.as_os_str().as_encoded_bytes(),
     );
     match check {
-        Check::Config(page) => {
+        Inspectable::Config(page) => {
             let inspection = provenant_config::inspect_config(
                 &roots,
                 &LocalFs,
@@ -115,7 +127,7 @@ fn inspect(check: Check, globals: &Globals) -> Result<CheckPage, Error> {
                 &page,
             )?)
         }
-        Check::Install { source, page } => private_home(|private| {
+        Inspectable::Install { source, page } => private_home(|private| {
             let executor = SystemExecutor::new(1)?;
             let smoke = Smoke {
                 executor: &executor,
@@ -146,10 +158,10 @@ fn inspect(check: Check, globals: &Globals) -> Result<CheckPage, Error> {
                 &page,
             )?)
         }),
-        Check::Harness(page) => git_page(&project, |git| {
+        Inspectable::Harness(page) => git_page(&project, |git| {
             provenant_cli::check::harness_page(git, ("harness", selector), &page)
         }),
-        Check::Release { base, head, page } => {
+        Inspectable::Release { base, head, page } => {
             let range = base.zip(head);
             git_page(&project, |git| {
                 provenant_cli::check::release_page(
@@ -164,7 +176,6 @@ fn inspect(check: Check, globals: &Globals) -> Result<CheckPage, Error> {
                 )
             })
         }
-        Check::Writing { .. } => Err(CheckError::Unavailable("workflow").into()),
     }
 }
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
@@ -176,7 +187,13 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
     let cleanup = anchor.rmdir(&name);
     match (result, cleanup) {
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(value), Err(error)) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "provenant: warning: cannot clean private check directory: {error}"
+            );
+            Ok(value)
+        }
         (Ok(value), Ok(())) => Ok(value),
     }
 }
@@ -259,31 +276,14 @@ impl ReleaseSmoke for Smoke<'_> {
                 struct VersionEnvelope {
                     command: String,
                     status: String,
-                    data: VersionWire,
-                }
-                #[derive(serde::Deserialize)]
-                struct VersionWire {
-                    source_digest: provenant_records::SourceDigest,
-                    asset_digest: provenant_records::SourceDigest,
-                    target: String,
-                    toolchain: String,
-                    record_schema_version: u64,
-                    config_schema_version: u64,
+                    data: VersionInfo,
                 }
                 let envelope: VersionEnvelope = serde_json::from_slice(&output.stdout.bytes)
                     .map_err(|_| io::Error::other("release version record"))?;
                 if envelope.command != "version" || envelope.status != "ok" {
                     return Err(io::Error::other("release version outcome"));
                 }
-                let data = envelope.data;
-                version = Some(VersionInfo {
-                    source_digest: data.source_digest,
-                    asset_digest: data.asset_digest,
-                    target: data.target,
-                    toolchain: data.toolchain,
-                    record_schema_version: data.record_schema_version,
-                    config_schema_version: data.config_schema_version,
-                });
+                version = Some(envelope.data);
             }
         }
         version.ok_or_else(|| io::Error::other("release identity unavailable"))

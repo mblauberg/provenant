@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "target_skill": "prototype",
+  "cases": [
+    {
+      "id": "q172",
+      "relation": "positive",
+      "prompt": "Build a 45-minute throwaway spike to test whether this library can stream ten thousand rows.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "prototype",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q173",
+      "relation": "positive",
+      "prompt": "Answer this one feasibility question with an isolated disposable prototype and measured evidence.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "prototype",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q174",
+      "relation": "positive",
+      "prompt": "Timebox a scratch-only spike to learn whether this browser API works in our target environment.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "prototype",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q175",
+      "relation": "negative",
+      "prompt": "Productionise the existing spike and ship it through verification and review.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176",
+      "relation": "negative",
+      "prompt": "The requirements are still vague; decide the user outcome and acceptance criteria.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q177",
+      "relation": "negative",
+      "prompt": "The production service is broken; reproduce the symptom and find its root cause.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q178",
+      "relation": "boundary",
+      "prompt": "Scope the feature, using one timeboxed spike only for the remaining library feasibility question.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": [
+          "prototype"
+        ]
+      }
+    },
+    {
+      "id": "q179",
+      "relation": "boundary",
+      "prompt": "Build a throwaway interaction prototype to learn what this onboarding UX feels like.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "prototype",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      }
+    },
+    {
+      "id": "q180",
+      "relation": "boundary",
+      "prompt": "Run three independent feasibility spikes in isolated scratch areas and reduce their evidence.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "orchestrate",
+        "companion_skills": [
+          "prototype"
+        ]
+      }
+    },
+    {
+      "id": "q922",
+      "relation": "negative",
+      "prompt": "Add a retained side-by-side design-comparison page to the project's prototype register so the owner can pick a layout.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      }
+    }
+  ]
+}
