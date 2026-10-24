@@ -66,7 +66,7 @@ fn pushing_survives_expiry_and_unknown_until_reconciliation() {
     let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
     let id = provenant_core::OperationId::parse("push-1").unwrap();
     store
-        .prepare_push(&guard, &fence, &id, &f.request())
+        .prepare_push(&guard, &fence, &id, "/fixture/origin", &f.request())
         .unwrap();
     store
         .change_push(&guard, &fence, &id, PushAction::Begin, &f.request())
@@ -299,7 +299,9 @@ fn setup_phase(
     phase: PushPhase,
 ) {
     let id = operation_id();
-    store.prepare_push(guard, fence, &id, &f.request()).unwrap();
+    store
+        .prepare_push(guard, fence, &id, "/fixture/origin", &f.request())
+        .unwrap();
     if phase == PushPhase::Prepared {
         return;
     }
@@ -354,7 +356,13 @@ fn push_transition_matrix_and_frozen_operation_identity() {
             // Replaying preparation preserves all later phase/result evidence.
             assert_eq!(
                 store
-                    .prepare_push(&guard, &fence, &operation_id(), &f.request())
+                    .prepare_push(
+                        &guard,
+                        &fence,
+                        &operation_id(),
+                        "/fixture/origin",
+                        &f.request()
+                    )
                     .unwrap(),
                 before
             );
@@ -402,13 +410,20 @@ fn push_transition_matrix_and_frozen_operation_identity() {
         .unwrap();
     let first = store.acquire_landing(&guard, &input, &f.request()).unwrap();
     store
-        .prepare_push(&guard, &first, &operation_id(), &f.request())
+        .prepare_push(
+            &guard,
+            &first,
+            &operation_id(),
+            "/fixture/origin",
+            &f.request(),
+        )
         .unwrap();
     assert!(matches!(
         store.prepare_push(
             &guard,
             &first,
             &provenant_core::OperationId::parse("different").unwrap(),
+            "/fixture/origin",
             &f.request()
         ),
         Err(Error::Conflict)
@@ -420,7 +435,13 @@ fn push_transition_matrix_and_frozen_operation_identity() {
         .acquire_landing(&guard, &landing(4), &f.request())
         .unwrap();
     assert!(matches!(
-        store.prepare_push(&guard, &second, &operation_id(), &f.request()),
+        store.prepare_push(
+            &guard,
+            &second,
+            &operation_id(),
+            "/fixture/origin",
+            &f.request()
+        ),
         Err(Error::Conflict)
     ));
     assert!(matches!(
@@ -544,6 +565,7 @@ fn exercise_fault(stage: Mutation, full: bool) {
                 &guard,
                 landing_fence.as_ref().unwrap(),
                 &operation_id(),
+                "/fixture/origin",
                 &f.request(),
             )
             .unwrap();
@@ -591,6 +613,7 @@ fn exercise_fault(stage: Mutation, full: bool) {
                     &guard,
                     landing_fence.as_ref().unwrap(),
                     &operation_id(),
+                    "/fixture/origin",
                     req,
                 )
                 .map(|_| ()),
@@ -782,7 +805,13 @@ fn invalid_inputs_tokens_generations_and_cancellation_leave_no_mutation() {
             Err(Error::StaleFence)
         ));
         assert!(matches!(
-            store.prepare_push(&guard, &wrong, &operation_id(), &f.request()),
+            store.prepare_push(
+                &guard,
+                &wrong,
+                &operation_id(),
+                "/fixture/origin",
+                &f.request()
+            ),
             Err(Error::StaleFence)
         ));
     }
@@ -865,7 +894,7 @@ fn reopened_store_keeps_unknown_push_pinned_after_owner_lock_closes() {
     assert_eq!(next.generation, fence.generation + 1);
     let retry = provenant_core::OperationId::parse("push-retry").unwrap();
     store
-        .prepare_push(&guard, &next, &retry, &f.request())
+        .prepare_push(&guard, &next, &retry, "/fixture/origin", &f.request())
         .unwrap();
     store
         .change_push(&guard, &next, &retry, PushAction::Begin, &f.request())
@@ -1123,7 +1152,13 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
         .unwrap();
     let landing_fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
     store
-        .prepare_push(&guard, &landing_fence, &operation_id(), &f.request())
+        .prepare_push(
+            &guard,
+            &landing_fence,
+            &operation_id(),
+            "/fixture/origin",
+            &f.request(),
+        )
         .unwrap();
     store
         .release_landing(&guard, &landing_fence, &f.request())
@@ -1131,7 +1166,7 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
     let mut input = work(&f, 3);
     let work_fence = store.acquire_claim(&input, &f.request()).unwrap();
     let before = database_records(&store);
-    store.db.execute_batch("DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;").unwrap();
+    store.db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;").unwrap();
     drop(guard);
     drop(store);
     let store = f.open();

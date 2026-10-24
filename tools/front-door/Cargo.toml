@@ -47,7 +47,6 @@ provenant-cli = { path = "crates/cli" }
 # deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = []
 ignored = [
-  "provenant-fabric-mcp",
   "provenant-routing",
 ]
 
@@ -76,6 +75,9 @@ publish = false
 license.workspace = true
 
 [dependencies]
+provenant-fabric-mcp = { workspace = true }
+provenant-fabric-runtime = { workspace = true }
+provenant-fabric-store = { workspace = true }
 provenant-workflow = { workspace = true }
 provenant-run = { workspace = true }
 provenant-providers = { workspace = true }

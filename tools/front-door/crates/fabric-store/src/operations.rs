@@ -56,3 +56,30 @@ impl Store {
         Ok(result)
     }
 }
+
+impl Store {
+    /// Read the home owner's atomic receipt without repeating a mutation.
+    pub fn coordination_receipt<T: DeserializeOwned>(
+        &self,
+        project: ProjectId,
+        actor: ActorId,
+        id: &OperationId,
+        request: &Request<'_>,
+    ) -> Result<Option<T>> {
+        request.retry(|| {
+            let row: Option<(String, Vec<u8>)> = self
+                .db
+                .query_row(
+                    "SELECT actor,result FROM coordination_operations WHERE project=?1 AND id=?2",
+                    params![project.to_string(), id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match row {
+                Some((owner, bytes)) if owner == actor.to_string() => Ok(Some(decode(&bytes)?)),
+                Some(_) => Err(Error::Conflict),
+                None => Ok(None),
+            }
+        })
+    }
+}

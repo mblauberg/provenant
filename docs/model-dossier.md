@@ -343,7 +343,7 @@ review legs and is reachable at `-high`, `-medium` and `-low`. Use
 `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
 **Route pools carry these preferences as weights.** The pools live only in
-`config/model-routing.json` `routes`; `provenant routes` prints them with live
+`config/model-routing.json` `routes`; `provenant route list` prints them with live
 availability (available models in full, others behind a per-pool count line;
 `--all` lists everything). To change a preference, edit the weight or order
 there; nothing else restates them.

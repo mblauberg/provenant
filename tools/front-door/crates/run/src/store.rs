@@ -222,7 +222,7 @@ impl RunStore {
                 let attempt = AttemptRecord {
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
-                    queued_at: input.created_at, started_at: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
+                    queued_at: input.created_at, started_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
@@ -309,12 +309,10 @@ impl RunStore {
             publication,
             Some(durable_exit),
             outcome_exit,
+            !exit.never_spawned,
             call,
         )
     }
-    /// Refuse an attempt that never reached supervisor custody, such as one
-    /// whose provider command could not be prepared. Its record carries no
-    /// exit evidence, no start time and an empty sealed result.
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
     /// `expected` names the state the caller observed; any other state is a
@@ -365,7 +363,7 @@ impl RunStore {
             usage: UsageRecord::default(),
         };
         self.attempt_dir(old.run_id, id, true)?;
-        self.commit_terminal(old, revision, &publication, None, None, call)
+        self.commit_terminal(old, revision, &publication, None, None, false, call)
             .map(Some)
     }
     /// Seal terminal intent and result, then commit the attempt, run summary,
@@ -378,6 +376,7 @@ impl RunStore {
         publication: &TerminalPublication<'_>,
         durable_exit: Option<ArtifactRecord>,
         outcome_exit: Option<i64>,
+        launched: bool,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = old.attempt_id;
@@ -402,6 +401,7 @@ impl RunStore {
         let mut next = old.clone();
         next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
         next.started_at = publication.started_at;
+        next.provider_launched = Some(launched);
         next.provider_ms = publication.provider_ms;
         next.resolved_route = publication.resolved_route.clone();
         next.applied_route = publication.applied_route.clone();

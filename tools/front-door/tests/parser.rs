@@ -324,6 +324,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         }
         let out = rig.command(&leaf)?;
         let expected = match leaf.first().copied() {
+            Some("fabric") if leaf.get(1) == Some(&"mcp") => 0,
             Some("config") => 0,
             Some("install") => 1,
             Some("uninstall") => 0,
@@ -336,7 +337,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             "{leaf:?}: {}",
             String::from_utf8_lossy(&out.stderr.bytes)
         );
-        if expected == 4 {
+        if expected == 4 || leaf == ["fabric", "mcp"] {
             assert!(out.stdout.bytes.is_empty());
         }
     }
