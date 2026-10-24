@@ -403,6 +403,13 @@ store; host recovery selects it with `PROVENANT_RUN_STATE_DIR` while keeping the
 original `--state-dir` for identity/config.
 Parent custody/quarantine and other lanes' Run stores receive no write grant.
 The macOS state-write overlap check remains unchanged.
+A lane prepared below `lanes.max_depth` may also create symlinks in its child
+store, but only where a child's provider setup links them:
+`runs/<RunId>/attempts/<AttemptId>/provider-state/candidate-N/auth.json` and
+`.../tmp/candidate-N/cargo-home/registry`. The child links the registered
+Codex `auth.json` rather than copying it, so token refresh keeps one source of
+truth. Link targets are not expressible in Seatbelt; setup fixes them, and an
+existing entry makes setup fail rather than reuse it.
 
 This chooses narrow shared grants and isolated child storage. Fabric's existing
 `RunOwner` is an in-process composition seam, not a parent-host broker; reusing
@@ -430,10 +437,12 @@ boundary.
 
 The MCP `fabric_submit` path seals child records and calls the shared launch
 owner, which attempts provider preparation and guardian handoff. The confined
-fixture proves child-store admission; a preparation refusal is permitted and
-it does not prove a nested provider ran. Live in-lane provider discovery,
-nested guardian/profile execution and cross-provider credential access remain
-unverified, subject to the activation gates below, with no additional grants.
+fixture proves child-store admission and, for a Codex lane, Codex child setup
+inside the lane. No nested provider runs yet: macOS refuses `sandbox_apply`
+inside a sandbox, so the child's own profile cannot be applied in the lane and
+its backend probe refuses. A Claude lane also cannot observe the Codex account,
+whose `auth.json` it cannot read. Nested profile execution and cross-provider
+credential access remain unresolved, subject to the activation gates below.
 Host recovery selects the child store explicitly.
 
 `STAGING` is `ATTEMPT/scratch/candidate-N/` for writers and

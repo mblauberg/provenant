@@ -271,6 +271,13 @@ rechecks the held cache's owner and mode. The cache gets read/write authority,
 with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
+The one exception is a lane below `lanes.max_depth`: inside its child Run store
+it may create symlinks only at each child attempt's
+`provider-state/candidate-N/auth.json` and read-only
+`tmp/candidate-N/cargo-home/registry` (see execution-route.md). An explicit
+`file-write-create` rule outranks a later `file-write*` rule in either
+direction, so the exception is pinned by `subpath` plus a depth-fixed regex
+and its store must already be a state write clear of protected roots.
 
 For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every

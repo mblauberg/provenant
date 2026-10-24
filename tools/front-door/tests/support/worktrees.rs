@@ -1294,6 +1294,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &|| 1000,
             2000,
         )?;
+        // Prepared below lanes.max_depth, so its children may launch; the
+        // limit then drops to exercise refusal at dispatch time.
+        fs::write(rig.state.join("config.toml"), config(2))?;
         let mut launch = provenant_cli::run::prepare_fixture(
             &registry,
             task,
@@ -1303,6 +1306,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             Some(&token),
         )
         .map_err(|e| format!("prepare {adapter} writer={writer}: {e}"))?;
+        fs::write(rig.state.join("config.toml"), config(1))?;
         assert!(
             launch
                 .environment
@@ -1327,6 +1331,16 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let permissions = confinement.plan.permissions();
         assert_eq!(permissions.scratch.path, staging.join("candidate-1"));
+        assert_eq!(
+            confinement.profile.spec.child_setup_links,
+            vec![provenant_confinement::permissions::PathGrant {
+                path: rig
+                    .state
+                    .join("children")
+                    .join(paths.attempt_id.to_string()),
+                scope: PathScope::Subtree,
+            }]
+        );
         if adapter == "codex" {
             assert!(
                 fs::symlink_metadata(
@@ -1478,6 +1492,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
             roots.state.as_path(),
             frames.as_bytes(),
             &config,
+            &context,
+            &rig.project,
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
@@ -1618,6 +1634,8 @@ fn verify_lane_profile(
     state: &Path,
     frames: &[u8],
     config: &dyn Fn(u8) -> String,
+    parent: &provenant_run::ExecutionContext,
+    assets: &Path,
 ) -> Result {
     use provenant_confinement::permissions::{
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
@@ -1751,6 +1769,48 @@ fn verify_lane_profile(
         Some(1),
         "confined child was not admitted: {targets}"
     );
+    // Admission is not launch: the child's provider setup runs inside this
+    // lane's profile and must reach the fake provider.
+    let attempt_id = provenant_core::AttemptId::parse(
+        targets[0]["attempt"].as_str().ok_or("child attempt id")?,
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(confinement.home.clone(), assets.into());
+    inputs.state_dir = Some(child.clone());
+    let child_context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&LocalFs)?.state,
+        ..parent.clone()
+    };
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let call = writer_call(&clock, &cancel)?;
+    let store = provenant_run::RunStore::open(&child_context, &call)?;
+    let record = await_terminal(&store, attempt_id, &call)?;
+    let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
+        return Err("child attempt was not terminal".into());
+    };
+    let reason = reason.as_deref().unwrap_or_default();
+    // The child's Codex setup must link the registered credential itself, the
+    // one file Codex refreshes, under the lane's child-link exception.
+    assert!(!reason.contains("setup failed"), "{reason}");
+    if launch.route.provider.as_deref() == Some("codex") {
+        let candidates = child.join(format!(
+            "runs/{}/attempts/{attempt_id}/provider-state",
+            record.run_id
+        ));
+        let linked = fs::read_dir(&candidates)?
+            .map(|entry| Ok(fs::read_link(entry?.path().join("auth.json")).ok()))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(
+            linked.into_iter().flatten().collect::<Vec<_>>(),
+            vec![confinement.home.join(".codex/auth.json")],
+            "{reason}"
+        );
+        // Launch itself is still out of reach: macOS refuses sandbox_apply
+        // inside a sandbox, so the child cannot confine itself in the lane.
+        assert_eq!(record.provider_launched, Some(false), "{reason}");
+        assert!(reason.contains("sandbox backend probe"), "{reason}");
+    }
+    // The parent store's own git-home is the host's, from preparing this lane.
+    assert!(child.join("tmp/git-home").is_dir());
     assert!(!state.join("run.sqlite3").exists());
     let denied = [
         attempt.join("custody.lock"),

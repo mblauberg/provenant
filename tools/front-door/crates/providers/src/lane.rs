@@ -17,6 +17,8 @@ pub struct LaneRuntime<'a> {
     pub child_state: &'a Path,
     pub home: &'a Path,
     pub depth: u64,
+    /// The depth is below `lanes.max_depth`, so children may launch here.
+    pub nests: bool,
     pub attempt: AttemptId,
     pub assets: &'a Path,
 }
@@ -147,6 +149,11 @@ impl LaneRuntime<'_> {
         // are mutable; Run databases and custody are private to child_state.
         setup.push(SetupStep::CreateDir(self.child_state.to_owned()));
         profile.state_writes.push(subtree(self.child_state));
+        // A child's Codex setup links the registered auth.json, the single
+        // source of truth Codex refreshes, into the child's provider state.
+        if self.nests {
+            profile.child_setup_links.push(subtree(self.child_state));
+        }
         let locks = self.state.join("fabric/locks");
         setup.push(SetupStep::CreateDir(locks.clone()));
         profile.state_writes.push(subtree(locks));

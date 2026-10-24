@@ -282,6 +282,12 @@ pub struct ProviderProfileSpec {
     /// Provider-owned state the CLI must write outside scratch, such as one
     /// session transcript. It never overlaps an authentication root.
     pub state_writes: Vec<PathGrant>,
+    /// Child Run stores, each also a subtree state write, where a nested
+    /// dispatch's provider setup may create its fixed links: every child
+    /// attempt's `provider-state/candidate-N/auth.json` and read-only
+    /// `tmp/candidate-N/cargo-home/registry`. Symbolic links only, at those
+    /// exact positions; set only for lanes below the nesting limit.
+    pub child_setup_links: Vec<PathGrant>,
     /// Directories whose executables the provider's own tools may run, for
     /// providers whose file reading goes through a shell. Exec only: reading
     /// them needs the runtime baseline or another grant.
@@ -1532,6 +1538,9 @@ fn render_profile(
             push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
         }
     }
+    for store in &profile.spec.child_setup_links {
+        push_child_link_rules(&mut source, &store.path)?;
+    }
     for grant in credential_writes {
         push_rule(
             &mut source,
@@ -1649,6 +1658,40 @@ fn render_profile(
         return Err(PermissionError::ProfileTooLarge);
     }
     Ok(source.into_bytes())
+}
+
+/// Link positions below a child Run store, relative to one child attempt.
+#[cfg(any(target_os = "macos", test))]
+const CHILD_SETUP_LINKS: [&str; 2] = [
+    "provider-state/candidate-[0-9]+/auth[.]json",
+    "tmp/candidate-[0-9]+/cargo-home/registry",
+];
+
+/// The bootstrap denies symlink creation. An explicit `file-write-create`
+/// rule outranks it only when it comes later, and outranks any `file-write*`
+/// rule wherever it sits, so this exception is pinned to exact positions:
+/// `subpath` fixes the store prefix literally, the regex fixes its depth and
+/// the child attempt layout, with no path text inside the regex to escape.
+#[cfg(any(target_os = "macos", test))]
+fn push_child_link_rules(source: &mut String, store: &Path) -> Result<(), PermissionError> {
+    let path = store.to_str().ok_or(PermissionError::NonUtf8Path)?;
+    if path
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'"' || byte == b'\\')
+    {
+        return Err(PermissionError::InvalidPath);
+    }
+    let depth = store
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    let prefix = "/[^/]+".repeat(depth);
+    for link in CHILD_SETUP_LINKS {
+        source.push_str(&format!(
+            "(allow file-write-create (require-all (vnode-type SYMLINK) (subpath \"{path}\") (regex #\"^{prefix}/runs/[0-9a-f]+/attempts/[0-9a-f]+/{link}$\")))\n"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1864,6 +1907,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         || spec.authentication.len() > 16
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
         || spec.state_writes.len() > MAX_PATH_GRANTS
+        || spec.child_setup_links.len() > MAX_PATH_GRANTS
         || spec.tool_exec_roots.len() > MAX_PATH_GRANTS
         || spec.provider_api.len() > MAX_NETWORK_GRANTS
         || spec.network.len() > MAX_NETWORK_GRANTS
@@ -1948,6 +1992,18 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
             .any(|root| grant.overlaps(root))
         {
             return Err(PermissionError::CredentialRoot);
+        }
+    }
+    // Link creation never widens writes: each store is already a subtree
+    // state write, which compile keeps clear of secret and protected roots.
+    for store in &spec.child_setup_links {
+        if store.scope != PathScope::Subtree
+            || !spec
+                .state_writes
+                .iter()
+                .any(|grant| grant.scope == PathScope::Subtree && grant.path == store.path)
+        {
+            return Err(PermissionError::InvalidFixture);
         }
     }
     for endpoint in &spec.provider_api {
@@ -2943,6 +2999,12 @@ mod tests {
                     path: provider_state.clone(),
                     scope: PathScope::Subtree,
                 }],
+                // Treat provider state as a child Run store: only the fixed
+                // child attempt link positions may become symlinks.
+                child_setup_links: vec![PathGrant {
+                    path: provider_state.clone(),
+                    scope: PathScope::Subtree,
+                }],
                 deny_keychain_access: true,
                 allow_process_fork: true,
                 tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
@@ -3118,6 +3180,26 @@ mod tests {
             &executables[0],
             &[&provider_state.join("transcript")]
         )));
+        let child_attempt = provider_state.join(
+            "runs/0123456789abcdef0123456789abcdef/attempts/fedcba9876543210fedcba9876543210",
+        );
+        let child_auth = child_attempt.join("provider-state/candidate-1");
+        let child_cargo = child_attempt.join("tmp/candidate-0/cargo-home");
+        let deeper = provider_state.join("x/runs/0a/attempts/0b/provider-state/candidate-0");
+        let outside = scratch.join("runs/0a/attempts/0b/provider-state/candidate-0");
+        for directory in [&child_auth, &child_cargo, &deeper, &outside] {
+            std::fs::create_dir_all(directory)?;
+        }
+        for link in [child_auth.join("auth.json"), child_cargo.join("registry")] {
+            let outcome = run(&executables[2], &[Path::new("-s"), &protected_file, &link]);
+            assert!(
+                successful_probe(&outcome) && link.is_symlink(),
+                "child setup link {}: {:?}; {}",
+                link.display(),
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            );
+        }
         let cache_outcome = run(&executables[0], &[&cache.join("artifact")]);
         assert!(
             successful_probe(&cache_outcome),
@@ -3141,6 +3223,31 @@ mod tests {
                         &protected_file,
                         &provider_state.join("new-link"),
                     ],
+                ),
+            ),
+            (
+                "other name in child provider state",
+                run(
+                    &executables[2],
+                    &[
+                        Path::new("-s"),
+                        &protected_file,
+                        &child_auth.join("config.toml"),
+                    ],
+                ),
+            ),
+            (
+                "child credential link at another depth",
+                run(
+                    &executables[2],
+                    &[Path::new("-s"), &protected_file, &deeper.join("auth.json")],
+                ),
+            ),
+            (
+                "child credential link outside the child store",
+                run(
+                    &executables[2],
+                    &[Path::new("-s"), &protected_file, &outside.join("auth.json")],
                 ),
             ),
             (
@@ -3219,6 +3326,55 @@ mod tests {
             !hardlink_path.exists(),
         );
         Ok(())
+    }
+
+    #[test]
+    fn child_setup_links_need_a_matching_state_write_and_render_fixed_positions() {
+        let store = PathGrant {
+            path: "/fixture/state/children/0a".into(),
+            scope: PathScope::Subtree,
+        };
+        let spec = |state_writes: Vec<PathGrant>, links: Vec<PathGrant>| ProviderProfileSpec {
+            process_executables: vec![PathGrant {
+                path: "/fixture/bin/provider".into(),
+                scope: PathScope::Exact,
+            }],
+            state_writes,
+            child_setup_links: links,
+            ..ProviderProfileSpec::default()
+        };
+        assert!(validate_profile_spec(&spec(vec![store.clone()], vec![store.clone()])).is_ok());
+        let parent = PathGrant {
+            path: "/fixture/state".into(),
+            scope: PathScope::Subtree,
+        };
+        let exact = PathGrant {
+            scope: PathScope::Exact,
+            ..store.clone()
+        };
+        for (writes, links) in [
+            (vec![], vec![store.clone()]),
+            (vec![parent], vec![store.clone()]),
+            (vec![exact.clone()], vec![exact]),
+        ] {
+            assert!(matches!(
+                validate_profile_spec(&spec(writes, links)),
+                Err(PermissionError::InvalidFixture)
+            ));
+        }
+        let mut source = String::new();
+        push_child_link_rules(&mut source, &store.path).expect("rendered rules");
+        let prefix = "(allow file-write-create (require-all (vnode-type SYMLINK) (subpath \"/fixture/state/children/0a\") (regex #\"^/[^/]+/[^/]+/[^/]+/[^/]+/runs/[0-9a-f]+/attempts/[0-9a-f]+/";
+        assert_eq!(
+            source,
+            format!(
+                "{prefix}provider-state/candidate-[0-9]+/auth[.]json$\")))\n{prefix}tmp/candidate-[0-9]+/cargo-home/registry$\")))\n"
+            )
+        );
+        assert!(matches!(
+            push_child_link_rules(&mut source, Path::new("/fixture/st\"ate")),
+            Err(PermissionError::InvalidPath)
+        ));
     }
 
     #[cfg(target_os = "macos")]

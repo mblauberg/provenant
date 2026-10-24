@@ -79,14 +79,19 @@ fn prepare_with(
         .name;
 
     let executor = provenant_supervisor::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
-    let settings = provenant_config::read_with_domains(
+    let config = provenant_config::read_with_domains(
         roots,
         &provenant_supervisor::fs::LocalFs,
         &crate::domains::SECTIONS,
     )
-    .map_err(|e| e.to_string())?
-    .domains
-    .accounts;
+    .map_err(|e| e.to_string())?;
+    // Only a lane that may still dispatch children gets their setup links.
+    let nests = config
+        .knobs
+        .get("lanes.max_depth")
+        .and_then(|knob| knob.value.as_u64())
+        .is_some_and(|max_depth| paths.lane_depth < max_depth);
+    let settings = config.domains.accounts;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     if !entries.iter().any(|e| e.adapter == "codex") {
         let directory = std::env::var_os("CODEX_HOME")
@@ -372,6 +377,7 @@ fn prepare_with(
                 child_state: &child_state,
                 home: &home,
                 depth: paths.lane_depth,
+                nests,
                 attempt: paths.attempt_id,
                 assets,
             },
