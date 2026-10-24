@@ -623,7 +623,7 @@ pub(crate) fn snapshot_target(
                         ..
                     }) = managed::snapshot(&directory, fs)?
                 {
-                    if managed::same_link_target(actual, &link.target) {
+                    if managed::same_link_target(&actual, &link.target) {
                         return Ok(None);
                     }
                     return Err(InstallError::Conflict(directory));

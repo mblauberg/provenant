@@ -816,18 +816,16 @@ pub fn plan_install(
                     && !was_owned
                     && matches!(current.value, Value::File { .. })
                 {
-                    let shared_agents = targets.home.join(".agents/AGENTS.md");
-                    let shared_agents_text = shared_agents.to_string_lossy();
-                    let shared_agents_bytes = shared_agents_text.as_bytes();
-                    let already_includes_shared = desired.contains_key(&shared_agents)
-                        && matches!(
-                            &current.value,
-                            Value::File { bytes, .. }
-                                if bytes.windows(b"~/.agents/AGENTS.md".len())
-                                    .any(|part| part == b"~/.agents/AGENTS.md")
-                                    || bytes.windows(shared_agents_bytes.len())
-                                        .any(|part| part == shared_agents_bytes)
-                        );
+                    // A file that already names the shared instructions includes them itself.
+                    let shared = targets.home.join(".agents/AGENTS.md");
+                    let shared = shared.to_string_lossy();
+                    let already_includes_shared = matches!(
+                        &current.value,
+                        Value::File { bytes, .. }
+                            if [b"~/.agents/AGENTS.md".as_slice(), shared.as_bytes()]
+                                .iter()
+                                .any(|name| bytes.windows(name.len()).any(|part| part == *name))
+                    );
                     if !already_includes_shared && let Value::Link(include) = &want.value {
                         manual_includes.push(ManualInclude {
                             path: AbsolutePath::new(path)?,

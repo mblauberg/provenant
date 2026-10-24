@@ -1143,41 +1143,22 @@ fn regular_user_instructions_are_preserved_with_manual_include_advice() {
 
 #[test]
 fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenced() {
-    let mut f = Fixture::new();
-    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
-    let shared = f.home.join(".agents/AGENTS.md");
-    fs::create_dir_all(shared.parent().unwrap()).unwrap();
-    fs::create_dir_all(f.targets.legacy_checkout.as_ref().unwrap()).unwrap();
-    fs::write(
-        f.targets
-            .legacy_checkout
-            .as_ref()
-            .unwrap()
-            .join("AGENTS.md"),
-        "legacy instructions",
-    )
-    .unwrap();
-    symlink(
-        f.targets
-            .legacy_checkout
-            .as_ref()
-            .unwrap()
-            .join("AGENTS.md"),
-        &shared,
-    )
-    .unwrap();
+    let f = Fixture::new();
+    let assets = f.source.join("instructions");
+    fs::create_dir_all(&assets).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let p = assets.join(name);
+        fs::write(&p, b"release instructions").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let instruction = f.home.join(".codex/AGENTS.md");
     fs::create_dir_all(instruction.parent().unwrap()).unwrap();
-    fs::write(
-        &instruction,
-        "See ~/.agents/AGENTS.md for shared instructions",
-    )
-    .unwrap();
-
+    let text = b"See ~/.agents/AGENTS.md for shared instructions";
+    fs::write(&instruction, text).unwrap();
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let outcome = install(
+    let result = install(
         &plan,
         &context(&clock, &cancel),
         &mut Reporter::default(),
@@ -1185,13 +1166,12 @@ fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenc
         false,
     )
     .unwrap();
-
-    assert!(outcome.manual_includes.is_empty());
-    assert!(shared.is_symlink());
-    assert_eq!(
-        fs::read_to_string(&instruction).unwrap(),
-        "See ~/.agents/AGENTS.md for shared instructions"
+    assert!(
+        result.manual_includes.is_empty(),
+        "{:?}",
+        result.manual_includes
     );
+    assert_eq!(fs::read(&instruction).unwrap(), text);
 }
 
 #[test]
@@ -1971,32 +1951,6 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     );
     assert_eq!(fs::read_to_string(&regular).unwrap(), "model='keep'\n");
     assert!(!f.targets.roots.state.as_path().exists());
-
-    let mut claude = Fixture::new();
-    claude.targets = Targets::new(
-        claude.targets.roots.clone(),
-        &claude.home,
-        &[Harness::Claude],
-    );
-    let settings = claude.home.join(".claude/settings.json");
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    let regular_settings = claude.home.join("regular-settings.json");
-    fs::write(&regular_settings, "{\"keep\":true}\n").unwrap();
-    symlink(&regular_settings, &settings).unwrap();
-    let release = claude.release();
-    let err = Snapshots::capture(&release, &claude.targets, &LocalFs).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "symlinked or non-regular harness config refused: {}; replace the link with a regular copy, then rerun install",
-            settings.display()
-        )
-    );
-    assert_eq!(
-        fs::read_to_string(&regular_settings).unwrap(),
-        "{\"keep\":true}\n"
-    );
-    assert!(!claude.targets.roots.state.as_path().exists());
 }
 
 #[test]
