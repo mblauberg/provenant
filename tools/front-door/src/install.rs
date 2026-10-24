@@ -16,7 +16,7 @@ use provenant_supervisor::{
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, Write},
+    io,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -110,17 +110,7 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
 }
 
 fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|path| provenant_supervisor::sys::is_executable(path))
-    .ok_or(EdgeError::Git)?;
+    let git = super::roots::git_binary().ok_or(EdgeError::Git)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),
@@ -189,21 +179,15 @@ fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
 #[derive(Default)]
 struct PreviewReporter;
 impl InstallReporter for PreviewReporter {
-    fn preview(&mut self, actions: &[Action]) -> io::Result<()> {
-        write_preview("actions", actions)
+    fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+        Ok(())
     }
-    fn findings(&mut self, findings: &[InstallFinding]) -> io::Result<()> {
-        write_preview("findings", findings)
+    fn findings(&mut self, _: &[InstallFinding]) -> io::Result<()> {
+        Ok(())
     }
-    fn manual_includes(&mut self, includes: &[ManualInclude]) -> io::Result<()> {
-        write_preview("manual_includes", includes)
+    fn manual_includes(&mut self, _: &[ManualInclude]) -> io::Result<()> {
+        Ok(())
     }
-}
-fn write_preview<T: Serialize + ?Sized>(kind: &str, value: &T) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(&serde_json::json!({"kind":kind,"items":value}))
-        .map_err(|_| io::Error::other("cannot encode install preview"))?;
-    bytes.push(b'\n');
-    io::stderr().lock().write_all(&bytes)
 }
 
 #[derive(Debug, Serialize)]
@@ -336,7 +320,44 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let mut human = format!("{command}: {} action(s)\n", outcome.actions.len());
+            let mut counts = [0usize; 3];
+            for action in &outcome.actions {
+                counts[match action.disposition {
+                    provenant_config::Disposition::Create => 0,
+                    provenant_config::Disposition::Replace => 1,
+                    provenant_config::Disposition::Remove => 2,
+                }] += 1;
+            }
+            let mut human = format!(
+                "{command}: {} action(s) ({} create, {} replace, {} remove)\n",
+                outcome.actions.len(),
+                counts[0],
+                counts[1],
+                counts[2]
+            );
+            for action in &outcome.actions {
+                let path = action
+                    .path
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                human.push_str(&format!("{:?}: {path}\n", action.disposition));
+            }
+            for manual in &outcome.manual_includes {
+                let path = manual
+                    .path
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                let include = manual
+                    .include
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                human.push_str(&format!(
+                    "manual include required: add {include} to {path}\n"
+                ));
+            }
             for finding in &outcome.findings {
                 human.push_str(&format!(
                     "{}: {}\n",
@@ -361,6 +382,20 @@ fn output_install(
 }
 
 pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
+    match provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, &args.source) {
+        Ok(source) => args.source = source,
+        Err(source) => {
+            return install_error(
+                "install",
+                &InstallError::Fs(provenant_supervisor::fs::FsError::Io {
+                    operation: "resolve install source",
+                    path: args.source.clone(),
+                    source,
+                }),
+                globals,
+            );
+        }
+    }
     if let Some(checkout) = &args.legacy_checkout {
         match provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, checkout) {
             Ok(canonical) => args.legacy_checkout = Some(canonical),
@@ -420,7 +455,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             return super::fail("install", Outcome::Error, "WAIT_BUDGET", &error, globals);
         }
     };
-    let smoke = match SystemSmoke::new() {
+    let smoke = match SystemSmoke::new(None) {
         Ok(smoke) => smoke,
         Err(error) => {
             return super::fail(

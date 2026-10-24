@@ -327,7 +327,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 roots::roots(globals, &assets, &project)
             })();
             match resolved {
-                Ok(roots) => provenant_cli::route::run(command, globals, &roots),
+                Ok(roots) => provenant_cli::route::run(command, globals, &roots, |result| {
+                    crate::overflow::publish(result, globals)
+                }),
                 Err(error) => fail(
                     &inv.leaf,
                     Outcome::Error,
@@ -378,6 +380,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                         &roots,
                         provenant_providers::REGISTRY,
                         &effects,
+                        |result| crate::overflow::publish(result, globals),
                     ),
                     Err(_) => fail(
                         &inv.leaf,
@@ -523,4 +526,35 @@ fn main() -> ExitCode {
         );
     }
     ExitCode::from(status)
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn git_resolver_prefers_override_then_path_and_checks_executable() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let override_dir = root.path().join("override");
+        let path_dir = root.path().join("path");
+        fs::create_dir_all(&override_dir).expect("override dir");
+        fs::create_dir_all(&path_dir).expect("path dir");
+        let override_git = override_dir.join("git");
+        let path_git = path_dir.join("git");
+        fs::write(&override_git, b"git").expect("override binary");
+        fs::write(&path_git, b"git").expect("path binary");
+        fs::set_permissions(&override_git, fs::Permissions::from_mode(0o700))
+            .expect("override mode");
+        fs::set_permissions(&path_git, fs::Permissions::from_mode(0o700)).expect("path mode");
+
+        assert_eq!(
+            crate::roots::resolve_git_binary(None, std::slice::from_ref(&path_dir)),
+            Some(path_git)
+        );
+        assert_eq!(
+            crate::roots::resolve_git_binary(Some(&override_git), &[path_dir]),
+            Some(override_git)
+        );
+    }
 }

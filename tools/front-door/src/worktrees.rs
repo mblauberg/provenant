@@ -13,12 +13,7 @@ use provenant_supervisor::{
     fs::{Directory, FileKind, FsError, LocalFs, SafeDir, canonicalize},
 };
 use serde::Serialize;
-use std::{
-    ffi::OsStr,
-    path::{Component, Path},
-    sync::Arc,
-    time::Duration,
-};
+use std::{ffi::OsStr, path::Component, sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -142,20 +137,10 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
         }
     }
     let utility_home = child(&state, "utility-home")?;
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|path| provenant_supervisor::sys::is_executable(path))
-    .ok_or(Error::GitUnavailable)?;
+    let git = super::roots::git_binary().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
         Arc::new(LocalFs),
-        canonicalize(git)?,
+        canonicalize(&git)?,
         roots.state.as_path().join("utility-home"),
     )?;
     let executor = SystemExecutor::new(1)?;

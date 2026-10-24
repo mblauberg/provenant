@@ -39,6 +39,46 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
+pub(crate) fn git_binary() -> Option<PathBuf> {
+    let path_directories = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    resolve_git_binary(
+        std::env::var_os("PROVENANT_GIT")
+            .map(PathBuf::from)
+            .as_deref(),
+        &path_directories,
+    )
+}
+pub(crate) fn resolve_git_binary(
+    override_path: Option<&Path>,
+    path_directories: &[PathBuf],
+) -> Option<PathBuf> {
+    let executable =
+        |path: PathBuf| path.is_absolute() && provenant_supervisor::sys::is_executable(&path);
+    if let Some(path) = override_path {
+        let path = path.to_path_buf();
+        return executable(path.clone()).then_some(path);
+    }
+    if let Some(path) = path_directories
+        .iter()
+        .map(|directory| directory.join("git"))
+        .find(|path| executable(path.clone()))
+    {
+        return Some(path);
+    }
+    [
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+        "/opt/local/bin/git",
+        "/usr/bin/git",
+        "/bin/git",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| executable(path.clone()))
+}
+
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {
         Some(path) => path.to_path_buf(),
@@ -62,17 +102,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|path| provenant_supervisor::sys::is_executable(path))
-    .ok_or(RootError::Checkout)?;
+    let git = git_binary().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),
