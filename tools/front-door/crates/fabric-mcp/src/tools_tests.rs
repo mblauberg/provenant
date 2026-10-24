@@ -52,3 +52,62 @@ fn every_mcp_observation_wait_uses_the_transport_cap() {
         );
     }
 }
+
+fn limits() -> Limits {
+    Limits {
+        body_bytes: 4,
+        input_frame_bytes: 1_048_576,
+        json_depth: 64,
+        page_rows: 2,
+        output_lines: 1,
+        output_bytes: 8,
+        result_bytes: 16,
+        lease_seconds: 2,
+        peer_seconds: 30,
+        bundle_bytes: 67_108_864,
+    }
+}
+
+#[test]
+fn configured_limits_reject_typed_body_page_lease_and_output_values() {
+    let limits = limits();
+    for (tool, args, path) in [
+        (
+            "fabric_task",
+            json!({"op":"create","objective":"12345","note":null}),
+            "objective",
+        ),
+        (
+            "fabric_mail",
+            json!({"op":"read","after":null,"limit":3}),
+            "limit",
+        ),
+        (
+            "fabric_claim",
+            json!({"op":"acquire","scope":{"kind":"issue","key":"x"},"lease_ms":3000}),
+            "lease_ms",
+        ),
+        (
+            "fabric_output",
+            json!({"op":"read","target":{"attempt":"00000000000000000000000000000001"},"part":"stdout","offset":0,"max_bytes":9}),
+            "max_bytes",
+        ),
+    ] {
+        let call = ToolCall::parse(tool, args).unwrap();
+        assert_eq!(call.validate_limits(&limits).unwrap_err().path, path);
+    }
+}
+
+#[test]
+fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations() {
+    let limits = limits();
+    let receipt = response("fabric_submit", json!({"operation_id":"op-1"})).unwrap();
+    let kept = limit_response(receipt, &limits, true, false).unwrap();
+    assert_eq!(kept.structured_content["operation_id"], "op-1");
+
+    let observation = response("fabric_run", json!({"attempt":"longer"})).unwrap();
+    assert!(matches!(
+        limit_response(observation, &limits, false, false),
+        Err(ServiceError::ResultTooLarge)
+    ));
+}

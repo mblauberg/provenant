@@ -3,6 +3,7 @@
 
 pub mod facade;
 pub mod input;
+pub use crate::home::CoordinationService;
 
 use input::bounded_input;
 pub use input::{InputError, ValidateInput};
@@ -24,6 +25,8 @@ pub use provenant_fabric_store::{
 
 #[derive(Debug, Error)]
 pub enum CoordinationError {
+    #[error(transparent)]
+    Peer(#[from] crate::hosts::PeerError),
     #[error("invalid coordination input: {0}")]
     InvalidInput(&'static str),
     #[error(transparent)]
@@ -47,8 +50,9 @@ pub enum CoordinationError {
 }
 
 impl CoordinationError {
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
+            Self::Peer(error) => error.code(),
             Self::InvalidInput(_) | Self::Input(_) | Self::Time(_) => "invalid_input",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
@@ -209,10 +213,29 @@ pub enum EventsResult {
         page: Page<Event>,
         cursor: i64,
         timed_out: bool,
+        #[serde(default)]
+        unknown_hosts: Vec<provenant_core::HostId>,
+        #[serde(default)]
+        run_events_pending: bool,
     },
     Noted {
         seq: i64,
     },
+}
+
+impl EventsResult {
+    pub fn empty_timeout(after: Option<i64>) -> Self {
+        Self::Read {
+            page: Page {
+                items: vec![],
+                truncated: false,
+            },
+            cursor: after.unwrap_or(0),
+            timed_out: true,
+            unknown_hosts: vec![],
+            run_events_pending: false,
+        }
+    }
 }
 
 const MAX_COORDINATION_RESULT_BYTES: usize = 768 * 1024;
@@ -334,7 +357,7 @@ pub trait CoordinationApi {
     ) -> Result<LandingResult, CoordinationError>;
 }
 
-pub struct CoordinationService<'a> {
+pub struct LocalCoordination<'a> {
     store: Store,
     project: ProjectId,
     actor: ActorId,
@@ -342,7 +365,7 @@ pub struct CoordinationService<'a> {
     backoff: &'a dyn RetryWait,
 }
 
-impl<'a> CoordinationService<'a> {
+impl<'a> LocalCoordination<'a> {
     pub fn open(
         root: &StateRoot,
         project: ProjectId,
@@ -424,7 +447,15 @@ impl<'a> CoordinationService<'a> {
         )
     }
 
-    fn pause(&self, budget: WaitBudget, cancel: &CancelToken) {
+    pub(crate) fn pause_observation(&self, budget: WaitBudget, cancel: &CancelToken) {
+        self.backoff.wait(
+            DurationMicros::from_micros(
+                500_000.min(budget.remaining(self.clock.mono_now()).as_micros()),
+            ),
+            cancel,
+        );
+    }
+    pub(crate) fn pause(&self, budget: WaitBudget, cancel: &CancelToken) {
         let left = budget.remaining(self.clock.mono_now()).as_micros();
         self.backoff
             .wait(DurationMicros::from_micros(left.min(50_000)), cancel);
@@ -479,7 +510,7 @@ impl<'a> CoordinationService<'a> {
     }
 }
 
-impl CoordinationApi for CoordinationService<'_> {
+impl CoordinationApi for LocalCoordination<'_> {
     fn mail(
         &self,
         input: MailInput,
@@ -654,6 +685,8 @@ impl CoordinationApi for CoordinationService<'_> {
                     },
                     cursor: after.unwrap_or(0),
                     timed_out: true,
+                    unknown_hosts: Vec::new(),
+                    run_events_pending: false,
                 }),
                 _ => Err(error),
             };
@@ -695,6 +728,8 @@ impl CoordinationApi for CoordinationService<'_> {
                     page,
                     cursor,
                     timed_out,
+                    unknown_hosts: Vec::new(),
+                    run_events_pending: false,
                 })
             }
             EventsInput::Note { note, dedup_key } => {
@@ -834,7 +869,7 @@ impl CoordinationApi for CoordinationService<'_> {
     }
 }
 
-impl CoordinationService<'_> {
+impl LocalCoordination<'_> {
     fn landing_locked(
         &self,
         input: LandingInput,
@@ -976,7 +1011,7 @@ fn landing_reference(input: &LandingInput) -> Result<&str, CoordinationError> {
         LandingInput::Wait { .. } => Err(CoordinationError::InvalidInput("wait is an observation")),
     }
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "domain", content = "input", rename_all = "snake_case")]
 pub enum Mutation {
     Mail(MailInput),
@@ -1123,6 +1158,7 @@ mod tests {
             page: event_page,
             cursor: event_cursor,
             timed_out: false,
+            ..
         } = service
             .events(
                 EventsInput::Read {

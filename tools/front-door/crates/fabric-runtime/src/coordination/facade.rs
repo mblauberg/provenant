@@ -127,6 +127,8 @@ bounded_input! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FacadeError {
+    #[error("run execution owner is unavailable")]
+    OwnerUnavailable,
     #[error("invalid input")]
     InvalidInput,
     #[error("record not found")]
@@ -162,6 +164,7 @@ pub enum FacadeError {
 impl FacadeError {
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput => "invalid_input",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
@@ -187,7 +190,19 @@ impl FacadeError {
 /// an observation must never stop a launched run; only explicit run cancel may.
 /// The shared records do not yet expose run requests, so F3 consumes these
 /// contracts directly until those owner types land.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct EventCoverage {
+    pub unknown_hosts: Vec<HostId>,
+    pub more_events: bool,
+}
 pub trait F3Facade {
+    fn refresh_events(
+        &mut self,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<EventCoverage, FacadeError> {
+        Ok(EventCoverage::default())
+    }
     type Identity: Serialize;
     type Submit: Serialize;
     type Run: Serialize;
@@ -226,7 +241,7 @@ pub trait F3Facade {
 }
 
 /// Output payload encoding is explicit and lossless across MCP JSON.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "data", rename_all = "snake_case")]
 pub enum OutputBytes {
     Utf8(String),
@@ -243,7 +258,7 @@ impl OutputBytes {
 }
 
 /// Typed, bounded output response produced by F3's run facade.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputResult {
     Chunk {

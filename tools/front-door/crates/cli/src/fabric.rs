@@ -19,6 +19,12 @@ pub enum Fabric {
     },
     Identity,
     #[command(subcommand)]
+    Host(Host),
+    #[command(hide = true)]
+    Peer,
+    #[command(subcommand)]
+    Graph(Graph),
+    #[command(subcommand)]
     Mail(Mail),
     #[command(subcommand)]
     Task(Task),
@@ -29,6 +35,21 @@ pub enum Fabric {
     #[command(subcommand)]
     Landing(Landing),
 }
+#[derive(Debug, Subcommand)]
+pub enum Host {
+    List,
+}
+#[derive(Debug, Subcommand)]
+pub enum Graph {
+    Tick {
+        #[arg(long)]
+        document: PathBuf,
+    },
+    Status {
+        id: String,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct Operation {
     #[arg(long)]
@@ -294,7 +315,7 @@ pub struct LandingFence {
     fence: Fence,
 }
 impl LandingFence {
-    fn proof(self) -> LandingProof {
+    pub fn proof(self) -> LandingProof {
         LandingProof {
             reference: self.reference,
             id: self.id,
@@ -305,6 +326,18 @@ impl LandingFence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Landing {
+    Push {
+        #[command(flatten)]
+        fence: LandingFence,
+        #[command(flatten)]
+        operation: Operation,
+    },
+    Reconcile {
+        #[command(flatten)]
+        fence: LandingFence,
+        #[command(flatten)]
+        operation: Operation,
+    },
     Acquire {
         #[arg(long)]
         reference: String,
@@ -386,6 +419,10 @@ impl Fabric {
         let (domain, verb) = match self {
             Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
+            Self::Host(_) => return "fabric host list".into(),
+            Self::Peer => return "fabric peer".into(),
+            Self::Graph(Graph::Tick { .. }) => return "fabric graph tick".into(),
+            Self::Graph(Graph::Status { .. }) => return "fabric graph status".into(),
             Self::Mail(v) => (
                 "mail",
                 match v {
@@ -425,6 +462,8 @@ impl Fabric {
             Self::Landing(v) => (
                 "landing",
                 match v {
+                    Landing::Push { .. } => "push",
+                    Landing::Reconcile { .. } => "reconcile",
                     Landing::Acquire { .. } => "acquire",
                     Landing::Renew { .. } => "renew",
                     Landing::Verify(_) => "verify",
@@ -465,15 +504,17 @@ fn execute(
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
-    ctx.require_local_home()?;
     let clock = provenant_supervisor::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
     let backoff = ThreadWait;
-    let service = CoordinationService::open(
+    let service = CoordinationService::for_identity(
         &ctx.roots.state,
-        ctx.identity.project,
-        ctx.identity.inbox.actor,
+        &ctx.identity,
+        &ctx.config,
+        &ctx.home,
+        &ctx.cwd,
+        &ctx.executor,
         &clock,
         &backoff,
         budget,
@@ -483,7 +524,14 @@ fn execute(
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let value = match cmd {
-        Fabric::Identity | Fabric::Mcp { .. } => return Err(EdgeError::Invalid),
+        Fabric::Identity
+        | Fabric::Mcp { .. }
+        | Fabric::Host(_)
+        | Fabric::Graph(_)
+        | Fabric::Peer
+        | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
+            return Err(EdgeError::Invalid);
+        }
         Fabric::Mail(Mail::Send {
             to,
             kind,
