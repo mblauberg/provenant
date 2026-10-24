@@ -12,7 +12,8 @@ Produce testable scope.
 Read the repository's `Repository process` declaration. If absent or ambiguous,
 use an unambiguous existing owner or return proposed content in chat; never
 invent an owner. Define the decision, users and done in the declared parent
-issue or project-docs home. Emit the minimum `config/risk-policy.json` tier,
+issue or project-docs home. Emit the minimum tier from the compiled factor
+floors in `HARNESS.md`,
 path/write/resource limits, prohibited actions, external effects, expiry and
 approver. Credentials, secrets, unrelated paths, denials and project bans stay
 outside authority. Execution permission is not assurance. Ordinary authorised

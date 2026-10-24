@@ -87,7 +87,7 @@ project may name its own landing gate as acceptance.
 ## Risk, authority, routing and memory
 
 `scope` emits the minimum risk tier (`routine`, `substantial`, `crucial` or
-`terminal`, with criteria in `config/risk-policy.json`) together with
+`terminal`) from the compiled factor floors below, together with
 machine-readable authority covering paths, actions, disclosure, secrets,
 deployment, irreversible actions, expiry and the approver. Delegation can only
 narrow that authority. Host access, credentials and subscriptions never grant
@@ -95,15 +95,30 @@ permission on their own. Merge authority is repository-based: `AGENTS.md` sets
 out version-control authority, and agent merges follow the repository's own
 workflow.
 
-Route each dispatch by task class to a `principal`, `senior` or `junior` model,
-or to an explicit model the adapter resolves. When several families are
-available, work as a tiered council whose depth follows the risk tier. Bind the
-applied route to the receipt. An adapter route given only as an alias records
-the alias and its capability limit; never invent task-class, role or effort
-fields. The runtime governs routing, catalogues only cache it, and the
-mechanics live in `orchestrate`. Prefer per-dispatch controls: editing a global
-provider configuration, such as `~/.codex/config.toml`, needs explicit
-authority for that path and action. Run artefacts live under `.agent-run/`.
+| Factor | `routine` | `substantial` | `crucial` | `terminal` |
+|---|---|---|---|---|
+| Blast radius | local | multi-module | shared-system | production |
+| Reversibility | easy | moderate | hard | irreversible |
+| Data sensitivity | public, internal |  | confidential | regulated |
+| Migration | none | reversible | stateful | destructive |
+| Oracle quality | strong | mixed | weak |  |
+| External effects | none |  | reversible | irreversible |
+| Critical surface | none | public-contract | auth-security, privacy, financial, legal, build-release-gate | life-safety |
+
+The routing catalogue currently provides the `utility` pool; `principal`,
+`senior` and `junior` are skill guidance, not router tiers. Route each dispatch
+using a named route or explicit model as the catalogue allows. Task-class
+presets affect knobs only. When several families are available, work as a
+tiered council whose depth follows the risk tier. Bind the applied route to the
+receipt. An adapter route given only as an alias records the alias and its
+capability limit; never invent task-class, role or effort fields. The runtime
+governs routing, catalogues only cache it, and the mechanics live in
+`orchestrate`. Prefer per-dispatch controls: editing a global provider
+configuration, such as `~/.codex/config.toml`, needs explicit
+authority for that path and action. Run attempts live under
+`<state>/runs/<run>/attempts/<attempt>/`; the default state root is
+`~/.local/share/provenant/v1`. `.agent-run/` is a protected legacy root, not
+the current run store.
 
 Durable knowledge belongs in project state, specs, ADRs and runbooks;
 harness-private memory holds only cross-project preferences. Once a memory

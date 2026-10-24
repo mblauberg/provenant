@@ -12,8 +12,8 @@ Require:
 - approved scope, non-goals and acceptance criteria;
 - costly-to-reverse decisions approved or expressly parked;
 - build ceiling and write/external authority;
-- `config/risk-policy.json` risk/authority profile: minimum tier, bounded paths,
-  disclosure, secrets and external-action constraints;
+- `HARNESS.md` risk criteria and task-scoped authority: minimum tier, bounded
+  paths, disclosure, secrets and external-action constraints;
 - `evaluate` need for stochastic/judgement-bearing behaviour.
 
 If missing, use `scope`; never infer owner decisions beyond the recorded,

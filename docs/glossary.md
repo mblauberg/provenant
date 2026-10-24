@@ -1,8 +1,9 @@
 # Glossary
 
-Terms used by `HARNESS.md`. Risk-tier criteria live in `config/risk-policy.json`.
+Terms used by `HARNESS.md`. Risk-tier criteria are listed there and compiled
+into `provenant-records`.
 
-- **Acceptance:** objective checks plus the review required by the risk tier establish that delivered work meets its approved criteria. The chair reports the outcome and the user may still reject it. Explicit user acceptance is required only for `terminal` work or when the approved scope asks for it. A project may name its landing gate as acceptance (Sealle: landing is acceptance for everything). Acceptance grants no release, deploy, publish or send authority.
+- **Acceptance:** objective checks plus the review required by the risk tier establish that delivered work meets its approved criteria. The chair reports the outcome and the user may still reject it. Explicit user acceptance is required only for `terminal` work or when the approved scope asks for it. A project may name its landing gate as acceptance. Acceptance grants no release, deploy, publish or send authority.
 - **User gate:** approval of specs and scope, one-way doors, risk-tier downgrades, unresolved acceptance criteria, destructive or irreversible actions, external communications or production promotion; also final acceptance for `terminal` work or when the approved scope asks for it.
 - **Chair:** the harness the user started. It owns authority, user communication, run state, gates and final synthesis.
 - **Lane:** one dispatched worker run (native subagent or Fabric dispatch) with its own prompt, route and output file.
