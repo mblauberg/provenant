@@ -42,10 +42,10 @@ fn fixture() -> Result {
             fs::write(dir.join("refreshed"), b"yes")?;
             return Ok(());
         }
-        assert_eq!(
-            std::env::var("CLAUDE_CODE_OAUTH_TOKEN")?,
-            "fixture-refreshed-token"
-        );
+        assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
+        let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
+        let token = provenant_supervisor::sys::fixture_read_secret_pipe(fd)?;
+        assert_eq!(token, b"fixture-refreshed-token");
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1,"output_tokens":1}}}),

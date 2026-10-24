@@ -409,6 +409,7 @@ fn prepare_with(
             argv: spec.argv,
             environment: spec.env,
             stdin,
+            secret_input: spec.secret_input,
             cwd: spec.cwd,
             route: provider,
             confinement: Some(run::LaunchConfinement {

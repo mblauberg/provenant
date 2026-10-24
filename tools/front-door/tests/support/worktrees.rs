@@ -781,6 +781,7 @@ impl provenant_run::Providers for WriterProvider {
             argv,
             environment: Vec::new(),
             stdin: Vec::new(),
+            secret_input: None,
             cwd: writer.worktree.path().to_owned(),
             route,
             confinement: Some(provenant_run::LaunchConfinement {

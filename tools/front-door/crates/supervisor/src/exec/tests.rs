@@ -66,6 +66,7 @@ fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
             env: None,
             cwd: Path::new("/"),
             input: false,
+            secret_input: None,
             capture_stdout: false,
             capture_stderr: false,
         },
@@ -179,4 +180,29 @@ fn bounds_and_pre_cancel_refuse_without_spawn() {
         executor.execute(ExecOptions::new(&[], Path::new("/"), Duration::ZERO)),
         Err(ExecError::EmptyArgv)
     ));
+}
+
+#[test]
+fn secret_input_arrives_by_descriptor_with_eof_and_no_token_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(
+            "test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && exec /bin/cat /dev/fd/$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        ),
+    ];
+    let env = vec![("HOME".into(), root.path().as_os_str().to_owned())];
+    let secret = SecretInput {
+        descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
+        bytes: b"synthetic-oauth-token".to_vec(),
+    };
+    let mut options = ExecOptions::new(&argv, root.path(), Duration::from_secs(2));
+    options.env = Some(&env);
+    options.secret_input = Some(&secret);
+    let outcome = SystemExecutor::new(1).unwrap().execute(options).unwrap();
+    assert_eq!(outcome.termination, Termination::Exit(0));
+    assert!(!outcome.timed_out);
+    assert_eq!(outcome.stdout.bytes, secret.bytes);
+    assert!(outcome.stderr.bytes.is_empty());
 }

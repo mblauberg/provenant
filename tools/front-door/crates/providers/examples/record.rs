@@ -49,10 +49,11 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const PROMPT: &str = "Reply with the word ok";
 const RESUME_PROMPT: &str = "Reply with the word ok again";
-const SHELL_RESUME_PROMPT: &str = "Use Bash to run git status --short. Then make a separate Bash call running only printf provenant-shell-proof. Reply with the word ok again";
+const SHELL_PROOF_COMMAND: &str = r#"test -z "${CLAUDE_CODE_OAUTH_TOKEN+x}" && test -z "${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}" && printf provenant-shell-proof"#;
+const SHELL_RESUME_PROMPT: &str = "Use Bash to run git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok again";
 /// Writers must prove an in-sandbox tool edit, not just a reply.
 const WRITER_PROMPT: &str = "Create the file note.txt in the current directory containing the word ok, then reply with the word ok";
-const SHELL_WRITER_PROMPT: &str = "Use Bash to run printf ok > note.txt in the current directory and git status --short. Then make a separate Bash call running only printf provenant-shell-proof. Reply with the word ok";
+const SHELL_WRITER_PROMPT: &str = "Use Bash to run printf ok > note.txt in the current directory and git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok";
 const BRANCH: &str = "provenant-probe";
 const PROBE_TOOLS: [&str; 6] = [
     "/bin/cat",
@@ -418,6 +419,7 @@ fn launch(context: &Context<'_>, plan: &ConfinedPlan, spec: &LaunchSpec) -> Resu
     let command = compiled.command(&spec.argv)?;
     let mut options = ExecOptions::new(&command, &spec.cwd, Duration::from_secs(300));
     options.env = Some(&spec.env);
+    options.secret_input = spec.secret_input.as_ref();
     options.stdin = match &spec.stdin {
         Stdin::Bytes(bytes) => Some(bytes),
         Stdin::Null => None,
@@ -762,9 +764,7 @@ fn successful_bash(stream: &[u8]) -> bool {
                             .get("input")
                             .and_then(|input| input.get("command"))
                             .and_then(Value::as_str)
-                            .is_some_and(|command| {
-                                command.contains("printf provenant-shell-proof")
-                            }) =>
+                            .is_some_and(|command| command == SHELL_PROOF_COMMAND) =>
                 {
                     if let Some(id) = item.get("id").and_then(Value::as_str) {
                         requests.insert(id.to_owned());
@@ -833,11 +833,19 @@ fn codex_answering_model_comes_from_the_private_rollout() {
 
 #[test]
 fn bash_proof_needs_a_matching_successful_tool_result() {
-    let request = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"printf provenant-shell-proof"}}]}}"#;
+    let request = json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":SHELL_PROOF_COMMAND}}]}}).to_string();
+    let unchecked = json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"printf provenant-shell-proof"}}]}}).to_string();
     let result = |id: &str, error: bool, output: &str| {
         json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error,"content":output}]}}).to_string()
     };
     assert!(!successful_bash(request.as_bytes()));
+    assert!(!successful_bash(
+        format!(
+            "{unchecked}\n{}",
+            result("b", false, "provenant-shell-proof")
+        )
+        .as_bytes()
+    ));
     for (id, error, output) in [
         ("other", false, "provenant-shell-proof"),
         ("b", true, "provenant-shell-proof"),
@@ -1070,7 +1078,18 @@ fn main() -> Result<()> {
         if session == "fresh" {
             continuation = Some(adapter.continuation(&outcome, &route, "recording")?);
         }
-        records.push((session, run, outcome, model, writer_shell_proof));
+        let subprocess_env_scrub = spec
+            .env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" && value == "1");
+        records.push((
+            session,
+            run,
+            outcome,
+            model,
+            writer_shell_proof,
+            subprocess_env_scrub,
+        ));
         last_profile = Some((plan, spec.profile));
     }
 
@@ -1145,7 +1164,7 @@ fn main() -> Result<()> {
         .trim()
         .to_owned();
     let platform = platform()?;
-    for (session, run, outcome, model, writer_shell_proof) in &records {
+    for (session, run, outcome, model, writer_shell_proof, subprocess_env_scrub) in &records {
         let redacted = redactor.stream(&run.outcome.stdout.bytes)?;
         let argv: Vec<String> = run
             .argv
@@ -1170,6 +1189,7 @@ fn main() -> Result<()> {
             "answering_model": model,
             "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
             "writer_shell_proof": writer_shell_proof,
+            "subprocess_env_scrub": subprocess_env_scrub,
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
             "keychain_ipc_proof": false,

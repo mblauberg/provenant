@@ -740,7 +740,6 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-                "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             _ => &[],
         };
@@ -802,9 +801,19 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 assert!(
                     spec.env
                         .iter()
-                        .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN"
-                            && value == FIXTURE_TOKEN)
+                        .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
                 );
+                let secret = spec.secret_input.as_ref().expect("token pipe");
+                assert_eq!(
+                    secret.descriptor_env,
+                    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
+                );
+                assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
+                let allowed = argv
+                    .iter()
+                    .position(|arg| arg == "--allowedTools")
+                    .expect("allow-list");
+                assert_eq!(argv[allowed + 1], "mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(
                     spec.profile
@@ -847,7 +856,10 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
         assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
             grant.path == package
-                || (id == "codex" && grant.path.starts_with("/fixture/home"))
+                || (id == "codex"
+                    && (grant.path.starts_with("/fixture/home")
+                        || grant.path == Path::new("/Library/Developer/CommandLineTools")
+                        || grant.path == Path::new("/private/etc/ssl/openssl.cnf")))
                 || [
                     "/fixture/provenant/bin/provenant",
                     "/fixture/git/bin/git",
@@ -896,6 +908,10 @@ struct LiveCapture {
     argv: Vec<String>,
     #[serde(default)]
     writer_shell_proof: bool,
+    #[serde(default)]
+    subprocess_env_scrub: bool,
+    #[serde(default)]
+    cli_version: String,
     #[serde(default)]
     keychain_ipc_proof: bool,
 }
@@ -1012,6 +1028,8 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
         session_mode: Session,
         enabled: bool,
         capture_refs: Vec<String>,
+        #[serde(default)]
+        shell_enabled: bool,
     }
     let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
     for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
@@ -1026,8 +1044,20 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
             assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
             assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
             assert!(capture.activation_eligible, "{reference}");
-            // Historical file-tool captures do not claim shell proof. The
-            // writer shell knob is policy; fresh live proof stays a host gate.
+            if mode.adapter == "claude" && mode.shell_enabled {
+                assert!(
+                    capture.writer_shell_proof,
+                    "{reference}: Bash must have run"
+                );
+                assert!(
+                    capture.subprocess_env_scrub,
+                    "{reference}: scrub must be enabled"
+                );
+                assert!(
+                    !capture.cli_version.is_empty(),
+                    "{reference}: CLI version required"
+                );
+            }
             if capture.keychain_ipc_proof {
                 assert!(capture.writer_shell_proof, "{reference}");
             }
@@ -1703,6 +1733,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
     Ok(())
 }
 
+#[cfg(feature = "recording")]
 #[test]
 fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
 -> Result<(), ProviderError> {
@@ -1723,6 +1754,15 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             .argv
             .iter()
             .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash")
+    );
+    assert!(launch.argv.windows(2).any(|pair| {
+        pair[0] == "--allowedTools" && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+    }));
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
     );
     assert!(launch.profile.spec.deny_keychain_access);
     assert!(launch.profile.spec.authentication.is_empty());
@@ -1771,12 +1811,12 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
                 && value == "/fixture/state/claude-config")
     );
-    assert!(
-        launch
-            .env
-            .iter()
-            .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == FIXTURE_TOKEN)
+    let secret = launch.secret_input.as_ref().expect("token pipe");
+    assert_eq!(
+        secret.descriptor_env,
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
     );
+    assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
     Ok(())
 }
 
