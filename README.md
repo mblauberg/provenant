@@ -41,7 +41,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md: the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library: 26 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library: 25 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -53,6 +53,8 @@ flowchart TB
 - **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
+- Host clients may provide extra skills such as `codebase-polish`,
+  `cross-verify` and `implement-run`. Those are external to this repository.
 - **Fabric:** messages, shared tasks and activity between agents working on one
   project, plus two MCP tools that delegate ordinary dispatch and finite batches
   to the existing owners. One SQLite file, no daemon, nothing to provision.

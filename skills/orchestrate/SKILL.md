@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: "Use for bounded fan-out, multi-agent research, cross-family reviews, audits, Herdr control and ready-issue automation. Not for tiny work; coupled defects: diagnose; run-until-STOP: autopilot."
+description: "Use to coordinate bounded work across agents, research lanes or independent reviews. Use diagnose for coupled defects and autopilot for missions that continue until STOP. Not for a small, single-owner task."
 ---
 
 # Multi-agent orchestration
@@ -21,7 +21,7 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
    enforce claims.
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
-7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task. Named sessions are retired.
+7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task.
 8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
 ## Rules
@@ -65,6 +65,10 @@ Preflight authority, isolation, disclosure and receipts. Dispatch independent wa
 
 ## Depth on demand
 
-Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. [lane-safety.md](references/lane-safety.md) for lane and reviewer failure modes and false greens. [trigger-boundary.md](references/trigger-boundary.md) for skill activation boundaries, [retrieval-and-tool-routing.md](references/retrieval-and-tool-routing.md) for source and tool selection, and [evaluation-and-observability.md](references/evaluation-and-observability.md) for checks and trace review. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
+Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for route choices, and [lane-safety.md](references/lane-safety.md) for lane and reviewer safeguards. For non-code work, read [domain adaptation](references/domain-adaptation.md); for scratch handling, read [memory and scratch](references/memory-scratchpad.md). Other references cover provider pairing, Herdr, verification, and evaluation.
 
 Keep the criteria, evidence and outcome in the existing project document or PR.
+
+Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml),
+[contracts](evals/contract_cases.yaml), [discipline](evals/discipline_cases.yaml),
+and [topology value](evals/topology_value_cases.yaml).

@@ -22,8 +22,7 @@ false report. Paste the first section into every lane and reviewer brief.
 - `provenant hook git pre-push` refuses default-branch deletion,
   non-fast-forward pushes, default-branch pushes from linked worktrees and
   conflict markers in pushed commits. `install --hooks on` registers only
-  the fixture-backed hooks in the Rust registry. The primary checkout keeps
-  its legacy copies until the authorised cut-over.
+  the fixture-backed hooks in the Rust registry.
 - A lane has no inbox: it hears new instructions only through `resume` or a new
   dispatch.
 
