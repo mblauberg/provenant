@@ -1281,6 +1281,52 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
 }
 
 #[test]
+fn exhausted_refusal_lapses_after_every_full_window_resets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut context = context(&catalogue, &config, now()?);
+    let records = [availability()];
+    context.availability = &records;
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    context.access = &access;
+    let query = request("codex/test")?;
+    let window = |reset| provenant_quota::QuotaWindow {
+        pool: "five_hour".into(),
+        window_seconds: None,
+        used_basis_points: 10_000,
+        resets_unix_seconds: Some(reset),
+    };
+    let observation = |reset| {
+        let mut o = quota(
+            "codex/test",
+            "opaque-account",
+            provenant_quota::QuotaStatus::Exhausted,
+            1,
+            80,
+            10_000,
+        )?;
+        o.snapshot.windows = vec![window(reset)];
+        Ok::<_, RoutingError>(o)
+    };
+    let at = 100;
+    let pending = [observation(at + 60)?];
+    context.quota = &pending;
+    assert_eq!(
+        reason(&resolve(&query, &context)?),
+        Some(&RouteExclusionReason::Exhausted)
+    );
+    let lapsed = [observation(at - 1)?];
+    context.quota = &lapsed;
+    assert!(reason(&resolve(&query, &context)?).is_none());
+    Ok(())
+}
+
+#[test]
 fn distinct_accounts_of_one_adapter_are_valid_resolution_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

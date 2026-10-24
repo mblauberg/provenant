@@ -106,9 +106,20 @@ pub fn reserve(
         .cloned()
         .unwrap_or_else(|| AccountRecord::empty(account.clone()));
     record.validate()?;
-    if record.account != *account || next_due(&record, trigger, power)?.is_none_or(|due| due > now)
+    // Identity is adapter and key; a changed display label is adopted below.
+    if record.account.adapter != account.adapter
+        || record.account.account_key != account.account_key
+        || next_due(&record, trigger, power)?.is_none_or(|due| due > now)
     {
         return Err(QuotaError::Conflict);
+    }
+    let stored_account = record.account.clone();
+    record.account = account.clone();
+    if let Some(snapshot) = record.snapshot.as_mut() {
+        snapshot.account = account.clone();
+    }
+    for refusal in &mut record.refusals {
+        refusal.account = account.clone();
     }
     record.revision = record
         .revision
@@ -122,7 +133,7 @@ pub fn reserve(
     record.last_attempt_unix_seconds = Some(now);
     record.validate()?;
     Ok(UpdateIntent {
-        account: account.clone(),
+        account: stored_account,
         expected: current.cloned(),
         replacement: Some(record),
     })
@@ -443,6 +454,19 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 3600);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
+    }
+    #[test]
+    fn reserve_adopts_a_renamed_label_for_the_same_account_key() {
+        let a = account();
+        let mut renamed = a.clone();
+        renamed.label = "renamed".into();
+        let r = AccountRecord::empty(a.clone());
+        let intent = reserve(Some(&r), &renamed, 400, "claim", Trigger::Manual, Power::Ac).unwrap();
+        intent.check(Some(&r)).unwrap();
+        let reserved = intent.replacement.unwrap();
+        assert_eq!(reserved.account, renamed);
+        let done = complete(&reserved, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
+        assert_eq!(done.replacement.unwrap().account, renamed);
     }
     #[test]
     fn completion_rejects_late_claim_and_keeps_good_snapshot_on_failure() {

@@ -211,7 +211,9 @@ impl UpdateIntent {
         }
         if let Some(next) = &self.replacement {
             next.validate()?;
-            if next.account != self.account
+            // The display label may change; the adapter and key identify the account.
+            if next.account.adapter != self.account.adapter
+                || next.account.account_key != self.account.account_key
                 || next.revision
                     != self
                         .expected

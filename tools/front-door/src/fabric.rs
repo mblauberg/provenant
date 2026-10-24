@@ -1697,47 +1697,60 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         route: &provenant_fabric_runtime::graph::GraphRoute,
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
+        stored_ref: Option<&str>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
-        let operation_id = graph_operation("graph-attempt-operation", key)?;
-        let input = SubmitInput::Submission {
-            operation_id,
-            tasks: vec![SubmittedTask {
-                account: None,
-                access,
-                worktree: worktree.map(str::to_owned),
-                prompt: prompt.into(),
-                route: RoutePreference {
-                    adapter: Some(route.adapter.clone()),
-                    model: route.model.clone(),
-                    route: route.alias.clone(),
-                    role: None,
-                    task_class: None,
-                    effort: route.effort.clone(),
-                },
-                timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
-                delivery_id: None,
-                deliver: None,
-            }],
-            concurrency: Some(1),
-            knobs: vec![],
-        };
         let mut owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
         };
-        let receipt = owner.submit(input, self.budget, self.cancel)?;
-        let target = receipt
-            .targets
-            .into_iter()
-            .next()
-            .ok_or(FacadeError::StateCorrupt)?;
-        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
-        let reference = Some(format!(
-            "{}/{}",
-            target.host.unwrap_or(self.factory.context.identity.host),
-            target.attempt
-        ));
+        let (target, reference) = if let Some(reference) = stored_ref {
+            // An accepted attempt is observed by reference: operation replay is
+            // actor-scoped, so resubmitting under another actor would launch again.
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            (target, Some(reference.to_owned()))
+        } else {
+            let operation_id = graph_operation("graph-attempt-operation", key)?;
+            let input = SubmitInput::Submission {
+                operation_id,
+                tasks: vec![SubmittedTask {
+                    account: None,
+                    access,
+                    worktree: worktree.map(str::to_owned),
+                    prompt: prompt.into(),
+                    route: RoutePreference {
+                        adapter: Some(route.adapter.clone()),
+                        model: route.model.clone(),
+                        route: route.alias.clone(),
+                        role: None,
+                        task_class: None,
+                        effort: route.effort.clone(),
+                    },
+                    timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
+                    delivery_id: None,
+                    deliver: None,
+                }],
+                concurrency: Some(1),
+                knobs: vec![],
+            };
+            let receipt = owner.submit(input, self.budget, self.cancel)?;
+            let target = receipt
+                .targets
+                .into_iter()
+                .next()
+                .ok_or(FacadeError::StateCorrupt)?;
+            let reference = Some(format!(
+                "{}/{}",
+                target.host.unwrap_or(self.factory.context.identity.host),
+                target.attempt
+            ));
+            (target, reference)
+        };
+        let attempt = owner.snapshot(target, self.budget, self.cancel)?;
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
@@ -1859,39 +1872,22 @@ impl Factory {
                 factory: self,
                 allow_remote: true,
             };
+            // One unresolvable target must not strand the others; report the first failure last.
+            let mut first_error = None;
             for node in &checkpoint.nodes {
                 for attempt in &node.attempts {
                     if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
                         continue;
                     }
-                    let reference = match attempt.attempt_ref.as_deref() {
-                        Some(reference) => reference,
-                        None => {
-                            return Err(FacadeError::LaunchUnknown {
-                                operation_id: graph_operation(
-                                    "graph-attempt-operation",
-                                    &attempt.key,
-                                )?,
-                            });
-                        }
-                    };
-                    let (host, attempt_id) =
-                        reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-                    let operation_id = graph_operation("graph-cancel", &attempt.key)?;
-                    owner.run(
-                        RunInput::Cancel {
-                            target: AttemptTarget {
-                                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
-                                attempt: attempt_id
-                                    .parse()
-                                    .map_err(|_| FacadeError::StateCorrupt)?,
-                            },
-                            operation_id,
-                        },
-                        budget,
-                        cancel,
-                    )?;
+                    if let Err(error) =
+                        self.cancel_graph_attempt(&mut owner, attempt, budget, cancel)
+                    {
+                        first_error.get_or_insert(error);
+                    }
                 }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
             }
         }
         let status = if checkpoint.cancelled {
@@ -1908,6 +1904,58 @@ impl Factory {
             GraphStatus::Complete
         };
         Ok(GraphRun { status, checkpoint })
+    }
+}
+impl Factory {
+    /// Cancel one live graph attempt. A missing checkpoint reference (a crash
+    /// between acceptance and the save) is recovered from the stable operation ID.
+    fn cancel_graph_attempt(
+        &self,
+        owner: &mut BinaryRunOwner<'_>,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        let operation_id = graph_operation("graph-cancel", &attempt.key)?;
+        let targets = match attempt.attempt_ref.as_deref() {
+            Some(reference) => {
+                let (host, attempt_id) =
+                    reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                vec![AttemptTarget {
+                    host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                    attempt: attempt_id.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                }]
+            }
+            None => {
+                let accepted = graph_operation("graph-attempt-operation", &attempt.key)?;
+                let store = owner.store(budget, cancel)?;
+                let call = owner.call(budget, cancel);
+                // An operation this actor never accepted launched nothing to stop.
+                match store.operation(&accepted, &call).map_err(run_error)? {
+                    Some(record) => store
+                        .pending_attempts(record.run_id, &call)
+                        .map_err(run_error)?
+                        .into_iter()
+                        .map(|record| AttemptTarget {
+                            host: Some(self.context.identity.host),
+                            attempt: record.attempt_id,
+                        })
+                        .collect(),
+                    None => vec![],
+                }
+            }
+        };
+        for target in targets {
+            owner.run(
+                RunInput::Cancel {
+                    target,
+                    operation_id: operation_id.clone(),
+                },
+                budget,
+                cancel,
+            )?;
+        }
+        Ok(())
     }
 }
 fn graph_operation(

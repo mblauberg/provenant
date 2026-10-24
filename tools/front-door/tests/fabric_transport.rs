@@ -446,6 +446,63 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
 }
 
 #[test]
+fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result {
+    use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal};
+    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"lost","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"}]}]}),
+        )?,
+    )?;
+    let run = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&run), 0);
+    // Model a crash after acceptance but before the reference was saved.
+    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let state = roots.resolve(&LocalFs)?.state;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    {
+        let mut journal = FileJournal::open(
+            &state,
+            project,
+            "lost",
+            &LocalFs,
+            WaitBudget::cli(clock.mono_now(), 10)?,
+            &cancel,
+            &clock,
+        )?;
+        let mut checkpoint = journal.load("lost")?.ok_or("checkpoint")?;
+        let attempt = checkpoint.nodes[0].attempts.last_mut().ok_or("attempt")?;
+        attempt.state = AttemptState::Running;
+        attempt.attempt_ref = None;
+        journal.save(&checkpoint)?;
+    }
+    let cancelled = rig.command(&["fabric", "graph", "cancel", "lost", "--json"])?;
+    assert_eq!(
+        code(&cancelled),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cancelled.stdout.bytes)
+    );
+    let cancelled: Value = serde_json::from_slice(&cancelled.stdout.bytes)?;
+    assert_eq!(cancelled["data"]["status"], "cancelled");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
