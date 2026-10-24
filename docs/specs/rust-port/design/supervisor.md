@@ -276,21 +276,33 @@ For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every
 packed branch, and common `config`/`config.lock` cannot be narrowed to one
 `branch.<name>` section. Remote-tracking refs, packed refs and common config
-therefore remain host-owned. The launch composition must fetch on the host
-before dispatch, let the lane push an explicit `HEAD:<branch>`, then fetch
-and set `branch.<name>.remote`/`merge` on the host after confirmed lane exit;
-verify `git status -sb` reports the upstream. The directory preparation and
-cache grants are implemented in confinement; the full fetch/push/upstream
-conformance row and runtime composition remain outstanding. A lane's
-`git push -u` may push successfully but fail to persist upstream locally.
-The host writer delivery work in #1246 must supply the remote, explicit
-refspec, credential authority and a verified push result before this handoff
-can be composed. Generic Run settlement has none of those fields and also
-runs for cancelled/recovered attempts; it cannot safely infer a completed push
-from provider text or unconditionally mutate shared config. After a bound
-push, the host must fetch the selected branch, match it to the lane's final
-head, set upstream and verify status. #1255 remains open until that host
-composition and its conformance row are present.
+therefore remain host-owned. A writer `TaskRequest` may explicitly carry
+`deliver: {remote, branch, open_pr}`. Run binds the configured remote's single
+push URL and lane branch under writer custody, then fetches before provider
+launch. After a complete, identity-verified successful writer exit and terminal
+confinement checks, the live host holder pushes the final commit OID to
+`refs/heads/<branch>`, fetches that destination into its remote-tracking ref,
+and requires it to equal the lane's final head. It sets the lane branch's
+`remote`, `merge` and `pushRemote` config and verifies upstream and status
+before optionally running `gh pr create --head <branch> --fill` for the bound
+repository. Host commands run from the protected primary root with the lane's
+Git directory, so relative credential helpers cannot select lane files. Helper
+search paths and configuration paths exclude the writer worktree; shell SSH
+overrides and opaque shell credential helpers are refused before dispatch.
+Plain executable helpers and gh's standard credential helper remain supported.
+Hooks, fsmonitor, implicit tag pushes and submodule pushes are disabled.
+
+The host's normal credential discovery environment travels only on the private
+guardian handoff pipe, separately from the provider environment. Embedded HTTP
+URL credentials are refused rather than exposed as process arguments. Neither
+provider prose nor generic terminal recovery can start delivery. Cancelled,
+failed, stopped and recovered attempts never initiate it. A sealed start marker
+prevents repeating external effects after interruption; terminal publication
+retains a typed delivered, failed-stage or interrupted receipt and the selected
+head for chair pickup. The local bare-remote conformance test covers host fetch,
+linked-worktree commit, push, tracking/upstream verification, receipt publication
+and interrupted delivery without a second push. Live host credential and PR
+acceptance remains a chair gate for #1246 and #1255.
 
 The providers owner loads and verifies profile fixtures, then constructs the typed
 profile data consumed by confinement. Provider profiles contain fixture-proven

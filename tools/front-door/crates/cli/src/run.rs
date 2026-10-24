@@ -441,6 +441,7 @@ struct ManifestTask {
     #[serde(default)]
     fallback: Vec<String>,
     delivery_id: Option<DeliveryId>,
+    deliver: Option<run::WriterDeliveryRequest>,
     account: Option<String>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
@@ -571,6 +572,7 @@ pub struct Submitted {
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
+    pub deliver: Option<run::WriterDeliveryRequest>,
     pub worktree: Option<PathBuf>,
 }
 pub struct Submission {
@@ -604,6 +606,13 @@ pub fn submit(
     let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
     for task in submission.tasks {
         scan(&task.prompt)?;
+        if task.deliver.is_some() && task.worktree.is_none() {
+            return Err(Fail::new(
+                Status::Invalid,
+                "INVALID",
+                "delivery requires a writer worktree",
+            ));
+        }
         let writer = task
             .worktree
             .as_ref()
@@ -621,6 +630,8 @@ pub fn submit(
         #[derive(serde::Serialize)]
         struct RunAuthority<'a> {
             writer: Option<&'a run::WriterRequest>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            deliver: Option<&'a run::WriterDeliveryRequest>,
             cwd: &'a Path,
             network: bool,
         }
@@ -629,6 +640,7 @@ pub fn submit(
             2,
             &RunAuthority {
                 writer: writer.as_ref(),
+                deliver: task.deliver.as_ref(),
                 cwd: edge.cwd,
                 network: false,
             },
@@ -646,6 +658,7 @@ pub fn submit(
             writer,
             provider_timeout_seconds: task.provider_timeout,
             delivery_id: task.delivery_id,
+            deliver: task.deliver,
         });
         attempts.push(run::NewAttempt {
             attempt_id: fresh(AttemptId::from_bytes)?,
@@ -712,6 +725,15 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
+    let flag_delivery =
+        command
+            .deliver_remote
+            .zip(command.deliver_branch)
+            .map(|(remote, branch)| run::WriterDeliveryRequest {
+                remote,
+                branch,
+                open_pr: command.open_pr,
+            });
     if let Some(path) = &command.input.manifest {
         let manifest: Manifest = provenant_records::decode_v1(
             read_bounded(path)?.as_bytes(),
@@ -778,6 +800,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 fallback,
                 task.delivery_id,
                 task.account,
+                task.deliver.or_else(|| flag_delivery.clone()),
             ));
         }
     } else {
@@ -800,6 +823,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             flag_route.3.clone(),
             command.delivery_id,
             None,
+            flag_delivery,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -810,7 +834,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id, account)| Submitted {
+            |(task_id, prompt, route, fallback, delivery_id, account, deliver)| Submitted {
                 task_class: None,
                 task_id,
                 prompt,
@@ -819,6 +843,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 account,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
+                deliver,
                 worktree: access.worktree.clone(),
             },
         )
@@ -971,6 +996,7 @@ pub fn launch(
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
+    let request = session.store.request(run, call)?;
     let holder = |attempt: &run::AttemptRecord| {
         run::HolderContext {
             schema_version: 1,
@@ -979,6 +1005,12 @@ pub fn launch(
             actor_id: session.context.actor_id,
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
+            host_delivery: request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == attempt.task_id)
+                .and_then(|task| task.deliver.as_ref())
+                .map(|_| run::HostDeliveryContext::capture()),
         }
         .encode()
     };
@@ -1110,6 +1142,18 @@ fn render_lanes(
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default()
             ));
+            if let Some(delivery) = &lane.delivery {
+                human.push_str(&format!(
+                    "  delivery {}:{} {:?} head={}\n",
+                    delivery.remote,
+                    delivery.branch,
+                    delivery.state,
+                    delivery
+                        .head
+                        .map(|h| h.to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                ));
+            }
             json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -1126,6 +1170,8 @@ fn render_lanes(
                 "started_at": lane.started_at,
                 "finished_at": finished_at,
                 "delivery_id": lane.delivery_id,
+                "head": lane.head,
+                "delivery": lane.delivery,
                 "result_path": result,
             })
         })

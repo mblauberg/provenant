@@ -62,6 +62,9 @@ pub struct TaskRequest {
     pub authority_digest: Digest,
     #[serde(default)]
     pub writer: Option<WriterRequest>,
+    /// Explicit authority for host delivery, separate from the writer sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<WriterDeliveryRequest>,
     pub provider_timeout_seconds: u64,
     pub delivery_id: Option<DeliveryId>,
 }
@@ -72,6 +75,52 @@ pub struct TaskRequest {
 pub struct WriterRequest {
     pub project: std::path::PathBuf,
     pub worktree: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterDeliveryRequest {
+    /// A configured remote name, never a URL supplied by a provider.
+    pub remote: String,
+    /// Short destination branch name; the host pushes an explicit full refspec.
+    pub branch: String,
+    #[serde(default)]
+    pub open_pr: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriterDeliveryStage {
+    Prepare,
+    Head,
+    Push,
+    Fetch,
+    Upstream,
+    Verify,
+    PullRequest,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriterDeliveryState {
+    Delivered {
+        pull_request: Option<String>,
+    },
+    /// The writer succeeded, but host delivery needs chair pickup. No retry.
+    Failed {
+        stage: WriterDeliveryStage,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterDeliveryReceipt {
+    pub schema_version: u64,
+    pub remote: String,
+    pub branch: String,
+    pub head: Option<GitOid>,
+    pub state: WriterDeliveryState,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -295,6 +344,8 @@ pub struct AttemptRecord {
     pub read_only_writable: Vec<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<WriterDeliveryReceipt>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,

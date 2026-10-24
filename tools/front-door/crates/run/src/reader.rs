@@ -459,6 +459,21 @@ impl RunStore {
     }
 }
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if let Some(delivery) = &r.delivery
+        && (delivery.schema_version != 1
+            || delivery.head != r.head
+            || !matches!(
+                r.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded,
+                    ..
+                }
+            )
+            || matches!(delivery.state, WriterDeliveryState::Delivered { .. })
+                && delivery.head.is_none())
+    {
+        return Err(RunError::Validation("delivery receipt"));
+    }
     if !valid_read_only_writable(&r.read_only_writable) {
         return Err(RunError::Validation("invalid read-only writable paths"));
     }
