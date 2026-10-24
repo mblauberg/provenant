@@ -84,7 +84,7 @@ never runtime dependencies. No credentials or authentication stores were read.
 | `reduce` and synthetic reduction prompts | No transcript invocation or skill caller was found beyond help/tests. `run_controls._reduce` constructs a special prompt. Dispatch a normal read-only task with explicit retained result references. A batch reports every failed/omitted task; it never implies a successful council. |
 | Arbitrary detached commands, PID text markers and `--validate` | `run_worker_detached.py` and Rust `detached.rs` implement a second completion protocol. The facade needs durable provider runs, not an arbitrary argv launcher. Use supervisor-owned workers and typed completion. |
 | JSON fallback lists, `fallback:any`, hidden effort downgrade and automatic writer replay | `exec_routing.py` merges several candidate representations; `dispatch_preflight.effort_retry_plan` silently retries rejected effort. Routing supplies a bounded candidate plan. Only opted-in read-only transient failures retry automatically. Every changed route/effort is visible in a new attempt. |
-| Runtime reads of Codex session transcripts | `context_usage._codex_rollouts`, `codex_rollout_effort` and `with_codex_rollout` supplement streams from `~/.codex/sessions`. R1 forbids transcript reads by the rewritten runtime. Unknown context or observed effort stays unknown. Recorded, sanitised wire fixtures remain tests. |
+| Runtime reads of Codex session transcripts | The chair authorises only the post-exit `codex_rollout` identity projection described below: bound the rollout to the exec thread under the selected home and retain only session ID, model and effort from `session_meta`/`turn_context`. Prompt, message and context-usage transcript reads remain forbidden. Missing identity stays unknown. |
 | Alias coercion, typo repair, old-root discovery and record migration | `execution-input.ts` repairs route names; controls select newest matching task across old directories. Use strict typed requests and unambiguous IDs. New state starts empty; never scan, migrate or remove `.agent-run/`, `~/.agents` or transcripts. |
 | Assurance dispatch flags, `--context-ceiling` and opt-in confidentiality | The council found no assurance/context-ceiling inputs and confidentiality always enabled. Workflow owns assurance policy; routing owns account/eligibility decisions. Confidential is the default; remove the flag and the provider context-ceiling control. Optional `delivery_id` remains a typed workflow correlation. |
 | Watchdog silence as an outcome or stop request | Silence is an observation. R5 and lane conformance require a healthy silent provider to survive; only supervisor's closed stop reasons can signal it. |
@@ -350,7 +350,7 @@ retains a transaction between calls.
 | run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &Acceptance, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
-| providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control or transcript reads. |
+| providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control; the only rollout read is the current-attempt host identity projection below. |
 | supervisor / run | `launch(OwnedLaunch, CapturePlan, PublicationReservation) -> CustodyHandle`; `observe(handle, WaitBudget, &CancelToken) -> Observation`; `stop(handle, StopReason) -> StopReceipt`; `recover(CustodyRef) -> Reattached\|Exited\|Unknown`; same-binary detached worker handoff. Safe filesystem publication/locks have explicit budgets; fixed Git evidence reads use `run_utility`. |
 | confinement, config / run | Validated prompt snapshots, canonical writer scopes, confined plans and lifetime-bound writer reservation; reject primary-checkout writers, secrets and unsupported enforcement. Config supplies immutable policy snapshots. Resource/liveness probes use supervisor's safe OS API. |
 
@@ -475,8 +475,9 @@ Retain sanitised real stream examples from `tests/fixtures/fabric-context/`
 for supported adapters (Claude, Codex, Cursor, OpenCode, agy, Kiro and Copilot
 only if execution-route keeps them). In particular `claude-direct-haiku.jsonl`
 contains repeated assistant frames, `codex.jsonl` turn totals and
-`codex-rollout.jsonl` a recorded session example. The latter may document a
-wire shape but must never cause a runtime transcript reader to return.
+`codex-rollout.jsonl` a recorded session example. COMPOSE-B's chair decision
+permits only the current-attempt host identity projection below; that example
+does not authorise historical transcript or message reads.
 Provider owners record CLI/version, argv, redacted environment keys, exit and
 stream provenance in new provider fixture manifests. Missing external samples
 must be recorded before enabling the affected adapter, without unauthorised
@@ -781,24 +782,25 @@ scheduler daemon. Within that, the lane decided:
   produces `failed` with the worktree and reason, even when the provider
   returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
-  alternatives. Runtime fallback on rate, quota or model-unavailable is
-  deferred, because no decoder emits those events yet.
-- **The provider seam is minimal**: `Providers::prepare` returns argv,
-  allow-listed environment, stdin, cwd and applied route, and `decode` maps a
-  sealed capture to an outcome. It is shaped for the providers crate's launch
-  specification. The composition edge prepares activated Codex launch specs;
-  Claude still needs a credential-authority binding. Provider execution does
-  not waive the existing terminal requirement for an observed route: Codex
-  streams without an answering-model observation cannot establish success.
-  This is confirmed for installed Codex CLI 0.159.0: its
-  [exec event schema](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/exec_events.rs)
-  has no answering-model field, and its
-  [JSON event processor](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
-  emits only the thread ID from `SessionConfiguredEvent`. A resolved model
-  pinned in argv remains recorded separately; it cannot satisfy the present
-  observed-route gate. Claude requires an authority record binding actor,
-  exact credential source, purpose and expiry before the host token loader
-  can run. The task request currently carries no such record.
+  alternatives, with admission checked for every candidate. Runtime fallback
+  on rate, quota or model-unavailable needs a new attempt and remains deferred.
+- **Provider preparation and observed identity (COMPOSE-B).**
+  `Providers::prepare` composes validated registrations, task access and quota
+  before building the confined argv/environment/stdin/cwd. Claude records its
+  registration-derived task-scoped credential authority before host loading
+  and refresh. Secret environment values travel in memory and on the handoff
+  pipe only. After process exit, the supervisor-owned holder reads the sealed
+  provider stream. For Codex it matches `thread.started.thread_id` to the
+  rollout filename under the lane's effective private `CODEX_HOME/sessions/`
+  year/month/day tree. A bounded reader projects only `session_meta.payload.id`
+  and `turn_context.payload.model`/`effort`; other record content is discarded.
+  The session ID must match, and conflicting turn identities are refused.
+  The observed route records source `codex_rollout`. Missing, malformed or
+  mismatched evidence retains `provider identity was not observed`; argv never
+  satisfies this gate. Claude retains provider-stream answering-model evidence.
+  Requested, applied and observed routes remain separate, with selected account
+  key/label preserved. Provider evidence persistence errors leave terminal
+  publication retryable rather than losing the cooldown silently.
 - **Launch storage** is allocated once per attempt before route fallback, under
   its canonical `scratch/` and `provider-state/` paths. No candidate creates
   random `tmp/` trees. Settlement removes empty scratch; provider history and
@@ -888,11 +890,11 @@ scheduler daemon. Within that, the lane decided:
   remote-host list cursors stay `owner_unavailable`. A graph route refused before launch
   (`rejected`, never launched) maps to `adapter_unavailable`, so the graph
   tries the next route.
-- **Provider launch specs.** Lane P's `LaunchSpec` (#1411) is consumed behind
-  `Providers::prepare -> PreparedLaunch` once it merges: confinement compiles
-  the plan, wraps the sandbox and the result maps to argv, env, stdin and cwd.
-  Main's adapter launch type is still uninhabited, so this branch keeps the
-  seam compiling against main and the consumer lands as a follow-up.
+- **Provider launch specs.** The composition introduced by #1429 consumes
+  `LaunchSpec` behind `Providers::prepare -> PreparedLaunch`: confinement
+  compiles the plan and wraps the sandbox, and the result maps to argv, env,
+  stdin and cwd. COMPOSE-B supplies account placement and host credential
+  preparation through this same path.
 
 Supervisor/confinement must accept the holder and writer-reservation protocol
 before step 2; Fabric must accept event reconciliation and continuation before
@@ -920,15 +922,16 @@ with the existing typed `quota_limited` outcome rather than the retired
 allowance pool. Admission refuses another model only when its supplied pool
 binding and account identity match; no model-name suffix implies identity.
 The holder's existing terminal transaction supplies the single finish time and
-outcome to both its record and attempt fact. Shared refusal persistence and
-pool bindings are still not composed into the production launch/admission edge,
-so this does not yet implement the end-to-end cooldown in #1216. A free-tier
-repair hint is also deferred until the terminal record carries the proven pool;
-a generic quota refusal must not assert free-tier exhaustion.
+outcome to both its record and attempt fact. Production decoding persists the proven pool in the applied account scope,
+and route admission checks every candidate, including explicit fallbacks,
+before launch. Quota refresh claims release the cache lock for provider I/O,
+then re-read and commit only a matching live claim. A refusal-cache write
+failure remains a typed, recoverable terminal-publication error; it cannot
+silently discard cooldown evidence. Only the structured free-pool
+event adds the free-tier repair hint. Unknown or stale quota cannot create a
+fresh refusal. OpenCode activation is a separate gate and remains disabled.
 
-The holder still has no verified writer-worktree capability, and production
-writers remain refused. Wiring `check_writer_terminal` into that missing writer
-path (#1288) must land with writer launch/custody composition. Inferring a writer
-from the process cwd would not establish that authority. Post-launch route
+Writer launch and `check_writer_terminal` are now composed through verified
+worktree custody (#1429), as recorded above. Post-launch route
 fallback also remains deferred: it needs a new attempt with retry-budget and
 publication ordering, rather than replaying an exited process in place.

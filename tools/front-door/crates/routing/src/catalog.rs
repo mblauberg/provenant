@@ -145,4 +145,11 @@ impl Catalogue {
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
     }
+    /// Whether the bundled pool evidence marks this exact model as free.
+    pub fn is_free_model(&self, id: &ModelId) -> bool {
+        self.pools
+            .values()
+            .flatten()
+            .any(|member| member.free && member.model == *id)
+    }
 }

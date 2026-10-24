@@ -192,9 +192,10 @@ fn candidate(
     if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
         reason = Some(RouteExclusionReason::ConfinementUnavailable);
     }
-    // An unknown exact ID is retained as unverified. Even a catalogue row cannot
-    // replace an exact observation in current preflight evidence.
+    // Known catalogue controls can use the fresh executable/account preflight.
+    // An unlisted exact ID additionally needs a current provider observation.
     if reason.is_none()
+        && entry.is_none()
         && availability.is_none_or(|a| !a.observed_models.iter().any(|m| m == model.model()))
     {
         reason = Some(RouteExclusionReason::UnverifiedModel);

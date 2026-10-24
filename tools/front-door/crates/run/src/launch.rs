@@ -48,6 +48,8 @@ pub struct Decoded {
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
+    pub run_id: RunId,
+    pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
     /// Private temporary directory for a read-only lane, never a shared system
@@ -67,7 +69,13 @@ pub trait Providers {
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
-    fn decode(&self, route: &RouteRecord, stdout: &[u8], exit: &ExitObservation) -> Decoded;
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+    ) -> std::result::Result<Decoded, String>;
 }
 enum HandOff {
     /// Failed before anything was sent to a guardian.
@@ -222,6 +230,10 @@ impl RunStore {
                 .join("attempts")
                 .join(id.to_string());
             let paths = LaunchPaths {
+                run_id: record.run_id,
+                deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)
+                    .unwrap_or(0)
+                    .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),

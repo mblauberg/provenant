@@ -44,7 +44,9 @@ commands and OpenCode's speculative spend estimator. Preserve current quota
 windows/reset advice and refusal backoff, without cooldown mutation commands.
 Provider quota pools are measured allowance scopes, not routing pools.
 No old transcript quota/identity reads, general home mirroring or Python shim
-survives. Confinement retains only a bounded safe Agy home recipe.
+survives. COMPOSE-B permits only the bounded post-exit identity projection
+from the current attempt's private Codex rollout, as execution-run specifies.
+Confinement retains only a bounded safe Agy home recipe.
 
 ## Resolution and command contract
 
@@ -156,27 +158,53 @@ the whole config directory. These narrower grants and private Codex state follow
 the execution/confinement design over #1114's broader directory wording.
 Lane rows expose the applied account, or `unknown` when none was applied.
 
-Current acceptance boundary: production `cli::run::Registry::prepare` still
-refuses launches at the existing unwired launch-specification seam. The typed
-registration/preparation APIs and concurrent Codex stubs are covered, but durable
-registration discovery, launch-time Codex identity revalidation and end-to-end
-production placement are not complete. The concurrency test asserts generated
-grants and uses unconfined stubs; it does not establish OS-enforced isolation.
-#1114 stays open until that composition work and its confinement acceptance run.
+### COMPOSE-B cut-over decisions (24 October 2026)
 
-#1062 also remains open. Static inspection of the official Agy 1.4.7 macOS
-binary and matching call sites in the installed executable found Keychain
-service `gemini` and product-constant account arguments (`antigravity`, with a
-`jetski-cli` alternative). Those attributes do not establish a signed-in Google
-identity. The normal backend's complete caller chain was not established; no
-live Keychain or secret was read. A metadata-derived per-user fingerprint has
-therefore not been implemented. Existing `google-<12 hex>` log attribution
-remains in quota-live; a supported non-secret provider identity source is needed
-before closing the cooldown/routing work. Evidence: `LoadStoredToken` at
-`0x101aaf580`, `NewCLITokenStorage` at `0x102692520`, and `Daemon.SeedToken` at
-`0x102c2e400` in the inspected darwin-arm64 build. The service string is at file
-offset `0x33aa5e5`. These are static executable observations, not a claim that
-runtime account switching was tested.
+Chair-authorised implementation route: `codex/gpt-6.1-sol@xhigh` via Fabric.
+These decisions supersede issue wording where it asks for broader directory
+access or an inferred Agy identity.
+
+Account registrations live in `S/config.toml`, under
+`[domains.accounts.entries.<adapter>-<label>]`, with adapter, display label,
+provider-detected key and canonical directory. `accounts register LABEL
+--adapter claude|codex --directory PATH` validates sign-in before saving;
+`accounts list` shows only these non-secret records. Claude labels bind exactly
+to `~/.claude-<label>`; rotating `~/.claude` is never a fixed registration.
+Codex discovers its effective `CODEX_HOME` (otherwise `~/.codex`) when no Codex
+registration exists. Preparation revalidates the selected registration and
+sets the lane's provider environment. Lane rows show the applied account label.
+Claude receives only its own transcript writes and an in-memory host-loaded
+token. Codex keeps an attempt-private home linked only to the selected auth file.
+These narrower grants govern #1114 over its whole-directory wording.
+
+Dispatch builds availability from the real executable/version and revalidated
+account, and supplies the validated task plan/disclosure reference, host ID and
+quota cache to resolution. Catalogue-backed exact model controls need no
+invented model-bearing preflight event; unlisted models still need a current
+provider observation. Applied argv and observed answering identity remain
+separate. Preview remains read-only and does not manufacture a task grant.
+Luna and Sonnet low effort are the explicit chair-authorised smoke controls.
+No fast or priority service is enabled.
+
+Claude's validated registration is durable credential authority. Each attempt
+records actor (dispatch run ID), exact `.credentials.json` or Keychain service
+and account, purpose `lane dispatch`, and the attempt deadline before the host
+loader runs. The service suffix is Claude Code's own eight-hex directory hash.
+The loader checks source and expiry before reads and refresh, rejects linked
+credential files, calls `refresh_if_expiring` on the host, and rechecks account
+identity. No secret is logged, persisted in the authority record or copied
+between identities. Login failures name the account and the sign-in command.
+
+#1062 closes as an unsupported-source decision, not an account detector.
+Agy's provider adapter has no signed-in identity source. The prior official
+1.4.7 darwin-arm64 static audit found Keychain service `gemini` and
+product-constant account attributes (`antigravity`, alternative `jetski-cli`),
+which cannot distinguish users. Audit locations: `LoadStoredToken`
+`0x101aaf580`, `NewCLITokenStorage` `0x102692520`, `Daemon.SeedToken`
+`0x102c2e400`; service string file offset `0x33aa5e5`. No live Keychain secret
+was read for that audit. Log-derived `google-<12 hex>` attribution is not a
+production dispatch identity. Agy stays unavailable rather than inheriting a
+shared `default` cooldown when a user switches accounts.
 
 Stored snapshots are typed, versioned serde records. Edge-built
 `VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
@@ -210,11 +238,15 @@ OpenCode `provider.quota` decodes its structured response body (JSON or a JSON
 string); `FreeUsageLimitError` supplies the shared `opencode-free` pool and its
 provider message, without searching stderr. The admission rule matches this
 pool across models only for the same account identity and a supplied pool
-binding. Production launch still needs to persist these events and supply those
-bindings. The quota tick's macOS Claude refresh calls the shared provider helper
+binding. Production terminal decoding persists these events under the applied account
+key, and dispatch admission supplies catalogue-backed free-pool bindings. A
+shared refusal blocks another free model on that same key until reset or the
+one-hour backoff; the repair hint names free-tier exhaustion. The private OpenCode profile has no stored login: its explicit `keyless`
+allowance is scoped to this host, rather than attributed to a guessed user.
+OpenCode remains disabled until its separate activation requirements are met. The quota tick's macOS Claude refresh calls the shared provider helper
 from the binary composition edge; quota itself cannot import providers because
-providers already depends on quota. The credential-file path on other platforms
-remains separate because that helper currently reads Keychain only.
+providers already depends on quota. The dispatch loader selects the registered directory
+credential file when present, otherwise its exact macOS Keychain item.
 
 Tick TTLs (timer/panel seconds): Claude 300/120, Codex 900/300, Cursor 1800/600,
 Agy 1200/900. Manual has a 30 s floor and respects backoff. Battery doubles
@@ -764,12 +796,12 @@ refreshed in an SSH session with a locked or unavailable keychain.
 
 The cut-over request also restores model-backed `digest`, `classify` and
 `extract`, superseding their earlier removal decision. Restoration is still
-blocked on execution composition: current Run exposes persistence/read APIs
-only, every provider's `prepare`/`preflight` returns `Disabled`, and both launch
-plan types are uninhabited. Confinement's `utility` module is a closed Git
-boundary, not an inference runner. Bypassing Run through a CLI-owned process
-would lose custody/confinement guarantees. No placeholder command or unused
-retry seam is added.
+pending its utility-specific command composition. Run now launches supported
+provider specs through custody (#1429 and COMPOSE-B); that launch capability
+alone does not implement these utility commands or their retry policy.
+Confinement's `utility` module is a closed Git boundary, not an inference
+runner. Utility commands must consume Run so their execution retains custody
+and confinement. No placeholder command or unused retry seam is added.
 
 The utility execution owner must consume an ordered, explicit cross-adapter
 candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:

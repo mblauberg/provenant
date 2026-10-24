@@ -782,9 +782,10 @@ impl provenant_run::Providers for WriterProvider {
         route: &provenant_run::RouteRecord,
         stdout: &[u8],
         exit: &provenant_supervisor::custody::ExitObservation,
-    ) -> provenant_run::Decoded {
+        provider_state: &std::path::Path,
+    ) -> std::result::Result<provenant_run::Decoded, String> {
         let registry = provenant_cli::run::Registry::default();
-        provenant_run::Providers::decode(&registry, route, stdout, exit)
+        provenant_run::Providers::decode(&registry, route, stdout, exit, provider_state)
     }
 }
 
@@ -794,6 +795,7 @@ fn fixture_route() -> provenant_run::RouteRecord {
         model: Some("claude/test-model".into()),
         effort: None,
         account_label: None,
+        ..Default::default()
     }
 }
 

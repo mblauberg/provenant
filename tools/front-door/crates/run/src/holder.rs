@@ -240,7 +240,22 @@ impl RunStore {
             },
             (Some(route), false) => {
                 let stdout = read_sealed(attempt, "stdout.log", CAPTURE_LIMIT)?.unwrap_or_default();
-                providers.decode(route, &stdout, exit)
+                providers
+                    .decode(
+                        route,
+                        &stdout,
+                        exit,
+                        &self
+                            .context
+                            .state_root
+                            .as_path()
+                            .join("runs")
+                            .join(record.run_id.to_string())
+                            .join("attempts")
+                            .join(id.to_string())
+                            .join("provider-state"),
+                    )
+                    .map_err(RunError::ProviderEvidence)?
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
