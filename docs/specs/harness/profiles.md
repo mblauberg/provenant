@@ -1,5 +1,9 @@
 # Spec: harness profiles for cost and quality trade-offs
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **proposed**. GitHub owns delivery state; this file owns the durable
 requirements. It grants no authority beyond what the user approves by
 accepting it, and it does not relax any gate in `HARNESS.md`.

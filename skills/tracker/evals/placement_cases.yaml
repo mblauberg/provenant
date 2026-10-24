@@ -2,7 +2,7 @@ schema_version: 1
 target_skill: tracker
 # Acceptance fixture (#872): a duplicate, a standalone bug and an epic
 # placement, each with the evidence and decision the filing branch requires.
-# See tests/test_tracker_placement_cases.py for the structural contract.
+# Rust harness checks own the structural contract.
 cases:
   - id: placement-duplicate
     scenario: "A new report describes the same crash already tracked by an open issue with matching stack trace and repro steps."

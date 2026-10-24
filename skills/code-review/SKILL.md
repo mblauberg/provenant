@@ -31,7 +31,7 @@ resulting system, not the changed lines alone.
    adversarial lens. Record blockers when the required cross-family coverage
    is unavailable. For a council review, challenge anonymised claims before
    a fresh reduction. Never rank prose or majority-vote findings.
-   `scripts/provenant-profile show --resolved` sets `review.*` above that floor.
+   `provenant config show` sets `review.*` above that floor.
 6. Review the design delta. Look for duplicated ownership, scattered flags,
    nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
    abstractions adding concepts without reducing complexity.

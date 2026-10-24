@@ -48,7 +48,7 @@ are refused, and unmerged branches are kept. The worktree directory is the branc
 with every `/` replaced by `-`; a writer's task id defaults to that same string.
 
 ```sh
-scripts/worktree create \
+provenant worktree create \
   --new-branch <type>/<area>-<slug>
 ```
 

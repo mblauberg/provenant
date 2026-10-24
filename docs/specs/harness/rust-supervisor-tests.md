@@ -1,5 +1,9 @@
 # Rust lane supervisor: deletable test inventory
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Companion to [the spec](rust-supervisor.md). Measured on `origin/main` at
 `59bb0ba4`. A count is the test body's span (decorators included; for
 TypeScript, the lines from one top-level `test(` to the next). File headers,

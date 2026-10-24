@@ -132,7 +132,7 @@ budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact cloc
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.
 
 F2 has no further whole-file legacy deletion: F1 already removed landing-cli.ts,
-lease tests and the old Rust landing owner. The remaining Python driver/writer
-leases have live run/worktree consumers, and fabric_git.py belongs to F7. F2
-therefore grows Rust rather than claiming those earlier deletion savings again.
+lease tests and the old Rust landing owner. Lane F removes the remaining Python driver/writer leases and Git helper.
+Rust run/supervisor and Fabric own their distinct custody/coordination roles;
+F2 does not claim those later deletion savings.
 Implementation route: `codex/gpt-6.1-sol@high` via Fabric.

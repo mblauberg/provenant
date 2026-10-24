@@ -1,5 +1,8 @@
 # Fabric v2 contract
 
+> Pre-rewrite design history. The [accepted Rust designs](rust-port/design/README.md)
+> own current behaviour; use `provenant help` for executable commands.
+
 Status: design record, 2026-09-23. Source: the reviewed Fabric v2 design in the project research run. The integration gate in that design controls rollout; this document records the durable interface and operating decisions.
 
 ## Decisions
@@ -96,7 +99,9 @@ Provenance records requested route, resolved and observed model, observation sou
 
 Run root is the primary checkout root, including when dispatch starts inside a linked worktree. Runs live at `.agent-run/runs/<YYYYMMDD-HHMM>-<kind>-<slug>-<rand6>/`; owner logs live in `_owner/`. The legacy top-level entries (`sessions/`, `locks/`, `scratch/`) remain under the run owner; Fabric grants every write-confined lane write access to `locks/` only. New [session checkpoints](../../skills/session/references/chair-state.md) use explicit project/host-session keys under the fresh workflow state root. `.worktrees/` names derive from branches with `/` replaced by `-`. New repositories exclude `.agent-run/`, `.worktrees/` and legacy `.work/` from Git locally.
 
-`provenant clean` plans by default and prints a digest. the plan is saved beside its digest under `.agent-run/scratch/` (it expires with scratch after one day, after which `--apply` fails and `provenant clean` must be rerun), and `--apply --plan sha256:<digest>` (with the same `--include` and `--older-than`) verifies that file, replans, and deletes only approved rows that are still exactly as approved, each reclassified and identity-checked again immediately before its anchored, no-follow deletion. Rows that vanished or changed are skipped and reported; rows that became eligible after approval are never touched, so lanes may keep running between plan and apply. A changed integration branch or worktree proof still aborts. `runs/index.lock` is kept infrastructure; clean merged worktrees can be removed without extra authority; dirty worktrees and unmerged work are never removed. Live, pinned, cited, unaccepted delivery, resumable and active mission runs are protected. Here `unaccepted` describes the retained receipt-code test, not a universal user-approval requirement; [issue #1025](https://github.com/mblauberg/provenant/issues/1025) records the pending code alignment. A terminal dispatch attempt prunes its private `tmp/` at once (kept for `input_required`, for a failed attempt under 50 MB, or when `PROVENANT_KEEP_ATTEMPT_TMP=1`); `clean` also removes `tmp/` and `cache/` of retained attempts after one day for successful runs and seven for others, keeping receipts, results and logs for the run's retention. Sizes count allocated blocks once per inode and never follow links. Successful and cancelled runs retain seven days; typed failures retain fourteen; accepted deliveries retain thirty; owner logs retain seven; scratch retains one day. Sessions are durable handoffs and remain triage-only. Unknown paths are triage-only. If GitHub PR state cannot be read, the plan warns and holds run deletion; ancestry-proven merged worktrees can still expire. Worktrees require clean state and merge proof: ancestry for merge commits, or a merged PR whose head SHA matches the local branch tip for squash merges, then removal through `scripts/worktree remove`. The append-only run index keeps provenance for at least 365 days. Readers use `.agent-run/runs/<timestamped-name>`; root-level `mcp-*`, orchestration, delivery and mission layouts are no longer read.
+The legacy cleanup plan/apply engine is retired. Authorised merged-worktree
+removal uses `provenant worktree remove --merged --integration OID --branch NAME`.
+Guardian settlement owns classified scratch; retained history stays on disk.
 
 Provider instruction paths remain provider-owned. The Rust release's `provenant install` command applies the compiled harness instruction and link plan, preserving unrelated entries and refusing unlisted paths. A cut-over uses an explicit fresh state root, selected harnesses and `--legacy-checkout` for exact legacy matches. Keep repository `AGENTS.md` project-specific; relying on an installed instance entrypoint reduces repeated context but makes the checkout less self-contained when opened without that harness.
 
@@ -183,7 +188,7 @@ finalisation nor a moved local ref can land an instruction change:
   upstream, a tag, `packed-refs` or another checkout's branch. Every boundary,
   native and sandbox-exec, also keeps `.git`, the private `commondir`, `gitdir`
   and `config.worktree`, and the common `objects/info` read-only.
-- **Range gate.** `lane_protection.py` walks every commit in `tip ^base` through
+- **Range gate.** Rust protected-tip verification walks every commit in `tip ^base` through
   the owner's common Git directory with `diff-tree --root -m`, so merge
   resolutions count. A commit may change a protected path only to the version
   the base already holds, as a merge or rebase from the base does, or be
@@ -201,7 +206,7 @@ finalisation nor a moved local ref can land an instruction change:
   only ranges that change protected paths. Anything else fails with
   `protected_instructions_changed` and names the held commits; the branch is
   left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
-  the base, never a local ref. `scripts/worktree verify-claim` and a manual
+  the base, never a local ref. Rust confinement verification and a manual
   check use the primary checkout's HEAD, which no writer can move. The gate
   needs no per-attempt record, so chair, human and never-dispatched worktrees
   go through the same check.
@@ -223,11 +228,9 @@ lane's history and the gate holds it. After reviewing the exact commits, a
 chair outside a writer either rewrites the lane without them or releases the
 reviewed tip:
 
-```sh
-python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" \
-  --cwd <lane-worktree> --release --tip <reviewed-sha> \
-  --actor <chair> --reason '<review decision>'
-```
+Current protected-tip and worktree operations belong to Rust confinement.
+Use `provenant worktree` with pinned Git OIDs; no Python lane-protection
+command or legacy release record is consumed by the new runtime.
 
 Release requires the full SHA, refuses when the checkout's HEAD has moved
 past it, and writes an immutable record of the tip, actor, reason, worktree
@@ -336,7 +339,7 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 
 Every attempt records top-level `account` and `host` before provider startup;
 terminal records retain that scope. Quota and cooldown routing share
-`scripts/provider_identity.py`. Account identity comes from paths, without
+the Rust providers identity owner. Account identity comes from paths, without
 reading credential contents:
 
 | Adapter | Selected identity source |
@@ -384,4 +387,4 @@ remains a timeout. Kiro's plain `Opening browser...` login diagnostic ends
 the attempt as `auth_required`, with `auth_expired` evidence and a hint to
 run `kiro-cli whoami` outside the sandbox.
 
-`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
+`provenant --json route list` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

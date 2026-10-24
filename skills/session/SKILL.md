@@ -49,7 +49,7 @@ session handoff should link to evidence and state what remains; it should not
 copy the project record.
 
 Run scratch is settled by the run guardian, and merged worktrees are pruned
-with `scripts/worktree remove --merged`. Remove only paths that are in scope
+with `provenant worktree remove --merged --integration OID --branch NAME`. Remove only paths that are in scope
 and explicitly authorised; never delete unknown, user-owned, or pre-existing files. Do not
 migrate old state roots as part of a fresh session.
 

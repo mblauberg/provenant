@@ -13,7 +13,7 @@ Prefer the smallest deterministic seam that reaches the failure:
 7. property/fuzz loop;
 8. `git bisect run` between known states;
 9. differential old-versus-new execution; or
-10. [human-in-the-loop script](../scripts/hitl-loop.template.sh).
+10. a bounded user-feedback loop.
 
 Sharpen the signal before interpreting it: cache setup, narrow scope, assert
 the exact symptom, seed randomness, pin time, isolate filesystem/network and
