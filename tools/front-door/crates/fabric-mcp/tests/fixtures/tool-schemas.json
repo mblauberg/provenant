@@ -4259,6 +4259,40 @@
                       }
                     ]
                   },
+                  "deliver": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "branch": {
+                            "maxLength": 1024,
+                            "minLength": 1,
+                            "pattern": "^[^\\u0000]*$",
+                            "type": "string",
+                            "x-provenant-maxUtf8Bytes": 1024
+                          },
+                          "open_pr": {
+                            "type": "boolean"
+                          },
+                          "remote": {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "pattern": "^[^\\u0000]*$",
+                            "type": "string",
+                            "x-provenant-maxUtf8Bytes": 64
+                          }
+                        },
+                        "required": [
+                          "branch",
+                          "remote"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "delivery_id": {
                     "anyOf": [
                       {
