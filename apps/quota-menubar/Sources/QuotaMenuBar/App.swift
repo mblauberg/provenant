@@ -129,6 +129,7 @@ struct QuotaPanel: View {
                     .symbolRenderingMode(.multicolor).font(.subheadline).foregroundStyle(.secondary)
                     .textSelection(.enabled).padding(.horizontal, 8)
             }
+            AttentionSection(lanes: LaneBoard.attention(model.lanes, now: now), now: now, stateRoot: model.stateRoot)
             if !accounts.isEmpty {
                 Divider().padding(.horizontal, 8)
                 ScrollView {
@@ -175,6 +176,38 @@ struct QuotaPanel: View {
                     AccountRow(account: account, now: now, alert: alert, expanded: Binding(
                         get: { expanded.contains(account.id) },
                         set: { if $0 { expanded.insert(account.id) } else { expanded.remove(account.id) } }))
+                }
+            }
+        }
+    }
+}
+
+/// Lanes that need a look, most urgent first; a click opens the run's directory. Nothing is drawn when none do.
+struct AttentionSection: View {
+    let lanes: [AttentionLane], now: Date, stateRoot: URL
+    static let limit = 5
+
+    var body: some View {
+        if !lanes.isEmpty {
+            Divider().padding(.horizontal, 8)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Needs attention").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 8).padding(.bottom, 2)
+                ForEach(lanes.prefix(Self.limit)) { item in
+                    MenuRow(action: { NSWorkspace.shared.open(LaneBoard.runDirectory(item.lane, stateRoot: stateRoot)) }) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(item.lane.route).lineLimit(1)
+                                Text("\(item.kind.title) · \(Fmt.ago(item.since, now: now))").font(.subheadline)
+                                    .foregroundStyle(.secondary).monospacedDigit()
+                            }
+                        } icon: { Image(systemName: item.kind.symbol).symbolRenderingMode(.multicolor) }
+                    }
+                    .help("Open the run directory")
+                    .accessibilityLabel("\(item.lane.route), \(item.kind.title)")
+                }
+                if lanes.count > Self.limit {
+                    Text("+\(lanes.count - Self.limit) more").font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 8)
                 }
             }
         }
