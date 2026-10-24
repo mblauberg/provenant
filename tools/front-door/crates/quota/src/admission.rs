@@ -121,9 +121,9 @@ impl Admission<'_> {
                 r.account.adapter == route.adapter
                     && r.account.account_key == *key
                     && (r.model == route.model
-                        || r.pool
-                            .as_ref()
-                            .is_some_and(|pool| self.pools.contains(pool)))
+                        || (route.adapter == "opencode"
+                            && r.pool.as_deref() == Some("opencode-free")
+                            && self.pools.iter().any(|pool| pool == "opencode-free")))
             })
         {
             let expires = refusal.resets_unix_seconds.unwrap_or(
@@ -157,11 +157,10 @@ impl Admission<'_> {
                 });
             if expires > self.now_unix_seconds
                 && !comparable_newer
-                && (refusal.model == route.model
-                    || refusal
-                        .pool
-                        .as_ref()
-                        .is_some_and(|pool| self.pools.contains(pool)))
+                && ((route.adapter == "opencode"
+                    && refusal.pool.as_deref() == Some("opencode-free")
+                    && refusal.model == route.model)
+                    || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
                 return Err(QuotaError::Refused(
                     if refusal.pool.as_deref() == Some("opencode-free") {
