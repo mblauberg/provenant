@@ -8,14 +8,14 @@
   "predecessor_delivery_run_id": "SKAUD-20260714",
   "retained_nonpasses": [
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/ADDY-HARNESS-20260711/evaluation/routing-fabric-v2",
+      "artifact_root": ".agent-run/ADDY-HARNESS-20260711/evaluation/routing-fabric-v2",
       "evaluation_id": "skill-portfolio-routing-20260711-fabric-v2-fable-unavailable",
       "reason": "three frozen Fable attempts returned HTTP 429 before generation; all 45 OpenAI rows passed but the mixed run was excluded and the full schedule reran on the predeclared Opus fallback",
       "receipt_digest": "sha256:0c69de105fe359fa1640f0b8f5a36416b350acf91f21b60a071e1884cf7dbad4",
       "status": "incomplete"
     },
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/SKILLS-FLAT-20260711/routing",
+      "artifact_root": ".agent-run/SKILLS-FLAT-20260711/routing",
       "attempts": [
         {
           "actual_model": "unknown",
@@ -78,7 +78,7 @@
       "status": "fail"
     },
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/SKILLS-FLAT-20260711/routing-current",
+      "artifact_root": ".agent-run/SKILLS-FLAT-20260711/routing-current",
       "completed_outputs": 5,
       "evaluation_id": "skill-portfolio-routing-20260711-unfrozen-attempt",
       "lineage": [
@@ -90,14 +90,14 @@
       "status": "cancelled"
     },
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/SKAUD-20260714/evaluation/results",
+      "artifact_root": ".agent-run/SKAUD-20260714/evaluation/results",
       "evaluation_id": "skill-audit-routing-20260714-v1",
       "reason": "24 action-plus-audit composition rows selected skill-audit as primary instead of the action owner; four additional approved-implementation rows had companion mismatches",
       "receipt_digest": "sha256:660422f2dd83f2dfc24435044e1ff0f4246c4373acb81c481e0353442b49eb15",
       "status": "fail"
     },
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/SKAUD-20260714/evaluation/portfolio-v3",
+      "artifact_root": ".agent-run/SKAUD-20260714/evaluation/portfolio-v3",
       "companion_fidelity": 0.9444444444444444,
       "critical_case_failures": 6,
       "evaluation_id": "skill-portfolio-routing-20260714-fabric-v3",
@@ -107,7 +107,7 @@
       "status": "fail"
     },
     {
-      "artifact_root": "~/.local/share/provenant/v1/runs/SKAUD-20260714/evaluation/portfolio-v4",
+      "artifact_root": ".agent-run/SKAUD-20260714/evaluation/portfolio-v4",
       "companion_fidelity": 1.0,
       "critical_case_failures": 0,
       "evaluation_id": "skill-portfolio-routing-20260714-fabric-v4",
