@@ -1079,6 +1079,7 @@ impl RunOwner for BinaryRunOwner<'_> {
             operation_id,
             tasks,
             concurrency,
+            knobs,
         } = input;
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
@@ -1103,6 +1104,7 @@ impl RunOwner for BinaryRunOwner<'_> {
                 None => route.role.as_deref().or(route.task_class.as_deref()),
             };
             submitted.push(Submitted {
+                task_class: route.task_class.clone(),
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 route: requested(model.as_deref(), name, route.effort.clone())
@@ -1121,7 +1123,8 @@ impl RunOwner for BinaryRunOwner<'_> {
                 Submission {
                     operation_id: operation_id.clone(),
                     tasks: submitted,
-                    concurrency: u64::from(concurrency),
+                    concurrency: concurrency.map(u64::from),
+                    knobs,
                 },
                 &call,
             )
@@ -1510,7 +1513,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
                 delivery_id: None,
             }],
-            concurrency: 1,
+            concurrency: Some(1),
+            knobs: vec![],
         };
         let mut owner = BinaryRunOwner {
             factory: self.factory,

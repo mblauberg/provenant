@@ -9,6 +9,23 @@ use provenant_supervisor::custody::{
 use rusqlite::params;
 use std::{ffi::OsString, path::PathBuf};
 
+/// An explicit dispatch argument wins over the effective profile default.
+pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile) -> u64 {
+    explicit.unwrap_or_else(|| profile.knob_u64("lanes.max_concurrency").unwrap_or(8))
+}
+
+pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
+    CapturePlan {
+        wall_ms: task.provider_timeout_seconds.saturating_mul(1000),
+        silence_ms: task
+            .profile
+            .knob_u64("lanes.silence_seconds")
+            .unwrap_or(300)
+            .saturating_mul(1000),
+        ..CapturePlan::default()
+    }
+}
+
 /// One prepared provider invocation. Secrets travel only in `environment`,
 /// in memory and on the handoff pipe.
 pub struct PreparedLaunch {
@@ -228,10 +245,7 @@ impl RunStore {
             stdin: plan.stdin,
             holder_context: context(record).map_err(|e| local(&e))?,
         };
-        let capture = CapturePlan {
-            wall_ms: task.provider_timeout_seconds.saturating_mul(1000),
-            ..CapturePlan::default()
-        };
+        let capture = capture_plan(task);
         custody::launch(
             OwnedLaunch {
                 command,

@@ -48,6 +48,7 @@ pub(super) fn input() -> PreparedRun {
         request: CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
+                profile: HarnessProfile::default(),
                 task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
@@ -128,6 +129,16 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
+    // A schema-v1 request without a profile must keep its sealed digest.
+    let mut unstamped = serde_json::to_value(&input.request)?;
+    for task in unstamped["tasks"].as_array_mut().ok_or("tasks")? {
+        task.as_object_mut().ok_or("task")?.remove("profile");
+    }
+    let decoded: CanonicalRequest = serde_json::from_value(unstamped.clone())?;
+    assert_eq!(
+        decoded.digest()?,
+        CanonicalV1::record_digest("run-request", 1, &unstamped)?
+    );
     let id = input.attempts[0].attempt_id;
     let run = store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
