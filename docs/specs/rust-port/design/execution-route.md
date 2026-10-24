@@ -506,6 +506,14 @@ read-only and writer launches. Host-side Codex recordings for `read_only` and
 compiles its profile under the same observation gate. The earlier blanket
 no-customisation launch policy is superseded by this explicit user decision.
 
+Codex's own package may live under `~/.codex` (standalone install: the
+`current` link resolves to `~/.codex/packages/standalone/releases/<release>`).
+Confinement carves exactly that resolved release directory, and paths beneath
+it, out of the credential-root refusal, for read and exec grants only
+(`validate_read_exec_grant`). `~/.codex` itself, `packages`, the `current`
+link, `auth.json`, config, sessions, state and logs stay refused, as does any
+write, scratch or protected-root grant there.
+
 Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
 `~/.rustup/toolchains`, plus read of `~/.rustup/settings.toml` and
 `~/.cargo/registry`. Read-only setup creates a private `CARGO_HOME` inside the

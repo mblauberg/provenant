@@ -1303,7 +1303,10 @@ fn compile_sbpl(
     }
     validate_profile_spec(&profile.spec)?;
     verify_requested_evidence(plan, profile)?;
-    for grant in plan.read_roots.iter().chain(&plan.protected_roots) {
+    for grant in &plan.read_roots {
+        validate_read_exec_grant(grant)?;
+    }
+    for grant in &plan.protected_roots {
         validate_noncredential_grant(grant)?;
     }
     let worktree_grants = match &plan.mode {
@@ -2123,13 +2126,13 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_noncredential_grant(executable)?;
+        validate_read_exec_grant(executable)?;
         if executable.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath);
         }
     }
     for grant in &spec.runtime_reads {
-        validate_noncredential_grant(grant)?;
+        validate_read_exec_grant(grant)?;
     }
     for grant in &spec.discovery_reads {
         grant.validate()?;
@@ -2178,7 +2181,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         validate_noncredential_grant(grant)?;
     }
     for root in &spec.tool_exec_roots {
-        validate_noncredential_grant(root)?;
+        validate_read_exec_grant(root)?;
         if root.scope != PathScope::Subtree {
             return Err(PermissionError::InvalidPath);
         }
@@ -2240,6 +2243,51 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
         return Err(PermissionError::CredentialRoot);
     }
     Ok(())
+}
+
+/// Validates a grant that confers only read and exec. It is the one place the
+/// Codex standalone package exception applies: writes, scratch, protected
+/// roots and private state keep the strict credential-root check.
+pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
+    grant.validate()?;
+    if is_codex_standalone_package(&grant.path) {
+        return Ok(());
+    }
+    validate_noncredential_grant(grant)
+}
+
+/// Exactly `<home>/.codex/packages/standalone/releases/<release>` or a path
+/// beneath it, where `<home>` is `/Users/<name>` or `/home/<name>`. Neither
+/// `~/.codex`, `packages`, `standalone`, `releases` nor any sibling (auth,
+/// config, sessions, state, logs) matches, and nothing credential-named may
+/// appear below the release directory.
+fn is_codex_standalone_package(path: &Path) -> bool {
+    let normal: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    let [
+        root,
+        _user,
+        codex,
+        packages,
+        standalone,
+        releases,
+        _release,
+        below @ ..,
+    ] = normal.as_slice()
+    else {
+        return false;
+    };
+    (*root == OsStr::new("Users") || *root == OsStr::new("home"))
+        && *codex == OsStr::new(".codex")
+        && *packages == OsStr::new("packages")
+        && *standalone == OsStr::new("standalone")
+        && *releases == OsStr::new("releases")
+        && !is_credential_root(&below.iter().collect::<PathBuf>())
 }
 
 fn validate_absolute(path: &Path) -> Result<(), PermissionError> {
@@ -2436,6 +2484,48 @@ mod tests {
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
+
+    #[test]
+    fn codex_standalone_package_is_read_exec_only() {
+        let grant = |path: &str| PathGrant {
+            path: PathBuf::from(path),
+            scope: PathScope::Subtree,
+        };
+        let release =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for path in [release, &format!("{release}/bin/codex")] {
+            assert!(validate_read_exec_grant(&grant(path)).is_ok(), "{path}");
+            assert!(
+                matches!(
+                    validate_noncredential_grant(&grant(path)),
+                    Err(PermissionError::CredentialRoot)
+                ),
+                "writes stay strict: {path}"
+            );
+        }
+        for path in [
+            "/Users/alice/.codex",
+            "/Users/alice/.codex/auth.json",
+            "/Users/alice/.codex/config.toml",
+            "/Users/alice/.codex/sessions",
+            "/Users/alice/.codex/packages",
+            "/Users/alice/.codex/packages/standalone",
+            "/Users/alice/.codex/packages/standalone/releases",
+            "/Users/alice/.codex/packages/standalone/current",
+            "/Users/alice/.codex/packages/other/releases/1",
+            "/Users/alice/.codex/packages/standalone/releases/1/.codex/auth.json",
+            "/Users/alice/.claude/packages/standalone/releases/1",
+            "/tmp/x/.codex/packages/standalone/releases/1",
+        ] {
+            assert!(
+                matches!(
+                    validate_read_exec_grant(&grant(path)),
+                    Err(PermissionError::CredentialRoot | PermissionError::BroadRoot)
+                ),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn broad_home_tmp_and_credential_roots_are_refused() {
