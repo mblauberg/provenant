@@ -215,6 +215,7 @@ fn git_page(
         .map(Path::new)
         .find(|path| provenant_supervisor::sys::is_executable(path))
         .ok_or(CheckError::Evidence("Git executable unavailable"))?;
+        let git = fs::canonicalize(git)?;
         let runtime = provenant_confinement::UtilityRuntime::new(fs, git, home)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
