@@ -213,6 +213,9 @@ struct Scope {
     heredocs: Vec<Heredoc>,
     /// The words of the current simple command, once its name is known.
     argv: Vec<String>,
+    /// A shell's `-c` was seen, and its body (the one command text) was taken.
+    shell_c: bool,
+    shell_body: bool,
 }
 #[derive(Default)]
 struct Word {
@@ -621,7 +624,18 @@ impl Lexer {
                     *operands += 1;
                     *dynamic |= word.dynamic;
                 }
-                self.commands.extend(inspect(text, depth + 1)?);
+                // After `sh -c BODY`, further words are positional parameters.
+                if !scope.shell_body {
+                    self.commands.extend(inspect(text, depth + 1)?);
+                }
+                if scope.interpreter.is_some() {
+                    let option = word.plain.is_none() && text.starts_with('-');
+                    if option && !text.starts_with("--") && text.contains('c') {
+                        scope.shell_c = true;
+                    } else if scope.shell_c && !option {
+                        scope.shell_body = true;
+                    }
+                }
                 Position::Shell
             }
             Position::Argument if scope.find && FIND_ACTIONS.contains(&text) => {

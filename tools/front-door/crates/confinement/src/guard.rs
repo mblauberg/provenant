@@ -96,86 +96,161 @@ fn breaks(rule: &str, argv: &[String], cwd: &Path) -> bool {
         return false;
     }
     let git = Git::parse(args);
-    let has = |flag: &str| git.rest.iter().any(|a| a == flag);
-    let cluster = |letter: char| {
-        git.rest
-            .iter()
-            .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains(letter))
-    };
+    let scan = git.scan(git.rest);
     match (rule, git.sub) {
-        ("no-verify", _) => has("--no-verify") || (git.sub == "commit" && cluster('n')),
+        ("no-verify", sub) => {
+            scan.long("no-verify") || (sub == "commit" && scan.short.contains(&'n'))
+        }
         ("stash", "stash") => match git.rest.first().map(String::as_str) {
             None | Some("pop" | "save") => true,
-            Some("push") => !(has("-m") || has("--message")),
+            Some("push") => {
+                let pushed = git.scan(&git.rest[1..]);
+                !(pushed.short.contains(&'m') || pushed.long("message"))
+            }
             Some(first) => first.starts_with('-'),
         },
-        ("reset-hard", "reset") => has("--hard"),
+        ("reset-hard", "reset") => scan.long("hard"),
         ("clean-force", "clean") => {
-            (has("--force") || cluster('f')) && !(has("--dry-run") || cluster('n'))
+            (scan.long("force") || scan.short.contains(&'f'))
+                && !(scan.long("dry-run") || scan.short.contains(&'n'))
         }
         ("force-push", "push") => {
-            has("--force")
-                || cluster('f')
-                || git.rest.iter().any(|a| a.len() > 1 && a.starts_with('+'))
+            scan.long("force")
+                || scan.short.contains(&'f')
+                || scan
+                    .positional
+                    .iter()
+                    .any(|a| a.len() > 1 && a.starts_with('+'))
         }
-        ("primary-checkout", "switch") => git.dir(cwd).is_some_and(|d| is_primary(&d)),
+        ("primary-checkout", "switch") => git.in_primary(cwd),
         ("primary-checkout", "checkout") => {
-            moves_branch(git.rest) && git.dir(cwd).is_some_and(|d| is_primary(&d))
+            let creates = scan.short.iter().any(|c| "bBd".contains(*c))
+                || scan.long("orphan")
+                || scan.long("detach");
+            let restores = scan.short.contains(&'p') || scan.long("patch") || scan.dashes;
+            (creates || (!restores && scan.positional.iter().any(|a| *a != ".")))
+                && git.in_primary(cwd)
         }
         _ => false,
     }
 }
 struct Git<'a> {
-    dir: Option<&'a str>,
+    dirs: Vec<&'a str>,
     sub: &'a str,
     rest: &'a [String],
 }
 impl<'a> Git<'a> {
-    /// Skip git's global options to the subcommand, keeping the last `-C`.
+    /// Skip git's global options to the subcommand, collecting every `-C`.
     fn parse(args: &'a [String]) -> Self {
-        let mut dir = None;
+        let mut dirs = Vec::new();
         let mut at = 0;
         while let Some(arg) = args.get(at) {
             at += 1;
-            match arg.as_str() {
-                "-C" => {
-                    dir = args.get(at).map(String::as_str);
-                    at += 1;
+            let value = |attached: &'a str, at: &mut usize| {
+                if attached.is_empty() {
+                    *at += 1;
+                    args.get(*at - 1).map_or("", String::as_str)
+                } else {
+                    attached
                 }
-                "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => at += 1,
-                option if option.starts_with('-') => {}
-                _ => {
-                    at -= 1;
-                    break;
-                }
+            };
+            if let Some(attached) = arg.strip_prefix("-C") {
+                dirs.push(value(attached, &mut at));
+            } else if let Some(attached) = arg.strip_prefix("-c") {
+                value(attached, &mut at);
+            } else if [
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+                "--super-prefix",
+                "--config-env",
+            ]
+            .contains(&arg.as_str())
+            {
+                at += 1;
+            } else if !arg.starts_with('-') {
+                at -= 1;
+                break;
             }
         }
-        let sub = args.get(at).map_or("", String::as_str);
         Self {
-            dir,
-            sub,
+            dirs,
+            sub: args.get(at).map_or("", String::as_str),
             rest: args.get(at + 1..).unwrap_or_default(),
         }
     }
-    fn dir(&self, cwd: &Path) -> Option<PathBuf> {
-        Some(self.dir.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d)))
+    /// Whether the directory git runs in is inside a primary checkout.
+    fn in_primary(&self, cwd: &Path) -> bool {
+        is_primary(&self.dirs.iter().fold(cwd.to_path_buf(), |d, c| d.join(c)))
+    }
+    fn scan(&self, args: &'a [String]) -> Scan<'a> {
+        let (short_values, long_values): (&str, &[&str]) = match self.sub {
+            "commit" => (
+                "mFCctu",
+                &["message", "file", "author", "date", "cleanup", "template"],
+            ),
+            "clean" => ("e", &["exclude"]),
+            "push" => ("o", &["repo", "receive-pack", "exec", "push-option"]),
+            "stash" => ("m", &["message"]),
+            "checkout" => ("bB", &["orphan", "conflict", "pathspec-from-file"]),
+            _ => ("", &[]),
+        };
+        let mut scan = Scan::default();
+        let mut tokens = args.iter();
+        while let Some(token) = tokens.next() {
+            if scan.dashes {
+                scan.positional.push(token);
+            } else if token == "--" {
+                scan.dashes = true;
+            } else if let Some(long) = token.strip_prefix("--") {
+                let (name, attached) = long
+                    .split_once('=')
+                    .map_or((long, false), |(n, _)| (n, true));
+                scan.longs.push(name);
+                if !attached && long_values.contains(&name) {
+                    tokens.next();
+                }
+            } else if let Some(cluster) = token.strip_prefix('-').filter(|c| !c.is_empty()) {
+                for (at, letter) in cluster.char_indices() {
+                    scan.short.push(letter);
+                    if short_values.contains(letter) {
+                        if at + letter.len_utf8() == cluster.len() {
+                            tokens.next();
+                        }
+                        break;
+                    }
+                }
+            } else {
+                scan.positional.push(token);
+            }
+        }
+        scan
     }
 }
-/// A checkout that moves HEAD: it names a branch or revision, or creates one.
-/// `git checkout -- path`, `-p` and a bare `git checkout` leave HEAD alone.
-fn moves_branch(rest: &[String]) -> bool {
-    let creates = ["-b", "-B", "--orphan", "--detach", "-d"];
-    let before_paths = rest.split(|a| a == "--").next().unwrap_or_default();
-    if before_paths.iter().any(|a| creates.contains(&a.as_str())) {
-        return true;
+/// Options and operands of one git subcommand, up to and after `--`.
+#[derive(Default)]
+struct Scan<'a> {
+    short: Vec<char>,
+    longs: Vec<&'a str>,
+    positional: Vec<&'a String>,
+    dashes: bool,
+}
+impl Scan<'_> {
+    /// Whether `full` was given, in full or as an abbreviation git would accept
+    /// (any prefix of at least two characters).
+    fn long(&self, full: &str) -> bool {
+        self.longs
+            .iter()
+            .any(|given| given.len() >= 2 && full.starts_with(given))
     }
-    rest.iter().all(|a| a != "--") && rest.iter().any(|a| !a.starts_with('-') && a != ".")
 }
 /// Whether `dir` is inside a repository whose `.git` is a directory, as in a
 /// primary checkout; a linked worktree's `.git` is a file. No repository, or
 /// any read failure, answers false.
 fn is_primary(dir: &Path) -> bool {
-    dir.ancestors()
+    std::fs::canonicalize(dir)
+        .unwrap_or_default()
+        .ancestors()
         .map(|d| d.join(".git"))
         .find_map(|git| std::fs::symlink_metadata(git).ok())
         .is_some_and(|meta| meta.is_dir())
@@ -247,6 +322,17 @@ mod tests {
             "git checkout -b topic",
             "git switch main",
             "git switch -c topic",
+            "git clean -f -enode_modules -x",
+            "git reset --har",
+            "git clean --for",
+            "git -Cx stash",
+            "git -c a=b -C. -Cx stash",
+            "bash -c 'git stash' _ 'echo'",
+            "git push --no-ver",
+            "git commit -n -mmsg",
+            "git stash push -u",
+            "git checkout -b",
+            "git checkout --orphan x",
             "sleep 5",
             "sleep 30",
             "sleep 1m",
@@ -256,6 +342,16 @@ mod tests {
         }
         for allowed in [
             "git stash push -m tag",
+            "git stash push -mtag",
+            "git stash push --message=tag",
+            "git stash push --mess tag",
+            "git clean -n -fenode_modules",
+            "git commit -mchange",
+            "git commit -m 'is -n here'",
+            "git checkout -p README.md",
+            "git checkout --patch",
+            "git push --force-with-lease=main",
+            "bash -c 'printf \"%s\\n\" \"$1\"' _ 'git stash'",
             "git stash list",
             "git stash apply abc123",
             "git stash drop",
@@ -290,6 +386,17 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         assert!(denies("git switch main", &nested));
         assert!(denies("git -C a checkout main", primary.path()));
+        let inner = linked.path().join("sub");
+        std::fs::create_dir(&inner).unwrap();
+        assert!(!denies("git -C sub checkout main", linked.path()));
+        let nested_linked = tempfile::tempdir().unwrap();
+        std::fs::create_dir(nested_linked.path().join(".git")).unwrap();
+        let work = nested_linked.path().join("w/x");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(nested_linked.path().join("w/.git"), "gitdir: /e\n").unwrap();
+        assert!(!denies("git switch main", &work));
+        assert!(denies("git -C../.. switch main", &work));
+        assert!(denies("git -C .. -C .. switch main", &work));
         let outside = tempfile::tempdir().unwrap();
         assert!(!denies("git checkout main", outside.path()));
     }

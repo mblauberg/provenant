@@ -1046,7 +1046,7 @@ pub fn create(
     if !root_identity.same_identity(&named_root) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let primary_head = primary_head(context);
+    let primary_head = primary_head(context, cancel)?;
     execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -1060,7 +1060,7 @@ pub fn create(
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
-    if primary_head != self::primary_head(context) {
+    if primary_head != self::primary_head(context, cancel)? {
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
@@ -1119,10 +1119,28 @@ pub fn create(
     })
 }
 
-/// The raw `HEAD` file of the primary checkout: `ref: refs/heads/X` or an oid.
-/// `None` when it cannot be read, so both sides of a comparison fail alike.
-fn primary_head(context: &WorktreeContext<'_>) -> Option<Vec<u8>> {
-    std::fs::read(context.repo.root_path().join(".git/HEAD")).ok()
+/// The primary checkout's `HEAD` file (it lives in the common git dir, so a
+/// linked worktree finds it too) and, when symbolic, the commit it resolves to,
+/// so a reset or commit on the same branch also counts as a move. Read
+/// failures propagate: an unreadable snapshot must not disable the check.
+fn primary_head(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<(Vec<u8>, Option<GitOid>), WorktreeError> {
+    let bytes = std::fs::read(context.repo.common_git_dir().join("HEAD"))
+        .map_err(|_| WorktreeError::InvalidOutput)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    let Some(name) = text.trim_end().strip_prefix("ref: ") else {
+        return Ok((bytes, None));
+    };
+    let name = GitRefName::new(name).map_err(|_| WorktreeError::InvalidOutput)?;
+    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
+    let commit = if exit_code(&outcome)? == 0 {
+        Some(parse_oid(trim_ascii(&outcome.stdout.bytes))?)
+    } else {
+        None
+    };
+    Ok((bytes, commit))
 }
 
 fn pin_revision(
