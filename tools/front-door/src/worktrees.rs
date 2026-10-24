@@ -53,6 +53,7 @@ impl Error {
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty
+                | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
                 | WorktreeError::UnknownWriter
                 | WorktreeError::Primary

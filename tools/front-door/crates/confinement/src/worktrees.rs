@@ -47,6 +47,8 @@ pub enum WorktreeError {
     NotFound,
     #[error("worktree is dirty")]
     Dirty,
+    #[error("worktree has an in-progress Git operation")]
+    GitOperationInProgress,
     #[error("worktree writer is live")]
     LiveWriter,
     #[error("worktree writer or registration is unknown")]
@@ -117,6 +119,7 @@ pub enum PruneScope {
 pub enum WorktreeCondition {
     Clean,
     Dirty,
+    GitOperationInProgress,
     Unknown,
 }
 
@@ -200,6 +203,7 @@ pub enum RetainReason {
     NotMerged,
     CheckedOut,
     Dirty,
+    GitOperationInProgress,
     NoUniqueCommit,
     LiveWriter,
     UnknownWriter,
@@ -716,11 +720,41 @@ fn writer_state(
     }
 }
 
+/// A writer must pass this check before its terminal result is accepted.
+/// Index and working-tree cleanliness do not prove a Git operation has ended.
+pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
+    repo.revalidate()?;
+    for marker in [
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "REBASE_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "sequencer",
+    ] {
+        match repo.private_dir().metadata_at(OsStr::new(marker), false) {
+            Ok(_) => return Err(WorktreeError::GitOperationInProgress),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    repo.revalidate()?;
+    Ok(())
+}
+
 fn worktree_dirty_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCondition, WorktreeError> {
+    match check_writer_terminal(repo) {
+        Ok(()) => {}
+        Err(WorktreeError::GitOperationInProgress) => {
+            return Ok(WorktreeCondition::GitOperationInProgress);
+        }
+        Err(error) => return Err(error),
+    }
     let index = run_git(
         context,
         repo,
@@ -1258,6 +1292,9 @@ fn remove_tree(
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
         WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
+        WorktreeCondition::GitOperationInProgress => {
+            return Err(WorktreeError::GitOperationInProgress);
+        }
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
     }
     let verified_path = locked.verified.path().to_path_buf();
@@ -1299,6 +1336,7 @@ fn pin_branch_ref(
 fn retain_reason(error: &WorktreeError) -> RetainReason {
     match error {
         WorktreeError::Dirty => RetainReason::Dirty,
+        WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter => RetainReason::LiveWriter,
         WorktreeError::UnknownWriter | WorktreeError::Cancelled => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
@@ -1738,6 +1776,89 @@ mod lifecycle_tests {
             list(&test_context.context(), &cancel()),
             Err(WorktreeError::Repository(RepoError::InvalidRegistration))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let cancellation = cancel();
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/sequencer".into(),
+                base: None,
+            },
+            &cancellation,
+        )?;
+        let verified = verify_worktree(&fixture.repo, &created.path)?;
+        check_writer_terminal(verified.repo())?;
+        for (marker, directory) in [
+            ("CHERRY_PICK_HEAD", false),
+            ("REVERT_HEAD", false),
+            ("REBASE_HEAD", false),
+            ("rebase-merge", true),
+            ("rebase-apply", true),
+            ("MERGE_HEAD", false),
+            ("sequencer", true),
+        ] {
+            let marker_path = verified.repo().private_git_dir().join(marker);
+            if directory {
+                fs::create_dir(&marker_path)?;
+            } else {
+                fs::write(&marker_path, format!("{}\n", created.head))?;
+            }
+            assert!(
+                matches!(
+                    check_writer_terminal(verified.repo()),
+                    Err(WorktreeError::GitOperationInProgress)
+                ),
+                "{marker}"
+            );
+            check_writer_terminal(&fixture.repo)?;
+            let listed = list(&context, &cancellation)?;
+            let entry = listed
+                .iter()
+                .find(|entry| entry.path == created.path)
+                .ok_or("worktree missing")?;
+            assert_eq!(
+                entry.dirty,
+                WorktreeCondition::GitOperationInProgress,
+                "{marker}"
+            );
+            assert!(
+                matches!(
+                    remove(
+                        &context,
+                        WorktreeRemove::Name("feature/sequencer".into()),
+                        &cancellation,
+                    ),
+                    Err(WorktreeError::GitOperationInProgress)
+                ),
+                "{marker}"
+            );
+            assert!(created.path.is_dir());
+            if directory {
+                fs::remove_dir(&marker_path)?;
+            } else {
+                fs::remove_file(&marker_path)?;
+            }
+        }
+        check_writer_terminal(verified.repo())?;
+        let listed = list(&context, &cancellation)?;
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.path == created.path && entry.dirty == WorktreeCondition::Clean)
+        );
+        remove(
+            &context,
+            WorktreeRemove::Name("feature/sequencer".into()),
+            &cancellation,
+        )?;
         Ok(())
     }
 
