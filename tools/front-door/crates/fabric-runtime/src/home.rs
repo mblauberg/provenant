@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn remote_coordination_recovers_lost_reply_by_receipt_then_replays_locally() {
-        let temporary = tempfile::tempdir_in("/private/tmp").unwrap();
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = temporary.path().canonicalize().unwrap();
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));

@@ -1331,7 +1331,7 @@ mod file_tests {
     }
     #[test]
     fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = std::fs::canonicalize(root.path()).unwrap();
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
