@@ -521,3 +521,32 @@ Each build PR lands Rust and deletes its subjects/tests together; no Python→Ru
 bridge, selector or old-output oracle. Chairs arrange cross-family review and
 accept/merge on CI. This lane updates the existing design PR and does not merge
 or arm auto-merge.
+
+## Lane D quota freshness and Claude expiry (2026-10-24)
+
+Quota reports retain last-known windows and their observation age. Any failed
+refresh makes the retained snapshot stale immediately, even inside its ordinary
+poll interval. Human output prints each account, `STALE`, `last known`, age,
+window percentages and a sanitised failure code. JSON retains the original
+snapshot and exposes current freshness at the account row, rather than rewriting
+the historical observation. A previously recorded plan name is not evidence of
+the current subscription after an account upgrade.
+
+The installed Claude CLI's `auth --help` advertises login, logout and status;
+`auth status --help` advertises JSON/text status only. There is no recorded
+non-billable token-renewal or usage-refresh command. Status success is not proof
+that usage was refreshed. Provenant does not run a model to renew tokens, copy
+credentials between `.claude-<label>` identities, write credentials, or widen a
+sandbox's keychain access. Expired identities need renewal through that selected
+Claude identity outside the utility sandbox before a supported quota probe can
+replace the last-known reading. Current Rust quota sources remain disabled
+without their activation recording and credential authority.
+
+Claude's structured result field `api_error_status = 401` is authentication
+failure, including an expired OAuth token inside confinement. It now becomes
+`AuthRequired` rather than a generic error or successful answer. Provider text
+mentioning expiry is ordinary text and cannot assert an authentication failure.
+This classification permits an explicitly authorised cross-adapter retry without
+weakening confinement. Utility execution and hosts-doctor composition still need
+their run/Fabric owners; a credential's existence alone never proves it can be
+refreshed in an SSH session with a locked or unavailable keychain.
