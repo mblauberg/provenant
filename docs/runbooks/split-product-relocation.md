@@ -12,14 +12,11 @@ harness clients and config editors, and preview the exact cut-over before
 applying it. `--legacy-checkout` explicitly selects the one old checkout whose
 compiled entries may be matched.
 
-```sh
-PROVENANT="$HOME/.local/bin/provenant"
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
-"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
-```
+Follow the [installation commands](front-door.md#install), using
+`$RELEASE/bin/provenant` as the staged release executable.
 
 Keep the harnesses and config editors stopped through `check install`. The
-installer prints each matched change before writing and rejects unmatched
-foreign entries. `uninstall --harness NAME` removes only unchanged entries in
-the receipt; it never recursively deletes a checkout, state root or release.
+installer prints each matched change before writing. Unmatched legacy entries
+are preserved and reported for follow-up. `uninstall --harness NAME` removes
+only unchanged entries in the receipt; it never recursively deletes a
+checkout, state root or release.

@@ -11,16 +11,19 @@ owns the replacement boundaries.
 
 ```sh
 provenant help
-provenant hosts list
+provenant fabric host list
 provenant hosts doctor
-provenant peer
-provenant fabric dispatch --help
+provenant fabric peer
+provenant dispatch --host workshop --help
 ```
 
-`hosts list` reads local and configured peer health. `hosts doctor` probes
-provider sign-in; optional host selectors target configured peers. The hidden
-top-level `peer` command is the fixed SSH protocol entrypoint. Fabric dispatch
-is `provenant fabric dispatch`. The Rust CLI grammar lives in
+`fabric host list` reads local and configured peer health. `hosts doctor`
+probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
+general provider sign-in check. Remote doctor uses
+`~/.local/bin/provenant` on the peer. Remote dispatch runs `provenant fabric
+peer` through the peer's non-interactive `PATH`. The hidden `fabric peer`
+command is the fixed SSH protocol entrypoint. Remote dispatch uses top-level
+`dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -57,11 +60,11 @@ seconds. The complete field validation and compiled defaults live in
 
 Configure SSH aliases and keys in the user's OpenSSH configuration. The Rust
 transport discovers `/usr/bin/ssh` or `/bin/ssh` and sends the fixed remote
-command `provenant peer`. It accepts no configurable peer command or
+command `provenant fabric peer`. It accepts no configurable peer command or
 SSH-program environment override. A restricted key can use:
 
 ```text
-command="provenant peer",restrict ssh-ed25519 <public-key> user
+command="provenant fabric peer",restrict ssh-ed25519 <public-key> user
 ```
 
 Verify that the receiving host can resolve the binary in this non-interactive
@@ -77,7 +80,7 @@ the retired `{protocol_version, verb, params}` envelope.
 
 ## Dispatch and recovery
 
-The CLI grammar reserves `provenant dispatch` for one prompt or a batch
+The CLI grammar uses `provenant dispatch` for one prompt or a batch
 manifest; `--host` names explicit placement. `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and

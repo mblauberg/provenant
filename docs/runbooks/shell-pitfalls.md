@@ -62,14 +62,6 @@ clean when the command in fact never ran, or ran on the wrong input.
   `kill -0 <pid>`; never poll with `pgrep -f`, whose pattern matches the
   waiting shell's own command line. Stopping a waiter can kill its process
   group, so launch the job from its own call, not from the waiter.
-- **Quote every heredoc delimiter.** `<<'EOF'` keeps the body literal; an
-  unquoted `<<EOF` expands `$(...)` and backticks inside the body, and once ran
-  a backticked `git` command that was only meant to be text in a commit message.
-- **Wait on a background PID with `kill -0`, never `pgrep -f`.** The pattern
-  matches the waiting shell's own command line, so the wait never ends.
-  Stopping a background task can kill its whole process group, including a
-  sibling you meant to keep; cancel owned runs with `provenant cancel` and an
-  explicit target and operation ID.
 - **A wildcard git pathspec matches across slashes.** `apps/*/src/**` matches
   the whole path, not one segment; use `:(glob)apps/*/src/**` for glob
   semantics.

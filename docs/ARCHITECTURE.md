@@ -1,7 +1,7 @@
 # Provenant architecture
 
-Fabric v2 run layout, tool contract, provenance and cleanup decisions are
-recorded in [the Fabric design](specs/rust-port/design/fabric.md).
+The current product contract and Rust subsystem owners are listed in the
+[Rust design index](specs/rust-port/design/README.md).
 
 ## Purpose
 
@@ -24,39 +24,21 @@ Routine work uses the chair and objective checks. Substantial work adds one
 independent cross-family review when available. Crucial work requires two passing
 independent reviews with distinct lenses and two non-chair families when
 available. Terminal work adds an adversarial lens to crucial coverage. The
-shared ladder checker enforces this coverage for delivery and orchestration
-receipts, including the recorded-blocker fallback.
+shared ladder checker enforces this coverage for delivery receipts, including
+the recorded-blocker fallback.
 
 Gold gates reserve scope and one-way doors, any required explicit acceptance,
 and external-action authority for the user. Objective checks and tier-required
 review meet delivery acceptance; the chair reports the outcome and the user
 may still reject it. Explicit user acceptance is required only for `terminal`
 work or when the approved scope asks for it. A project may name its landing
-gate as acceptance (Sealle: landing is acceptance for everything).
+gate as acceptance.
 
-The tier is derived rather than declared. `scope` rates every factor in
-`config/risk-policy.json`, the highest tier any rating maps to is the run's
-minimum tier, and a lower declared tier needs a user-approved override carrying
-an approver, a reason and evidence. The table between the markers records the
-current policy and is maintained with that source file. Internal data alone
-leaves the minimum tier routine: consequence factors such as reversibility,
-external effects and critical surface raise it. Disclosure is scoped
-separately; pass `confidential: true` (`--confidential`) to keep content off
-free and prompt-training routes.
+The tier is derived rather than declared. `scope` rates each compiled risk
+factor; the highest floor is the minimum tier, and a lower declared tier needs
+user-approved evidence. The criteria live in [`HARNESS.md`](../HARNESS.md).
+Disclosure is a separate route constraint.
 
-<!-- risk-factor-table:start -->
-
-| Factor | `routine` | `substantial` | `crucial` | `terminal` |
-|---|---|---|---|---|
-| blast radius | `local` | `multi-module` | `shared-system` | `production` |
-| reversibility | `easy` | `moderate` | `hard` | `irreversible` |
-| data sensitivity | `public`, `internal` |  | `confidential` | `regulated` |
-| migration | `none` | `reversible` | `stateful` | `destructive` |
-| oracle quality | `strong` | `mixed` | `weak` |  |
-| external effects | `none` |  | `reversible` | `irreversible` |
-| critical surface | `none` | `public-contract` | `auth-security`, `privacy`, `financial`, `legal`, `build-release-gate` | `life-safety` |
-
-<!-- risk-factor-table:end -->
 
 One palette carries the whole document. Every diagram below uses it, and no
 colour means two things:
@@ -79,7 +61,7 @@ run's ladder rather than a fixed colour.
 ```mermaid
 flowchart TB
     accTitle: The full delivery lifecycle and its user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent review runs in fresh contexts that never authored the work. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification, an optional conditional evaluate gate and independent review in fresh contexts. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. Failed checks and blocking findings return to execute under the repair guidance in the delivery skills; no runtime repair budget is enforced. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs separate user authorisation before release and observation. A failed observation opens diagnose. Returns to scope converge on one back-to-scope collector.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -94,7 +76,7 @@ flowchart TB
       Q == "yes" ==> EV["evaluate<br/>repeatable judgement gate"]
       EV -. "failed" .-> EX
       EV --> RV["review<br/>independent, fresh context<br/>risk-scaled HARNESS.md ladder"]
-      RV -. "repair by tier: routine 2, substantial 4, crucial/terminal 5" .-> EX
+      RV -. "repair guidance" .-> EX
     end
 
     RV --> AC["acceptance<br/>checks + required review or project landing"]
@@ -162,38 +144,12 @@ stream of micro-approvals.
 
 ## Neutral delivery kernel
 
-`deliver` is the cross-domain lifecycle front door. The delivery receipt is a
-revisioned Rust record (`provenant-workflow`, `provenant-records`) written with
-`provenant workflow receipt save`. Review facts are bound from run attempt
-custody by `provenant workflow review`, which checks coverage against the risk
-tier. The high-stakes overlay adds source-authority, privacy, qualified-review
-and explicit user-action controls.
-
-Ordering is not certified, because a receipt cannot certify its own history:
-the agent that writes the transitions writes the receipt in the same turn. What
-is checked is what each recorded gate demands. The current schema still uses
-`human_gates.acceptance` for explicit user approval; this retained code contract
-is catalogued in [issue #1025](https://github.com/mblauberg/provenant/issues/1025) and
-must not be auto-approved from checks. Human acceptance recorded as
-approved requires the profile's deterministic and judgement evidence, the
-review ladder, the security surfaces and the measures to be present and
-passing. Release approval requires acceptance. A closed run, meaning release
-approved with a settled observation, requires a passing observation inside its
-declared window and, where risk or incident policy says so, a closed
-retrospective. `repair_cycles` is a counter the producer increments, bounded by
-the risk tier.
-
-A digest-bound project policy may add a complete profile or add evidence and
-measure gates to a built-in profile. Global minima load first and cannot be
-removed or reclassified by the project overlay.
-
-The kernel binds approved intent, design, authority, artifacts, deterministic
-and judgement evidence, review independence, acceptance, release, observation
-and retrospective linkage. Domain skills own methods; the kernel owns state
-and proof. `implement` remains the software front door and uses the same
-canonical receipt; there is no parallel implementation schema or adapter.
-Passing deterministic evidence binds its declared, live-hash-verified artifact;
-a syntactically valid digest or exit code alone is not proof.
+`deliver` is the cross-domain lifecycle front door. The current
+`DeliveryReceipt` record contains a subject, authors, risk record, review
+attempts, a decision (`pending`, `accepted` or `abandoned`) and timestamps.
+`provenant workflow review` binds review attempts from run custody and checks
+coverage against the risk tier. The receipt records those claims; it does not
+contain release, observation or retrospective gates.
 
 Software execution composes bounded techniques rather than duplicating
 lifecycle owners: `tdd` for new or changed observable behaviour, `refactor` for
@@ -290,8 +246,7 @@ through Fabric, which carries the messages, shared tasks and activity log
 between them.
 It still has one chair and one active owner per stage, namespaced artifacts and
 non-overlapping write scopes. Pane transcripts are transport, not durable state.
-Pi is dormant by default until its provider, economics, permissions and receipt
-quality are deliberately accepted.
+No Pi adapter is present in the Rust provider set.
 
 ## Routing, adapters and receipts
 
@@ -303,19 +258,11 @@ The router separates policy from execution:
 - Rust providers executes the resolved route;
 - receipts record requested and actual identity, effort and substitutions.
 
-`principal`, `senior` and `junior` are capability aliases, not permanent jobs
-for a vendor. Opus is the default Claude principal. The catalogue may configure
-one bounded override occupant per risk tier. Each configured occupant is
-reserved for that tier's roles, alias and effort ceiling. Runtime discovery,
-not this document, determines effort support and current availability.
-Lifecycle risk stays in delivery and dispatch receipts. Selecting a configured
-override occupant requires the separate explicit model-override input; ordinary
-risk metadata cannot change a route.
-
-Task-class routes use the resolver's policy-owned alias and effort. Codex and
-Agy produce fresh model snapshots before final resolution. Claude first
-resolves that alias and effort, runs its bounded canary, then resolves with the
-snapshot. The shell does not duplicate the model or task-class catalogue.
+The catalogue has one `utility` pool. Task classes are knob presets, not model
+pool mappings. Provider activation is controlled by
+[`activation.json`](../tools/front-door/tests/fixtures/providers/activation.json);
+only Claude and Codex are enabled today. Model listings and route decisions
+come from the Rust routing catalogue and live availability checks.
 
 ## Review as a council, not a vote
 
@@ -376,9 +323,9 @@ install` compares the installed release digest without repairing it, and
 `uninstall` removes only unchanged receipt-owned entries. Unmanaged paths are
 preserved and conflicts are refused.
 
-These are library entrypoints. CLI command wiring, explicit harness selection,
-client MCP/hooks/skill edits and the compiled legacy-entry table belong to the
-later harness cut-over. The library reads no old receipt or product-root pointer.
+The Rust CLI wires `install`, `check install` and `uninstall` to these library
+entrypoints. It handles explicit harness selection and client MCP, hook and
+skill edits. The library reads no old receipt or product-root pointer.
 Product files, instance-owned files and machine-local derived state retain
 separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
 
