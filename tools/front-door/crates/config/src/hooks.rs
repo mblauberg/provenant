@@ -2,17 +2,24 @@
 use crate::{HookRegistration, InstallError, Targets, managed::SelectorChange, splice};
 use provenant_records::{Harness, Limits, decode_jsonc};
 use serde_json::{Value, json};
-use std::io::Cursor;
+use std::{io::Cursor, path::Path};
 
 pub(crate) fn command(spec: &HookRegistration, targets: &Targets) -> Result<String, InstallError> {
-    let binary = targets.bin_dir.join("provenant");
+    hook_command(
+        spec,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+    )
+}
+fn hook_command(
+    spec: &HookRegistration,
+    binary: &Path,
+    state: &Path,
+) -> Result<String, InstallError> {
     let binary = binary
         .to_str()
         .ok_or(InstallError::InvalidConfig("hook executable must be UTF-8"))?;
-    let state = targets
-        .roots
-        .state
-        .as_path()
+    let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("hook state root must be UTF-8"))?;
     Ok(std::iter::once(binary)
@@ -26,7 +33,14 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 pub(crate) fn value(spec: &HookRegistration, targets: &Targets) -> Result<Value, InstallError> {
-    let mut value = json!({"type":"command", "command":command(spec, targets)?});
+    hook_value(
+        spec,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+    )
+}
+fn hook_value(spec: &HookRegistration, binary: &Path, state: &Path) -> Result<Value, InstallError> {
+    let mut value = json!({"type":"command", "command":hook_command(spec, binary, state)?});
     if let Some(timeout) = spec.timeout {
         value["timeout"] = timeout.into();
     }
@@ -190,4 +204,42 @@ pub(crate) fn register(bytes: &[u8], targets: &Targets) -> Result<Registration, 
         owned.push((sel, desired));
     }
     Ok((out, changes, owned))
+}
+
+/// Registrations shared by the installer, lane settings and CLI handlers.
+pub const CLAUDE_HOOKS: &[HookRegistration] = &[
+    HookRegistration {
+        harness: Some(Harness::Claude),
+        event: "PreToolUse",
+        matcher: Some("Bash"),
+        timeout: None,
+        command: &["hook", "claude", "pre-tool-use"],
+    },
+    HookRegistration {
+        harness: Some(Harness::Claude),
+        event: "PreCompact",
+        matcher: None,
+        timeout: Some(5),
+        command: &["hook", "claude", "pre-compact"],
+    },
+    HookRegistration {
+        harness: Some(Harness::Claude),
+        event: "SessionStart",
+        matcher: Some("compact"),
+        timeout: Some(5),
+        command: &["hook", "claude", "compact"],
+    },
+];
+
+/// An isolated settings document, containing only Provenant's own hooks.
+pub fn claude_lane_settings(binary: &Path, state: &Path) -> Result<Value, InstallError> {
+    let mut settings = json!({"hooks": {}});
+    for spec in CLAUDE_HOOKS {
+        let mut group = json!({"hooks": [hook_value(spec, binary, state)?]});
+        if let Some(matcher) = spec.matcher {
+            group["matcher"] = matcher.into();
+        }
+        settings["hooks"][spec.event] = json!([group]);
+    }
+    Ok(settings)
 }

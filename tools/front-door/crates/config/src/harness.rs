@@ -58,14 +58,19 @@ fn selector(h: Harness) -> &'static str {
     }
 }
 fn mcp(h: Harness, targets: &Targets) -> Result<Json, InstallError> {
-    let binary = targets.bin_dir.join("provenant");
+    mcp_entry(
+        h,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+    )
+}
+
+/// The installer and confined lanes use the same stdio registration.
+pub fn mcp_entry(h: Harness, binary: &Path, state: &Path) -> Result<Json, InstallError> {
     let binary = binary
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP command requires UTF-8"))?;
-    let state = targets
-        .roots
-        .state
-        .as_path()
+    let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP state path requires UTF-8"))?;
     let args = ["--state-dir", state, "fabric", "mcp", "--client", name(h)];

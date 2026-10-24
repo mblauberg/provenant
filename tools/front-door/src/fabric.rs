@@ -918,9 +918,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
     match error {
         RunError::NotFound => FacadeError::NotFound,
-        RunError::Refused | RunError::Writer(_) | RunError::Confinement(_) => {
-            FacadeError::ConfinementRefused
-        }
+        RunError::Refused => FacadeError::ConfinementRefused,
+        RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
+        RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
         RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
@@ -935,6 +935,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     match fail.code {
         "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
+        "LANE_DEPTH" => FacadeError::LaneDepth,
+        "LANE_CONTEXT" | "PARENT_ATTEMPT" => FacadeError::InvalidInput,
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
@@ -964,7 +966,12 @@ impl BinaryRunOwner<'_> {
     ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: ctx.roots.state.clone(),
+            state_root: provenant_cli::run::execution_state(
+                &ctx.roots,
+                &self.factory.home,
+                &crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?,
+            )
+            .map_err(fail_error)?,
             project_id: ctx.identity.project,
             actor_id: ctx.identity.inbox.actor,
             read_prompts: false,
