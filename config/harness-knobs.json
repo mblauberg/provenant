@@ -15,7 +15,7 @@
       "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
     },
     "lanes.max_concurrency": {
-      "type": "int", "min": 1, "max": 64, "default": 8, "status": "wired",
+      "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/run/src/admission.rs",
       "effect": "Default number of lanes one batch runs at once, resolved from the base profile only; task-class values do not apply. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."

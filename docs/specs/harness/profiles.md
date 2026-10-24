@@ -46,7 +46,7 @@ Paths below are relative to `tools/front-door/crates/`.
 | Knob registry, overrides and precedence | `config/src/knobs.rs` | `provenant config set`, `config unset`, `config show`; `[knobs]` in `config.toml` |
 | Registered domain composition | `cli/src/domains.rs` | `domains.routing`, `domains.quota`, `domains.fabric`, `domains.guard` |
 | Route selection and effort | `routing/src/resolve.rs`, `cli/src/route.rs` | `provenant route list`, `provenant route resolve`; dispatch route flags |
-| Batch concurrency | `cli/src/run.rs`, `run/src/launch.rs`, `run/src/admission.rs` | Base-profile `lanes.max_concurrency` supplies the default (registry: 8, max 64); task-class values do not apply; explicit `--concurrency N` or Fabric `concurrency` wins |
+| Batch concurrency | `cli/src/run.rs`, `run/src/launch.rs`, `run/src/admission.rs` | Base-profile `lanes.max_concurrency` supplies the default (registry: 8); task-class values do not apply; explicit `--concurrency N` or Fabric `concurrency` wins |
 | Provider timeout | `cli/src/grammar.rs`, `run/src/launch.rs` | `--provider-timeout` |
 | Silence observation | `run/src/launch.rs`, `supervisor/src/custody.rs`, `supervisor/src/guardian.rs` | `lanes.silence_seconds` marks observations silent after no output or CPU progress; silence never authorises a stop |
 | Attempt profile stamp | `config/src/knobs.rs`, `records/src/run.rs`, `run/src/store.rs` | Effective task-class policy and dispatch `knobs`, retained with the sealed request and attempt |
