@@ -7,7 +7,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, WaitBudget, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WaitBudget, WallTime};
 use provenant_supervisor::{
     fs::Directory,
     sys::resources::{self, MemorySample},
@@ -120,12 +120,14 @@ impl RunStore {
         Ok(ticket)
     }
     /// Move a queued attempt to `starting` with a fresh custody generation
-    /// and its applied route, just before supervisor handoff.
+    /// and its applied route, just before supervisor handoff. `head` is the
+    /// checkout HEAD the host observed for a read-only lane; never lane output.
     pub(crate) fn mark_starting(
         &self,
         id: AttemptId,
         route: &RouteRecord,
         writable: &[String],
+        head: Option<GitOid>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         if !valid_read_only_writable(writable) {
@@ -142,6 +144,7 @@ impl RunStore {
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
             next.state = AttemptState::Starting;
             next.read_only_writable = writable.to_vec();
+            next.head = head;
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);
