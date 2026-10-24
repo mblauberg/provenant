@@ -10,6 +10,7 @@ publish = false
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

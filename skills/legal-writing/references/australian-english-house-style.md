@@ -50,8 +50,8 @@ extract.
 The `natural-writing` skill's hub default sets the general em-dash ban, en-dash-for-ranges
 rule, semicolon and quotation-mark conventions. This skill's overlay:
 
-- The em-dash ban is **lint-enforced** here (`scripts/lint_legal_style.py`
-  fails on U+2014); the en dash is a lint warning only, not a ban.
+- The em-dash ban is **lint-enforced** here (`provenant check writing <paths> --rules legal`
+  reports a filing blocker on U+2014); the en dash is a lint warning only, not a ban.
 - In a document title, follow the verified template or use a spaced hyphen
   (`Orders Sought - Extension and Directions`) as a house default.
 - The **spaced hyphen** (` - `) is **not** caught by the lint. Use it only

@@ -37,17 +37,29 @@ enum Error {
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
     Exec(#[from] provenant_supervisor::exec::ExecError),
+    #[error(transparent)]
+    Writing(#[from] provenant_workflow::writing::WritingError),
 }
 impl Error {
     fn outcome(&self) -> Outcome {
         match self {
             Self::Check(error) => error.outcome(),
+            Self::Writing(
+                provenant_workflow::writing::WritingError::Invalid(_)
+                | provenant_workflow::writing::WritingError::Rules
+                | provenant_workflow::writing::WritingError::RulesLimit,
+            ) => Outcome::Invalid,
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_)) => Outcome::Invalid,
             _ => Outcome::Error,
         }
     }
 }
 enum Inspectable {
+    Writing {
+        paths: Vec<PathBuf>,
+        rules: provenant_cli::Rules,
+        page: provenant_cli::Page,
+    },
     Config(provenant_cli::Page),
     Install {
         source: Option<PathBuf>,
@@ -68,7 +80,9 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
         Check::Release { base, head, page } => {
             ("check release", Inspectable::Release { base, head, page })
         }
-        Check::Writing { .. } => return crate::unavailable("check writing", "workflow", globals),
+        Check::Writing { paths, rules, page } => {
+            ("check writing", Inspectable::Writing { paths, rules, page })
+        }
     };
     let result = inspect(check, globals);
     match result {
@@ -101,7 +115,50 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
         ),
     }
 }
-fn inspect(check: Inspectable, globals: &Globals) -> Result<CheckPage, Error> {
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum Inspection {
+    Check(CheckPage),
+    Writing {
+        #[serde(flatten)]
+        page: CheckPage<provenant_workflow::writing::FileFinding>,
+        blockers: usize,
+    },
+}
+impl Inspection {
+    fn outcome(&self) -> Outcome {
+        match self {
+            Self::Check(p) => p.outcome(),
+            Self::Writing { page, .. } => page.outcome(),
+        }
+    }
+    fn human(&self) -> Result<String, serde_json::Error> {
+        match self {
+            Self::Check(p) => p.human(),
+            Self::Writing { page: p, blockers } => {
+                let mut text = String::new();
+                for row in &p.findings {
+                    let f = &row.finding;
+                    text.push_str(&format!(
+                        "{}:{}:{}: {:?}: {}: {}\n",
+                        serde_json::to_string(&row.path)?,
+                        f.line,
+                        f.column,
+                        f.severity,
+                        f.rule,
+                        f.message
+                    ));
+                }
+                text.push_str(&format!("{} finding(s), {blockers} blocker(s)\n", p.count));
+                if let Some(cursor) = &p.next_cursor {
+                    text.push_str(&format!("next cursor: {cursor}\n"));
+                }
+                Ok(text)
+            }
+        }
+    }
+}
+fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let assets = roots::product_root()?;
     let project = roots::selected_project(
         globals.project.as_deref(),
@@ -115,7 +172,41 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<CheckPage, Error> {
         roots.state.as_path().as_os_str().as_encoded_bytes(),
         project.as_os_str().as_encoded_bytes(),
     );
-    match check {
+    if let Inspectable::Writing { paths, rules, page } = check {
+        use provenant_workflow::writing::{self, RuleSet};
+        let set = match rules {
+            provenant_cli::Rules::General => RuleSet::General,
+            provenant_cli::Rules::Academic => RuleSet::Academic,
+            provenant_cli::Rules::Legal => RuleSet::Legal,
+        };
+        let inspection = writing::inspect(&assets, &project, &paths, set)?;
+        let evidence = inspection
+            .evidence
+            .iter()
+            .map(|(p, b)| {
+                (
+                    p.to_string_lossy().into_owned(),
+                    provenant_records::CanonicalV1::file_digest(b),
+                )
+            })
+            .collect();
+        let blockers = inspection
+            .findings
+            .iter()
+            .filter(|f| f.finding.severity == writing::Severity::Blocker)
+            .count();
+        return Ok(Inspection::Writing {
+            blockers,
+            page: provenant_cli::check::findings_page(
+                inspection.findings,
+                evidence,
+                ("writing", set.name(), selector),
+                &page,
+            )?,
+        });
+    }
+    let page = match check {
+        Inspectable::Writing { .. } => return Err(CheckError::Invalid("writing selector").into()),
         Inspectable::Config(page) => {
             let inspection = provenant_config::inspect_config(
                 &roots,
@@ -177,7 +268,8 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<CheckPage, Error> {
                 )
             })
         }
-    }
+    }?;
+    Ok(Inspection::Check(page))
 }
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
     let temp = fs::canonicalize(Path::new("/tmp"))?;

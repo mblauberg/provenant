@@ -153,8 +153,10 @@ doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
 and claim discipline) plus academic prose; `engineering-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
-`skills/natural-writing/scripts/style_lint.py` owns the shared lint vocabulary
-the domain linters import, so a change there ripples to all of them.
+`skills/natural-writing/lint-rules.json` owns the general and academic rule
+vocabulary; `skills/legal-writing/lint-rules.json` owns legal rules and filing
+blocker severities. Run `provenant check writing <paths> [--rules general|academic|legal]`.
+Rules and exclusions are skill data, outside policy, configuration and records.
 
 ## Promote and retire
 
