@@ -4,26 +4,15 @@ Telemetry reduces supervised terminal attempt records into usage and
 API-equivalent cost estimates. Its accepted contract is the
 [Rust telemetry design](../specs/rust-port/design/telemetry.md).
 
-## Rewrite status
+## Stats command
 
-Step 1 supplies the pure `provenant-telemetry` reducer and its typed
-[TOML price asset](../../config/telemetry-prices.toml). It removes the Python
-ledger, transcript and OTel ingestion, sources, delivery-cost joins, changes,
-comparison and retro reports. The Rust product ships no collector or collector installer. Removing that
-source does not alter an already installed LaunchAgent, collector binary,
-harness setting or stored telemetry data. There is no history import or
-transition adapter.
-
-The command is pending CLI integration:
-
-```text
-provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
-```
-
-Until run integration lands, this command parses fully and returns
-`OWNER_UNAVAILABLE` with exit 4. The old telemetry, stats and retro forwarding
-routes are removed. Legacy quota, utility and Fabric peer paths still import
-the removed telemetry owner; their owners remove those calls in later steps.
+`provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]`
+reduces supervised terminal-attempt records using the bundled typed
+[TOML price asset](../../config/telemetry-prices.toml). It is local and
+read-only. Reports include usage, API-equivalent cost estimates, route
+outcomes and measurement coverage. Unsupervised activity, other hosts and old
+ledger history are outside the report; stats does not import transcripts,
+collect usage or create telemetry state.
 
 ## Measurements and estimates
 
@@ -60,25 +49,21 @@ partial totals. Reduction refuses more than 100,000 selected attempts, 10,000
 combined groups or 1 MiB of retained group keys. CLI will enforce its separate
 1 MiB envelope limit and bounded human output.
 
-## Collector retirement
+## Collector and harness configuration
 
-Source deletion does not uninstall an existing collector or edit harness
-configuration. Use the stable Rust binary and the explicit `provenant install`
-procedure in the [front-door runbook](front-door.md) to preview and apply
-selected harness changes. Stop selected clients and config editors through
-`check install`; pass `--legacy-checkout` only for exact entries from that
-checkout. The installer does not discover launchd services or delete paths that
-are absent from its printed plan. Retiring an already installed collector needs
-separate host-specific authorisation and verification. Preserve old ledger,
-transcript and collector data.
+Telemetry does not install or manage an OTel collector, or edit harness
+configuration. Use the `provenant install` procedure in the
+[front-door runbook](front-door.md) to preview and apply selected harness
+changes. Stop selected clients and config editors before installation, and
+keep them stopped through `check install`. Pass `--legacy-checkout` only for
+exact entries from that checkout. The installer does not discover launchd
+services or delete paths absent from its printed plan.
 
 ## Provider quota
 
-The following is the legacy quota owner's reference during the rewrite. Its
-telemetry imports, state paths and renderer are unavailable after step 1 removes
-the ledger. Quota and execution-route own their replacements; this telemetry
-step does not change account eligibility, probes or cooldown policy. Ledger
-window history and plan-change events are retired.
+Provider quota is owned by execution-route. Telemetry stats reads the
+resolved provider and account labels recorded on attempts; it does not fetch
+quota, infer account identity or reconstruct window history from ledger events.
 
 ```sh
 scripts/provenant-quota                 # fetches only the accounts that are due
@@ -309,7 +294,7 @@ The legacy quota classifier distinguishes `natural`, `granted_date_kept`,
 changes. Natural rollover compares the new provider window start against the
 previous provider reset. Restarted windows must start within five minutes of
 the observation. These classification rules remain with quota; their retired
-ledger events provide no history in the Rust rewrite.
+Telemetry stats does not reconstruct provider windows from ledger events.
 
 ### Display
 

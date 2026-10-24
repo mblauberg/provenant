@@ -10,6 +10,8 @@ use provenant_records::{CanonicalV1, FileDigest, Harness, Limits, decode_jsonc};
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
 use std::{
+    cmp::Reverse,
+    collections::BTreeSet,
     io::Cursor,
     path::{Path, PathBuf},
 };
@@ -38,6 +40,13 @@ pub(crate) struct LegacyLink {
     pub name: String,
     pub target: PathBuf,
     pub retained: bool,
+    pub replacement_asset: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegacyShim {
+    pub path: PathBuf,
+    pub retained: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +59,8 @@ struct Manifest {
     instruction_links: Vec<InstructionLink>,
     git_hooks: Vec<GitHookLink>,
     hooks: Vec<HookEntry>,
+    #[serde(default)]
+    legacy_shims: Vec<LegacyShimEntry>,
     #[serde(default)]
     mcp: Vec<McpEntry>,
     #[serde(default)]
@@ -96,6 +107,8 @@ struct InstructionLink {
     harness: Harness,
     kind: InstructionKind,
     source: String,
+    #[serde(default)]
+    replacement_asset: Option<String>,
     disposition: Disposition,
 }
 
@@ -130,8 +143,16 @@ struct HookEntry {
     source: String,
     args: Vec<String>,
     timeout: Option<u64>,
-    #[serde(rename = "disposition")]
-    _disposition: Disposition,
+    disposition: Disposition,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyShimEntry {
+    path: String,
+    identity_prefix: String,
+    binary_magic_hex: Vec<String>,
+    disposition: Disposition,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +245,7 @@ pub(crate) fn legacy_links(
                 name: entry.name,
                 target: checkout.join(checked_relative(&entry.source)?),
                 retained: entry.disposition.retained(),
+                replacement_asset: None,
             });
         }
     }
@@ -240,6 +262,7 @@ pub(crate) fn legacy_links(
             name: String::new(),
             target: checkout.join(checked_relative(&entry.source)?),
             retained: entry.disposition.retained(),
+            replacement_asset: None,
         });
     }
     for entry in registry.workflows {
@@ -249,6 +272,7 @@ pub(crate) fn legacy_links(
                 name: entry.name,
                 target: checkout.join(checked_relative(&entry.source)?),
                 retained: entry.disposition.retained(),
+                replacement_asset: None,
             });
         }
     }
@@ -260,7 +284,7 @@ pub(crate) fn legacy_links(
             InstructionKind::GlobalDoctrine => (
                 LegacyArea::GlobalInstruction,
                 "AGENTS.md",
-                home.join(".agents/AGENTS.md"),
+                PathBuf::from(expand_home(&entry.source, home)?),
             ),
             InstructionKind::CheckoutDoctrine => (
                 LegacyArea::Instruction,
@@ -275,7 +299,7 @@ pub(crate) fn legacy_links(
             InstructionKind::OpenCodeHomeDoctrine => (
                 LegacyArea::OpenCodeInstruction,
                 "home-doctrine",
-                home.join(".agents/AGENTS.md"),
+                PathBuf::from(expand_home(&entry.source, home)?),
             ),
             InstructionKind::OpenCodeCompanion => (
                 LegacyArea::OpenCodeInstruction,
@@ -288,17 +312,114 @@ pub(crate) fn legacy_links(
             name: name.to_owned(),
             target: path,
             retained: entry.disposition.retained(),
+            replacement_asset: entry
+                .replacement_asset
+                .as_deref()
+                .map(checked_relative)
+                .transpose()?,
         });
     }
-    for entry in registry.git_hooks {
-        links.push(LegacyLink {
-            area: LegacyArea::GitHook,
-            name: entry.name,
-            target: checkout.join(checked_relative(&entry.source)?),
-            retained: entry.disposition.retained(),
-        });
-    }
+    links.extend(git_hook_links_from(registry.git_hooks, checkout)?);
     Ok(links)
+}
+
+pub(crate) fn git_hook_links(checkout: &Path) -> Result<Vec<LegacyLink>, InstallError> {
+    git_hook_links_from(manifest()?.git_hooks, checkout)
+}
+
+fn git_hook_links_from(
+    entries: Vec<GitHookLink>,
+    checkout: &Path,
+) -> Result<Vec<LegacyLink>, InstallError> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            Ok(LegacyLink {
+                area: LegacyArea::GitHook,
+                name: entry.name,
+                target: checkout.join(checked_relative(&entry.source)?),
+                retained: entry.disposition.retained(),
+                replacement_asset: None,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn instruction_assets(harness: Harness) -> Result<BTreeSet<PathBuf>, InstallError> {
+    manifest()?
+        .instruction_links
+        .into_iter()
+        .filter(|entry| entry.harness == harness && entry.disposition.retained())
+        .filter_map(|entry| entry.replacement_asset)
+        .map(|asset| checked_relative(&asset))
+        .collect()
+}
+
+pub(crate) fn legacy_shim(home: &Path) -> Result<Option<LegacyShim>, InstallError> {
+    let registry = manifest()?;
+    registry
+        .legacy_shims
+        .into_iter()
+        .next()
+        .map(|entry| {
+            Ok(LegacyShim {
+                path: PathBuf::from(expand_home(&entry.path, home)?),
+                retained: entry.disposition.retained(),
+            })
+        })
+        .transpose()
+}
+
+/// Match the old installer's compiled front-door file form. The old Rust
+/// binary embeds this complete identity block after its platform header; the
+/// remaining binary bytes may vary with the release build.
+pub(crate) fn legacy_shim_matches(bytes: &[u8]) -> bool {
+    let Ok(registry) = manifest() else {
+        return false;
+    };
+    registry.legacy_shims.iter().any(|entry| {
+        let has_magic = entry.binary_magic_hex.iter().any(|magic| {
+            let Ok(magic) = decode_hex(magic) else {
+                return false;
+            };
+            bytes.starts_with(&magic)
+        });
+        if !has_magic {
+            return false;
+        }
+        let prefix = entry.identity_prefix.as_bytes();
+        let Some(start) = bytes
+            .windows(prefix.len())
+            .position(|window| window == prefix)
+        else {
+            return false;
+        };
+        let identity = &bytes[start + prefix.len()..];
+        let Some(end) = identity.iter().position(|byte| *byte == b'\n') else {
+            return false;
+        };
+        let digest = &identity[..end];
+        digest == b"unknown"
+            || (digest.len() == 64
+                && digest
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)))
+    })
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(());
+    }
+    pairs
+        .iter()
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16).ok_or(())?;
+            let low = (pair[1] as char).to_digit(16).ok_or(())?;
+            Ok(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn checked_relative(value: &str) -> Result<PathBuf, InstallError> {
@@ -317,12 +438,7 @@ fn checked_relative(value: &str) -> Result<PathBuf, InstallError> {
 
 /// True only for a complete, exact old registration in the finite manifest.
 /// `existing` is the value at the selected client's `fabric` selector.
-pub(crate) fn mcp_matches(
-    existing: &Value,
-    harness: Harness,
-    home: &Path,
-    _checkout: &Path,
-) -> bool {
+pub(crate) fn mcp_matches(existing: &Value, harness: Harness, home: &Path) -> bool {
     let Ok(registry) = manifest() else {
         return false;
     };
@@ -404,17 +520,18 @@ fn expand_home(template: &str, home: &Path) -> Result<String, InstallError> {
     Ok(format!("{home}{suffix}"))
 }
 
-/// Remove exact installer-owned Claude hook leaves, preserving all unrelated
-/// entries, comments, key order, and array order. Other harnesses have no
-/// fixture-backed legacy command registrations in this registry.
+/// Remove fixture-backed `remove` Claude hooks and report exact `replace`
+/// hooks without changing their bytes. Other harnesses have no command
+/// registrations in this registry.
+type HookCleanup = (Vec<u8>, Vec<SelectorChange>, Vec<String>);
+
 pub(crate) fn clean_hooks(
     bytes: &[u8],
     harness: Harness,
-    _home: &Path,
     checkout: &Path,
-) -> Result<(Vec<u8>, Vec<SelectorChange>), InstallError> {
+) -> Result<HookCleanup, InstallError> {
     if harness != Harness::Claude {
-        return Ok((bytes.to_vec(), Vec::new()));
+        return Ok((bytes.to_vec(), Vec::new(), Vec::new()));
     }
     let value: Value = decode_jsonc(Cursor::new(bytes), Limits::CONFIG)?;
     let Some(root) = value.as_object() else {
@@ -423,7 +540,7 @@ pub(crate) fn clean_hooks(
         ));
     };
     let Some(hooks_value) = root.get("hooks") else {
-        return Ok((bytes.to_vec(), Vec::new()));
+        return Ok((bytes.to_vec(), Vec::new(), Vec::new()));
     };
     let Some(hooks) = hooks_value.as_object() else {
         return Err(InstallError::InvalidConfig(
@@ -436,34 +553,11 @@ pub(crate) fn clean_hooks(
         .iter()
         .filter(|entry| entry.harness == harness)
         .collect();
-    // No path/interpreter inference establishes ownership. An unrecorded
-    // command form at this compiled event/matcher blocks cut-over unchanged.
-    if registry.utility_hook_interpreters.is_empty()
-        && let Some(groups) = hooks.get("PostToolUse").and_then(Value::as_array)
-        && groups.iter().any(|g| {
-            g.get("matcher").and_then(Value::as_str) == Some("Bash")
-                && g.get("hooks")
-                    .and_then(Value::as_array)
-                    .is_some_and(|h| !h.is_empty())
-        })
-    {
-        return Err(InstallError::LegacyUnresolved(
-            "PostToolUse/Bash requires a recorded utility-hook interpreter",
-        ));
-    }
+    let events: BTreeSet<_> = entries.iter().map(|entry| entry.event.as_str()).collect();
     let mut operations = Vec::new();
+    let mut unresolved = BTreeSet::new();
 
-    for event in entries
-        .iter()
-        .map(|entry| entry.event.as_str())
-        .collect::<Vec<_>>()
-    {
-        if operations
-            .iter()
-            .any(|operation: &Removal| operation.event == event)
-        {
-            continue;
-        }
+    for event in events {
         let Some(event_value) = hooks.get(event) else {
             continue;
         };
@@ -474,18 +568,12 @@ pub(crate) fn clean_hooks(
         };
         for (group_index, group) in groups.iter().enumerate() {
             let Some(group_object) = group.as_object() else {
-                return Err(InstallError::InvalidConfig(
-                    "Claude hook group must be an object",
-                ));
+                continue;
             };
             let group_matcher = match group_object.get("matcher") {
                 None => None,
                 Some(Value::String(value)) => Some(value.as_str()),
-                _ => {
-                    return Err(InstallError::InvalidConfig(
-                        "Claude hook matcher must be a string",
-                    ));
-                }
+                _ => continue,
             };
             let expected_for_group: Vec<_> = entries
                 .iter()
@@ -499,32 +587,46 @@ pub(crate) fn clean_hooks(
                     && group_object.contains_key("hooks")
                     && group_object.contains_key("matcher"));
             let Some(group_hooks) = group_object.get("hooks").and_then(Value::as_array) else {
-                return Err(InstallError::InvalidConfig(
-                    "Claude hook group hooks value must be an array",
-                ));
+                continue;
             };
             let mut matched = Vec::new();
             for (hook_index, hook_value) in group_hooks.iter().enumerate() {
                 if hook_value.as_object().is_none() {
-                    return Err(InstallError::InvalidConfig(
-                        "Claude hook entry must be an object",
-                    ));
+                    continue;
                 }
                 for entry in &expected_for_group {
                     let mut found = false;
-                    for command in
-                        hook_commands(entry, checkout, &registry.utility_hook_interpreters)?
+                    let commands =
+                        hook_commands(entry, checkout, &registry.utility_hook_interpreters)?;
+                    if commands.is_empty()
+                        && matches!(&entry.command_form, CommandForm::RecordedInterpreter)
+                        && hook_mentions_source(hook_value, entry, checkout)?
                     {
+                        return Err(InstallError::LegacyUnresolved(
+                            "manifest-matched hook command has an unrecorded interpreter",
+                        ));
+                    }
+                    for command in commands {
                         let expected = hook_value_for(entry, command);
                         if hook_value.get("command") == expected.get("command")
                             && hook_value != &expected
                         {
-                            return Err(InstallError::LegacyUnresolved(
-                                "compiled hook command has changed registration fields",
-                            ));
+                            if entry.disposition.retained() {
+                                unresolved
+                                    .insert(format!("hooks.{event}[{group_index}] ({})", entry.id));
+                            } else {
+                                return Err(InstallError::LegacyUnresolved(
+                                    "compiled hook command has changed registration fields",
+                                ));
+                            }
                         }
                         if hook_value == &expected {
-                            matched.push((hook_index, hook_value.clone(), entry.id.clone()));
+                            if entry.disposition.retained() {
+                                unresolved
+                                    .insert(format!("hooks.{event}[{group_index}] ({})", entry.id));
+                            } else {
+                                matched.push((hook_index, hook_value.clone(), entry.id.clone()));
+                            }
                             found = true;
                             break;
                         }
@@ -541,6 +643,8 @@ pub(crate) fn clean_hooks(
             if only_owned {
                 operations.push(Removal {
                     event: event.to_owned(),
+                    group_index,
+                    hook_index: None,
                     path: vec!["hooks".into(), event.to_owned(), group_index.to_string()],
                     selector: format!("hooks.{event}[{group_index}]"),
                     before: group.clone(),
@@ -549,6 +653,8 @@ pub(crate) fn clean_hooks(
                 for (hook_index, before, id) in matched {
                     operations.push(Removal {
                         event: event.to_owned(),
+                        group_index,
+                        hook_index: Some(hook_index),
                         path: vec![
                             "hooks".into(),
                             event.to_owned(),
@@ -566,32 +672,12 @@ pub(crate) fn clean_hooks(
         }
     }
 
-    operations.sort_by(|left, right| {
-        left.event
-            .cmp(&right.event)
-            .then_with(|| {
-                right
-                    .path
-                    .get(2)
-                    .map_or(usize::MAX, |part| numeric_component(part))
-                    .cmp(
-                        &left
-                            .path
-                            .get(2)
-                            .map_or(usize::MAX, |part| numeric_component(part)),
-                    )
-            })
-            .then_with(|| {
-                let left_nested = left
-                    .path
-                    .get(4)
-                    .map_or(usize::MAX, |part| numeric_component(part));
-                let right_nested = right
-                    .path
-                    .get(4)
-                    .map_or(usize::MAX, |part| numeric_component(part));
-                right_nested.cmp(&left_nested)
-            })
+    operations.sort_by_key(|operation| {
+        (
+            operation.event.clone(),
+            Reverse(operation.group_index),
+            Reverse(operation.hook_index.unwrap_or(usize::MAX)),
+        )
     });
     let mut updated = bytes.to_vec();
     let mut changes = Vec::with_capacity(operations.len());
@@ -613,18 +699,31 @@ pub(crate) fn clean_hooks(
     if !changes.is_empty() {
         let _: Value = decode_jsonc(Cursor::new(&updated), Limits::CONFIG)?;
     }
-    Ok((updated, changes))
+    Ok((updated, changes, unresolved.into_iter().collect()))
 }
 
 struct Removal {
     event: String,
+    group_index: usize,
+    hook_index: Option<usize>,
     path: Vec<String>,
     selector: String,
     before: Value,
 }
 
-fn numeric_component(value: &str) -> usize {
-    value.parse::<usize>().unwrap_or(usize::MAX)
+fn hook_mentions_source(
+    hook: &Value,
+    entry: &HookEntry,
+    checkout: &Path,
+) -> Result<bool, InstallError> {
+    let Some(command) = hook.get("command").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let script = checkout.join(checked_relative(&entry.source)?);
+    let script = script.to_str().ok_or(InstallError::InvalidConfig(
+        "legacy hook path must be UTF-8",
+    ))?;
+    Ok(command.contains(script))
 }
 
 fn hook_commands(
@@ -767,123 +866,6 @@ mod tests {
         assert_eq!(skill_names().expect("names are available").len(), 30);
     }
 
-    fn test_target(harness: Harness) -> HarnessTarget {
-        HarnessTarget {
-            harness,
-            skills_dir: PathBuf::from("/tmp/home/skills"),
-            mcp_file: PathBuf::from("/tmp/home/config.json"),
-            hook_file: None,
-            instruction: None,
-        }
-    }
-
-    #[test]
-    fn manifest_projects_every_link_target_for_every_harness() {
-        let registry = manifest().expect("compiled registry parses");
-        let home = Path::new("/tmp/home");
-        let checkout = Path::new("/tmp/legacy-checkout");
-        for harness in [
-            Harness::Claude,
-            Harness::Codex,
-            Harness::Cursor,
-            Harness::Agy,
-            Harness::Opencode,
-        ] {
-            let actual =
-                legacy_links(home, checkout, &test_target(harness)).expect("legacy links compile");
-            let mut expected = Vec::new();
-            for entry in &registry.skills {
-                if entry.harnesses.contains(&harness) {
-                    expected.push(LegacyLink {
-                        area: LegacyArea::Skills,
-                        name: entry.name.clone(),
-                        target: checkout.join(checked_relative(&entry.source).expect("skill path")),
-                        retained: entry.disposition.retained(),
-                    });
-                }
-            }
-            for entry in &registry.directory_links {
-                if entry.harness == harness {
-                    expected.push(LegacyLink {
-                        area: match entry.area {
-                            DirectoryArea::Skills => LegacyArea::Skills,
-                            DirectoryArea::Workflows => LegacyArea::Workflows,
-                        },
-                        name: String::new(),
-                        target: checkout
-                            .join(checked_relative(&entry.source).expect("directory path")),
-                        retained: entry.disposition.retained(),
-                    });
-                }
-            }
-            for entry in &registry.workflows {
-                if entry.harness == harness {
-                    expected.push(LegacyLink {
-                        area: LegacyArea::Workflows,
-                        name: entry.name.clone(),
-                        target: checkout
-                            .join(checked_relative(&entry.source).expect("workflow path")),
-                        retained: entry.disposition.retained(),
-                    });
-                }
-            }
-            for entry in &registry.instruction_links {
-                if entry.harness != harness {
-                    continue;
-                }
-                let (area, name, target) = match entry.kind {
-                    InstructionKind::GlobalDoctrine => (
-                        LegacyArea::GlobalInstruction,
-                        "AGENTS.md",
-                        PathBuf::from(expand_home(&entry.source, home).expect("global path")),
-                    ),
-                    InstructionKind::CheckoutDoctrine => (
-                        LegacyArea::Instruction,
-                        "AGENTS.md",
-                        checkout.join(checked_relative(&entry.source).expect("doctrine path")),
-                    ),
-                    InstructionKind::Companion => (
-                        LegacyArea::Companion,
-                        "HARNESS.md",
-                        checkout.join(checked_relative(&entry.source).expect("companion path")),
-                    ),
-                    InstructionKind::OpenCodeHomeDoctrine => (
-                        LegacyArea::OpenCodeInstruction,
-                        "home-doctrine",
-                        PathBuf::from(
-                            expand_home(&entry.source, home).expect("OpenCode home path"),
-                        ),
-                    ),
-                    InstructionKind::OpenCodeCompanion => (
-                        LegacyArea::OpenCodeInstruction,
-                        "companion",
-                        checkout.join(
-                            checked_relative(&entry.source).expect("OpenCode companion path"),
-                        ),
-                    ),
-                };
-                expected.push(LegacyLink {
-                    area,
-                    name: name.to_owned(),
-                    target,
-                    retained: entry.disposition.retained(),
-                });
-            }
-            for entry in &registry.git_hooks {
-                expected.push(LegacyLink {
-                    area: LegacyArea::GitHook,
-                    name: entry.name.clone(),
-                    target: checkout.join(checked_relative(&entry.source).expect("Git hook path")),
-                    retained: entry.disposition.retained(),
-                });
-            }
-            assert_eq!(actual.len(), expected.len(), "{harness:?} link count");
-            for link in expected {
-                assert!(actual.contains(&link), "{harness:?}: {link:?}");
-            }
-        }
-    }
-
     #[test]
     fn mcp_fixture_shapes_are_exact_for_all_harnesses() {
         let home = Path::new("/tmp/legacy-home");
@@ -919,10 +901,7 @@ mod tests {
             ),
         ];
         for (harness, fixture) in fixtures {
-            assert!(
-                mcp_matches(&fixture, harness, home, Path::new("/tmp/old")),
-                "{harness:?}"
-            );
+            assert!(mcp_matches(&fixture, harness, home), "{harness:?}");
             let mut near = fixture.clone();
             if harness == Harness::Opencode {
                 near["command"][0] = json!(format!("{command}-wrapper"));
@@ -930,7 +909,7 @@ mod tests {
                 near["command"] = json!(format!("{command}-wrapper"));
             }
             assert!(
-                !mcp_matches(&near, harness, home, Path::new("/tmp/old")),
+                !mcp_matches(&near, harness, home),
                 "{harness:?} command near miss"
             );
             let mut foreign = fixture.clone();
@@ -941,7 +920,7 @@ mod tests {
             };
             foreign[env_key]["FOREIGN"] = json!("preserve");
             assert!(
-                !mcp_matches(&foreign, harness, home, Path::new("/tmp/old")),
+                !mcp_matches(&foreign, harness, home),
                 "{harness:?} foreign env"
             );
         }
@@ -997,7 +976,6 @@ mod tests {
     #[test]
     fn mcp_match_requires_exact_legacy_shape_and_preserves_near_misses() {
         let home = Path::new("/tmp/legacy-home");
-        let checkout = Path::new("/tmp/old-checkout");
         let old = json!({
             "type": "stdio",
             "command": "/tmp/legacy-home/.local/bin/provenant",
@@ -1008,42 +986,240 @@ mod tests {
                 "AGENT_FABRIC_CLIENT_LABEL": "claude"
             }
         });
-        assert!(mcp_matches(&old, Harness::Claude, home, checkout));
+        assert!(mcp_matches(&old, Harness::Claude, home));
         let mut near = old.clone();
         near["command"] = json!("/tmp/legacy-home/.local/bin/provenant-wrapper");
-        assert!(!mcp_matches(&near, Harness::Claude, home, checkout));
+        assert!(!mcp_matches(&near, Harness::Claude, home));
         let mut secret = old.clone();
         secret["env"]["TOKEN"] = json!("redacted-test-value");
-        assert!(!mcp_matches(&secret, Harness::Claude, home, checkout));
+        assert!(!mcp_matches(&secret, Harness::Claude, home));
     }
 
+    fn hook_fixture(entry: &HookEntry, checkout: &Path) -> Value {
+        let command = hook_commands(entry, checkout, &[])
+            .expect("recorded command compiles")
+            .into_iter()
+            .next()
+            .expect("fixture has a recorded interpreter");
+        hook_value_for(entry, command)
+    }
+
+    fn hook_group(matcher: Option<&str>, hook: Value) -> Value {
+        let mut group = Map::from_iter([("hooks".to_owned(), Value::Array(vec![hook]))]);
+        if let Some(matcher) = matcher {
+            group.insert("matcher".to_owned(), Value::String(matcher.to_owned()));
+        }
+        Value::Object(group)
+    }
+
+    fn jsonc_hooks(hooks: Value) -> Vec<u8> {
+        format!(
+            "{{\n  // preserve this comment\n  \"hooks\": {}\n}}\n",
+            serde_json::to_string(&hooks).expect("hooks JSON")
+        )
+        .into_bytes()
+    }
+
+    fn hook_events(entries: &[&HookEntry], checkout: &Path) -> Value {
+        let mut events = Map::new();
+        for entry in entries {
+            let groups = events
+                .entry(entry.event.clone())
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("event groups are an array");
+            groups.push(hook_group(
+                entry.matcher.as_deref(),
+                hook_fixture(entry, checkout),
+            ));
+        }
+        Value::Object(events)
+    }
+
+    #[test]
+    fn legacy_manifest_exposes_hooks_git_links_and_instruction_assets() {
+        let home = Path::new("/tmp/home");
+        let checkout = Path::new("/tmp/legacy-checkout");
+        let links = git_hook_links(checkout).expect("Git hooks compile");
+        assert!(links.iter().any(|link| {
+            link.name == "pre-push"
+                && link.target == checkout.join("scripts/hooks/pre-push")
+                && link.retained
+        }));
+        assert!(
+            links
+                .iter()
+                .any(|link| link.name == "post-merge" && !link.retained)
+        );
+
+        let target = HarnessTarget {
+            harness: Harness::Opencode,
+            skills_dir: home.join(".opencode/skills"),
+            mcp_file: home.join(".config/opencode/opencode.jsonc"),
+            hook_file: None,
+            instruction: None,
+        };
+        let links = legacy_links(home, checkout, &target).expect("OpenCode links compile");
+        assert!(links.iter().any(|link| {
+            link.area == LegacyArea::OpenCodeInstruction
+                && link.name == "home-doctrine"
+                && link.target == home.join(".agents/AGENTS.md")
+                && link.replacement_asset.as_deref() == Some(Path::new("instructions/AGENTS.md"))
+        }));
+        assert!(links.iter().any(|link| {
+            link.area == LegacyArea::OpenCodeInstruction
+                && link.name == "companion"
+                && link.target == checkout.join("HARNESS.md")
+                && link.replacement_asset.as_deref() == Some(Path::new("instructions/HARNESS.md"))
+        }));
+
+        let shim = legacy_shim(home)
+            .expect("shim manifest is valid")
+            .expect("old shim row");
+        assert_eq!(shim.path, home.join(".local/bin/provenant"));
+        assert!(shim.retained);
+    }
+
+    #[test]
+    fn replace_hooks_are_reported_and_remain_byte_for_byte_unchanged() {
+        let checkout = Path::new("/tmp/old-checkout");
+        let entries: Vec<_> = manifest()
+            .expect("manifest parses")
+            .hooks
+            .into_iter()
+            .filter(|entry| entry.disposition.retained())
+            .collect();
+        let refs: Vec<_> = entries.iter().collect();
+        let source = jsonc_hooks(hook_events(&refs, checkout));
+        let (updated, changes, unresolved) =
+            clean_hooks(&source, Harness::Claude, checkout).expect("replace hooks are retained");
+        assert_eq!(updated, source);
+        assert!(changes.is_empty());
+        assert!(
+            unresolved
+                .iter()
+                .any(|entry| entry.contains("compact_reinject"))
+        );
+        assert!(unresolved.iter().any(|entry| entry.contains("state_check")));
+        assert!(
+            unresolved
+                .iter()
+                .any(|entry| entry.contains("lane_safety_guard"))
+        );
+    }
+
+    #[test]
+    fn remove_hooks_are_removed_but_unrelated_bash_hooks_survive() {
+        let checkout = Path::new("/tmp/old-checkout");
+        let entries: Vec<_> = manifest()
+            .expect("manifest parses")
+            .hooks
+            .into_iter()
+            .filter(|entry| !entry.disposition.retained() && entry.id != "utility_output")
+            .collect();
+        let refs: Vec<_> = entries.iter().collect();
+        let mut events = hook_events(&refs, checkout)
+            .as_object()
+            .expect("hook events object")
+            .clone();
+        events
+            .entry("PostToolUse".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("PostToolUse groups")
+            .push(hook_group(
+                Some("Bash"),
+                json!({"type":"command", "command":"echo user hook"}),
+            ));
+        let source = jsonc_hooks(Value::Object(events));
+        let (updated, changes, unresolved) = clean_hooks(&source, Harness::Claude, checkout)
+            .expect("unrelated Bash hooks are not ambiguous");
+        let updated_text = String::from_utf8(updated).expect("UTF-8 JSONC");
+        assert_eq!(changes.len(), 2);
+        assert!(unresolved.is_empty());
+        assert!(updated_text.contains("// preserve this comment"));
+        assert!(updated_text.contains("echo user hook"));
+        assert!(!updated_text.contains("routing_context_hook.py"));
+    }
+
+    #[test]
+    fn utility_hook_is_ambiguous_only_when_its_manifest_source_is_present() {
+        let checkout = Path::new("/tmp/old-checkout");
+        let unrelated = jsonc_hooks(json!({
+            "PostToolUse": [hook_group(
+                Some("Bash"),
+                json!({"type":"command", "command":"echo user hook"})
+            )]
+        }));
+        let (same, changes, unresolved) =
+            clean_hooks(&unrelated, Harness::Claude, checkout).expect("user hook is preserved");
+        assert_eq!(same, unrelated);
+        assert!(changes.is_empty());
+        assert!(unresolved.is_empty());
+
+        let matching = jsonc_hooks(json!({
+            "PostToolUse": [hook_group(
+                Some("Bash"),
+                json!({
+                    "type":"command",
+                    "command":format!("python3 '{}'", checkout.join("scripts/utility_output_hook.py").display()),
+                    "timeout":30
+                })
+            )]
+        }));
+        assert!(matches!(
+            clean_hooks(&matching, Harness::Claude, checkout),
+            Err(InstallError::LegacyUnresolved(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_shim_match_requires_binary_magic_and_complete_identity() {
+        let identity = b"\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\nprovenant-front-door source-sha256=";
+        let mut valid = b"\x7fELF\x02\x01fixture".to_vec();
+        valid.extend_from_slice(identity);
+        valid.extend_from_slice(&[b'a'; 64]);
+        valid.extend_from_slice(b"\ntrailing binary bytes");
+        assert!(legacy_shim_matches(&valid));
+
+        let mut unknown = b"\xcf\xfa\xed\xfefixture".to_vec();
+        unknown.extend_from_slice(identity);
+        unknown.extend_from_slice(b"unknown\ntrailing binary bytes");
+        assert!(legacy_shim_matches(&unknown));
+
+        let mut marker_only = b"\x7fELF".to_vec();
+        marker_only.extend_from_slice(identity);
+        marker_only.extend_from_slice(b"arbitrary\n");
+        assert!(!legacy_shim_matches(&marker_only));
+        let mut text_file = identity.to_vec();
+        text_file.extend_from_slice(&[b'a'; 64]);
+        text_file.push(b'\n');
+        assert!(!legacy_shim_matches(&text_file));
+    }
     #[test]
     fn hooks_remove_only_exact_owned_leaf_and_preserve_siblings_and_comments() {
         let checkout = Path::new("/tmp/old-checkout");
         let command = format!(
-            "python3 {}",
+            "python3 {} --pre-tool",
             shell_quote(
                 &checkout
-                    .join("scripts/lane_safety_guard.py")
+                    .join("scripts/routing_context_hook.py")
                     .to_string_lossy()
             )
         );
         let source = format!(
-            "{{\n  // keep this comment\n  \"hooks\": {{\n    \"PreToolUse\": [\n      {{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":{}}},{{\"type\":\"command\",\"command\":\"foreign\"}}]}},\n      {{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":\"python3 '{}'\"}}]}}\n    ]\n  }}\n}}\n",
+            "{{\n  // keep this comment\n  \"hooks\": {{\n    \"PreToolUse\": [\n      {{\"matcher\":\"Agent|.*fabric_dispatch\",\"hooks\":[{{\"type\":\"command\",\"command\":{}}},{{\"type\":\"command\",\"command\":\"foreign\"}}]}},\n      {{\"matcher\":\"Agent|.*fabric_dispatch\",\"hooks\":[{{\"type\":\"command\",\"command\":\"python3 '{}' --pre-tool\"}}]}}\n    ]\n  }}\n}}\n",
             serde_json::to_string(&command).expect("command JSON"),
-            checkout.join("scripts/lane_safety_guard.py").display()
+            checkout.join("scripts/routing_context_hook.py").display()
         );
-        let (updated, changes) = clean_hooks(
-            source.as_bytes(),
-            Harness::Claude,
-            Path::new("/tmp/home"),
-            checkout,
-        )
-        .expect("exact fixture is editable");
+        let (updated, changes, unresolved) =
+            clean_hooks(source.as_bytes(), Harness::Claude, checkout)
+                .expect("exact fixture is editable");
         let updated_text = String::from_utf8(updated).expect("UTF-8 JSONC");
         assert_eq!(changes.len(), 1);
         assert!(updated_text.contains("// keep this comment"));
         assert!(updated_text.contains("foreign"));
-        assert!(updated_text.contains("lane_safety_guard.py"));
+        assert!(updated_text.contains("routing_context_hook.py"));
+        assert!(unresolved.is_empty());
     }
 }

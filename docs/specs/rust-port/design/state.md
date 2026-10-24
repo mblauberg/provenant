@@ -344,14 +344,17 @@ reparse; preserve unrelated bytes, comments, trailing commas and array order.
 Reject malformed/duplicate/ambiguous containers unchanged. Never serialise an
 entire user config or log its raw contents. Config files must be regular;
 symlinked configs refuse with their path, requiring an explicitly selected
-regular destination. Instruction/skill links are inspected with `readlink`,
+regular destination. `~/.claude.json` has a 16 MiB byte bound; other harness
+configs retain the 1 MiB bound. Quit Claude Code before installation because
+it rewrites this file while running. Recheck identity and bytes immediately
+before publication. Instruction/skill links are inspected with `readlink`,
 never opened through the old link.
 
-### Cut over every legacy entry
+### Legacy entry reconciliation
 
 `--legacy-checkout ABS` authorises matching **only** the compiled legacy
-entry table below at the selected harness paths. Build slice 4 must land
-`assets/install/legacy.toml` as the authoritative, compiled matching manifest:
+entry table below at the selected harness paths.
+`assets/install/legacy.toml` is the authoritative, compiled matching manifest:
 finite entries with harness, config selector/event/matcher, exact command or
 link template and replace/remove disposition. Only captured home and the
 explicit legacy checkout substitute into templates; no prefix/glob/regex
@@ -376,7 +379,9 @@ independently of the new release's retained-skill list.
 
 | Legacy entry | Exact match and planned action |
 | --- | --- |
-| Four Claude hooks | Compiled commands for `<legacy>/skills/session/scripts/compact_reinject.py`, `<legacy>/skills/session/scripts/state_check.py --hook`, `<legacy>/scripts/utility_output_hook.py`, `<legacy>/scripts/lane_safety_guard.py`, at `SessionStart`/matcher `compact`, `PreCompact`/no matcher, `PostToolUse`/matcher `Bash` and `PreToolUse`/matcher `Bash`, respectively. Replace retained behaviour with CLI's Rust hook; remove retired behaviour. Preserve sibling commands, even in the same hook group. |
+| Stable command file | At `~/.local/bin/provenant`, replace only the old installer's managed regular binary form: a manifest-listed ELF or Mach-O header and its complete embedded managed marker and source identity. Other files conflict unless explicitly adopted. |
+| Git hook links | Resolve the hooks directory from canonical `--legacy-checkout`, independently of `--project`. Only manifest-listed links whose `readlink` equals that checkout's listed source may be replaced or removed there. Preserve and report regular files and foreign links. A `replace` link remains unresolved without a fixture-backed `HookSpec`. Every other removal obeys protected, state and source root checks. |
+| Four Claude hooks | Compiled commands for `<legacy>/skills/session/scripts/compact_reinject.py`, `<legacy>/skills/session/scripts/state_check.py --hook`, `<legacy>/scripts/utility_output_hook.py`, `<legacy>/scripts/lane_safety_guard.py`, at `SessionStart`/matcher `compact`, `PreCompact`/no matcher, `PostToolUse`/matcher `Bash` and `PreToolUse`/matcher `Bash`, respectively. A `replace` entry requires a fixture-backed CLI `HookSpec`; without one, preserve the legacy entry byte-for-byte and report it unresolved. Remove only exact `remove` entries. Preserve sibling commands, even in the same hook group. |
 | Skill links in all five skills directories | For each compiled name, `readlink` equals `<legacy>/skills/<name>` or `<legacy>/library/<name>` (normalised relative targets allowed). Replace retained names; remove retired names and `_shared`. A whole skills-directory link to exactly `<legacy>/skills` is unlinked and replaced by a real directory of managed entries; never traverse it. Foreign files/directories conflict. |
 | Claude workflow links | `codebase-polish.js`, `cross-verify.js`, `implement-run.js`, each targeting `<legacy>/workflows/<name>`. Remove all three; no JS workflow replacement. Handle an exact whole-directory link without traversal. |
 | Instructions and constitution | Replace Claude `CLAUDE.md` and Codex `AGENTS.md` links whose `readlink` is exactly `~/.agents/AGENTS.md`, plus the registry's instruction links to `<legacy>/AGENTS.md` and companions targeting `<legacy>/HARNESS.md`. Link directly to the new release instruction assets. Apply the authorised variable rewrite below before replacing links. |
@@ -399,25 +404,28 @@ utility output uses its recorded absolute Python interpreter with that
 rendering. Never accept arbitrary interpreters, shell suffixes, labels or env
 keys by pattern.
 
-At cut-over, rewrite `AGENT_FABRIC_LABEL` to `PROVENANT_AGENT_LABEL` in
+The installer rewrites `AGENT_FABRIC_LABEL` to `PROVENANT_AGENT_LABEL` in
 `~/.agents/AGENTS.md` and the files linked to it. New release instruction
-assets already use `PROVENANT_AGENT_LABEL` before publication. Print each
-path and exact before/after change before applying it; a failed preview prevents writes. The user has authorised this
-instruction-only exception to the old-root prohibition. Plan each regular
-instruction file once, verify its identity and unchanged bytes before atomic
-publication, and refuse unresolved or foreign links. Never write the primary
-checkout; replace a link into it with the updated release asset. No other
-old-root contents are opened or changed. Re-application accepts already
-updated text; `check install` verifies no old variable remains in these files.
+assets use `PROVENANT_AGENT_LABEL` before publication. Print each path and
+exact before/after change before applying it; a failed preview prevents writes.
+This instruction-only exception to the old-root prohibition authorises the
+edit. Plan each regular instruction file once, verify its identity and
+unchanged bytes before atomic publication, and refuse unresolved or foreign
+links. Never write the primary checkout; replace a link into it with the
+updated release asset. No other old-root contents are opened or changed.
+Re-application accepts already updated text; `check install` verifies no old
+variable remains in these files.
 
 Absolute and relative link targets are compared lexically after resolving
 relative components against the link's parent; target contents are read only
 for the authorised instruction rewrite. Only named harness entries and those
 instructions change, not old runtime state, transcripts or the primary
 checkout. Print matched selector/target, disposition and replacement before
-any write. A required legacy entry left unresolved blocks cut-over;
-`check install` checks all compiled legacy selectors for residual references.
-No cleanup of unrelated historical files is implied.
+any write. An unresolved legacy entry is preserved and reported in the install
+preview/outcome and as a `check install` finding (exit 1). The cut-over
+end-to-end suite requires zero unresolved entries. `check install` checks all
+compiled legacy selectors for residual references. Unrelated historical files
+are outside the installer's scope.
 
 `--adopt-existing` is limited to an occupied destination selector or the
 stable regular executable, printing/pinning its exact identity and digest.

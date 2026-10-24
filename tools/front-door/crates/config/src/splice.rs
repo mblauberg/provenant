@@ -9,11 +9,17 @@ use provenant_records::{JsoncDocument, JsoncToken, JsoncTokenKind, Limits};
 use serde_json::{Map, Value};
 use std::io::Cursor;
 
-const OUTPUT_LIMIT: usize = 1_048_576;
-
 /// Read a selector from a bounded JSON or JSONC document.
 pub(crate) fn get(source: &[u8], path: &[&str]) -> Result<Option<Value>, InstallError> {
-    let document = read_document(source)?;
+    get_with_limits(source, path, Limits::CONFIG)
+}
+
+pub(crate) fn get_with_limits(
+    source: &[u8],
+    path: &[&str],
+    limits: Limits,
+) -> Result<Option<Value>, InstallError> {
+    let document = read_document(source, limits)?;
     let value: Value = document.decode()?;
     Ok(value_at_path(&value, path).cloned())
 }
@@ -29,10 +35,19 @@ pub(crate) fn set(
     path: &[&str],
     replacement: Option<&Value>,
 ) -> Result<Vec<u8>, InstallError> {
-    if path.is_empty() || path.len() > Limits::CONFIG.max_depth {
+    set_with_limits(source, path, replacement, Limits::CONFIG)
+}
+
+pub(crate) fn set_with_limits(
+    source: &[u8],
+    path: &[&str],
+    replacement: Option<&Value>,
+    limits: Limits,
+) -> Result<Vec<u8>, InstallError> {
+    if path.is_empty() || path.len() > limits.max_depth {
         return Err(invalid("JSONC selector path is empty or too deep"));
     }
-    let document = read_document(source)?;
+    let document = read_document(source, limits)?;
     let decoded: Value = document.decode()?;
 
     if let Some(replacement) = replacement
@@ -44,15 +59,15 @@ pub(crate) fn set(
     let source = document.source().as_bytes();
     let root = TreeParser::new(&document).parse()?;
     let edits = edit_path(&root, path, replacement, source)?;
-    let edited = apply_edits(source, edits)?;
+    let edited = apply_edits(source, edits, limits.max_bytes as usize)?;
     // The edit plan is intentionally small and span-based; this second strict
     // bounded read proves that no malformed or duplicate selector was produced.
-    let _ = read_document(&edited)?;
+    let _ = read_document(&edited, limits)?;
     Ok(edited)
 }
 
-fn read_document(source: &[u8]) -> Result<JsoncDocument, InstallError> {
-    Ok(JsoncDocument::read(Cursor::new(source), Limits::CONFIG)?)
+fn read_document(source: &[u8], limits: Limits) -> Result<JsoncDocument, InstallError> {
+    Ok(JsoncDocument::read(Cursor::new(source), limits)?)
 }
 
 fn invalid(reason: &'static str) -> InstallError {
@@ -733,7 +748,11 @@ fn array_insert(
     }
 }
 
-fn apply_edits(source: &[u8], mut edits: Vec<Edit>) -> Result<Vec<u8>, InstallError> {
+fn apply_edits(
+    source: &[u8],
+    mut edits: Vec<Edit>,
+    output_limit: usize,
+) -> Result<Vec<u8>, InstallError> {
     edits.sort_by_key(|edit| (edit.span.start, edit.span.end));
     let mut previous_end = 0usize;
     let mut final_len = source.len();
@@ -750,9 +769,9 @@ fn apply_edits(source: &[u8], mut edits: Vec<Edit>) -> Result<Vec<u8>, InstallEr
             .and_then(|size| size.checked_add(edit.replacement.len()))
             .ok_or_else(|| invalid("JSONC edited size overflowed"))?;
     }
-    if final_len > OUTPUT_LIMIT {
-        return Err(InstallError::Manifest(
-            "edited JSONC configuration exceeds 1 MiB",
+    if final_len > output_limit {
+        return Err(InstallError::InvalidConfig(
+            "edited JSONC config byte bound",
         ));
     }
     let mut output = Vec::with_capacity(final_len);
@@ -848,8 +867,9 @@ fn trailing_whitespace_start(
 
 #[cfg(test)]
 mod tests {
-    use super::{get, set};
+    use super::{get, get_with_limits, set};
     use crate::InstallError;
+    use provenant_records::Limits;
     use serde_json::json;
 
     #[test]
@@ -946,6 +966,28 @@ mod tests {
             set(b"{\"a\": [1]}", &["a", "3"], Some(&json!(3))),
             Err(InstallError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn accepts_a_larger_harness_config_only_with_its_explicit_bound() {
+        let mut source = b"{\"a\":\"".to_vec();
+        source.resize(1_048_577, b'x');
+        source.extend_from_slice(b"\"}");
+        let larger = Limits {
+            max_bytes: 16 * 1024 * 1024,
+            ..Limits::CONFIG
+        };
+        assert!(matches!(
+            get(&source, &["a"]),
+            Err(InstallError::Decode(
+                provenant_records::DecodeError::TooLarge { .. }
+            ))
+        ));
+        assert!(
+            get_with_limits(&source, &["a"], larger)
+                .expect("Claude config stays within the explicit harness limit")
+                .is_some()
+        );
     }
 
     #[test]

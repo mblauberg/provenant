@@ -9,9 +9,7 @@ mod domains;
 mod harness;
 mod loader;
 mod managed;
-pub use harness::{
-    InstallSettings, TargetSettings, apply_install_config, apply_install_config_with_domains,
-};
+pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 mod legacy;
 mod presets;
 mod project_binding;
@@ -160,8 +158,8 @@ pub struct ConfigCheck {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
-    SelectorChange, Snapshots, Targets, check_install, check_install_with_digest, install,
-    plan_install, uninstall,
+    SelectorChange, Snapshots, Targets, check_install_with_digest, install, plan_install,
+    uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

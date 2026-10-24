@@ -2,8 +2,8 @@
 //! every child is supervised with a bounded wait and isolated environment.
 use provenant_cli::{self as cli, install::InstallCheckError};
 use provenant_config::{
-    self as config, Action, InstallContext, InstallError, InstallOutcome, InstallReporter,
-    ManualInclude, Release, ReleaseSmoke, Targets,
+    self as config, Action, InstallContext, InstallError, InstallFinding, InstallOutcome,
+    InstallReporter, ManualInclude, Release, ReleaseSmoke, Targets,
 };
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
 use provenant_records::{CommandError, CommandResult, Harness, Outcome, VersionInfo};
@@ -51,9 +51,7 @@ fn environment(
     let roots = super::roots::roots(globals, &assets, &project).map_err(EdgeError::Root)?;
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-    let git_hooks_dir = legacy_checkout
-        .map(|checkout| git_hooks_dir(globals.project.as_deref().unwrap_or(checkout)))
-        .transpose()?;
+    let git_hooks_dir = legacy_checkout.map(git_hooks_dir).transpose()?;
     Ok(Environment {
         home,
         roots,
@@ -299,6 +297,9 @@ impl InstallReporter for PreviewReporter {
     fn preview(&mut self, actions: &[Action]) -> io::Result<()> {
         write_preview("actions", actions)
     }
+    fn findings(&mut self, findings: &[InstallFinding]) -> io::Result<()> {
+        write_preview("findings", findings)
+    }
     fn manual_includes(&mut self, includes: &[ManualInclude]) -> io::Result<()> {
         write_preview("manual_includes", includes)
     }
@@ -440,7 +441,18 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let human = format!("{command}: {} action(s)\n", outcome.actions.len());
+            let mut human = format!("{command}: {} action(s)\n", outcome.actions.len());
+            for finding in &outcome.findings {
+                human.push_str(&format!(
+                    "{}: {}\n",
+                    finding.rule,
+                    finding
+                        .path
+                        .to_path_buf()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                ));
+            }
             let read_only = outcome.dry_run;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, InstallData::success(outcome)),
@@ -454,6 +466,22 @@ fn output_install(
 }
 
 pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
+    if let Some(checkout) = &args.legacy_checkout {
+        match provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, checkout) {
+            Ok(canonical) => args.legacy_checkout = Some(canonical),
+            Err(source) => {
+                return install_error(
+                    "install",
+                    &InstallError::Fs(provenant_supervisor::fs::FsError::Io {
+                        operation: "resolve legacy checkout",
+                        path: checkout.clone(),
+                        source,
+                    }),
+                    globals,
+                );
+            }
+        }
+    }
     let (_environment, mut targets) =
         match selected_targets(globals, &args.harness, args.legacy_checkout.as_deref()) {
             Ok(value) => value,

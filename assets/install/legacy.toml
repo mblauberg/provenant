@@ -221,72 +221,84 @@ disposition = "remove"
 harness = "claude"
 kind = "global_doctrine"
 source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "claude"
 kind = "checkout_doctrine"
 source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "claude"
 kind = "companion"
 source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "codex"
 kind = "global_doctrine"
 source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "codex"
 kind = "checkout_doctrine"
 source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "codex"
 kind = "companion"
 source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "agy"
 kind = "checkout_doctrine"
 source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "agy"
 kind = "companion"
 source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "opencode"
 kind = "checkout_doctrine"
 source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "opencode"
 kind = "companion"
 source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "opencode"
 kind = "opencode_home_doctrine"
 source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
 disposition = "replace"
 
 [[instruction_links]]
 harness = "opencode"
 kind = "opencode_companion"
 source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
 disposition = "replace"
 
 # Git hook links are matched under the verified Git hooks directory by the
@@ -300,6 +312,15 @@ disposition = "replace"
 name = "post-merge"
 source = "scripts/hooks/post-merge"
 disposition = "remove"
+
+# The previous front-door installer owned this exact path and embedded binary
+# identity block. The digest value may vary by build; all other file-form
+# markers are fixed and validated by the compiled matcher.
+[[legacy_shims]]
+path = "{home}/.local/bin/provenant"
+identity_prefix = "\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\nprovenant-front-door source-sha256="
+binary_magic_hex = ["7f454c46", "cffaedfe", "feedfacf", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]
+disposition = "replace"
 
 # The absolute interpreter used by utility_output_hook.py is host-specific.
 # No literal is accepted without a recorded fixture, so the root list remains empty.

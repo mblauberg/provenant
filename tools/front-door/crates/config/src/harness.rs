@@ -12,6 +12,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
+
+fn limits(harness: Harness) -> Limits {
+    Limits {
+        max_bytes: if harness == Harness::Claude {
+            CLAUDE_CONFIG_LIMIT
+        } else {
+            Limits::CONFIG.max_bytes
+        },
+        ..Limits::CONFIG
+    }
+}
+
 pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
     match h {
         Harness::Claude => home.join(".claude.json"),
@@ -72,8 +85,8 @@ fn json_path(selector: &str) -> Result<Vec<&str>, InstallError> {
         .ok_or(InstallError::InvalidConfig("unknown selector"))?;
     Ok(path.split('/').collect())
 }
-fn toml_document(bytes: &[u8]) -> Result<toml_edit::DocumentMut, InstallError> {
-    if bytes.len() as u64 > Limits::CONFIG.max_bytes {
+fn toml_document(bytes: &[u8], limits: Limits) -> Result<toml_edit::DocumentMut, InstallError> {
+    if bytes.len() as u64 > limits.max_bytes {
         return Err(InstallError::InvalidConfig("config byte bound"));
     }
     let text = std::str::from_utf8(bytes)
@@ -81,9 +94,12 @@ fn toml_document(bytes: &[u8]) -> Result<toml_edit::DocumentMut, InstallError> {
     text.parse()
         .map_err(|_| InstallError::InvalidConfig("malformed TOML"))
 }
-fn get(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
+fn get_for(bytes: &[u8], sel: &str, harness: Harness) -> Result<Option<Json>, InstallError> {
+    get_with_limits(bytes, sel, limits(harness))
+}
+fn get_with_limits(bytes: &[u8], sel: &str, limits: Limits) -> Result<Option<Json>, InstallError> {
     if let Some(expected) = sel.strip_prefix("array:") {
-        let value = crate::splice::get(bytes, &["instructions"])?;
+        let value = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
         let Some(array) = value.as_ref().and_then(Json::as_array) else {
             return Ok(None);
         };
@@ -97,7 +113,7 @@ fn get(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
         return Ok(found.first().map(|v| (*v).clone()));
     }
     if let Some(sel) = sel.strip_prefix("toml:") {
-        let doc = toml_document(bytes)?;
+        let doc = toml_document(bytes, limits)?;
         let mut item = doc.as_item();
         for key in sel.split('.') {
             match item.get(key) {
@@ -111,24 +127,42 @@ fn get(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
             .map_err(|_| InstallError::InvalidConfig("unsupported TOML selector"))?;
         Ok(parsed.get("value").cloned())
     } else {
-        crate::splice::get(bytes, &json_path(sel)?)
+        crate::splice::get_with_limits(bytes, &json_path(sel)?, limits)
     }
 }
-fn set(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>, InstallError> {
+fn set_for(
+    bytes: &[u8],
+    sel: &str,
+    value: Option<&Json>,
+    harness: Harness,
+) -> Result<Vec<u8>, InstallError> {
+    set_with_limits(bytes, sel, value, limits(harness))
+}
+fn set_with_limits(
+    bytes: &[u8],
+    sel: &str,
+    value: Option<&Json>,
+    limits: Limits,
+) -> Result<Vec<u8>, InstallError> {
     if let Some(expected) = sel.strip_prefix("array:") {
-        let array = crate::splice::get(bytes, &["instructions"])?;
+        let array = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
         if let Some(index) = array
             .as_ref()
             .and_then(Json::as_array)
             .and_then(|a| a.iter().position(|v| v.as_str() == Some(expected)))
         {
-            return crate::splice::set(bytes, &["instructions", &index.to_string()], value);
+            return crate::splice::set_with_limits(
+                bytes,
+                &["instructions", &index.to_string()],
+                value,
+                limits,
+            );
         }
         return Ok(bytes.to_vec());
     }
 
     if let Some(sel) = sel.strip_prefix("toml:") {
-        let mut doc = toml_document(bytes)?;
+        let mut doc = toml_document(bytes, limits)?;
         let keys: Vec<_> = sel.split('.').collect();
         let (last, parents) = keys
             .split_last()
@@ -136,7 +170,9 @@ fn set(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>, Install
         let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
         for key in parents {
             if !table.contains_key(key) {
-                table.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
+                let mut parent = toml_edit::Table::new();
+                parent.set_implicit(true);
+                table.insert(key, toml_edit::Item::Table(parent));
             }
             table = table
                 .get_mut(key)
@@ -148,27 +184,145 @@ fn set(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>, Install
         if let Some(value) = value {
             let mut encoded = toml_edit::ser::to_document(&json!({"value":value}))
                 .map_err(|_| InstallError::InvalidConfig("cannot encode TOML selector"))?;
-            let item = encoded
+            let mut item = encoded
                 .remove("value")
                 .ok_or(InstallError::InvalidConfig("cannot encode TOML selector"))?;
+            if matches!(table.get(last), Some(toml_edit::Item::Table(_))) {
+                item = toml_edit::Item::Table(
+                    item.into_table()
+                        .map_err(|_| InstallError::InvalidConfig("cannot encode TOML table"))?,
+                );
+            }
+            if let Some(previous) = table.get(last).and_then(item_decor).cloned() {
+                set_item_decor(&mut item, previous);
+            }
             table.insert(last, item);
         } else {
-            table.remove(last);
+            let source = doc.to_string();
+            let mut comments = Vec::new();
+            remove_toml_path(doc.as_table_mut(), &keys, &source, &mut comments)?;
+            if !comments.is_empty() {
+                append_root_comments(doc.as_table_mut(), &comments, &source);
+            }
         }
         let out = doc.to_string().into_bytes();
-        toml_document(&out)?;
+        toml_document(&out, limits)?;
         Ok(out)
     } else {
-        crate::splice::set(bytes, &json_path(sel)?, value)
+        crate::splice::set_with_limits(bytes, &json_path(sel)?, value, limits)
     }
 }
+fn item_decor(item: &toml_edit::Item) -> Option<&toml_edit::Decor> {
+    match item {
+        toml_edit::Item::Table(table) => Some(table.decor()),
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => Some(table.decor()),
+        _ => None,
+    }
+}
+fn set_item_decor(item: &mut toml_edit::Item, decor: toml_edit::Decor) {
+    match item {
+        toml_edit::Item::Table(table) => *table.decor_mut() = decor,
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+            *table.decor_mut() = decor;
+        }
+        _ => {}
+    }
+}
+fn decor_text(decor: Option<&toml_edit::Decor>, source: &str) -> Option<String> {
+    let raw = decor?.prefix()?;
+    raw.as_str().map(str::to_owned).or_else(|| {
+        raw.span()
+            .and_then(|span| source.get(span).map(str::to_owned))
+    })
+}
+fn item_prefix(item: &toml_edit::Item, source: &str) -> Option<String> {
+    match item {
+        toml_edit::Item::Table(table) => decor_text(Some(table.decor()), source),
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+            decor_text(Some(table.decor()), source)
+        }
+        _ => None,
+    }
+}
+fn remove_toml_path(
+    table: &mut dyn toml_edit::TableLike,
+    keys: &[&str],
+    source: &str,
+    comments: &mut Vec<String>,
+) -> Result<(), InstallError> {
+    let (key, tail) = keys
+        .split_first()
+        .ok_or(InstallError::InvalidConfig("empty selector"))?;
+    if tail.is_empty() {
+        if let Some(item) = table.get(key)
+            && let Some(prefix) = item_prefix(item, source)
+            && prefix.contains('#')
+        {
+            comments.push(prefix);
+        }
+        table.remove(key);
+        return Ok(());
+    }
+    let empty = {
+        let Some(child) = table.get_mut(key) else {
+            return Ok(());
+        };
+        let child = child
+            .as_table_like_mut()
+            .ok_or(InstallError::InvalidConfig(
+                "selector parent is not a table",
+            ))?;
+        remove_toml_path(child, tail, source, comments)?;
+        child.iter().next().is_none()
+    };
+    if empty {
+        if let Some(item) = table.get(key)
+            && let Some(prefix) = item_prefix(item, source)
+            && prefix.contains('#')
+        {
+            comments.push(prefix);
+        }
+        table.remove(key);
+    }
+    Ok(())
+}
+fn append_root_comments(root: &mut toml_edit::Table, comments: &[String], source: &str) {
+    let mut suffix = root
+        .decor()
+        .suffix()
+        .and_then(|raw| {
+            raw.as_str().map(str::to_owned).or_else(|| {
+                raw.span()
+                    .and_then(|span| source.get(span).map(str::to_owned))
+            })
+        })
+        .unwrap_or_default();
+    for comment in comments {
+        suffix.push_str(comment);
+    }
+    root.decor_mut().set_suffix(suffix);
+}
 fn file(snapshot: &Option<Snapshot>, path: &Path) -> Result<(Vec<u8>, u64), InstallError> {
+    file_with_limits(snapshot, path, Limits::CONFIG)
+}
+fn file_for(
+    snapshot: &Option<Snapshot>,
+    path: &Path,
+    harness: Harness,
+) -> Result<(Vec<u8>, u64), InstallError> {
+    file_with_limits(snapshot, path, limits(harness))
+}
+fn file_with_limits(
+    snapshot: &Option<Snapshot>,
+    path: &Path,
+    limits: Limits,
+) -> Result<(Vec<u8>, u64), InstallError> {
     match snapshot {
         None => Ok((b"{}\n".to_vec(), 0o600)),
         Some(Snapshot {
             value: Value::File { bytes, mode },
             ..
-        }) if bytes.len() as u64 <= Limits::CONFIG.max_bytes => Ok((bytes.clone(), *mode)),
+        }) if bytes.len() as u64 <= limits.max_bytes => Ok((bytes.clone(), *mode)),
         _ => Err(InstallError::ConfigFile(path.into())),
     }
 }
@@ -178,6 +332,7 @@ pub(crate) struct HarnessPlan {
     pub removals: BTreeSet<PathBuf>,
     pub owned: Vec<OwnedEntry>,
     pub changes: BTreeMap<PathBuf, Vec<SelectorChange>>,
+    pub findings: Vec<managed::InstallFinding>,
     pub authorised: BTreeSet<PathBuf>,
 }
 fn capture_one(
@@ -192,6 +347,7 @@ fn capture_one(
     entries.insert(path.into(), s.clone());
     Ok(s)
 }
+
 fn expected_previous(
     receipt: Option<&InstallReceipt>,
     path: &AbsolutePath,
@@ -217,27 +373,26 @@ pub(crate) fn capture(
     fs: &dyn SafeFs,
 ) -> Result<HarnessPlan, InstallError> {
     let mut plan = HarnessPlan::default();
-    let root = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(release.manifest().source_digest.to_string());
+    let checkout = &targets.legacy_checkout;
+    let root = managed::release_root(
+        targets.roots.state.as_path(),
+        release.manifest().source_digest,
+    );
     for target in &targets.harnesses {
         let path = &target.mcp_file;
         let snap = capture_one(path, entries, fs)?;
-        let (mut bytes, mode) = file(&snap, path)?;
+        let (mut bytes, mode) = file_for(&snap, path, target.harness)?;
         if snap.is_none() && target.harness == Harness::Codex {
             bytes.clear();
         }
         let sel = selector(target.harness);
-        let before = get(&bytes, sel)?;
+        let before = get_for(&bytes, sel, target.harness)?;
         let want = mcp(target.harness, targets)?;
         let wire = AbsolutePath::new(path)?;
         if before.as_ref() != Some(&want) {
             if let Some(current) = &before {
-                let legacy = targets.legacy_checkout.as_ref().is_some_and(|checkout| {
-                    crate::legacy::mcp_matches(current, target.harness, &targets.home, checkout)
+                let legacy = checkout.as_ref().is_some_and(|_| {
+                    crate::legacy::mcp_matches(current, target.harness, &targets.home)
                 });
                 if !legacy
                     && !expected_previous(previous, &wire, sel, current)
@@ -246,7 +401,7 @@ pub(crate) fn capture(
                     return Err(InstallError::Conflict(path.clone()));
                 }
             }
-            bytes = set(&bytes, sel, Some(&want))?;
+            bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
             plan.changes
                 .entry(path.clone())
                 .or_default()
@@ -262,14 +417,20 @@ pub(crate) fn capture(
             selector: sel.into(),
             expected: OwnedValue::Selector { value: want },
         });
-        if let Some(checkout) = &targets.legacy_checkout
+        if let Some(checkout) = checkout.as_deref()
             && let Some(hook) = &target.hook_file
         {
             let hook_snapshot = capture_one(hook, entries, fs)?;
             if hook_snapshot.is_some() {
                 let (old, hook_mode) = file(&hook_snapshot, hook)?;
-                let (updated, changes) =
-                    crate::legacy::clean_hooks(&old, target.harness, &targets.home, checkout)?;
+                let (updated, changes, unresolved) =
+                    crate::legacy::clean_hooks(&old, target.harness, checkout)?;
+                if !unresolved.is_empty() {
+                    plan.findings.push(managed::InstallFinding {
+                        rule: "legacy_entry".into(),
+                        path: AbsolutePath::new(hook)?,
+                    });
+                }
                 if updated != old {
                     plan.files.insert(
                         hook.clone(),
@@ -288,17 +449,19 @@ pub(crate) fn capture(
                 let array = array
                     .as_array()
                     .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-                for asset in ["instructions/AGENTS.md", "instructions/HARNESS.md"] {
-                    let path_value = root.join(asset);
-                    let Some(text) = path_value.to_str() else {
-                        return Err(InstallError::InvalidConfig(
-                            "instruction path requires UTF-8",
-                        ));
-                    };
-                    if array.iter().filter(|v| v.as_str() == Some(text)).count() > 1 {
+                for asset in crate::legacy::instruction_assets(target.harness)? {
+                    let path_value = root.join(&asset);
+                    let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
+                        "instruction path requires UTF-8",
+                    ))?;
+                    let count = array.iter().filter(|v| v.as_str() == Some(text)).count();
+                    if count > 1 {
                         return Err(InstallError::InvalidConfig("duplicate owned instruction"));
                     }
-                    if array.iter().any(|v| v.as_str() == Some(text)) {
+                    if count == 1 {
+                        if !release.files.contains_key(&asset) {
+                            return Err(InstallError::Manifest("missing instruction asset"));
+                        }
                         plan.owned.push(OwnedEntry {
                             path: AbsolutePath::new(path)?,
                             harness: Some(target.harness),
@@ -319,7 +482,7 @@ pub(crate) fn capture(
             plan.files.insert(path.clone(), Value::File { bytes, mode });
         }
     }
-    if let Some(checkout) = &targets.legacy_checkout {
+    if let Some(checkout) = checkout.as_deref() {
         legacy_links(release, targets, checkout, entries, &mut plan, fs)?;
         instruction_rewrite(release, targets, checkout, previous, entries, &mut plan, fs)?;
     }
@@ -357,7 +520,13 @@ pub(crate) fn entry_matches(value: &Value, entry: &OwnedEntry) -> Result<bool, I
         let Value::File { bytes, .. } = value else {
             return Err(InstallError::ConfigFile(entry.path.to_path_buf()?));
         };
-        Ok(get(bytes, &entry.selector)?.as_ref() == Some(expected))
+        Ok(get_for(
+            bytes,
+            &entry.selector,
+            entry.harness.unwrap_or(Harness::Codex),
+        )?
+        .as_ref()
+            == Some(expected))
     } else {
         Ok(managed::matches_owned(value, &entry.expected))
     }
@@ -372,8 +541,9 @@ pub(crate) fn remove_selector(
     let Value::File { bytes, mode } = value else {
         return Ok(None);
     };
-    let before = get(bytes, &entry.selector)?;
-    let out = set(bytes, &entry.selector, None)?;
+    let harness = entry.harness.unwrap_or(Harness::Codex);
+    let before = get_for(bytes, &entry.selector, harness)?;
+    let out = set_for(bytes, &entry.selector, None, harness)?;
     Ok(Some((
         Value::File {
             bytes: out,
@@ -395,26 +565,30 @@ pub(crate) fn snapshot_target(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<Snapshot>, InstallError> {
-    for target in &targets.harnesses {
-        for (directory, tail) in [
-            (target.skills_dir.clone(), "skills"),
-            (target.skills_dir.with_file_name("workflows"), "workflows"),
-        ] {
-            if path != directory
-                && path.starts_with(&directory)
-                && let Some(Snapshot {
-                    value: Value::Link(link),
-                    ..
-                }) = managed::snapshot(&directory, fs)?
-            {
-                if targets
-                    .legacy_checkout
-                    .as_ref()
-                    .is_some_and(|checkout| link == checkout.join(tail))
+    if let Some(checkout) = &targets.legacy_checkout {
+        for target in &targets.harnesses {
+            for link in crate::legacy::legacy_links(&targets.home, checkout, target)? {
+                use crate::legacy::LegacyArea;
+                let directory = match (link.area, link.name.is_empty()) {
+                    (LegacyArea::Skills, true) => Some(target.skills_dir.clone()),
+                    (LegacyArea::Workflows, true) => {
+                        Some(target.skills_dir.with_file_name("workflows"))
+                    }
+                    _ => None,
+                };
+                if let Some(directory) = directory
+                    && path != directory
+                    && path.starts_with(&directory)
+                    && let Some(Snapshot {
+                        value: Value::Link(actual),
+                        ..
+                    }) = managed::snapshot(&directory, fs)?
                 {
-                    return Ok(None);
+                    if actual == link.target {
+                        return Ok(None);
+                    }
+                    return Err(InstallError::Conflict(directory));
                 }
-                return Err(InstallError::Conflict(directory));
             }
         }
     }
@@ -428,36 +602,42 @@ fn rewrite_instruction_array(
     plan: &mut HarnessPlan,
     path: &Path,
 ) -> Result<Vec<u8>, InstallError> {
-    let root = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(release.manifest().source_digest.to_string());
+    let root = managed::release_root(
+        targets.roots.state.as_path(),
+        release.manifest().source_digest,
+    );
     let Some(array) = crate::splice::get(bytes, &["instructions"])? else {
         return Ok(bytes.to_vec());
     };
     let array = array
         .as_array()
         .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-    let legacy = if let Some(checkout) = &targets.legacy_checkout {
-        let target = targets
-            .harnesses
-            .iter()
-            .find(|target| target.harness == Harness::Opencode)
-            .ok_or(InstallError::HarnessSelection)?;
+    let target = targets
+        .harnesses
+        .iter()
+        .find(|target| target.harness == Harness::Opencode)
+        .ok_or(InstallError::HarnessSelection)?;
+    let legacy = if let Some(checkout) = targets.legacy_checkout.as_deref() {
         crate::legacy::legacy_links(&targets.home, checkout, target)?
     } else {
         Vec::new()
     };
+    // The receipt can identify prior managed release paths without authorising
+    // writes to a legacy checkout. Asset names come from the manifest itself.
+    let assets = crate::legacy::instruction_assets(Harness::Opencode)?;
+    let old_root = previous
+        .map(|receipt| managed::release_root(targets.roots.state.as_path(), receipt.source_digest));
     let mut out = bytes.to_vec();
     // Reverse order keeps recorded array indices valid for removals.
     for (i, value) in array.iter().enumerate().rev() {
         let mut asset = None;
+        let mut matched_legacy = false;
+        let mut matched_receipt = false;
         if let Some(link) = legacy.iter().find(|link| {
             link.area == crate::legacy::LegacyArea::OpenCodeInstruction
                 && value.as_str() == link.target.to_str()
         }) {
+            matched_legacy = true;
             if !link.retained {
                 out = crate::splice::set(&out, &["instructions", &i.to_string()], None)?;
                 plan.changes
@@ -470,61 +650,90 @@ fn rewrite_instruction_array(
                     });
                 continue;
             }
-            asset = Some(match link.name.as_str() {
-                "home-doctrine" => "instructions/AGENTS.md",
-                "companion" => "instructions/HARNESS.md",
-                _ => return Err(InstallError::Manifest("unsupported legacy instruction")),
-            });
+            asset = link.replacement_asset.clone();
         }
-        if let Some(receipt) = previous {
-            for entry in &receipt.entries {
-                if entry.path.to_path_buf().is_ok_and(|p| p == path)
+        if let (Some(receipt), Some(old_root), Some(text)) =
+            (previous, old_root.as_ref(), value.as_str())
+            && receipt.entries.iter().any(|entry| {
+                entry
+                    .path
+                    .to_path_buf()
+                    .is_ok_and(|owned_path| owned_path == path)
                     && entry.harness == Some(Harness::Opencode)
                     && entry.selector.starts_with("array:")
                     && entry.expected
                         == (OwnedValue::Selector {
                             value: value.clone(),
                         })
-                    && let Some(text) = value.as_str()
-                {
-                    let old_root = targets
-                        .roots
-                        .state
-                        .as_path()
-                        .join("releases")
-                        .join(receipt.source_digest.to_string());
-                    for candidate in ["instructions/AGENTS.md", "instructions/HARNESS.md"] {
-                        if Path::new(text) == old_root.join(candidate) {
-                            asset = Some(candidate);
-                        }
-                    }
+            })
+        {
+            if array.iter().filter(|candidate| *candidate == value).count() > 1 {
+                return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+            }
+            for candidate in &assets {
+                if Path::new(text) == old_root.join(candidate) {
+                    asset = Some(candidate.clone());
+                    matched_receipt = true;
                 }
             }
         }
         if let Some(asset) = asset {
-            if !release.files.contains_key(Path::new(asset)) {
+            if !release.files.contains_key(&asset) {
                 return Err(InstallError::Manifest("missing instruction asset"));
             }
-            let new = root.join(asset);
-            let new = new.to_str().ok_or(InstallError::InvalidConfig(
+            let new_path = root.join(&asset);
+            let new_text = new_path.to_str().ok_or(InstallError::InvalidConfig(
                 "instruction path requires UTF-8",
             ))?;
-            let after = json!(new);
+            let duplicate_new = array
+                .iter()
+                .enumerate()
+                .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));
             let index = i.to_string();
-            if &after != value {
-                out = crate::splice::set(&out, &["instructions", &index], Some(&after))?;
+            if duplicate_new && (matched_receipt || matched_legacy) {
+                out = crate::splice::set(&out, &["instructions", &index], None)?;
                 plan.changes
                     .entry(path.into())
                     .or_default()
                     .push(SelectorChange {
                         selector: format!("json:/instructions/{i}"),
                         before: Some(value.clone()),
-                        after: Some(after),
+                        after: None,
                     });
+            } else {
+                let after = json!(new_text);
+                if &after != value {
+                    out = crate::splice::set(&out, &["instructions", &index], Some(&after))?;
+                    plan.changes
+                        .entry(path.into())
+                        .or_default()
+                        .push(SelectorChange {
+                            selector: format!("json:/instructions/{i}"),
+                            before: Some(value.clone()),
+                            after: Some(after),
+                        });
+                }
             }
         }
     }
     Ok(out)
+}
+
+fn rewrite_legacy_variable_lines(text: &str) -> (String, Vec<SelectorChange>) {
+    let mut updated = String::with_capacity(text.len());
+    let mut changes = Vec::new();
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let rewritten = line.replace("AGENT_FABRIC_LABEL", "PROVENANT_AGENT_LABEL");
+        if rewritten != line {
+            changes.push(SelectorChange {
+                selector: format!("line {}", index + 1),
+                before: Some(json!(line)),
+                after: Some(json!(rewritten)),
+            });
+        }
+        updated.push_str(&rewritten);
+    }
+    (updated, changes)
 }
 
 fn instruction_rewrite(
@@ -553,34 +762,26 @@ fn instruction_rewrite(
             Value::File { bytes, mode } => {
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|_| InstallError::InvalidConfig("instruction is not UTF-8"))?;
-                let updated = text
-                    .replace("AGENT_FABRIC_LABEL", "PROVENANT_AGENT_LABEL")
-                    .into_bytes();
-                if updated != bytes {
+                let (updated, changes) = rewrite_legacy_variable_lines(text);
+                if !changes.is_empty() {
                     plan.files.insert(
                         global.clone(),
                         Value::File {
-                            bytes: updated,
+                            bytes: updated.into_bytes(),
                             mode,
                         },
                     );
-                    plan.changes.insert(
-                        global.clone(),
-                        vec![SelectorChange {
-                            selector: "instruction variable".into(),
-                            before: Some(json!("AGENT_FABRIC_LABEL")),
-                            after: Some(json!("PROVENANT_AGENT_LABEL")),
-                        }],
-                    );
+                    plan.changes
+                        .entry(global.clone())
+                        .or_default()
+                        .extend(changes);
                 }
             }
             Value::Link(link) if link == checkout.join("AGENTS.md") => {
-                let root = targets
-                    .roots
-                    .state
-                    .as_path()
-                    .join("releases")
-                    .join(release.manifest().source_digest.to_string());
+                let root = managed::release_root(
+                    targets.roots.state.as_path(),
+                    release.manifest().source_digest,
+                );
                 if !release
                     .files
                     .contains_key(Path::new("instructions/AGENTS.md"))
@@ -592,21 +793,17 @@ fn instruction_rewrite(
             }
             Value::Link(link)
                 if link
-                    == targets
-                        .roots
-                        .state
-                        .as_path()
-                        .join("releases")
-                        .join(release.manifest().source_digest.to_string())
-                        .join("instructions/AGENTS.md")
+                    == managed::release_root(
+                        targets.roots.state.as_path(),
+                        release.manifest().source_digest,
+                    )
+                    .join("instructions/AGENTS.md")
                     || previous.is_some_and(|p| {
-                        link == targets
-                            .roots
-                            .state
-                            .as_path()
-                            .join("releases")
-                            .join(p.source_digest.to_string())
-                            .join("instructions/AGENTS.md")
+                        link == managed::release_root(
+                            targets.roots.state.as_path(),
+                            p.source_digest,
+                        )
+                        .join("instructions/AGENTS.md")
                     }) => {}
             _ => return Err(InstallError::Conflict(global)),
         }
@@ -678,10 +875,6 @@ impl Targets {
         Ok(())
     }
 }
-pub fn apply_install_config(targets: &mut Targets, fs: &dyn SafeFs) -> Result<(), InstallError> {
-    apply_install_config_with_domains(targets, fs, &crate::domains::NO_DOMAINS)
-}
-
 pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serialize>(
     targets: &mut Targets,
     fs: &dyn SafeFs,
@@ -690,12 +883,13 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     // `load` accepts a bounded optional reader and validates the entire user
     // configuration; no unrelated domain policy is interpreted by installation.
     let path = targets.roots.state.as_path().join("config.toml");
+    let snapshot = managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?;
     let Some(Snapshot {
         value: Value::File { bytes, .. },
         ..
-    }) = managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?
+    }) = snapshot
     else {
-        if managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?.is_some() {
+        if snapshot.is_some() {
             return Err(InstallError::ConfigFile(path));
         }
         return Ok(());
@@ -729,6 +923,48 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     Ok(())
 }
 
+fn legacy_destination(
+    target: &managed::HarnessTarget,
+    link: &crate::legacy::LegacyLink,
+    git_hooks_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    use crate::legacy::LegacyArea;
+    match link.area {
+        LegacyArea::Skills => Some(target.skills_dir.join(&link.name)),
+        LegacyArea::Workflows => Some(
+            target
+                .skills_dir
+                .with_file_name("workflows")
+                .join(&link.name),
+        ),
+        LegacyArea::Instruction | LegacyArea::GlobalInstruction => target.instruction.clone(),
+        LegacyArea::Companion => target
+            .instruction
+            .as_ref()
+            .map(|path| path.with_file_name(&link.name)),
+        LegacyArea::GitHook => git_hooks_dir.map(|path| path.join(&link.name)),
+        LegacyArea::OpenCodeInstruction => None,
+    }
+}
+
+fn add_finding(
+    findings: &mut Vec<managed::InstallFinding>,
+    rule: &str,
+    path: &Path,
+) -> Result<(), InstallError> {
+    let path = AbsolutePath::new(path)?;
+    if !findings
+        .iter()
+        .any(|finding| finding.rule == rule && finding.path == path)
+    {
+        findings.push(managed::InstallFinding {
+            rule: rule.into(),
+            path,
+        });
+    }
+    Ok(())
+}
+
 fn legacy_links(
     release: &Release,
     targets: &Targets,
@@ -740,27 +976,9 @@ fn legacy_links(
     for target in &targets.harnesses {
         for link in crate::legacy::legacy_links(&targets.home, checkout, target)? {
             use crate::legacy::LegacyArea;
-            let path = match link.area {
-                LegacyArea::Skills => target.skills_dir.join(&link.name),
-                LegacyArea::Workflows => target
-                    .skills_dir
-                    .with_file_name("workflows")
-                    .join(&link.name),
-                LegacyArea::Instruction | LegacyArea::GlobalInstruction => {
-                    match &target.instruction {
-                        Some(p) => p.clone(),
-                        None => continue,
-                    }
-                }
-                LegacyArea::Companion => match &target.instruction {
-                    Some(p) => p.with_file_name("HARNESS.md"),
-                    None => continue,
-                },
-                LegacyArea::GitHook => match &targets.git_hooks_dir {
-                    Some(p) => p.join(&link.name),
-                    None => continue,
-                },
-                LegacyArea::OpenCodeInstruction => continue,
+            let Some(path) = legacy_destination(target, &link, targets.git_hooks_dir.as_deref())
+            else {
+                continue;
             };
             let snap = if let Some(s) = entries.get(&path) {
                 s.clone()
@@ -769,6 +987,24 @@ fn legacy_links(
                 entries.insert(path.clone(), s.clone());
                 s
             };
+            if link.area == LegacyArea::GitHook {
+                match snap {
+                    Some(Snapshot {
+                        value: Value::Link(actual),
+                        ..
+                    }) if actual == link.target => {
+                        if link.retained {
+                            add_finding(&mut plan.findings, "legacy_entry", &path)?;
+                        } else {
+                            plan.authorised.insert(path.clone());
+                            plan.removals.insert(path);
+                        }
+                    }
+                    Some(_) => add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?,
+                    None => {}
+                }
+                continue;
+            }
             if let Some(Snapshot {
                 value: Value::Link(actual),
                 ..
@@ -776,9 +1012,7 @@ fn legacy_links(
                 && actual == link.target
             {
                 plan.authorised.insert(path.clone());
-                if !link.retained || matches!(link.area, LegacyArea::GitHook) {
-                    // Hooks are off; retained handlers cannot register until
-                    // CLI owns a fixture-backed HookSpec.
+                if !link.retained {
                     plan.removals.insert(path);
                 } else {
                     let replacement = match link.area {
@@ -804,10 +1038,9 @@ fn legacy_links(
                                 Some(library)
                             }
                         }
-                        LegacyArea::Instruction | LegacyArea::GlobalInstruction => {
-                            Some(PathBuf::from("instructions/AGENTS.md"))
-                        }
-                        LegacyArea::Companion => Some(PathBuf::from("instructions/HARNESS.md")),
+                        LegacyArea::Instruction
+                        | LegacyArea::GlobalInstruction
+                        | LegacyArea::Companion => link.replacement_asset.clone(),
                         _ => return Err(InstallError::Manifest("unsupported legacy replacement")),
                     };
                     if replacement.is_some_and(|asset| !release.files.contains_key(&asset)) {
@@ -850,25 +1083,16 @@ pub(crate) fn check_legacy(
         };
         let mut blocked = Vec::new();
         let links = crate::legacy::legacy_links(&home, &checkout, &target)?;
-        for link in links {
+        for link in &links {
             use crate::legacy::LegacyArea;
-            let path = match link.area {
-                LegacyArea::Skills => target.skills_dir.join(&link.name),
-                LegacyArea::Workflows => target
-                    .skills_dir
-                    .with_file_name("workflows")
-                    .join(&link.name),
-                LegacyArea::Instruction | LegacyArea::GlobalInstruction => {
-                    match &target.instruction {
-                        Some(p) => p.clone(),
-                        None => continue,
-                    }
-                }
-                LegacyArea::Companion => match &target.instruction {
-                    Some(p) => p.with_file_name("HARNESS.md"),
-                    None => continue,
-                },
-                _ => continue,
+            if matches!(
+                link.area,
+                LegacyArea::GitHook | LegacyArea::OpenCodeInstruction
+            ) {
+                continue;
+            }
+            let Some(path) = legacy_destination(&target, link, None) else {
+                continue;
             };
             if blocked
                 .iter()
@@ -887,36 +1111,32 @@ pub(crate) fn check_legacy(
                     blocked.push(path.clone());
                 }
                 if actual == link.target {
-                    findings.push(managed::InstallFinding {
-                        rule: "legacy_entry".into(),
-                        path: AbsolutePath::new(&path)?,
-                    });
+                    add_finding(findings, "legacy_entry", &path)?;
                 }
             }
         }
         let config = managed::snapshot(&target.mcp_file, fs)?;
         managed::digest_snapshot(basis, &target.mcp_file, &config)?;
         if config.is_some() {
-            let (bytes, _) = file(&config, &target.mcp_file)?;
-            let old_mcp = get(&bytes, selector(target.harness))?
-                .is_some_and(|v| crate::legacy::mcp_matches(&v, target.harness, &home, &checkout));
+            let (bytes, _) = file_for(&config, &target.mcp_file, target.harness)?;
+            let old_mcp = get_for(&bytes, selector(target.harness), target.harness)?
+                .is_some_and(|v| crate::legacy::mcp_matches(&v, target.harness, &home));
             let old_array = if target.harness == Harness::Opencode {
                 crate::splice::get(&bytes, &["instructions"])?
                     .and_then(|v| v.as_array().cloned())
-                    .is_some_and(|a| {
-                        a.iter().any(|v| {
-                            v.as_str() == home.join(".agents/AGENTS.md").to_str()
-                                || v.as_str() == checkout.join("HARNESS.md").to_str()
+                    .is_some_and(|array| {
+                        array.iter().any(|value| {
+                            links.iter().any(|link| {
+                                link.area == crate::legacy::LegacyArea::OpenCodeInstruction
+                                    && value.as_str() == link.target.to_str()
+                            })
                         })
                     })
             } else {
                 false
             };
             if old_mcp || old_array {
-                findings.push(managed::InstallFinding {
-                    rule: "legacy_entry".into(),
-                    path: AbsolutePath::new(&target.mcp_file)?,
-                });
+                add_finding(findings, "legacy_entry", &target.mcp_file)?;
             }
         }
         for path in target.hook_file.iter() {
@@ -924,13 +1144,15 @@ pub(crate) fn check_legacy(
             managed::digest_snapshot(basis, path, &current)?;
             if current.is_some() {
                 let (bytes, _) = file(&current, path)?;
-                let (new, _) =
-                    crate::legacy::clean_hooks(&bytes, target.harness, &home, &checkout)?;
-                if new != bytes {
-                    findings.push(managed::InstallFinding {
-                        rule: "legacy_entry".into(),
-                        path: AbsolutePath::new(path)?,
-                    });
+                match crate::legacy::clean_hooks(&bytes, target.harness, &checkout) {
+                    Ok((new, _, unresolved)) if new != bytes || !unresolved.is_empty() => {
+                        add_finding(findings, "legacy_entry", path)?;
+                    }
+                    Ok(_) => {}
+                    Err(InstallError::LegacyUnresolved(_)) => {
+                        add_finding(findings, "legacy_entry", path)?;
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -938,19 +1160,19 @@ pub(crate) fn check_legacy(
     if let Some(directory) = &legacy.git_hooks_dir {
         let directory = directory.to_path_buf()?;
         managed::normal_absolute(&directory)?;
-        for (name, source) in [
-            ("pre-push", "scripts/hooks/pre-push"),
-            ("post-merge", "scripts/hooks/post-merge"),
-        ] {
-            let path = directory.join(name);
+        for link in crate::legacy::git_hook_links(&checkout)? {
+            let path = directory.join(&link.name);
             let current = managed::snapshot(&path, fs)?;
             managed::digest_snapshot(basis, &path, &current)?;
-            if matches!(current,Some(Snapshot{value:Value::Link(ref target),..}) if target==&checkout.join(source))
-            {
-                findings.push(managed::InstallFinding {
-                    rule: "legacy_entry".into(),
-                    path: AbsolutePath::new(&path)?,
-                });
+            match current {
+                Some(Snapshot {
+                    value: Value::Link(actual),
+                    ..
+                }) if actual == link.target => {
+                    add_finding(findings, "legacy_entry", &path)?;
+                }
+                Some(_) => add_finding(findings, "legacy_hook_conflict", &path)?,
+                None => {}
             }
         }
     }
@@ -959,10 +1181,7 @@ pub(crate) fn check_legacy(
     managed::digest_snapshot(basis, &path, &current)?;
     if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if link==&checkout.join("AGENTS.md"))
     {
-        findings.push(managed::InstallFinding {
-            rule: "legacy_entry".into(),
-            path: AbsolutePath::new(&path)?,
-        });
+        add_finding(findings, "legacy_entry", &path)?;
     }
     if let Some(Snapshot {
         value: Value::File { bytes, .. },
@@ -972,10 +1191,66 @@ pub(crate) fn check_legacy(
             .windows(b"AGENT_FABRIC_LABEL".len())
             .any(|s| s == b"AGENT_FABRIC_LABEL")
     {
-        findings.push(managed::InstallFinding {
-            rule: "legacy_instruction_variable".into(),
-            path: AbsolutePath::new(&path)?,
-        });
+        add_finding(findings, "legacy_instruction_variable", &path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rewrite_legacy_variable_lines, set_with_limits};
+    use crate::managed::SelectorChange;
+    use provenant_records::Limits;
+    use serde_json::json;
+
+    #[test]
+    fn fabric_table_comments_survive_replacement_and_removal_without_empty_tables() {
+        let before = b"# fabric table note\n[mcp_servers.fabric]\ncommand = 'old'\n[mcp_servers.fabric.env]\n[mcp_servers.other]\ncommand = 'keep'\n";
+        let replacement = json!({"command": "/new/provenant", "env": {}});
+        let replaced = set_with_limits(
+            before,
+            "toml:mcp_servers.fabric",
+            Some(&replacement),
+            Limits::CONFIG,
+        )
+        .expect("selector replacement should preserve valid TOML");
+        let replaced = String::from_utf8(replaced).expect("TOML remains UTF-8");
+        assert!(replaced.contains("# fabric table note"));
+        assert!(replaced.contains("[mcp_servers.fabric]"));
+        assert!(replaced.contains("[mcp_servers.other]"));
+        assert!(!replaced.contains("[mcp_servers.fabric.env]"));
+
+        let removed = set_with_limits(before, "toml:mcp_servers.fabric", None, Limits::CONFIG)
+            .expect("selector removal should preserve valid TOML");
+        let removed = String::from_utf8(removed).expect("TOML remains UTF-8");
+        assert!(removed.contains("# fabric table note"));
+        assert!(removed.contains("[mcp_servers.other]"));
+        assert!(!removed.contains("[mcp_servers.fabric"));
+        assert!(!removed.contains("[mcp_servers]"));
+    }
+
+    #[test]
+    fn instruction_preview_records_each_changed_line_exactly() {
+        let before = "first AGENT_FABRIC_LABEL\r\nAGENT_FABRIC_LABEL and again\nunchanged";
+        let (after, changes) = rewrite_legacy_variable_lines(before);
+        assert_eq!(
+            after,
+            "first PROVENANT_AGENT_LABEL\r\nPROVENANT_AGENT_LABEL and again\nunchanged"
+        );
+        assert_eq!(
+            changes,
+            vec![
+                SelectorChange {
+                    selector: "line 1".into(),
+                    before: Some(json!("first AGENT_FABRIC_LABEL\r\n")),
+                    after: Some(json!("first PROVENANT_AGENT_LABEL\r\n")),
+                },
+                SelectorChange {
+                    selector: "line 2".into(),
+                    before: Some(json!("AGENT_FABRIC_LABEL and again\n")),
+                    after: Some(json!("PROVENANT_AGENT_LABEL and again\n")),
+                },
+            ]
+        );
+    }
 }

@@ -334,12 +334,16 @@ pub struct InstallPlan {
     manual_includes: Vec<ManualInclude>,
 }
 impl InstallPlan {
+    pub fn findings(&self) -> &[InstallFinding] {
+        &self.before.harness.findings
+    }
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }
 }
 #[derive(Debug, Serialize)]
 pub struct InstallOutcome {
+    pub findings: Vec<InstallFinding>,
     pub actions: Vec<Action>,
     pub manual_includes: Vec<ManualInclude>,
     pub dry_run: bool,
@@ -352,6 +356,9 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
+    fn findings(&mut self, _findings: &[InstallFinding]) -> std::io::Result<()> {
+        Ok(())
+    }
     fn preview(&mut self, actions: &[Action]) -> std::io::Result<()>;
     fn manual_includes(&mut self, _includes: &[ManualInclude]) -> std::io::Result<()> {
         Ok(())
@@ -373,12 +380,10 @@ impl Snapshots {
         let desired = desired(release, targets)?;
         let snapshot =
             |path: &Path, fs: &dyn SafeFs| snapshot_scoped(path, targets.roots.state.as_path(), fs);
-        let installed = targets
-            .roots
-            .state
-            .as_path()
-            .join("releases")
-            .join(release.manifest.source_digest.to_string());
+        let installed = release_root(
+            targets.roots.state.as_path(),
+            release.manifest.source_digest,
+        );
         let manifest_path = installed.join("release.json");
         let manifest_snapshot = snapshot(&manifest_path, fs)?;
         let completed = match &manifest_snapshot {
@@ -482,12 +487,10 @@ fn desired(
     targets: &Targets,
 ) -> Result<BTreeMap<PathBuf, Desired>, InstallError> {
     targets.validate()?;
-    let root = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(release.manifest.source_digest.to_string());
+    let root = release_root(
+        targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
     let mut result = BTreeMap::new();
     let mut insert =
         |p: PathBuf, value: Value, harness, selector: String| -> Result<(), InstallError> {
@@ -614,6 +617,46 @@ fn desired(
     }
     Ok(result)
 }
+pub(crate) fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> PathBuf {
+    state.join("releases").join(digest.to_string())
+}
+
+fn validate_removal(
+    path: &Path,
+    targets: &Targets,
+    source: Option<&Path>,
+    before: &Option<Snapshot>,
+) -> Result<(), InstallError> {
+    normal_absolute(path)?;
+    // The composition edge resolves this directory from the explicit checkout.
+    // Only a manifest-listed link to that checkout receives the exception.
+    let git_hook = match (&targets.legacy_checkout, &targets.git_hooks_dir, before) {
+        (
+            Some(checkout),
+            Some(directory),
+            Some(Snapshot {
+                value: Value::Link(actual),
+                ..
+            }),
+        ) => crate::legacy::git_hook_links(checkout)?
+            .iter()
+            .any(|link| path == directory.join(&link.name) && actual == &link.target),
+        _ => false,
+    };
+    if path.starts_with(targets.roots.state.as_path())
+        || source.is_some_and(|root| path.starts_with(root) || root.starts_with(path))
+        || (!git_hook
+            && targets
+                .protected_roots
+                .iter()
+                .chain(targets.legacy_checkout.iter())
+                .any(|root| path.starts_with(root)))
+    {
+        return Err(InstallError::Conflict(path.into()));
+    }
+    Ok(())
+}
+
 pub(crate) fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
     match value {
         Value::File { bytes, mode } => Ok(OwnedValue::File {
@@ -701,12 +744,10 @@ pub fn plan_install(
                     }
                     continue;
                 }
-                let release_root = targets
-                    .roots
-                    .state
-                    .as_path()
-                    .join("releases")
-                    .join(release.manifest.source_digest.to_string());
+                let release_root = release_root(
+                    targets.roots.state.as_path(),
+                    release.manifest.source_digest,
+                );
                 let complete = snapshots
                     .entries
                     .get(&release_root.join("release.json"))
@@ -714,7 +755,12 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                let legacy = snapshots.harness.authorised.contains(path);
+                let legacy = snapshots.harness.authorised.contains(path)
+                    || (want.selector == "binary"
+                        && targets.legacy_checkout.is_some()
+                        && crate::legacy::legacy_shim(&targets.home)?
+                            .is_some_and(|shim| shim.retained && &shim.path == path)
+                        && matches!(&current.value, Value::File { bytes, .. } if crate::legacy::legacy_shim_matches(bytes)));
                 if !immutable && !was_owned && !adopt_binary && !legacy && want.selector != "config"
                 {
                     return Err(InstallError::Conflict(path.clone()));
@@ -815,6 +861,16 @@ pub fn plan_install(
                 identity: identity(before),
                 edits: Vec::new(),
             });
+        }
+    }
+    for action in &actions {
+        if action.disposition == Disposition::Remove {
+            let path = action.path.to_path_buf()?;
+            let before = snapshots
+                .entries
+                .get(&path)
+                .ok_or_else(|| InstallError::Drift(path.clone()))?;
+            validate_removal(&path, &targets, Some(&release.source), before)?;
         }
     }
     for action in &mut actions {
@@ -966,8 +1022,12 @@ pub fn install(
     reporter
         .manual_includes(&plan.manual_includes)
         .map_err(InstallError::Preview)?;
+    reporter
+        .findings(plan.findings())
+        .map_err(InstallError::Preview)?;
     if dry_run {
         return Ok(InstallOutcome {
+            findings: plan.findings().to_vec(),
             actions: plan.actions.clone(),
             manual_includes: plan.manual_includes.clone(),
             dry_run: true,
@@ -991,13 +1051,10 @@ pub fn install(
             return Err(InstallError::Drift(path.clone()));
         }
     }
-    let release_root = plan
-        .targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(plan.release.manifest.source_digest.to_string());
+    let release_root = release_root(
+        plan.targets.roots.state.as_path(),
+        plan.release.manifest.source_digest,
+    );
     let unfinished = plan
         .before
         .entries
@@ -1049,6 +1106,7 @@ pub fn install(
     Ok(InstallOutcome {
         actions: completed,
         manual_includes: plan.manual_includes.clone(),
+        findings: plan.findings().to_vec(),
         dry_run: false,
     })
 }
@@ -1286,7 +1344,9 @@ fn snapshot_at(path: &Path, dir: &dyn SafeDir) -> Result<Option<Snapshot>, Insta
         Err(e) if e.is_not_found() => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let limit = if Path::new(name)
+    let limit = if name == OsStr::new(".claude.json") {
+        16 * 1024 * 1024
+    } else if Path::new(name)
         .extension()
         .is_some_and(|ext| matches!(ext.to_str(), Some("json" | "jsonc" | "toml" | "md")))
     {
@@ -1456,10 +1516,7 @@ fn permitted_entry(
     normal_absolute(&path)?;
     if entry.harness.is_none() {
         let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
-        let expected_target = state_root
-            .join("releases")
-            .join(receipt.source_digest.to_string())
-            .join("bin/provenant");
+        let expected_target = release_root(state_root, receipt.source_digest).join("bin/provenant");
         return Ok(entry.selector == "binary"
             && path == binary
             && matches!(
@@ -1525,18 +1582,6 @@ fn permitted_entry(
     }
     Ok(false)
 }
-/// Read-only digest comparison, without locks, repair or initialisation.
-pub fn check_install(
-    targets: &Targets,
-    source: Option<&Release>,
-    target: &str,
-    fs: &dyn SafeFs,
-    smoke: &dyn ReleaseSmoke,
-    cancel: &CancelToken,
-) -> Result<Vec<InstallFinding>, InstallError> {
-    check_install_with_digest(targets, source, target, fs, smoke, cancel)
-        .map(|(findings, _)| findings)
-}
 pub(crate) fn digest_snapshot(
     basis: &mut Vec<u8>,
     path: &Path,
@@ -1574,12 +1619,7 @@ pub fn check_install_with_digest(
     };
     recheck(&receipt_path, &receipt_snapshot, fs, state_root)?;
     let mut findings = Vec::new();
-    let release_path = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(receipt.source_digest.to_string());
+    let release_path = release_root(targets.roots.state.as_path(), receipt.source_digest);
     let manifest_path = release_path.join("release.json");
     let manifest_snapshot = snapshot(&manifest_path, fs)?;
     digest_snapshot(&mut basis, &manifest_path, &manifest_snapshot)?;
@@ -1692,7 +1732,15 @@ pub fn uninstall(
     let before_receipt = snapshot(&receipt_path, fs)?;
     let Some(mut receipt) = read_receipt(targets, fs)? else {
         reporter.preview(&[]).map_err(InstallError::Preview)?;
+        let findings = vec![InstallFinding {
+            rule: "not_installed".into(),
+            path: AbsolutePath::new(&receipt_path)?,
+        }];
+        reporter
+            .findings(&findings)
+            .map_err(InstallError::Preview)?;
         return Ok(InstallOutcome {
+            findings,
             actions: Vec::new(),
             manual_includes: Vec::new(),
             dry_run: false,
@@ -1707,7 +1755,15 @@ pub fn uninstall(
     let selected: BTreeSet<_> = requested.intersection(&registered).copied().collect();
     if selected.is_empty() {
         reporter.preview(&[]).map_err(InstallError::Preview)?;
+        let findings = vec![InstallFinding {
+            rule: "not_installed".into(),
+            path: AbsolutePath::new(&receipt_path)?,
+        }];
+        reporter
+            .findings(&findings)
+            .map_err(InstallError::Preview)?;
         return Ok(InstallOutcome {
+            findings,
             actions: Vec::new(),
             manual_includes: Vec::new(),
             dry_run: false,
@@ -1715,6 +1771,7 @@ pub fn uninstall(
     }
 
     let mut removals = Vec::new();
+    let mut findings = Vec::new();
     let mut actions = Vec::new();
     let mut selector_files = BTreeMap::new();
     for entry in &receipt.entries {
@@ -1752,23 +1809,34 @@ pub fn uninstall(
                         removals.push((path.clone(), Some(before)));
                     }
                     selector_files.insert(path, value);
+                } else {
+                    findings.push(InstallFinding {
+                        rule: "relinquished_modified_entry".into(),
+                        path: entry.path.clone(),
+                    });
                 }
             }
             continue;
         }
-        if let Some(before) = snapshot(&path, fs)?
-            && matches_owned(&before.value, &entry.expected)
-        {
-            actions.push(Action {
-                path: entry.path.clone(),
-                disposition: Disposition::Remove,
-                selector: entry.selector.clone(),
-                before: Some(entry.expected.clone()),
-                after: None,
-                identity: identity(&Some(before.clone())),
-                edits: Vec::new(),
-            });
-            removals.push((path, Some(before)));
+        let before = snapshot(&path, fs)?;
+        if let Some(current) = &before {
+            if matches_owned(&current.value, &entry.expected) {
+                actions.push(Action {
+                    path: entry.path.clone(),
+                    disposition: Disposition::Remove,
+                    selector: entry.selector.clone(),
+                    before: Some(entry.expected.clone()),
+                    after: None,
+                    identity: identity(&before),
+                    edits: Vec::new(),
+                });
+                removals.push((path, before));
+            } else {
+                findings.push(InstallFinding {
+                    rule: "relinquished_modified_entry".into(),
+                    path: entry.path.clone(),
+                });
+            }
         }
     }
 
@@ -1799,7 +1867,13 @@ pub fn uninstall(
         edits: Vec::new(),
     });
 
+    for (path, before) in &removals {
+        validate_removal(path, targets, None, before)?;
+    }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
+    reporter
+        .findings(&findings)
+        .map_err(InstallError::Preview)?;
     let install_dir = directory_scoped(&state_root.join("install"), state_root, false, fs)?;
     let _lock = install_dir.lock(
         OsStr::new("install.lock"),
@@ -1859,6 +1933,7 @@ pub fn uninstall(
     }
     Ok(InstallOutcome {
         actions: completed,
+        findings,
         manual_includes: Vec::new(),
         dry_run: false,
     })

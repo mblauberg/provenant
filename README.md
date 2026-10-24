@@ -60,26 +60,28 @@ flowchart TB
 ## Quick start
 
 The Rust `provenant-config` crate packages verified releases and manages
-selected harness entries. Install a staged release with the stable `provenant`
-binary, an explicit fresh state root and explicit harness names. The state path
-must be absolute, outside every legacy root and unused before cut-over. Stop
-selected harness clients and config editors before preview, and keep them
-stopped through installation and `check install`.
+selected harness entries. Bootstrap from the binary in the staged release,
+with an explicit fresh state root and harness names. The state path must be
+absolute and outside every protected legacy root. Quit Claude Code before
+installation because it rewrites `~/.claude.json` while running. Close the
+other selected clients and config editors before preview, and keep them closed
+through installation and `check install`.
 
 ```sh
-PROVENANT="$HOME/.local/bin/provenant"
+PROVENANT="$RELEASE/bin/provenant"
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
 ```
 
 `RELEASE` and `LEGACY_CHECKOUT` are absolute paths. `--legacy-checkout` is
-needed only when the printed plan should match entries from that exact checkout;
-it never authorises a broad scan. Repeat `--harness` for each selected client.
-Review the complete dry-run output before applying it. The default is
-`--hooks off`; hook registration is available only for handlers with recorded
-`HookSpec` policy and fixtures. `uninstall --harness NAME` removes unchanged
-owned entries and keeps the state root, release assets and running binary.
+needed when the plan must match entries from that exact checkout; it never
+authorises a broad scan. Repeat `--harness` for each selected client.
+Hooks default off. `--hooks on` requires recorded `HookSpec` policies and
+fixtures. Review the complete dry-run output before applying it. Unresolved
+legacy entries remain visible in the install result and `check install`
+findings. `uninstall --harness NAME` removes unchanged owned entries and keeps
+the state root, release assets and running binary.
 
 For checkout development, install the locked Python and Node tools, then run the
 Rust config checks and Node preflight:
@@ -98,9 +100,10 @@ missing packages; it never installs or borrows another checkout's tree.
 ## Providers
 
 The [Fabric MCP registration notes](docs/runbooks/fabric-mcp-registration.md)
-document the legacy registry editor and the pending Rust client cut-over. Fabric
-registration and direct provider execution are separate; current dispatch
-activation is owned by [adapter compatibility](config/adapter-compatibility.yaml).
+describe registration through `provenant install` and preservation of unrelated
+client configuration. Fabric registration and direct provider execution are
+separate; dispatch activation is owned by
+[adapter compatibility](config/adapter-compatibility.yaml).
 
 | Client or provider | Fabric MCP registration | Direct provider execution |
 |---|---|---|
@@ -244,8 +247,8 @@ prunes its link.
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
-- [Landing lease](docs/runbooks/landing-lease.md): Fabric landing-lease requirements and the Rust cut-over gap.
-- [Local telemetry](docs/runbooks/telemetry.md): supervised attempt usage, API-equivalent cost estimates, rewrite status and quota ownership.
+- [Landing lease](docs/runbooks/landing-lease.md): Fabric landing-lease operations and advisory coordination.
+- [Local telemetry](docs/runbooks/telemetry.md): supervised attempt usage, API-equivalent cost estimates and provider quota.
 - [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.

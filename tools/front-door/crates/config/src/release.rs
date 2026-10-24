@@ -366,7 +366,7 @@ pub(crate) fn verify_binary_identity(
 }
 
 pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
-    inventory_with_cleanup(root, fs, false)
+    inventory_held(root, directory(root, false, fs)?.as_ref(), false)
 }
 
 // These are the exact names produced by supervisor temporary_name and
@@ -388,13 +388,6 @@ fn is_supervisor_staging_name(name: &OsStr) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-pub(crate) fn inventory_with_cleanup(
-    root: &Path,
-    fs: &dyn SafeFs,
-    remove_staging: bool,
-) -> Result<Vec<PathBuf>, InstallError> {
-    inventory_held(root, directory(root, false, fs)?.as_ref(), remove_staging)
-}
 pub(crate) fn inventory_held(
     root: &Path,
     anchor: &dyn provenant_supervisor::fs::SafeDir,

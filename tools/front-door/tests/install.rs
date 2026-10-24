@@ -192,8 +192,17 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
     assert!(!rig.state.exists());
     let old = legacy.join(".git/hooks/post-merge");
     symlink(legacy.join("scripts/hooks/post-merge"), &old)?;
+    let retained = legacy.join(".git/hooks/pre-push");
+    symlink(legacy.join("scripts/hooks/pre-push"), &retained)?;
+    let project_hook = rig.project.join(".git/hooks/post-merge");
+    symlink(legacy.join("scripts/hooks/post-merge"), &project_hook)?;
     let mut args = args(&stage, false);
-    args.extend(["--legacy-checkout".into(), legacy.clone().into_os_string()]);
+    args.extend([
+        "--legacy-checkout".into(),
+        source_alias.into_os_string(),
+        "--project".into(),
+        rig.project.clone().into_os_string(),
+    ]);
     let installed = rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &args, None)?;
     assert_eq!(
         code(&installed),
@@ -202,6 +211,24 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
         String::from_utf8_lossy(&installed.stderr.bytes)
     );
     assert!(fs::symlink_metadata(&old).is_err());
+    assert_eq!(
+        fs::read_link(&retained)?,
+        legacy.join("scripts/hooks/pre-push")
+    );
+    assert_eq!(
+        fs::read_link(&project_hook)?,
+        legacy.join("scripts/hooks/post-merge")
+    );
+    let installed_data: serde_json::Value = serde_json::from_slice(&installed.stdout.bytes)?;
+    assert!(
+        installed_data["data"]["outcome"]["findings"]
+            .as_array()
+            .ok_or("findings")?
+            .iter()
+            .any(|v| v["rule"] == "legacy_entry")
+    );
+    let checked = rig.command(&["check", "install", "--json"])?;
+    assert_eq!(code(&checked), 1);
     let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
         fs::File::open(rig.state.join("install/receipt.json"))?,
         provenant_records::Limits::CONFIG,

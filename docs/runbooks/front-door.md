@@ -6,34 +6,33 @@ for the full contract. A staged release contains a verified manifest and
 immutable assets; installation publishes its receipt last. Exact desired bytes
 and links are no-ops, including after a crash before receipt publication.
 
-## Cut-over procedure
+## Install
 
-Use the absolute stable `provenant` binary and an explicit, fresh state root
-outside every legacy root. Stage the release at an absolute path. Stop the
-selected harness clients and config editors before preview, and keep them
-stopped through installation and verification. The example selects Claude;
-repeat `--harness` for each client, and provide `--legacy-checkout` only when
-planning exact entries from that old checkout.
+Bootstrap from the binary in the staged release and use an explicit,
+fresh state root outside every protected legacy root. Stage the release at an
+absolute path. Quit Claude Code before installation because it rewrites
+`~/.claude.json` while running. Close the other selected harness clients and
+config editors before preview, and keep them closed through installation and
+`check install`. The example selects Claude; repeat `--harness` for each
+client, and set `--legacy-checkout` to the checkout whose exact entries are
+being reconciled.
 
 ```sh
-PROVENANT="$HOME/.local/bin/provenant"
+PROVENANT="$RELEASE/bin/provenant"
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
 ```
 
-Review every planned change before applying it; a failed preview prevents
-writes. The default is `--hooks off`; enabling hooks requires a recorded
-`HookSpec` policy and fixture for each registered handler. No hook policy has
-landed yet, so `--hooks on` currently refuses before writing. Legacy Claude
-`PostToolUse`/`Bash` groups also refuse cut-over until their host-specific
-utility-hook interpreter has an exact recorded entry in `legacy.toml`; resolve
-that registration explicitly instead of inferring ownership from its command.
-`check install`
-compares the installed binary, assets, receipt and owned selectors without
-repair. To remove an installation, run
-`provenant --state-dir "$STATE" uninstall --harness claude`; it removes only
-unchanged owned entries and keeps the state and release assets. Reapply
+Review every planned change and unresolved entry before applying it; a
+failed preview prevents writes. Hooks default off. `--hooks on` requires a
+fixture-backed `HookSpec` for each handler. An exact legacy entry marked `replace` is replaced
+only when that handler is available. Otherwise the installer preserves it
+byte-for-byte and reports it as unresolved. `check install` reports unresolved
+legacy entries as findings with exit 1 and compares the installed binary,
+assets, receipt and owned selectors without repair. To remove an installation,
+run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes
+only unchanged owned entries and keeps the state and release assets. Reapply
 `install` after resolving a partial-write error.
 
 `build.rs` stamps the source digest, and the release build packages typed
