@@ -820,8 +820,13 @@ scheduler daemon. Within that, the lane decided:
   produces `failed` with the worktree and reason, even when the provider
   returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
-  alternatives, with admission checked for every candidate. Runtime fallback
-  on rate, quota or model-unavailable needs a new attempt and remains deferred.
+  alternatives, with admission checked for every candidate. A candidate that
+  does not launch (unavailable route, unregistered or signed-out account, setup
+  or refusal) is recorded on the launched attempt as a typed `skipped_routes`
+  entry with its route, `SkipKind` and detail, before the attempt is queued for
+  start. `lanes --json` and `output` show it, so a skipped review leg is never
+  only a footnote. Runtime fallback on rate, quota or model-unavailable needs a
+  new attempt and remains deferred.
 - **Provider preparation and observed identity (COMPOSE-B).**
   `Providers::prepare` composes validated registrations, task access and quota
   before building the confined argv/environment/stdin/cwd. Claude records its

@@ -1338,6 +1338,12 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default()
             ));
+            for skipped in &lane.skipped_routes {
+                human.push_str(&format!(
+                    "  skipped {} {:?}: {}\n",
+                    skipped.route, skipped.kind, skipped.detail
+                ));
+            }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {:?} head={}\n",
@@ -1360,6 +1366,7 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "reason": reason,
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
+                "skipped_routes": lane.skipped_routes,
                 "account": account,
                 "observed_route": lane.observed_route,
                 "queued_at": lane.queued_at,

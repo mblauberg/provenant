@@ -36,6 +36,8 @@ pub struct PreparedLaunch {
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
+    /// Fallback candidates that failed before this one launched.
+    pub skipped_routes: Vec<SkippedRoute>,
     /// HEAD of the checkout a read-only lane runs in, read by the host at
     /// preparation. Writers record theirs from delivery instead.
     pub observed_head: Option<provenant_core::GitOid>,
@@ -379,6 +381,9 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
+            if !plan.skipped_routes.is_empty() {
+                self.record_skipped_routes(id, &plan.skipped_routes, call)?;
+            }
             let record =
                 match self.mark_starting(id, &plan.route, writable, plan.observed_head, call) {
                     Ok(record) => record,
