@@ -39,3 +39,9 @@ mod command_result;
 pub use command_result::{
     CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpGroup, Outcome,
 };
+
+mod resolved_route;
+pub use resolved_route::{
+    ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+    RouteExclusion, RouteExclusionReason, RouteReadiness, TooManyAlternatives,
+};

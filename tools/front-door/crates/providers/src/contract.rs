@@ -1,0 +1,234 @@
+use crate::{ExitObservation, ProviderEvent, ProviderOutcome, StreamState};
+use provenant_confinement::permissions::ConfinedLaunch;
+use provenant_records::ResolvedRoute;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("{adapter} invocation has no qualifying activation recording")]
+    Disabled { adapter: &'static str },
+    #[error("argv prompt exceeds 64 KiB")]
+    PromptTooLarge,
+    #[error("provider protocol is malformed")]
+    Malformed,
+    #[error("provider stream exceeds its size bound")]
+    Overflow,
+    #[error("provider/session/account/host/model/controls or grant changed")]
+    IdentityMismatch,
+    #[error("provider continuation identity is unknown")]
+    UnknownIdentity,
+}
+
+/// No provider effects qualify for activation. An uninhabited plan cannot be
+/// forged or accidentally executed; qualifying recordings must precede effects.
+#[derive(Debug)]
+pub enum PreflightPlan {}
+#[derive(Debug)]
+pub enum AdapterLaunchSpec {}
+
+pub struct PreflightInput {
+    pub route: ResolvedRoute,
+    pub observed_unix_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvailabilityRecord {
+    pub schema_version: u64,
+    pub adapter: String,
+    pub executable: String,
+    pub version: String,
+    pub fixture_ref: String,
+    pub catalogue_revision: String,
+    pub account_key: Option<String>,
+    pub observed_unix_seconds: i64,
+    pub expires_unix_seconds: i64,
+}
+
+pub struct Prompt(String);
+impl Prompt {
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+    pub fn check_argv(&self) -> Result<(), ProviderError> {
+        if self.0.len() > 65_536 {
+            Err(ProviderError::PromptTooLarge)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// ConfinedLaunch is the current confinement-owned compiled profile. No provider
+/// can turn it into a launch until activation evidence is available.
+pub struct PrepareInput<'a> {
+    pub route: &'a ResolvedRoute,
+    pub confined: &'a ConfinedLaunch,
+    pub prompt: &'a Prompt,
+    pub continuation: Option<&'a Continuation>,
+    pub grant_digest: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountDetection {
+    Unknown,
+    AuthRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Continuation {
+    adapter: String,
+    session: String,
+    account_key: String,
+    host: String,
+    model: String,
+    effort: Option<String>,
+    grant_digest: String,
+}
+impl Continuation {
+    pub(crate) fn from_outcome(
+        adapter: &str,
+        outcome: &ProviderOutcome,
+        route: &ResolvedRoute,
+        grant_digest: &str,
+    ) -> Result<Self, ProviderError> {
+        if outcome.adapter() != adapter || route.adapter != adapter {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let session = outcome.session().ok_or(ProviderError::UnknownIdentity)?;
+        let account_key = route
+            .account_key
+            .clone()
+            .ok_or(ProviderError::UnknownIdentity)?;
+        // Requested models cannot substitute for answering-model evidence.
+        if outcome.model() != Some(route.model.as_str()) {
+            return Err(ProviderError::UnknownIdentity);
+        }
+        Ok(Self {
+            adapter: adapter.into(),
+            session: session.into(),
+            account_key,
+            host: route.host.clone(),
+            model: route.model.clone(),
+            effort: route.effort.clone(),
+            grant_digest: grant_digest.into(),
+        })
+    }
+    pub(crate) fn bind_stream(
+        &self,
+        adapter: &str,
+        state: &mut StreamState,
+    ) -> Result<(), ProviderError> {
+        if self.adapter != adapter {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        state.bind_identity(&self.session, &self.model);
+        Ok(())
+    }
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+    pub fn validate(&self, route: &ResolvedRoute, grant_digest: &str) -> Result<(), ProviderError> {
+        if self.adapter != route.adapter
+            || Some(&self.account_key) != route.account_key.as_ref()
+            || self.host != route.host
+            || self.model != route.model
+            || self.effort != route.effort
+            || self.grant_digest != grant_digest
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub struct FamilyEntry {
+    pub adapter: String,
+    pub model: String,
+    pub family: String,
+}
+pub struct RouteProvenance<'a> {
+    pub route: &'a ResolvedRoute,
+    pub outcome: &'a ProviderOutcome,
+    pub evidence_ref: &'a str,
+    pub evidence_catalogue_revision: &'a str,
+    pub catalogue: &'a [FamilyEntry],
+}
+/// Serialize only: stored claims cannot construct a verified fact.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct VerifiedLineage {
+    observed_model: Option<String>,
+    catalogue_revision: String,
+    family: Option<String>,
+    evidence_ref: String,
+}
+impl VerifiedLineage {
+    pub fn family(&self) -> Option<&str> {
+        self.family.as_deref()
+    }
+    pub fn observed_model(&self) -> Option<&str> {
+        self.observed_model.as_deref()
+    }
+}
+pub(crate) fn verify_lineage(
+    adapter: &str,
+    p: &RouteProvenance<'_>,
+) -> Result<VerifiedLineage, ProviderError> {
+    if adapter != p.route.adapter || adapter != p.outcome.adapter() {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    let observed = p.outcome.model();
+    let family = if observed == Some(p.route.model.as_str())
+        && p.route.catalogue_revision == p.evidence_catalogue_revision
+        && !p.evidence_ref.is_empty()
+    {
+        p.catalogue
+            .iter()
+            .find(|entry| entry.adapter == adapter && Some(entry.model.as_str()) == observed)
+            .map(|entry| entry.family.clone())
+    } else {
+        None
+    };
+    Ok(VerifiedLineage {
+        observed_model: observed.map(str::to_owned),
+        catalogue_revision: p.route.catalogue_revision.clone(),
+        family,
+        evidence_ref: p.evidence_ref.into(),
+    })
+}
+
+pub trait Adapter: Sync {
+    fn id(&self) -> &'static str;
+    fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
+    fn preflight(&self, input: &PreflightInput) -> Result<PreflightPlan, ProviderError>;
+    fn decode_preflight(
+        &self,
+        plan: &PreflightPlan,
+        capture: &[u8],
+    ) -> Result<AvailabilityRecord, ProviderError>;
+    fn prepare(&self, input: PrepareInput<'_>) -> Result<AdapterLaunchSpec, ProviderError>;
+    fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
+    /// If a later line fails, events from earlier lines in that call are
+    /// retained in `finish().final_events()` alongside the malformed outcome.
+    fn observe(
+        &self,
+        state: &mut StreamState,
+        bytes: &[u8],
+    ) -> Result<Vec<ProviderEvent>, ProviderError>;
+    fn finish(
+        &self,
+        state: StreamState,
+        exit: ExitObservation,
+    ) -> Result<ProviderOutcome, ProviderError>;
+    fn continuation(
+        &self,
+        outcome: &ProviderOutcome,
+        route: &ResolvedRoute,
+        grant_digest: &str,
+    ) -> Result<Continuation, ProviderError>;
+    fn validate_provenance(
+        &self,
+        provenance: &RouteProvenance<'_>,
+    ) -> Result<VerifiedLineage, ProviderError>;
+}

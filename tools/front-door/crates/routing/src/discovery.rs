@@ -159,61 +159,6 @@ pub fn fallback_candidates(
     Ok(results)
 }
 
-/// Exact request to the process probe owner; no safety chat is requested for discovery.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProviderListingRequest {
-    pub adapter: String,
-    pub executable: String,
-    pub deadline: f64,
-    pub listing_only: bool,
-    pub refresh: bool,
-}
-
-/// One shared deadline; a short refresh budget never invokes the probe.
-pub fn opencode_live_models<E>(
-    refresh: bool,
-    deadline: Option<f64>,
-    monotonic_now: f64,
-    probe: impl FnOnce(ProviderListingRequest) -> Result<Value, E>,
-) -> (Vec<String>, bool) {
-    let deadline = deadline.unwrap_or(monotonic_now + crate::live::OPENCODE_DISCOVERY_BUDGET);
-    if refresh && deadline - monotonic_now < crate::live::OPENCODE_REFRESH_MIN_REMAINING {
-        return (vec![], false);
-    }
-    let request = ProviderListingRequest {
-        adapter: "opencode".into(),
-        executable: "opencode".into(),
-        deadline,
-        listing_only: true,
-        refresh,
-    };
-    let Ok(record) = probe(request) else {
-        return (vec![], false);
-    };
-    if !record.is_object()
-        || record.get("status").and_then(Value::as_str) == Some("probe_unavailable")
-    {
-        return (vec![], false);
-    }
-    let found = record
-        .get("models")
-        .and_then(Value::as_array)
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    (
-        found,
-        record
-            .get("cache_hit")
-            .is_some_and(crate::pending::value_truthy),
-    )
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpencodeRefusal {
     pub status: String,
