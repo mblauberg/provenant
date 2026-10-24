@@ -227,7 +227,7 @@ jobs:
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           version: "1.31.1"
-          # Audit exactly the surfaces this job is path-filtered on.
+          # Audit workflow definitions on every tested tree.
           inputs: ".github/workflows"
           online-audits: "false"
           advanced-security: "false"
