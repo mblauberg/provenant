@@ -157,6 +157,9 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo test -p provenant-supervisor -p provenant-confinement --locked
+      - name: Run menu bar tests
+        working-directory: apps/quota-menubar
+        run: swift test
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
