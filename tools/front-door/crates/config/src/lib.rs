@@ -22,7 +22,7 @@ pub use loader::{
     check_config, config_show, inspect_config, load, load_with_domains, read, read_with_domains,
 };
 pub use presets::Profile;
-pub use project_binding::{ProjectBinding, ProjectLocation, bind_project};
+pub use project_binding::{ProjectBinding, ProjectLocation, bind_host, bind_project};
 pub use provenant_records::Finding;
 
 use serde::{Deserialize, Serialize, Serializer};

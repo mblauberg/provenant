@@ -43,7 +43,7 @@ pub enum Command {
     #[command(subcommand)]
     Config(Config),
     #[command(subcommand)]
-    Fabric(Fabric),
+    Fabric(crate::fabric::Fabric),
     Install(Install),
     Uninstall(Uninstall),
     #[command(subcommand)]
@@ -70,10 +70,6 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum Config {
     Show,
-}
-#[derive(Debug, Subcommand)]
-pub enum Fabric {
-    Mcp,
 }
 #[derive(Debug, Args)]
 pub struct Install {

@@ -291,6 +291,7 @@ jobs:
       - name: Check harness assets
         working-directory: tools/front-door
         env:
+          PROVENANT_ROOT: ${{ github.workspace }}
           PROVENANT_STATE_DIR: ${{ runner.temp }}/provenant-state
           TMPDIR: ${{ runner.temp }}
         run: cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"

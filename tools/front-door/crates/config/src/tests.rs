@@ -937,3 +937,57 @@ fn inspect_config_preserves_malformed_input_digest_without_rereading() {
     assert!(matches!(second.error, Some(ConfigError::Syntax { .. })));
     assert_ne!(first.input_digest, second.input_digest);
 }
+
+#[test]
+fn empty_compiled_typed_map_accepts_new_keys() {
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Maps {
+        values: std::collections::BTreeMap<String, u64>,
+    }
+    impl DomainConfig for Maps {}
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Aggregate {
+        maps: Maps,
+    }
+    fn defaults(_: Profile) -> &'static str {
+        "[values]"
+    }
+    const ENTRIES: DomainSections<Aggregate> =
+        DomainSections::new(&[DomainSection::new::<Maps>("maps", defaults)]);
+    let loaded = load_with_domains(
+        &roots(),
+        Some(&b"schema_version=1\n[domains.maps.values]\nnew_key=7"[..]),
+        &ENTRIES,
+    )
+    .unwrap();
+    assert_eq!(loaded.domains.maps.values["new_key"], 7);
+}
+
+#[test]
+fn empty_compiled_closed_section_rejects_unknown_keys() {
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Closed {}
+    impl DomainConfig for Closed {}
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Aggregate {
+        closed: Closed,
+    }
+    fn defaults(_: Profile) -> &'static str {
+        ""
+    }
+    const ENTRIES: DomainSections<Aggregate> =
+        DomainSections::new(&[DomainSection::new::<Closed>("closed", defaults)]);
+    assert!(load_with_domains(&roots(), None::<&[u8]>, &ENTRIES).is_ok());
+    assert!(
+        load_with_domains(
+            &roots(),
+            Some(&b"schema_version=1\n[domains.closed]\nunknown=7"[..]),
+            &ENTRIES
+        )
+        .is_err()
+    );
+}

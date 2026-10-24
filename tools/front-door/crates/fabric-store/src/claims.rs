@@ -198,7 +198,7 @@ pub(crate) struct ClaimWrite<'a> {
     pub expires: Option<WallTime>,
 }
 pub(crate) fn save_claim<T: Serialize>(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     row: ClaimWrite<'_>,
     value: &T,
 ) -> Result<()> {
@@ -213,7 +213,7 @@ pub(crate) fn save_claim<T: Serialize>(
     Ok(())
 }
 pub(crate) fn claim_event(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     project: ProjectId,
     fence: &ClaimFence,
     kind: EventKind,
@@ -279,7 +279,7 @@ fn overlapping_path(
         .map(|id| ClaimId::parse(&id).map_err(|_| Error::Invalid("stored claim id")))
         .transpose()
 }
-fn prune_released(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
+fn prune_released(tx: &rusqlite::Connection, project: ProjectId) -> Result<()> {
     let project = project.to_string();
     let mut statement = tx.prepare("SELECT c.id FROM claims c WHERE c.project=? AND c.holder IS NULL AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.project=c.project AND o.claim=c.id) ORDER BY c.id LIMIT 100")?;
     let ids = statement

@@ -1,6 +1,8 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
 pub mod check;
+pub mod fabric;
+pub use fabric::Fabric;
 mod grammar;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
@@ -74,7 +76,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
-                    error: clap_error(error),
+                    error: clap_error(error, &argv),
                     globals,
                 },
             };
@@ -95,7 +97,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
         Err(error) => {
             return ParseOutcome::Invalid {
-                error: clap_error(error),
+                error: clap_error(error, &argv),
                 globals,
             };
         }
@@ -127,8 +129,35 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-fn clap_error(error: clap::Error) -> CliError {
-    let text = error.to_string();
+fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
+    // Clap normally includes the rejected value. Fence tokens are secrets,
+    // including malformed tokens, so redact them before either renderer.
+    use clap::error::{ContextKind, ContextValue};
+    if error
+        .get(ContextKind::InvalidArg)
+        .is_some_and(|arg| arg.to_string().starts_with("--token"))
+    {
+        error.insert(
+            ContextKind::InvalidValue,
+            ContextValue::String("[redacted]".into()),
+        );
+    }
+    let mut text = error.to_string();
+    if argv.iter().any(|arg| arg == "fabric") {
+        // Clap may echo a secret as an unexpected positional, an invalid value,
+        // a suggestion or a conflict. Scrub every run of 32 or more hex digits
+        // in argv, including runs embedded in a longer value, in every error
+        // kind before either renderer receives the diagnostic.
+        for arg in argv {
+            if let Some(arg) = arg.to_str() {
+                for run in arg.split(|c: char| !c.is_ascii_hexdigit()) {
+                    if run.len() >= 32 {
+                        text = text.replace(run, "[redacted]");
+                    }
+                }
+            }
+        }
+    }
     let message = text
         .split("\nUsage:")
         .next()

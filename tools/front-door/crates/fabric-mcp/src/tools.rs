@@ -41,7 +41,12 @@ impl ToolCall {
         macro_rules! parse {
             ($ty:ty, $variant:ident) => {
                 serde_json::from_value::<$ty>(arguments.clone())
-                    .map(Self::$variant)
+                    .and_then(|input| {
+                        input
+                            .validate_input(WaitTransport::Mcp)
+                            .map_err(serde::de::Error::custom)?;
+                        Ok(Self::$variant(input))
+                    })
                     .map_err(|error| InvalidInput::Arguments {
                         path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
                             let message = error.to_string();
@@ -76,15 +81,27 @@ impl ToolCall {
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        // ToolCall is public and can be constructed without parse. Apply the
+        // same transport cap before any coordination or facade side effects.
+        match &self {
+            Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Mail(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Task(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Events(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Claim(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Landing(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Submit(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Run(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Output(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
+        }
+        .map_err(ServiceError::Invalid)?;
         let budget = service.budget(match &self {
             Self::Run(RunInput::Wait { wait_ms, .. }) => *wait_ms,
             _ => 55_000,
         })?;
         macro_rules! call {
-            ($owner:ident, $method:ident, $input:ident, $tool:literal) => {{
-                $input.validate_input().map_err(ServiceError::Invalid)?;
-                response($tool, service.$owner.$method($input, budget, cancel)?)
-            }};
+            ($owner:ident, $method:ident, $input:ident, $tool:literal) => {{ response($tool, service.$owner.$method($input, budget, cancel)?) }};
         }
         match self {
             Self::Identity(input) => call!(facade, identity, input, "fabric_identity"),
