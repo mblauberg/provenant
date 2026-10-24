@@ -41,6 +41,8 @@ pub struct AvailabilityRecord {
     pub fixture_ref: String,
     pub catalogue_revision: String,
     pub account_key: Option<String>,
+    pub observed_models: Vec<String>,
+    pub last_preflight_error: Option<String>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,
 }
@@ -158,12 +160,22 @@ pub struct RouteProvenance<'a> {
 /// Serialize only: stored claims cannot construct a verified fact.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct VerifiedLineage {
+    adapter: String,
     observed_model: Option<String>,
     catalogue_revision: String,
     family: Option<String>,
     evidence_ref: String,
 }
 impl VerifiedLineage {
+    pub fn adapter(&self) -> &str {
+        &self.adapter
+    }
+    pub fn catalogue_revision(&self) -> &str {
+        &self.catalogue_revision
+    }
+    pub fn evidence_ref(&self) -> &str {
+        &self.evidence_ref
+    }
     pub fn family(&self) -> Option<&str> {
         self.family.as_deref()
     }
@@ -191,6 +203,7 @@ pub(crate) fn verify_lineage(
         None
     };
     Ok(VerifiedLineage {
+        adapter: adapter.into(),
         observed_model: observed.map(str::to_owned),
         catalogue_revision: p.route.catalogue_revision.clone(),
         family,
@@ -200,6 +213,11 @@ pub(crate) fn verify_lineage(
 
 pub trait Adapter: Sync {
     fn id(&self) -> &'static str;
+    /// Activation is a provider-owned recording gate, independent of cache/config.
+    /// No current invocation form has qualifying evidence.
+    fn execution_enabled(&self) -> bool {
+        false
+    }
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn preflight(&self, input: &PreflightInput) -> Result<PreflightPlan, ProviderError>;
     fn decode_preflight(

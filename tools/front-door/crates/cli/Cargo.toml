@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-routing = { workspace = true }
+provenant-providers = { workspace = true }
 provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-supervisor = { workspace = true }

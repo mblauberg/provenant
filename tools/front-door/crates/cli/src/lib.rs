@@ -1,7 +1,10 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+mod domains;
 pub mod fabric;
+pub mod route;
 pub use fabric::Fabric;
+pub use route::Route;
 mod grammar;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};

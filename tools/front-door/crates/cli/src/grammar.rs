@@ -47,7 +47,7 @@ pub enum Command {
     Install(Install),
     Uninstall(Uninstall),
     #[command(subcommand)]
-    Route(Route),
+    Route(crate::route::Route),
     Dispatch(Box<Dispatch>),
     Lanes(Lanes),
     Output(Output),
@@ -97,40 +97,11 @@ fn harness_parser() -> impl TypedValueParser<Value = Harness> {
     clap::builder::PossibleValuesParser::new(["claude", "codex", "cursor", "agy", "opencode"])
         .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
 }
-#[derive(Debug, Subcommand)]
-pub enum Route {
-    List(Adapter),
-    Resolve(RouteRequest),
-}
+pub use crate::route::{Model, RouteRequest};
 #[derive(Debug, Args)]
 pub struct Adapter {
     #[arg(long)]
     pub adapter: Option<String>,
-}
-#[derive(Debug, Args)]
-pub struct RouteRequest {
-    #[arg(long, conflicts_with = "route")]
-    pub model: Option<Model>,
-    #[arg(long)]
-    pub route: Option<String>,
-    #[arg(long)]
-    pub effort: Option<String>,
-    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
-    pub fallback: Vec<Model>,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Model(pub String);
-impl FromStr for Model {
-    type Err = &'static str;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text
-            .split_once('/')
-            .is_none_or(|(adapter, id)| adapter.is_empty() || id.is_empty())
-        {
-            return Err("model must be ADAPTER/ID");
-        }
-        Ok(Self(text.into()))
-    }
 }
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum Mode {
