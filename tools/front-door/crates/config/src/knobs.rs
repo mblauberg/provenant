@@ -33,6 +33,13 @@ struct Spec {
 struct Preset {
     #[serde(default)]
     knobs: BTreeMap<String, Value>,
+    #[serde(default)]
+    task_classes: BTreeMap<String, ClassPreset>,
+}
+#[derive(Deserialize)]
+struct ClassPreset {
+    #[serde(default)]
+    knobs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,6 +62,27 @@ pub enum KnobEdit<'a> {
     Profile(&'a str),
     Set { name: &'a str, value: &'a str },
     Unset(&'a str),
+}
+
+impl<D> crate::ResolvedConfig<D> {
+    /// Layer the profile preset's per-task-class knobs over the base preset.
+    /// A user `[knobs]` override still wins. An unlisted class changes nothing.
+    pub fn apply_task_class(&mut self, class: &str) -> Result<(), ConfigError> {
+        let registry = registry()?;
+        let preset = registry.presets.get(profile_name(self.profile));
+        let layer = preset.and_then(|p| p.task_classes.get(class));
+        for (name, value) in layer.into_iter().flat_map(|c| &c.knobs) {
+            if let Some(knob) = self.knobs.get_mut(name)
+                && knob.source != KnobSource::Override
+            {
+                *knob = KnobValue {
+                    value: value.clone(),
+                    source: KnobSource::Profile,
+                };
+            }
+        }
+        Ok(())
+    }
 }
 
 fn registry() -> Result<Registry, ConfigError> {
@@ -216,13 +244,28 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             let knobs = doc
                 .entry("knobs")
                 .or_insert_with(toml_edit::table)
-                .as_table_mut()
+                .as_table_like_mut()
                 .ok_or_else(|| invalid("knobs", "type"))?;
-            knobs.insert(name, item);
+            match knobs.get_mut(name) {
+                // Keep the key and the value's own comments and spacing.
+                Some(slot) => {
+                    let decor = slot.as_value().map(|old| old.decor().clone());
+                    *slot = item;
+                    if let (Some(decor), Some(new)) = (decor, slot.as_value_mut()) {
+                        *new.decor_mut() = decor;
+                    }
+                }
+                None => {
+                    knobs.insert(name, item);
+                }
+            }
         }
         KnobEdit::Unset(name) => {
             spec(&registry, name)?;
-            if let Some(knobs) = doc.get_mut("knobs").and_then(Item::as_table_mut) {
+            if let Some(item) = doc.get_mut("knobs") {
+                let knobs = item
+                    .as_table_like_mut()
+                    .ok_or_else(|| invalid("knobs", "type"))?;
                 knobs.remove(name);
             }
         }
@@ -261,12 +304,16 @@ pub fn edit_config(
         }
         Err(error) => return Err(error.into()),
     };
-    state.atomic_write(
+    match state.atomic_write(
         std::ffi::OsStr::new("config.toml"),
         ".config-",
         updated.as_bytes(),
         0o600,
         provenant_supervisor::fs::PublishMode::Replace,
-    )?;
-    Ok(())
+    )? {
+        provenant_supervisor::fs::Publication::Durable => Ok(()),
+        provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error } => {
+            Err(sync_error.into())
+        }
+    }
 }

@@ -202,8 +202,10 @@ const-concatenation. These assets are the only preset channel: balanced defaults
 one additional review, cross-family required and full re-review. Domain
 owners validate those values and enforce their minima. The config crate
 loads/validates user domain sections over the selected compiled defaults once;
-there is no profile layering, per-request profile selector or generic knobs
-API. A preset never grants authority or a provider stop reason.
+there is no profile layering or per-request profile selector. Knobs resolve
+through the embedded registry (default, profile preset, optional task class,
+then the user's `[knobs]` override); there is no other generic knobs API. A preset never grants authority or a
+provider stop reason.
 
 Every allowed section key appears in its complete default asset. Tables merge
 recursively; arrays replace as a whole. Structured arrays provide a complete

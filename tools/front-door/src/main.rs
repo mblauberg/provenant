@@ -90,13 +90,14 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
         globals,
     )
 }
-fn show_config(globals: &provenant_cli::Globals) -> u8 {
-    config_command("config show", None, globals)
+fn show_config(task_class: Option<&str>, globals: &provenant_cli::Globals) -> u8 {
+    config_command("config show", None, task_class, globals)
 }
 /// Apply an optional knob edit, then print the effective config read back.
 fn config_command(
     command: &str,
     edit: Option<provenant_config::KnobEdit>,
+    task_class: Option<&str>,
     globals: &provenant_cli::Globals,
 ) -> u8 {
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
@@ -106,11 +107,15 @@ fn config_command(
         if let Some(edit) = edit {
             provenant_config::edit_config(&roots, &provenant_supervisor::fs::LocalFs, edit)?;
         }
-        Ok(provenant_config::config_show(
+        let mut config = provenant_config::config_show(
             &roots,
             &provenant_supervisor::fs::LocalFs,
             &provenant_cli::domains::SECTIONS,
-        )?)
+        )?;
+        if let Some(class) = task_class {
+            config.apply_task_class(class)?;
+        }
+        Ok(config)
     })();
     match result {
         Ok(config) => match serde_json::to_string_pretty(&config) {
@@ -222,7 +227,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
-        Command::Config(provenant_cli::Config::Show) => show_config(globals),
+        Command::Config(provenant_cli::Config::Show { task_class }) => {
+            show_config(task_class.as_deref(), globals)
+        }
         Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
             "config set",
             Some(if name == "profile" {
@@ -233,11 +240,13 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                     value: &value,
                 }
             }),
+            None,
             globals,
         ),
         Command::Config(provenant_cli::Config::Unset { name }) => config_command(
             "config unset",
             Some(provenant_config::KnobEdit::Unset(&name)),
+            None,
             globals,
         ),
         Command::Fabric(provenant_cli::Fabric::Mcp { client }) => fabric::mcp(client, globals),

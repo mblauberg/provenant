@@ -130,6 +130,7 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
             "unknown_key",
         ),
         ("schema_version=1\n[knobs]\nnope=1", "unknown_key"),
+        ("schema_version=1\nknobs=42", "type"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=18446744073709551616", "syntax"),
@@ -965,7 +966,32 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let roots = state_roots(dir.path());
     let fs = provenant_supervisor::fs::LocalFs;
     let path = dir.path().join("config.toml");
-    std::fs::write(&path, "schema_version = 1 # keep\n").unwrap();
+    std::fs::write(
+        &path,
+        "schema_version = 1 # keep\nknobs = { \"effort.shift\" = 1 } # inline\n",
+    )
+    .unwrap();
+    edit_config(
+        &roots,
+        &fs,
+        KnobEdit::Set {
+            name: "effort.shift",
+            value: "-1",
+        },
+    )
+    .unwrap();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("# inline"));
+    assert_eq!(read(&roots, &fs).unwrap().knobs["effort.shift"].value, -1);
+    edit_config(&roots, &fs, KnobEdit::Unset("effort.shift")).unwrap();
+    assert_eq!(
+        read(&roots, &fs).unwrap().knobs["effort.shift"].source,
+        KnobSource::Default
+    );
+    edit_config(&roots, &fs, KnobEdit::Profile("rigorous")).unwrap();
+    let mut rigorous = read(&roots, &fs).unwrap();
+    assert_eq!(rigorous.knobs["effort.shift"].value, 1);
+    rigorous.apply_task_class("mechanical").unwrap();
+    assert_eq!(rigorous.knobs["effort.shift"].value, 0);
     edit_config(&roots, &fs, KnobEdit::Profile("economy")).unwrap();
     edit_config(
         &roots,

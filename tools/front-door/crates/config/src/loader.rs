@@ -238,12 +238,16 @@ fn inspect<T: DeserializeOwned + Serialize>(
         _ => Profile::Balanced,
     };
     let overrides = knobs_item.as_ref().map(Item::as_table_like);
-    let not_table = matches!(overrides, Some(None));
+    if matches!(overrides, Some(None)) {
+        return Err(ConfigError::Schema {
+            location: site(&user_sites, "knobs", &user_origin, false),
+            rule: "type",
+        });
+    }
     let knobs = crate::knobs::resolve(profile, overrides.flatten()).map_err(|(key, rule)| {
-        let key = if not_table { "knobs" } else { &key };
         ConfigError::Schema {
-            location: site(&user_sites, key, &user_origin, false),
-            rule: if not_table { "type" } else { rule },
+            location: site(&user_sites, &key, &user_origin, false),
+            rule,
         }
     })?;
     let compiled = Origin::Compiled { profile };
