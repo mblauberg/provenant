@@ -1321,8 +1321,8 @@ mod file_tests {
             _: &AttemptKey,
             _: &str,
             _: &GraphRoute,
-            access: AccessMode,
-            worktree: Option<&str>,
+            _: AccessMode,
+            _: Option<&str>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(AttemptObservation::Pending {
                 attempt_ref: Some("fixture-attempt".into()),
