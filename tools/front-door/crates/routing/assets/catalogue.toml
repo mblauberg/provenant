@@ -1,7 +1,7 @@
 # Listing/answering evidence only. No row enables execution or proves lineage.
 # No retained recording proves effort controls, so efforts are empty.
 schema_version = 1
-revision = "recordings-20261024-v1"
+revision = "recordings-20261024-utility-v1"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -39,3 +39,37 @@ evidence_ref = "model-listings/opencode-models.txt"
 model = "opencode/openrouter/~anthropic/claude-haiku-latest"
 efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
+
+[[models]]
+model = "claude/claude-haiku-5-5"
+efforts = []
+family = "anthropic"
+evidence_ref = "config/model-routing.json"
+trains_on_prompts = false
+
+[[models]]
+model = "codex/gpt-6-luna"
+efforts = []
+family = "openai"
+evidence_ref = "config/model-routing.json"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode/deepseek-v4.1-flash-free"
+efforts = []
+evidence_ref = "config/model-routing.json"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode/glm-5.3-flash-free"
+efforts = []
+evidence_ref = "config/model-routing.json"
+trains_on_prompts = false
+
+[pools]
+utility = [
+    { model = "claude/claude-haiku-5-5" },
+    { model = "codex/gpt-6-luna" },
+    { model = "opencode/opencode/deepseek-v4.1-flash-free" },
+    { model = "opencode/opencode/glm-5.3-flash-free" },
+]

@@ -2,12 +2,12 @@ mod support;
 use support::{Result, TestRig, code};
 
 #[test]
-fn tick_does_not_create_missing_state_ancestors() -> Result {
+fn failed_tick_creates_only_usage_state() -> Result {
     let mut rig = quota_rig()?;
     let missing = rig.root.join("missing");
     rig.state = missing.join("state");
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 3);
-    assert!(!missing.exists());
+    rig.assert_only_usage_state()?;
     rig.assert_legacy_unchanged()
 }
 
@@ -43,7 +43,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let shown: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
     assert_eq!(shown["command"], "quota show");
     assert_eq!(shown["data"]["coverage"]["known"], 0);
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     let tick = rig.command(&["quota", "tick", "--json"])?;
     assert_eq!(
         code(&tick),

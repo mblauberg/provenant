@@ -73,6 +73,12 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
             .iter()
             .any(|m| m["model"] == "opencode/openrouter/~anthropic/claude-haiku-latest")
     );
+    let pool = call(
+        &rig,
+        &["route", "resolve", "--route", "utility", "--confidential"],
+        0,
+    )?;
+    assert_eq!(pool["data"]["model"], "claude-haiku-5-5");
     let resolved = call(
         &rig,
         &[
@@ -124,7 +130,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
         ],
         0,
     )?;
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 #[test]
@@ -136,7 +142,13 @@ fn named_routes_and_cached_availability_are_read_only_and_fail_closed() -> Resul
     let resolved = call(&rig, &["route", "resolve", "--route", "review"], 0)?;
     assert_eq!(resolved["data"]["model"], "openrouter/vendor/exact");
     assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
-    assert_eq!(fs::read_dir(&rig.state)?.count(), 1);
+    assert_eq!(
+        fs::read_dir(&rig.state)?
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with("usage."))
+            .count(),
+        1
+    );
     fs::write(rig.state.join("config.toml"), "schema_version=2\n")?;
     call(&rig, &["route", "list"], 2)?;
     fs::remove_file(rig.state.join("config.toml"))?;
@@ -213,7 +225,7 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     ] {
         call(&rig, &args, 2)?;
     }
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 

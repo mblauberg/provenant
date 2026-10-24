@@ -140,6 +140,10 @@ impl TestRig {
         }
         Ok(result)
     }
+    /// Read-only leaves may emit demand counters, but no owner state.
+    pub fn assert_only_usage_state(&self) -> Result {
+        assert_only_usage_state(&self.state)
+    }
     pub fn assert_legacy_unchanged(&self) -> Result {
         for tail in [
             ".agents/sentinel",
@@ -162,3 +166,26 @@ pub fn code(output: &ExecOutcome) -> i64 {
 }
 
 pub mod mcp;
+
+pub fn assert_only_usage_state(state: &Path) -> Result {
+    if !state.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(state)? {
+        let entry = entry?;
+        assert!(
+            entry.file_type()?.is_file(),
+            "unexpected state: {:?}",
+            entry.path()
+        );
+        assert!(
+            matches!(
+                entry.file_name().to_str(),
+                Some("usage.jsonl" | "usage.jsonl.1" | "usage.lock")
+            ),
+            "unexpected state: {:?}",
+            entry.path()
+        );
+    }
+    Ok(())
+}

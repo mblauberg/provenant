@@ -380,3 +380,51 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn mcp_usage_counts_success_rejection_and_error_without_arguments() -> Result {
+    let rig = TestRig::new()?;
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_identity","arguments":{"op":"inspect"}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_mail","arguments":{"op":"send","body":"secret-body"}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"secret-unknown-tool","arguments":{"secret":"secret-value"}}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":1,"cursor":null}}}),
+        ],
+    )?;
+    assert_eq!(replies.len(), 5);
+    let log = std::fs::read_to_string(rig.state.join("usage.jsonl"))?;
+    assert!(!log.contains("secret"));
+    let rows: Vec<Value> = log
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    let tools: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "mcp.tool")
+        .collect();
+    assert_eq!(tools.len(), 4);
+    assert!(
+        tools
+            .iter()
+            .any(|row| row["unit"] == "fabric_identity" && row["outcome"] == "ok")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|row| row["unit"] == "fabric_mail" && row["outcome"] == "error")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|row| row["unit"] == "unknown" && row["outcome"] == "error")
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["kind"] == "cli.verb" && row["unit"] == "fabric mcp")
+            .count(),
+        1
+    );
+    Ok(())
+}

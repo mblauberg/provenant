@@ -51,6 +51,8 @@ pub trait Factory: Send + Sync + 'static {
     where
         Self: 'a;
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;
+    /// Optional composition hook. Names/outcomes are fixed metadata, never arguments.
+    fn record_usage(&self, _tool: &str, _outcome: &str, _duration_ms: u64) {}
     fn input_limits(&self) -> provenant_records::Limits {
         provenant_records::Limits {
             max_bytes: MAX_FRAME as u64,
@@ -122,12 +124,31 @@ impl Framer {
 }
 
 struct Job {
+    tool: &'static str,
+    started: Instant,
     id: Id,
     modern: bool,
     call: ToolCall,
     cancel: CancelToken,
 }
+// Unknown caller-supplied names may contain secrets. Persist only installed names.
+fn usage_tool(frame: &[u8]) -> Option<&'static str> {
+    let frame: Value = serde_json::from_slice(frame).ok()?;
+    if frame["method"] != "tools/call" {
+        return None;
+    }
+    let name = frame["params"]["name"].as_str();
+    Some(
+        tools::catalogue()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .find(|known| Some(*known) == name)
+            .unwrap_or("unknown"),
+    )
+}
 struct Completion {
+    tool: &'static str,
+    started: Instant,
     id: Id,
     reply: Value,
 }
@@ -178,18 +199,28 @@ fn write(output: &mut impl Output, value: &Value, timeouts: Timeouts) -> Result<
 }
 
 struct CompletionGuard {
+    tool: &'static str,
+    started: Instant,
     id: Id,
     modern: bool,
     events: SyncSender<Event>,
     response: Option<Value>,
 }
 impl CompletionGuard {
-    fn new(id: Id, modern: bool, events: SyncSender<Event>) -> Self {
+    fn new(
+        id: Id,
+        modern: bool,
+        events: SyncSender<Event>,
+        tool: &'static str,
+        started: Instant,
+    ) -> Self {
         Self {
             id,
             modern,
             events,
             response: None,
+            tool,
+            started,
         }
     }
 }
@@ -203,6 +234,8 @@ impl Drop for CompletionGuard {
         let _ = self.events.send(Event::Completed(Completion {
             id: self.id.clone(),
             reply,
+            tool: self.tool,
+            started: self.started,
         }));
     }
 }
@@ -302,8 +335,13 @@ fn serve_with_timeouts(
                     Err(_) => return,
                 };
                 let Ok(job) = received else { return };
-                let mut completion =
-                    CompletionGuard::new(job.id.clone(), job.modern, events.clone());
+                let mut completion = CompletionGuard::new(
+                    job.id.clone(),
+                    job.modern,
+                    events.clone(),
+                    job.tool,
+                    job.started,
+                );
                 let response = if job.cancel.is_cancelled() {
                     failure("cancelled")
                 } else {
@@ -337,7 +375,13 @@ fn serve_with_timeouts(
             )
         });
         let run = serve_loop(
-            &events, &jobs, output, &mut live, &workers, timeouts, limits,
+            &events,
+            &jobs,
+            output,
+            &mut live,
+            &workers,
+            timeouts,
+            factory.as_ref(),
         );
         stop_reader.store(true, Ordering::Release);
         drop(jobs);
@@ -349,6 +393,7 @@ fn serve_with_timeouts(
             &mut workers,
             output_failed || matches!(&run, Err(Error::Worker)),
             timeouts,
+            factory.as_ref(),
         );
         // Input::read must honour its deadline: after stop, at most one
         // input_read interval remains. A reader blocked sending to the bounded
@@ -381,61 +426,78 @@ fn serve_loop(
     live: &mut BTreeMap<Id, CancelToken>,
     workers: &[thread::JoinHandle<()>],
     timeouts: Timeouts,
-    limits: provenant_records::Limits,
+    factory: &impl Factory,
 ) -> Result<(), Error> {
+    let limits = factory.input_limits();
     let mut protocol = Protocol::default();
     loop {
         match events.recv_timeout(timeouts.event) {
-            Ok(Event::Frame(frame)) => match protocol.receive_with_limits(&frame, limits) {
-                Action::Ignore => {}
-                Action::Cancel(id) => {
-                    if let Some(cancel) = live.get(&id) {
-                        cancel.cancel();
-                    }
-                }
-                Action::Reply(reply) => {
-                    let id = reply
-                        .get("id")
-                        .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
-                    if id.as_ref().is_some_and(|id| live.contains_key(id)) {
-                        write(
-                            output,
-                            &protocol::error(id.as_ref(), -32600, "Duplicate live request ID"),
-                            timeouts,
-                        )?;
-                    } else {
-                        write(output, &reply, timeouts)?;
-                    }
-                }
-                Action::Call { id, modern, call } => {
-                    if live.contains_key(&id) {
-                        write(
-                            output,
-                            &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
-                            timeouts,
-                        )?;
-                        continue;
-                    }
-                    let cancel = CancelToken::new();
-                    let job = Job {
-                        id: id.clone(),
-                        modern,
-                        call: *call,
-                        cancel: cancel.clone(),
-                    };
-                    match jobs.try_send(job) {
-                        Ok(()) => {
-                            live.insert(id, cancel);
+            Ok(Event::Frame(frame)) => {
+                let tool = usage_tool(&frame);
+                let started = Instant::now();
+                match protocol.receive_with_limits(&frame, limits) {
+                    Action::Ignore => {}
+                    Action::Cancel(id) => {
+                        if let Some(cancel) = live.get(&id) {
+                            cancel.cancel();
                         }
-                        Err(TrySendError::Full(_)) => write(
-                            output,
-                            &protocol::result(&id, failure("busy"), modern),
-                            timeouts,
-                        )?,
-                        Err(TrySendError::Disconnected(_)) => return Err(Error::Worker),
+                    }
+                    Action::Reply(reply) => {
+                        if let Some(tool) = tool {
+                            factory.record_usage(tool, "error", 0);
+                        }
+                        let id = reply
+                            .get("id")
+                            .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
+                        if id.as_ref().is_some_and(|id| live.contains_key(id)) {
+                            write(
+                                output,
+                                &protocol::error(id.as_ref(), -32600, "Duplicate live request ID"),
+                                timeouts,
+                            )?;
+                        } else {
+                            write(output, &reply, timeouts)?;
+                        }
+                    }
+                    Action::Call { id, modern, call } => {
+                        if live.contains_key(&id) {
+                            factory.record_usage(tool.unwrap_or("unknown"), "error", 0);
+                            write(
+                                output,
+                                &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
+                                timeouts,
+                            )?;
+                            continue;
+                        }
+                        let cancel = CancelToken::new();
+                        let job = Job {
+                            tool: tool.unwrap_or("unknown"),
+                            started,
+                            id: id.clone(),
+                            modern,
+                            call: *call,
+                            cancel: cancel.clone(),
+                        };
+                        match jobs.try_send(job) {
+                            Ok(()) => {
+                                live.insert(id, cancel);
+                            }
+                            Err(TrySendError::Full(job)) => {
+                                factory.record_usage(job.tool, "busy", 0);
+                                write(
+                                    output,
+                                    &protocol::result(&id, failure("busy"), modern),
+                                    timeouts,
+                                )?;
+                            }
+                            Err(TrySendError::Disconnected(job)) => {
+                                factory.record_usage(job.tool, "error", 0);
+                                return Err(Error::Worker);
+                            }
+                        }
                     }
                 }
-            },
+            }
             Ok(Event::Oversize) => {
                 write(
                     output,
@@ -464,6 +526,7 @@ fn serve_loop(
             }
             Ok(Event::InputError(error)) => return Err(Error::Io(error)),
             Ok(Event::Completed(completion)) => {
+                record_completion(factory, &completion);
                 if let Some(cancel) = live.remove(&completion.id)
                     && !cancel.is_cancelled()
                 {
@@ -479,6 +542,19 @@ fn serve_loop(
     }
 }
 
+fn record_completion(factory: &impl Factory, completion: &Completion) {
+    let outcome = if completion.reply["result"]["isError"] == true {
+        "error"
+    } else {
+        "ok"
+    };
+    factory.record_usage(
+        completion.tool,
+        outcome,
+        u64::try_from(completion.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
+}
+
 fn shutdown_workers(
     events: &Receiver<Event>,
     output: &mut impl Output,
@@ -486,6 +562,7 @@ fn shutdown_workers(
     workers: &mut Vec<thread::JoinHandle<()>>,
     cancel_now: bool,
     timeouts: Timeouts,
+    factory: &impl Factory,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + timeouts.shutdown;
     let mut cancelled = cancel_now;
@@ -518,6 +595,7 @@ fn shutdown_workers(
         };
         match event {
             Some(Event::Completed(completion)) => {
+                record_completion(factory, &completion);
                 if let Some(cancel) = live.remove(&completion.id)
                     && !cancel.is_cancelled()
                     && output_error.is_none()

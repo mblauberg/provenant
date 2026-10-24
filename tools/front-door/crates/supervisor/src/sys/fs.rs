@@ -166,6 +166,14 @@ pub(crate) fn create_new(dir: &File, name: &OsStr) -> io::Result<File> {
         0o600,
     )
 }
+pub(crate) fn open_append_at(dir: &File, name: &OsStr) -> io::Result<File> {
+    open_at(
+        dir.as_raw_fd(),
+        name,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        0o600,
+    )
+}
 pub(crate) fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<Metadata> {
     let name = string(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();

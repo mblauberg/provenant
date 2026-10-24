@@ -79,6 +79,9 @@ fn system_ssh() -> Option<&'static Path> {
         .find(|p| provenant_supervisor::sys::is_executable(p))
 }
 impl stdio::Factory for Factory {
+    fn record_usage(&self, tool: &str, outcome: &str, duration_ms: u64) {
+        crate::usage::record_tool(&self.context.roots, tool, outcome, duration_ms);
+    }
     type Facade<'a> = BoundFacade<'a>;
     fn input_limits(&self) -> provenant_records::Limits {
         provenant_records::Limits {
@@ -1100,7 +1103,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 route: RoutePreference {
                     adapter: Some(route.adapter.clone()),
                     model: route.model.clone(),
-                    role: route.alias.clone(),
+                    route: route.alias.clone(),
+                    confidential: true,
+                    role: None,
                     task_class: None,
                     effort: route.effort.clone(),
                 },

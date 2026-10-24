@@ -50,7 +50,7 @@ fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Resu
     assert!(value["data"]["source_digest"].is_string());
     let empty = rig.command(&[])?;
     assert_eq!(code(&empty), 2);
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     rig.assert_legacy_unchanged()
 }
 #[test]
@@ -90,7 +90,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
         serde_json::from_value(value["data"]["state_directory"].clone())?;
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
-    assert!(!state.exists());
+    support::assert_only_usage_state(&state)?;
     let human = rig.execute(&release.join("bin/provenant"), &["root"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
@@ -259,7 +259,7 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
     assert_eq!(value["data"]["profile"], "balanced");
     assert!(value["data"]["domains"]["quota"].is_object());
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
@@ -317,7 +317,7 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     );
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-marker"));
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-credential-marker"));
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     assert_eq!(
         code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
         2
@@ -355,6 +355,6 @@ fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> 
         code(&rig.command(&["hosts", "doctor", "workshop", "--json"])?),
         4
     );
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     rig.assert_legacy_unchanged()
 }

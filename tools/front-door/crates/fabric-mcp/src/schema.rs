@@ -74,7 +74,7 @@ fn definitions() -> Value {
         "TaskProof":proof("task",false),"ClaimProof":proof("id",false),"LandingProof":proof("id",true),
         "MessageRef":message_ref,
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(4096)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
-        "Route":object(json!({"adapter?":nullable(text(128)),"model?":nullable(text(128)),"role?":nullable(text(128)),"task_class?":nullable(text(128)),"effort?":nullable(text(128))})),
+        "Route":object(json!({"adapter?":nullable(text(128)),"model?":nullable(text(128)),"route?":nullable(text(128)),"confidential?":{"type":"boolean"},"role?":nullable(text(128)),"task_class?":nullable(text(128)),"effort?":nullable(text(128))})),
         "Scope":tagged("kind",json!({"issue":{"key":text(1024)},"paths":{"paths":array(text(4096),1,100)},"worktree":{"path":text(4096)}}))
     })
 }

@@ -90,6 +90,7 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
         "string" => !value.is_string(),
         "integer" => !value.as_number().is_some_and(|n| n.is_i64() || n.is_u64()),
         "null" => !value.is_null(),
+        "boolean" => !value.is_boolean(),
         _ => true,
     }) {
         return false;
@@ -232,6 +233,7 @@ fn sample(root: &Value, schema: &Value) -> Option<Value> {
             .find(|v| accepts(root, schema, v)),
         "integer" => Some(json!(schema["minimum"].as_u64().unwrap_or(0))),
         "null" => Some(Value::Null),
+        "boolean" => Some(json!(true)),
         _ => None,
     }
 }
@@ -367,6 +369,8 @@ fn candidates(root: &Value, schema: &Value, _value: &Value, valid: bool) -> Vec<
             }
         }
         (Some("object"), false) => out.push(json!("wrong type")),
+        (Some("boolean"), true) => out.extend([json!(true), json!(false)]),
+        (Some("boolean"), false) => out.extend([Value::Null, json!("true"), json!(1)]),
         (Some("null"), true) => out.push(Value::Null),
         (Some("null"), false) => out.push(json!({"not":"null"})),
         _ => {}

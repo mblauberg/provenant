@@ -6,6 +6,7 @@ mod hosts;
 mod install;
 mod overflow;
 mod roots;
+mod usage;
 #[cfg(test)]
 #[path = "../tests/support/worktrees.rs"]
 mod worktree_tests;
@@ -269,8 +270,12 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Cancel(_) => unavailable("cancel", "run", globals),
         Command::Resume(_) => unavailable("resume", "run", globals),
         Command::Reconcile(_) => unavailable("reconcile", "run", globals),
-        Command::Telemetry(provenant_cli::Telemetry::Stats(_)) => {
-            unavailable("telemetry stats", "telemetry", globals)
+        Command::Telemetry(provenant_cli::Telemetry::Stats(stats)) => {
+            if stats.usage {
+                usage::run(&stats, globals)
+            } else {
+                unavailable("telemetry stats", "telemetry", globals)
+            }
         }
         Command::Quota(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
@@ -332,7 +337,17 @@ fn main() -> ExitCode {
             }
         };
     }
-    let status = match provenant_cli::parse(std::env::args_os().skip(1)) {
+    let started = std::time::Instant::now();
+    let parsed = provenant_cli::parse(std::env::args_os().skip(1));
+    let (verb, globals) = match &parsed {
+        ParseOutcome::Invocation(inv) => (inv.leaf.as_str(), &inv.globals),
+        ParseOutcome::Invalid { globals, .. } => ("parse", globals),
+        ParseOutcome::Help { globals, .. } => ("help", globals),
+        ParseOutcome::Version { globals } => ("version", globals),
+    };
+    let verb = verb.to_owned();
+    let usage_roots = usage::selected_roots(globals);
+    let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
             "parse",
@@ -388,5 +403,13 @@ fn main() -> ExitCode {
             ),
         },
     };
+    if let Some(roots) = usage_roots {
+        usage::record_cli(
+            &roots,
+            &verb,
+            status,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+    }
     ExitCode::from(status)
 }

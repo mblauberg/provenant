@@ -197,6 +197,7 @@ fn route(route: &RoutePreference, path: &str) -> Result<(), InputError> {
     for (name, value) in [
         ("adapter", route.adapter.as_deref()),
         ("model", route.model.as_deref()),
+        ("route", route.route.as_deref()),
         ("role", route.role.as_deref()),
         ("task_class", route.task_class.as_deref()),
         ("effort", route.effort.as_deref()),
@@ -515,7 +516,7 @@ mod tests {
             json!({"op":"acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_ms":1_000}),
             "scope.paths[0]",
         );
-        for name in ["adapter", "model", "role", "task_class", "effort"] {
+        for name in ["adapter", "model", "route", "role", "task_class", "effort"] {
             let mut route = json!({});
             route[name] = json!("m".repeat(129));
             rejects::<SubmitInput>(

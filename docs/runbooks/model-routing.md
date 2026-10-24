@@ -4,6 +4,11 @@ Run `provenant route list` to inspect the catalogue and cached availability.
 Use `provenant --json route list` for records, or `--adapter NAME` to narrow it.
 Resolve a named route with `provenant route resolve --route NAME`, or select
 an exact model with `--model ADAPTER/ID` and optional `--effort LEVEL`.
+The `utility` pool sits below junior for mechanical work, trying low-cost
+non-training Haiku and Luna before free DeepSeek and GLM. Select it with
+`--route utility`; `--confidential` excludes training or unclassified members
+and fallbacks. It uses exact routing, with no classifier or synonyms.
+
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 
 Dispatch uses the same route flags. Copy the resolved `adapter/model@effort`

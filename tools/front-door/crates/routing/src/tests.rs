@@ -28,6 +28,7 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
     Ok(RouteRequest {
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
+        confidential: false,
         fallback: Fallback::None,
     })
 }
@@ -84,6 +85,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         efforts: vec!["low".into(), "high".into()],
         evidence_ref: "synthetic-controls".into(),
         family: None,
+        trains_on_prompts: None,
     });
     let config = RoutingConfig {
         routes: BTreeMap::from([(
@@ -98,6 +100,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     let mut query = RouteRequest {
         choice: RouteChoice::NamedRoute("review".into()),
         effort: None,
+        confidential: false,
         fallback: Fallback::None,
     };
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
@@ -115,6 +118,60 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     ));
     Ok(())
 }
+#[test]
+fn utility_pool_resolves_and_confidential_skips_training_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue
+        .models
+        .iter_mut()
+        .find(|row| row.model.as_str() == "claude/claude-haiku-5-5")
+        .expect("utility member is catalogued")
+        .trains_on_prompts = Some(true);
+    let config = RoutingConfig::default();
+    let mut context = context(&catalogue, &config, now()?);
+    let mut query = RouteRequest {
+        choice: RouteChoice::NamedRoute("utility".into()),
+        effort: None,
+        confidential: true,
+        fallback: Fallback::Models(BoundedModels::new(vec![
+            ModelId::parse("claude/claude-haiku-5-5")?,
+            ModelId::parse("codex/unclassified")?,
+        ])?),
+    };
+    let route = resolve(&query, &context)?;
+    assert_eq!(route.model, "gpt-6-luna");
+    assert!(route.alternatives.as_slice().is_empty());
+    query.fallback = Fallback::None;
+
+    query.confidential = false;
+    assert_eq!(resolve(&query, &context)?.model, "claude-haiku-5-5");
+    let registry = [
+        provenant_providers::Registration {
+            adapter: &provenant_providers::claude::Claude,
+            quota_source: None,
+        },
+        provenant_providers::Registration {
+            adapter: &RecordedFixture(&provenant_providers::codex::Codex),
+            quota_source: None,
+        },
+    ];
+    let mut records = [availability()];
+    records[0].observed_models = vec!["gpt-6-luna".into()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    context.registry = &registry;
+    context.availability = &records;
+    context.access = &access;
+    let route = resolve(&query, &context)?;
+    assert_eq!(route.model, "gpt-6-luna");
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
 #[test]
 fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -172,6 +229,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         efforts: vec!["high".into()],
         evidence_ref: "test".into(),
         family: None,
+        trains_on_prompts: None,
     });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -191,7 +249,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "recordings-20261024-v1".into(),
+        catalogue_revision: "recordings-20261024-utility-v1".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         last_preflight_error: None,
@@ -368,6 +426,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         efforts: vec![],
         family: Some("anthropic".into()),
         evidence_ref: "test".into(),
+        trains_on_prompts: None,
     });
     assert_eq!(
         FamilyFact::from_verified(

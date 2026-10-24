@@ -225,7 +225,7 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
         ],
     ] {
         assert_eq!(call(&rig, &args, 2)?["status"], "invalid");
-        assert!(!rig.state.exists());
+        rig.assert_only_usage_state()?;
     }
     let help = call(&rig, &["help", "fabric"], 0)?;
     let commands = help["data"]["commands"].as_array().ok_or("catalogue")?;
@@ -234,7 +234,7 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             .iter()
             .any(|v| v["command"] == "provenant fabric landing wait")
     );
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     rig.assert_legacy_unchanged()
 }
 #[test]
@@ -484,7 +484,7 @@ fn malformed_fence_tokens_never_reach_either_error_renderer() -> Result {
     assert_eq!(code(&human), 2);
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
     assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 
@@ -548,7 +548,7 @@ fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
         assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
         assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
     }
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 
@@ -579,7 +579,7 @@ fn embedded_and_uppercase_fence_tokens_never_reach_either_error_renderer() -> Re
         assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
         assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
     }
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 
@@ -604,13 +604,13 @@ fn empty_environment_label_falls_through_to_config() -> Result {
 }
 
 #[test]
-fn fabric_never_creates_ancestors_of_the_state_root() -> Result {
+fn failed_fabric_with_missing_ancestors_creates_only_usage_state() -> Result {
     let mut rig = TestRig::new()?;
     let parent = rig.root.join("missing-parent");
     rig.state = parent.join("state");
     let result = call(&rig, &["fabric", "identity"], 3)?;
     assert_eq!(result["error"]["code"], "io");
-    assert!(!parent.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }
 
@@ -626,6 +626,6 @@ fn fabric_uses_the_binary_product_root_protection() -> Result {
         }
     }
     assert_eq!(call(&rig, &["fabric", "identity"], 2)?["status"], "invalid");
-    assert!(!rig.state.exists());
+    rig.assert_only_usage_state()?;
     Ok(())
 }

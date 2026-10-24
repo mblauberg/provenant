@@ -10,7 +10,7 @@ records and cut-over. Author route: `codex/gpt-6.1-sol@high` via Fabric.
 bundled price table. It reports supervised usage, API-equivalent cost estimates,
 route outcomes, attempt timing, route comparison, cost per accepted delivery and
 measurement coverage. Run owns durable records, admission,
-the registry and terminal publication. Telemetry owns no store, writer lock,
+the registry and terminal publication. The attempt reducer owns no store, writer lock,
 background collection or provider lifecycle operation; a report failure cannot
 signal a provider or change a published outcome.
 
@@ -28,7 +28,8 @@ improve the harness and evaluate configurations, efficiency, performance and
 cost-effectiveness. It needs per-route outcomes, time, usage, cost and cost per
 accepted delivery, not raw OTel streams, a second store or old history. Every
 report reduces run's terminal attempt records and workflow's acceptance facts
-on demand; telemetry writes nothing.
+on demand. The command edge also keeps the bounded local demand log described
+below; the attempt reducer remains pure.
 
 | Keep | Contract |
 |---|---|
@@ -43,12 +44,38 @@ on demand; telemetry writes nothing.
 |---|---|
 | SQLite ledger, writer lock, advisory writes, `record_attempt`, ingest and sources | Duplicate run's durable facts without a product reader. No telemetry supervisor edge or new database. |
 | Ledger import and history carry-forward | The new binary never opens, imports or deletes the old ledger. Its history stays on disk for the old install. No import command or receipt. |
-| Transcript/receipt discovery and OTel ingest/export/collector | No reader for the raw collection (about 0.5 GB a day); the comparison reader is served by run's records. OTel prompt/tool logging stays off. Unsupervised CLI activity is outside coverage; old transcripts and collector data stay untouched. |
+| Transcript/receipt discovery and OTel ingest/export/collector | No reader for the raw collection (about 0.5 GB a day); the comparison reader is served by run's records. OTel prompt/tool logging stays off. CLI demand counts do not imply token/cost coverage; old transcripts and collector data stay untouched. |
 | Delivery telemetry writes and the old accepted-cost report | Workflow retains acceptance evidence. No telemetry `upsert_delivery`, `delivery_report` or delivery rows; the read-only join below replaces them. |
 | Changes and retro reports | Still no product reader; `stats --by` is the comparison view. Delete both reducers `scripts/telemetry_changes.py` and `scripts/telemetry_delivery.py`; the retrospect skill keeps using evidence directly. |
 | Cross-host summaries, aliases and read-time refresh | Stats is local and read-only. No SSH telemetry operation, top-level `stats`/`retro` aliases or implicit refresh. |
 | Weekly quota history and ledger fallback | History is not carried forward. Execution-route/quota owns any future window history, reset interpretation, probes and cooldowns. |
 | Model heuristics, parent rollups and compaction telemetry | Exact recorded identity suffices. Run owns context and lineage; parent references never add another usage total. |
+
+## Local demand counters (#1224)
+
+The binary composition edge owns a separate best-effort `usage.jsonl` under
+`Roots.state`, shared by CLI invocation completion and the Fabric MCP transport
+hook. `EVENT_KINDS` registers `cli.verb` and `mcp.tool`. Records contain the
+canonical verb or installed tool name, timestamp and duration in milliseconds,
+plus CLI exit code or MCP outcome. Unknown tool names are `unknown`; argument,
+prompt and result text never enter the writer. Skill loads and script entry
+points remain unrecorded. OTel prompt and tool logging stays off.
+
+Supervisor supplies descriptor-relative, no-follow `O_APPEND` access and a
+single nonblocking lock attempt. Each line is at most 512 bytes. The writer
+rotates before the next line would exceed 5,000,000 bytes, replacing the single
+`usage.jsonl.1` backup, and performs no sync, polling or background collection.
+I/O errors and lock contention discard the event without affecting the call.
+Local filesystem operations add small overhead, without a hard latency
+promise on a stalled filesystem.
+
+`provenant telemetry stats --usage [--since 30d]` reads both bounded logs and
+sorts units by call count. The CLI grammar and MCP catalogue supply zero-call
+rows. Dates/RFC3339 and `--until` also bound the interval; malformed and torn
+lines are skipped. Retention is bounded by size rather than days, so counts
+are observed demand, not proof of inactivity beyond the retained logs. Stats
+records its own invocation after rendering. This log neither replaces run's
+terminal facts nor adds an edge from run or the pure reducer to a writer.
 
 ## Command and report
 
