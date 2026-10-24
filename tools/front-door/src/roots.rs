@@ -39,7 +39,7 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
-pub(crate) use provenant_cli::git::git_binary;
+pub(crate) use provenant_supervisor::git::git_executable as git_binary;
 
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {

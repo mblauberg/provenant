@@ -576,7 +576,7 @@ pub(crate) fn clean_hooks_at_home(
     let mut operations = Vec::new();
     let mut unresolved = BTreeSet::new();
 
-    for event in events {
+    for event in events.iter().copied() {
         let Some(event_value) = hooks.get(event) else {
             continue;
         };
@@ -718,6 +718,13 @@ pub(crate) fn clean_hooks_at_home(
         });
     }
     if !changes.is_empty() {
+        for event in events.iter().copied() {
+            if splice::get(&updated, &["hooks", event])?
+                .is_some_and(|value| value.as_array().is_some_and(Vec::is_empty))
+            {
+                updated = splice::set(&updated, &["hooks", event], None)?;
+            }
+        }
         let _: Value = decode_jsonc(Cursor::new(&updated), Limits::CONFIG)?;
     }
     Ok((updated, changes, unresolved.into_iter().collect()))
@@ -1218,6 +1225,29 @@ mod tests {
         assert!(updated_text.contains("// preserve this comment"));
         assert!(updated_text.contains("echo user hook"));
         assert!(!updated_text.contains("routing_context_hook.py"));
+    }
+
+    #[test]
+    fn removing_the_last_managed_hook_drops_its_event_array() {
+        let checkout = Path::new("/tmp/old-checkout");
+        let entries: Vec<_> = manifest()
+            .expect("manifest parses")
+            .hooks
+            .into_iter()
+            .filter(|entry| {
+                entry.event == "PostToolUse"
+                    && !entry.disposition.retained()
+                    && entry.id != "utility_output"
+            })
+            .collect();
+        let refs: Vec<_> = entries.iter().collect();
+        let source = jsonc_hooks(hook_events(&refs, checkout));
+        let (updated, _, _) = clean_hooks(&source, Harness::Claude, checkout)
+            .expect("managed PostToolUse hooks are removed");
+        assert_eq!(
+            splice::get(&updated, &["hooks", "PostToolUse"]).expect("updated settings"),
+            None
+        );
     }
 
     #[test]

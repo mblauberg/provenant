@@ -56,7 +56,7 @@ fn prepare_with(
     let assets = registry.assets.ok_or("product assets are unavailable")?;
     let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let provenant_executable = canonical(&provenant_executable)?;
-    let git = canonical(&crate::git::git_binary().ok_or("Git unavailable")?)?;
+    let git = canonical(&provenant_supervisor::git::git_executable().ok_or("Git unavailable")?)?;
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;

@@ -15,6 +15,7 @@ use provenant_supervisor::{
 };
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io,
     os::unix::ffi::OsStringExt,
@@ -332,60 +333,54 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let mut counts = [0usize; 3];
+            let mut counts = BTreeMap::<&str, [usize; 5]>::new();
             for action in &outcome.actions {
-                counts[match action.disposition {
-                    provenant_config::Disposition::Create => 0,
-                    provenant_config::Disposition::Replace => 1,
-                    provenant_config::Disposition::Remove => 2,
-                }] += 1;
-            }
-            let mut human = format!(
-                "{command}: {} action(s) ({} create, {} replace, {} remove)\n",
-                outcome.actions.len(),
-                counts[0],
-                counts[1],
-                counts[2]
-            );
-            const LISTED: usize = 20;
-            for action in outcome.actions.iter().take(LISTED) {
-                let path = action
+                let target = action
                     .path
                     .to_path_buf()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                human.push_str(&format!("{:?}: {path}\n", action.disposition));
-            }
-            if outcome.actions.len() > LISTED {
-                human.push_str(&format!(
-                    "... and {} more (use --json for the full list)\n",
-                    outcome.actions.len() - LISTED
-                ));
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                let selector = action.selector.to_ascii_lowercase();
+                let bucket = if selector.contains("hook") {
+                    Some(1)
+                } else if selector.contains("mcp") {
+                    Some(2)
+                } else if matches!(
+                    action.before.as_ref().or(action.after.as_ref()),
+                    Some(provenant_records::OwnedValue::Link { .. })
+                ) {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(bucket) = bucket {
+                    counts.entry(target).or_default()[bucket] += 1;
+                }
             }
             for manual in &outcome.manual_includes {
-                let path = manual
+                let target = manual
                     .path
                     .to_path_buf()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                let include = manual
-                    .include
-                    .to_path_buf()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                human.push_str(&format!(
-                    "manual include required: add {include} to {path}\n"
-                ));
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                counts.entry(target).or_default()[3] += 1;
             }
             for finding in &outcome.findings {
+                let target = finding
+                    .path
+                    .to_path_buf()
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                counts.entry(target).or_default()[4] += 1;
+            }
+            if counts.is_empty() {
+                counts.entry("target").or_default();
+            }
+            let mut human = format!("{command}:\n");
+            for (target, count) in counts {
                 human.push_str(&format!(
-                    "{}: {}\n",
-                    finding.rule,
-                    finding
-                        .path
-                        .to_path_buf()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
+                    "  {target}: {} links, {} hooks, {} MCP, {} notes; {} findings\n",
+                    count[0], count[1], count[2], count[3], count[4]
                 ));
             }
             let read_only = outcome.dry_run;
@@ -397,6 +392,23 @@ fn output_install(
             )
         }
         Err(error) => install_error(command, &error, globals),
+    }
+}
+
+fn install_target(path: &Path) -> &'static str {
+    let path = path.to_string_lossy();
+    if path.contains("/.claude/") || path.ends_with("/.claude") || path.ends_with("/.claude.json") {
+        "Claude"
+    } else if path.contains("/.codex/") || path.ends_with("/.codex") {
+        "Codex"
+    } else if path.contains("/.cursor/") || path.ends_with("/.cursor") {
+        "Cursor"
+    } else if path.contains("/.config/opencode/") {
+        "OpenCode"
+    } else if path.contains("/.config/agents/") {
+        "Agents"
+    } else {
+        "Git"
     }
 }
 
