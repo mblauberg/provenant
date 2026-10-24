@@ -14,7 +14,7 @@ material security standard changes
 Implementation status (11 July 2026): this document is the pre-implementation
 baseline. Its 30-skill inventory and ten material gaps are historical, not the
 live backlog. The current 32-skill catalogue is generated in the
-[repository README](../../README.md#skill-library); closed gaps, dated
+[skill catalogue](../../skills/); closed gaps, dated
 evaluation evidence and later consolidations are explained in
 [Agent skill portfolio: 2026 research and refactor](skill-portfolio-practices-2026.md).
 

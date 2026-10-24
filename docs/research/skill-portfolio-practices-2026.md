@@ -26,7 +26,7 @@ gate.
 
 The portfolio held 32 skills at this decision's evidence cut-off; later
 consolidations brought it to the count generated in the
-[repository README](../../README.md#skill-library). Since this decision's
+[skill catalogue](../../skills/). Since this decision's
 evidence cut-off, `frontend-design` and `frontend-review` consolidated into
 `ui-ux-design`, `autonomous-lab` became `autopilot`, and `skill-audit` and
 `skill-authoring` consolidated into `skill-craft`. The obsolete `agy-headless`
