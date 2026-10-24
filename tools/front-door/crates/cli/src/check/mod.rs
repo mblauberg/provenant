@@ -504,10 +504,15 @@ pub fn install_page(
 }
 pub fn harness_page(
     git: &GitContext<'_>,
+    installed_skill_roots: &[PathBuf],
     selector: impl Serialize,
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
-    paginate(harness::inspect(git)?, selector, page)
+    paginate(
+        harness::inspect(git, installed_skill_roots)?,
+        selector,
+        page,
+    )
 }
 pub fn release_page(
     git: &GitContext<'_>,
