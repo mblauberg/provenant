@@ -14,6 +14,8 @@ provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 provenant-records = { workspace = true }
+provenant-routing = { workspace = true }
+provenant-providers = { workspace = true }
 provenant-supervisor = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }

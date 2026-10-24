@@ -7,15 +7,17 @@ license.workspace = true
 publish = false
 
 [dependencies]
-clap.workspace = true
-jiff.workspace = true
-regex.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
+provenant-core = { workspace = true }
+provenant-records = { workspace = true }
+provenant-config = { workspace = true }
+provenant-quota = { workspace = true }
+provenant-providers = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml_edit = { workspace = true }
 
 [dev-dependencies]
-tempfile.workspace = true
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

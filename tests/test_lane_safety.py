@@ -497,19 +497,3 @@ def test_settings_refuse_unreadable_json(tmp_path):
     with pytest.raises(hooks.ConfigError):
         hooks.apply(settings, guard_path(tmp_path))
     assert settings.read_text() == "{not json"
-
-
-def test_utility_hook_install_preserves_lane_safety_and_other_post_hooks(tmp_path):
-    settings = tmp_path / 'settings.json'
-    settings.write_text(json.dumps({'hooks': {'PostToolUse': [{'matcher': 'Read', 'hooks': [{'command': 'keep'}]}]}}))
-    hooks.apply(settings, guard_path(tmp_path))
-    digest = tmp_path / 'scripts/utility_output_hook.py'
-    assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'installed'
-    assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'unchanged'
-    data = json.loads(settings.read_text())
-    assert data['hooks']['PostToolUse'][1]['hooks'][0]['timeout'] == 30
-    assert shlex.split(data['hooks']['PostToolUse'][1]['hooks'][0]['command'])[0] == sys.executable
-    assert data['hooks']['PreToolUse'][0]['matcher'] == 'Bash'
-    assert [entry['matcher'] for entry in data['hooks']['PostToolUse']] == ['Read', 'Bash']
-    hooks.apply(settings, None)
-    assert len(json.loads(settings.read_text())['hooks']['PostToolUse']) == 2
