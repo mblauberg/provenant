@@ -552,7 +552,7 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
                 } else {
                     let coverage =
                         if matches!(input, CoordinationInput::Events(EventsInput::Read { .. })) {
-                            peer_match factory.pull_events(budget,&cancel){Ok(value)=>value,Err(_) if wait.is_some()&&budget.remaining(factory.clock.mono_now()).as_micros()==0=>EventCoverage::default(),Err(error)=>return Err(error.into())}
+                            peer_factory.pull_events_from(false, budget, &cancel)?
                         } else {
                             EventCoverage::default()
                         };
@@ -1206,6 +1206,14 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<EventCoverage, FacadeError> {
+        self.pull_events_from(true, budget, cancel)
+    }
+    fn pull_events_from(
+        &self,
+        allow_peers: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<EventCoverage, FacadeError> {
         let ctx = &self.context;
         if ctx.identity.federation.as_ref().is_some_and(|p| {
             ctx.config
@@ -1232,6 +1240,10 @@ impl Factory {
         hosts.extend(ctx.config.peers.values().map(|p| p.host));
         let mut coverage = EventCoverage::default();
         for host in hosts {
+            if !allow_peers && host != ctx.identity.host {
+                coverage.unknown_hosts.push(host);
+                continue;
+            }
             if cancel.is_cancelled() {
                 return Err(FacadeError::Cancelled);
             }
@@ -1291,7 +1303,16 @@ pub fn events(
             let coverage = if expired {
                 EventCoverage::default()
             } else {
-                factory.pull_events(budget, &cancel)?
+                match factory.pull_events(budget, &cancel) {
+                    Ok(value) => value,
+                    Err(_)
+                        if wait.is_some()
+                            && budget.remaining(factory.clock.mono_now()).as_micros() == 0 =>
+                    {
+                        EventCoverage::default()
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             };
             unavailable.extend(coverage.unknown_hosts);
             let result = if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {

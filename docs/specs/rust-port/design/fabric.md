@@ -147,7 +147,9 @@ marked sent before transport and recorded committed or unknown afterwards.
 Repeating an uncertain operation asks only for the home's atomic receipt; it
 never repeats the mutation or falls back locally. Coordination receipts retain
 the original actor. Run-event ingestion commits host-qualified deduplication and
-cursor advancement together. Peer failures remain explicit observations.
+cursor advancement together. Ingress only ingests its local run events and
+reports other configured hosts as unknown; it never recursively fans out. Peer
+failures remain explicit observations.
 
 Landing push records bind the resolved origin URL as well as the ref and OIDs.
 URLs containing passwords or query/fragment credentials are refused before
