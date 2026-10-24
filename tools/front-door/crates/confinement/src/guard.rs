@@ -5,7 +5,7 @@
 use crate::shell_command;
 use provenant_config::{DomainConfig, DomainSection, SectionError};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A rule id and the one-line remedy shown when it denies.
 pub const RULES: [(&str, &str); 7] = [
