@@ -1014,6 +1014,7 @@ fn main() -> Result<()> {
         adapter: args.adapter.clone(),
         label: "recording".into(),
         key: account_key.clone(),
+        org_fingerprint: None,
         directory,
         plan: None,
         priority: None,

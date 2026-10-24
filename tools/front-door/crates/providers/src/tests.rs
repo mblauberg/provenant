@@ -2027,13 +2027,22 @@ fn package_root_never_grants_a_hidden_home_tool_tree() {
 }
 
 #[test]
-fn claude_account_key_binds_the_organisation() {
-    let email = identity::fingerprint("a@example.test");
-    assert_eq!(identity::claude_account("a@example.test", None), email);
-    let one = identity::claude_account("a@example.test", Some("org-1"));
-    assert_ne!(one, email);
-    assert_ne!(
-        one,
-        identity::claude_account("a@example.test", Some("org-2"))
-    );
+fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
+    let mut entry = accounts::Registration {
+        adapter: "claude".into(),
+        label: "pro".into(),
+        key: "k".into(),
+        org_fingerprint: None,
+        directory: "/home/u/.claude-pro".into(),
+        plan: None,
+        priority: None,
+        billing_anchor: None,
+        limits: None,
+    };
+    assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    entry.org_fingerprint = Some("a".into());
+    assert_eq!(entry.check_org(Some("a")).unwrap(), None);
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    assert!(entry.check_org(Some("b")).is_err());
 }

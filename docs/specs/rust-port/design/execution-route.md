@@ -175,9 +175,12 @@ access or an inferred Agy identity.
 
 Account registrations live in `S/config.toml`, under
 `[domains.accounts.entries.<adapter>-<label>]`, with adapter, display label,
-provider-detected key and canonical directory. A Claude key hashes the email
-and the `orgId` from `auth status` (email only when absent), so a directory
-re-logged into another org fails revalidation with "re-register it". `accounts register LABEL
+provider-detected key and canonical directory. A Claude registration also records
+`org_fingerprint`, a hash of the `orgId` from `auth status`; the key stays
+email-only. Revalidation refuses with "changed identity; re-register it" when
+the stored and probed organisations are both present and differ. A legacy
+record gets the probed organisation on its next successful validation (trust
+on first use), and an absent probe organisation never refuses. `accounts register LABEL
 --adapter claude|codex --directory PATH` validates sign-in before saving;
 `accounts list` shows only these non-secret records. Claude labels bind exactly
 to `~/.claude-<label>`; rotating `~/.claude` is never a fixed registration.

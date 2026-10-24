@@ -71,7 +71,7 @@ pub fn execute(
             .map_err(|e| e.to_string())?
             .ok_or("current user identity is unavailable")?
             .name;
-        let key = provenant_providers::accounts::detect(
+        let (key, org_fingerprint) = provenant_providers::accounts::detect_with_org(
             &executor,
             adapter,
             &executable,
@@ -85,6 +85,7 @@ pub fn execute(
             adapter: adapter.clone(),
             label: label.clone(),
             key,
+            org_fingerprint,
             directory,
             plan: plan.clone(),
             priority: *priority,
@@ -123,72 +124,106 @@ pub fn execute(
         if !provenant_config::DomainConfig::validate(&settings).is_empty() {
             return Err("conflicting account registration".into());
         }
-        let bytes = match root.read_bounded(OsStr::new("config.toml"), 1024 * 1024) {
-            Ok(b) => b,
-            Err(e) if e.is_not_found() => b"schema_version = 1\n".to_vec(),
-            Err(e) => return Err(e.to_string()),
-        };
-        let text = std::str::from_utf8(&bytes).map_err(|_| "invalid config encoding")?;
-        let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| "invalid config")?;
-        let mut section = toml_edit::Table::new();
-        let mut entries = toml_edit::Table::new();
-        for (name, e) in &settings.entries {
-            let mut row = toml_edit::Table::new();
-            row["adapter"] = toml_edit::value(&e.adapter);
-            row["label"] = toml_edit::value(&e.label);
-            row["key"] = toml_edit::value(&e.key);
-            row["directory"] =
-                toml_edit::value(e.directory.to_str().ok_or("account path encoding")?);
-            if let Some(value) = &e.plan {
-                row["plan"] = toml_edit::value(value);
-            }
-            if let Some(value) = e.priority {
-                let value = i64::try_from(value).map_err(|_| "priority out of range")?;
-                row["priority"] = toml_edit::value(value);
-            }
-            if let Some(value) = &e.billing_anchor {
-                row["billing_anchor"] = toml_edit::value(value);
-            }
-            if let Some(limits) = &e.limits {
-                let mut table = toml_edit::Table::new();
-                if let Some(value) = limits.monthly_usd {
-                    table["monthly_usd"] = toml_edit::value(value);
-                }
-                if let Some(value) = &limits.cycle_anchor {
-                    table["cycle_anchor"] = toml_edit::value(value);
-                }
-                if let Some(value) = &limits.weekly_anchor {
-                    table["weekly_anchor"] = toml_edit::value(value);
-                }
-                row["limits"] = toml_edit::Item::Table(table);
-            }
-            entries[name] = toml_edit::Item::Table(row);
-        }
-        section["entries"] = toml_edit::Item::Table(entries);
-        if !doc.contains_key("domains") {
-            doc["domains"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        let domains = doc
-            .get_mut("domains")
-            .and_then(toml_edit::Item::as_table_mut)
-            .ok_or("domains must be a TOML table")?;
-        domains["accounts"] = toml_edit::Item::Table(section);
-        match root
-            .atomic_write(
-                OsStr::new("config.toml"),
-                ".accounts-",
-                doc.to_string().as_bytes(),
-                PublishMode::Replace,
-            )
-            .map_err(|e| e.to_string())?
-        {
-            Publication::Durable => {}
-            Publication::VisibleDurabilityUnconfirmed { .. } => {
-                return Err("account config durability unconfirmed".into());
-            }
-        }
+        write_settings(&root, &settings)?;
     }
     Ok(settings)
+}
+
+fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
+    let bytes = match root.read_bounded(OsStr::new("config.toml"), 1024 * 1024) {
+        Ok(b) => b,
+        Err(e) if e.is_not_found() => b"schema_version = 1\n".to_vec(),
+        Err(e) => return Err(e.to_string()),
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|_| "invalid config encoding")?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| "invalid config")?;
+    let mut section = toml_edit::Table::new();
+    let mut entries = toml_edit::Table::new();
+    for (name, e) in &settings.entries {
+        let mut row = toml_edit::Table::new();
+        row["adapter"] = toml_edit::value(&e.adapter);
+        row["label"] = toml_edit::value(&e.label);
+        row["key"] = toml_edit::value(&e.key);
+        if let Some(value) = &e.org_fingerprint {
+            row["org_fingerprint"] = toml_edit::value(value);
+        }
+        row["directory"] = toml_edit::value(e.directory.to_str().ok_or("account path encoding")?);
+        if let Some(value) = &e.plan {
+            row["plan"] = toml_edit::value(value);
+        }
+        if let Some(value) = e.priority {
+            let value = i64::try_from(value).map_err(|_| "priority out of range")?;
+            row["priority"] = toml_edit::value(value);
+        }
+        if let Some(value) = &e.billing_anchor {
+            row["billing_anchor"] = toml_edit::value(value);
+        }
+        if let Some(limits) = &e.limits {
+            let mut table = toml_edit::Table::new();
+            if let Some(value) = limits.monthly_usd {
+                table["monthly_usd"] = toml_edit::value(value);
+            }
+            if let Some(value) = &limits.cycle_anchor {
+                table["cycle_anchor"] = toml_edit::value(value);
+            }
+            if let Some(value) = &limits.weekly_anchor {
+                table["weekly_anchor"] = toml_edit::value(value);
+            }
+            row["limits"] = toml_edit::Item::Table(table);
+        }
+        entries[name] = toml_edit::Item::Table(row);
+    }
+    section["entries"] = toml_edit::Item::Table(entries);
+    if !doc.contains_key("domains") {
+        doc["domains"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let domains = doc
+        .get_mut("domains")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or("domains must be a TOML table")?;
+    domains["accounts"] = toml_edit::Item::Table(section);
+    match root
+        .atomic_write(
+            OsStr::new("config.toml"),
+            ".accounts-",
+            doc.to_string().as_bytes(),
+            PublishMode::Replace,
+        )
+        .map_err(|e| e.to_string())?
+    {
+        Publication::Durable => {}
+        Publication::VisibleDurabilityUnconfirmed { .. } => {
+            return Err("account config durability unconfirmed".into());
+        }
+    }
+    Ok(())
+}
+
+/// Records the organisation first seen for a legacy registration (trust on
+/// first use). Best effort: the next validation retries on any failure.
+pub fn record_org(roots: &Roots, adapter: &str, label: &str, org: &str) -> Result<(), String> {
+    let root = ensure_state_directory(roots.state.as_path())?;
+    let _lock = root
+        .try_lock(
+            OsStr::new("config.lock"),
+            provenant_supervisor::fs::LockMode::Exclusive,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut settings =
+        provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
+            .map_err(|e| e.to_string())?
+            .domains
+            .accounts;
+    let entry = settings
+        .entries
+        .values_mut()
+        .find(|a| a.adapter == adapter && a.label == label)
+        .ok_or("account is not registered")?;
+    if entry.org_fingerprint.is_some() {
+        return Ok(());
+    }
+    entry.org_fingerprint = Some(org.to_owned());
+    write_settings(&root, &settings)
 }
 
 fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
