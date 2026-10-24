@@ -360,7 +360,7 @@ fn route(args: &Args) -> ResolvedRoute {
         effort: args.effort.clone(),
         catalogue_revision: "recording".into(),
         // This recorder measures provider activation, not signed-in identity.
-        account_key: None,
+        account_key: Some("recording".into()),
         host: "recording".into(),
         alternatives: Default::default(),
         exclusions: Vec::new(),
@@ -962,6 +962,19 @@ fn main() -> Result<()> {
         private_dir(&state.join(child))?;
     }
     let route = route(&args);
+    // Continuations bind an account key; register the login source the recording uses.
+    let account = provenant_providers::accounts::Registration {
+        adapter: args.adapter.clone(),
+        label: "recording".into(),
+        key: "recording".into(),
+        directory: home.join(if args.adapter == "codex" {
+            ".codex"
+        } else {
+            ".claude"
+        }),
+    }
+    .registered()
+    .ok();
     let mut records = Vec::new();
     let mut continuation = None;
     let mut last_profile = None;
@@ -992,7 +1005,7 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
-            account: None,
+            account: account.as_ref(),
             token: token.as_ref(),
             cwd,
             nonce,

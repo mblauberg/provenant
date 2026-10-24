@@ -708,9 +708,11 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let result = entry
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
+        // Recording builds may prepare disabled modes to gather their evidence.
         if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
             assert!(
-                matches!(result, Err(ProviderError::Disabled { .. })),
+                matches!(result, Err(ProviderError::Disabled { .. }))
+                    || (cfg!(feature = "recording") && result.is_ok()),
                 "{id}"
             );
             continue;
@@ -927,7 +929,12 @@ fn replay_live(
     };
     let outcome = adapter.finish(state, exit)?;
     assert_eq!(format!("{:?}", outcome.status()), capture.outcome, "{id}");
-    assert_eq!(outcome.model(), capture.answering_model.as_deref(), "{id}");
+    // Codex streams carry no model; its recorded answering model comes from the rollout.
+    let streamed = capture
+        .answering_model
+        .as_deref()
+        .filter(|_| adapter.id() != "codex");
+    assert_eq!(outcome.model(), streamed, "{id}");
     assert!(outcome.session().is_some(), "{id}");
     Ok(())
 }
@@ -1708,7 +1715,11 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
     );
     assert!(launch.profile.spec.deny_keychain_access);
     assert!(launch.profile.spec.authentication.is_empty());
-    assert!(launch.profile.spec.state_writes.is_empty());
+    // Only lane grants are writable: never the private config or the user's home.
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/state/claude-config")
+            && !grant.path.starts_with("/fixture/home")
+    }));
     assert!(
         launch
             .env

@@ -10,6 +10,7 @@
     "provider_endpoint": "allowed",
     "runtime_read": "allowed",
     "secret_read": "denied",
+    "state_write": "allowed",
     "undeclared_process_exec": "denied",
     "undeclared_read": "denied",
     "undeclared_write": "denied"
@@ -31,6 +32,7 @@
     "runtime_read": "allowed",
     "secret_read": "denied",
     "selected_ref_write": "allowed",
+    "state_write": "allowed",
     "undeclared_process_exec": "denied",
     "undeclared_read": "denied",
     "undeclared_write": "denied",
