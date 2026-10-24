@@ -401,11 +401,14 @@ impl RunStore {
                 }
             }
         }
-        let route = format!(
-            "{}/{}",
-            plan.route.provider.as_deref().unwrap_or_default(),
-            plan.route.model.as_deref().unwrap_or_default()
-        );
+        // Route records name models as `adapter/model`; prefix only a
+        // provider-native one (which may itself contain `/`).
+        let provider = plan.route.provider.as_deref().unwrap_or_default();
+        let model = plan.route.model.as_deref().unwrap_or_default();
+        let route = match model.strip_prefix(provider) {
+            Some(rest) if rest.starts_with('/') => model.to_owned(),
+            _ => format!("{provider}/{model}"),
+        };
         let command = ProviderCommand {
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
