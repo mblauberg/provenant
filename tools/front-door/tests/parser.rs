@@ -13,10 +13,56 @@ fn invalid_json_is_an_envelope_and_unbuilt_owners_never_succeed() -> Result {
             .unwrap_or_default()
             .contains("Usage:")
     );
-    let unavailable = rig.command(&["lanes", "--json"])?;
+    let unavailable = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&unavailable), 4);
     let value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
     assert_eq!(value["error"]["code"], "OWNER_UNAVAILABLE");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn run_leaves_accept_work_and_refuse_unactivated_providers_per_task() -> Result {
+    let rig = TestRig::new()?;
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let state = rig.state.to_string_lossy().into_owned();
+    let empty = rig.command(&["lanes", "--json"])?;
+    assert_eq!(code(&empty), 0);
+    let value: serde_json::Value = serde_json::from_slice(&empty.stdout.bytes)?;
+    assert_eq!(value["data"]["lanes"], serde_json::json!([]));
+    let args = [
+        "--state-dir",
+        &state,
+        "dispatch",
+        "--prompt-stdin",
+        "--model",
+        "codex/id",
+        "--operation-id",
+        "fixture",
+        "--json",
+    ];
+    let out = rig.execute(binary, &args, Some(b"hello"))?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let lane = &value["data"]["lanes"][0];
+    assert_eq!(lane["state"], "rejected");
+    // Replaying the operation returns the same run.
+    let again: serde_json::Value =
+        serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
+    assert_eq!(again["data"]["run_id"], value["data"]["run_id"]);
+    let attempt = format!(
+        "{}/{}/{}",
+        lane["run_id"].as_str().ok_or("run")?,
+        lane["task_id"].as_str().ok_or("task")?,
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
+    assert_eq!(value["data"]["text"], "hello");
     rig.assert_legacy_unchanged()
 }
 
@@ -216,7 +262,12 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             )?;
             assert_eq!(code(&out), 2, "{leaf:?} {flag}");
         }
-        if leaf == ["root"] || matches!(leaf.first(), Some(&"quota" | &"route" | &"worktree")) {
+        if leaf == ["root"]
+            || matches!(
+                leaf.first(),
+                Some(&"quota" | &"route" | &"worktree" | &"dispatch" | &"lanes" | &"output")
+            )
+        {
             continue;
         }
         let out = rig.command(&leaf)?;
