@@ -66,7 +66,8 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         value["data"]["receipts"][0]["receipt"]["state"],
         "already_terminal"
     );
-    // Providers expose no sessions yet, so a continuation is refused per task.
+    // Providers expose no sessions yet, so resume refuses before it spends
+    // the attempt's one continuation.
     let resume = [
         "--state-dir",
         &state,
@@ -78,9 +79,9 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "--json",
     ];
     let out = rig.execute(binary, &resume, Some(b"more"))?;
+    assert_eq!(code(&out), 1);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["data"]["lanes"][0]["state"], "rejected");
-    assert_eq!(value["data"]["resumed_from"], lane["attempt_id"]);
+    assert_eq!(value["error"]["code"], "UNSUPPORTED");
     let reconcile = rig.command(&["reconcile", "--json"])?;
     assert_eq!(code(&reconcile), 0);
     let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;
@@ -102,7 +103,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         String::from_utf8_lossy(&stats.stdout.bytes)
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
-    assert_eq!(value["data"]["totals"]["attempts"], 2);
+    assert_eq!(value["data"]["totals"]["attempts"], 1);
     rig.assert_legacy_unchanged()
 }
 

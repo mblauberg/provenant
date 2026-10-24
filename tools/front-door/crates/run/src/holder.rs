@@ -150,13 +150,19 @@ impl RunStore {
             .map_err(|_| RunError::Validation("wall clock"))?;
         let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
+            // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
                 outcome: Outcome::Cancelled,
                 result: String::new(),
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
-                reason: Some("cancelled before start".into()),
+                reason: Some(format!(
+                    "cancelled before start: {}",
+                    exit.warnings
+                        .first()
+                        .map_or("provider never spawned", String::as_str)
+                )),
             },
             (_, true) => Decoded {
                 outcome: Outcome::Rejected,

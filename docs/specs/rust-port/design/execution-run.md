@@ -749,16 +749,21 @@ scheduler daemon. Within that, the lane decided:
   Started work gets a supervisor stop request, and its guardian maps the exit
   to `cancelled`; a guardian still waiting for admission sees `cancel.json`,
   publishes a never-spawned exit and the attempt becomes `cancelled`. The
-  receipt says requested, not exited. An attempt with no launch summary is
-  reported as unobservable for `reconcile`. Cancellation is naturally
-  idempotent, so the operation ID is echoed, not stored.
+  receipt says requested, not exited. An attempt still mid-handoff is retried
+  for half the call budget; if its launch summary never appears it is reported
+  as unobservable and the command fails, so the caller retries or reconciles.
+  One attempt's failure never hides the other receipts. Cancellation is
+  naturally idempotent, so the operation ID is echoed, not stored.
 - **Resume** creates a new single-task run whose attempt is the next attempt
   number of the prior task, with `retry_of` set and route, access and timeout
   copied from it. Each terminal attempt can be continued once: a
   `continuations` table enforces it and the CLI sends expected generation 0.
   The provider seam receives the prior attempt and must continue its exact
-  session; no provider exposes sessions yet, so production `prepare` refuses
-  every continuation task-locally instead of starting a fresh one.
+  session. No provider exposes sessions yet, so the CLI refuses `resume` as
+  unsupported before it spends the continuation, and production `prepare`
+  refuses any continuation that still reaches it. A replay compares the
+  rebuilt request digest, so a changed prompt under the same operation ID is
+  an operation conflict.
 - **Reconcile** observes each nonterminal attempt through supervisor custody.
   A durable exit is committed through the same `finish` path as the guardian
   and its settlement published; a starting attempt without a launch summary,
@@ -767,7 +772,10 @@ scheduler daemon. Within that, the lane decided:
   reported as held or uncertain. Accepting lost custody
   (`--abandon-uncertain`) is refused as unsupported until its evidence rules
   are designed. Reader fences on terminal attempts stay, because attempt
-  directories are never reused.
+  directories are never reused. A per-attempt or per-run error is reported in
+  place and the scan continues; anything left uncertain, unlaunched or in
+  error fails the command. The scan covers the 320 oldest open runs and says
+  when more exist; `--id` reaches the rest.
 - **Telemetry stats** reads this project's terminal attempt facts and prices
   them from the reviewed `config/telemetry-prices.toml` product asset.
   Cross-project totals are out of scope for this slice.

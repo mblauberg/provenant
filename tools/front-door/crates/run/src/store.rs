@@ -327,7 +327,7 @@ impl RunStore {
         reason: &str,
         finished_at: WallTime,
         call: &Request<'_>,
-    ) -> Result<AttemptRecord> {
+    ) -> Result<Option<AttemptRecord>> {
         if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
@@ -342,7 +342,7 @@ impl RunStore {
         )?;
         let old = self.record(id, call)?;
         if let AttemptState::Terminal { .. } = old.state {
-            return Ok(old);
+            return Ok(None);
         }
         if old.state != expected
             || !matches!(old.state, AttemptState::Queued | AttemptState::Starting)
@@ -366,6 +366,7 @@ impl RunStore {
         };
         self.attempt_dir(old.run_id, id, true)?;
         self.commit_terminal(old, revision, &publication, None, None, call)
+            .map(Some)
     }
     /// Seal terminal intent and result, then commit the attempt, run summary,
     /// operation state, released admission and event together. The caller

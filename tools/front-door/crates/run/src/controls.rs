@@ -57,69 +57,75 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
+    /// request. A handoff that has not yet published its launch summary is
+    /// retried within the call budget.
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
-        let record = self.record(id, call)?;
-        match record.state {
-            AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
-            AttemptState::Queued => {
-                let now = call
-                    .clock
-                    .wall_now()
-                    .map_err(|_| RunError::Validation("wall clock"))?;
-                return match self.withdraw(
-                    id,
-                    AttemptState::Queued,
-                    Outcome::Cancelled,
-                    reason,
-                    now,
-                    call,
-                ) {
-                    Ok(_) => Ok(CancelReceipt::Cancelled),
-                    // A concurrent start took it; ask its guardian instead.
-                    Err(RunError::Conflict) => self.cancel(id, reason, call),
-                    Err(error) => Err(error),
-                };
+        // Half the budget for waiting on the handoff; the rest for the store.
+        let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
+        loop {
+            let record = self.record(id, call)?;
+            match record.state {
+                AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
+                AttemptState::Queued => {
+                    let now = call
+                        .clock
+                        .wall_now()
+                        .map_err(|_| RunError::Validation("wall clock"))?;
+                    match self.withdraw(
+                        id,
+                        AttemptState::Queued,
+                        Outcome::Cancelled,
+                        reason,
+                        now,
+                        call,
+                    ) {
+                        Ok(Some(_)) => return Ok(CancelReceipt::Cancelled),
+                        Ok(None) => return Ok(CancelReceipt::AlreadyTerminal),
+                        // A concurrent start took it; it is no longer queued.
+                        Err(RunError::Conflict) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+            let dir = self.attempt_dir(record.run_id, id, false)?;
+            match custody::reattach(dir, Self::scope(&record)) {
+                Ok(handle) => {
+                    return Ok(
+                        match custody::stop(&handle, StopReason::ExplicitCancellation) {
+                            Ok(StopReceipt::Requested) => CancelReceipt::Requested,
+                            Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
+                            Err(error) => CancelReceipt::Unobservable {
+                                reason: error.to_string(),
+                            },
+                        },
+                    );
+                }
+                Err(CustodyError::Filesystem(error))
+                    if error.is_not_found()
+                        && record.state == AttemptState::Starting
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::park_timeout(std::time::Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Ok(CancelReceipt::Unobservable {
+                        reason: error.to_string(),
+                    });
+                }
+            }
         }
-        let dir = self.attempt_dir(record.run_id, id, false)?;
-        let receipt = custody::reattach(dir, Self::scope(&record))
-            .and_then(|handle| custody::stop(&handle, StopReason::ExplicitCancellation));
-        Ok(match receipt {
-            Ok(StopReceipt::Requested) => CancelReceipt::Requested,
-            Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
-            Err(error) => CancelReceipt::Unobservable {
-                reason: error.to_string(),
-            },
-        })
     }
 
     /// Accept a continuation run. Each terminal attempt can be continued
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
-        if let Some(op) = self.operation(&input.operation_id, call)?
-            && op.state != OperationState::Prepared
-        {
-            let run = self.run(op.run_id, call)?;
-            if run.parent != Some(input.prior) {
-                return Err(RunError::OperationConflict);
-            }
-            return Ok(run);
-        }
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
-        }
-        let generation: i64 = call.retry(|| {
-            Ok(self.db.query_row(
-                "SELECT COUNT(*) FROM continuations WHERE target=?1",
-                [input.prior.to_string()],
-                |r| r.get(0),
-            )?)
-        })?;
-        if u64::try_from(generation).ok() != Some(input.expected_generation) {
-            return Err(RunError::Conflict);
         }
         let request = self.request(prior.run_id, call)?;
         let task = request
@@ -153,16 +159,34 @@ impl RunStore {
             }],
             created_at: input.created_at,
         };
+        // A replay is answered by `create`, which compares the request digest.
+        let replay = self
+            .operation(&input.operation_id, call)?
+            .is_some_and(|op| op.state != OperationState::Prepared);
+        if !replay {
+            let generation: i64 = call.retry(|| {
+                Ok(self.db.query_row(
+                    "SELECT COUNT(*) FROM continuations WHERE target=?1",
+                    [input.prior.to_string()],
+                    |r| r.get(0),
+                )?)
+            })?;
+            if u64::try_from(generation).ok() != Some(input.expected_generation) {
+                return Err(RunError::Conflict);
+            }
+        }
         self.create(&prepared, call)
     }
 
-    /// Nonterminal runs in this project, oldest first, for a recovery scan.
-    pub fn open_runs(&self, call: &Request<'_>) -> Result<Vec<RunId>> {
+    /// Up to `limit` runs with nonterminal work in this project, oldest
+    /// first, for a recovery scan.
+    pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
+        let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = call.retry(|| {
             let mut query = self.db.prepare(
-                "SELECT run FROM attempts WHERE project=?1 AND terminal=0 GROUP BY run ORDER BY MIN(sequence) LIMIT 320",
+                "SELECT run FROM attempts WHERE project=?1 AND terminal=0 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
             )?;
-            let rows = query.query_map([self.context.project_id.to_string()], |r| r.get(0))?;
+            let rows = query.query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
             Ok(rows.collect::<std::result::Result<_, _>>()?)
         })?;
         ids.iter()
@@ -192,7 +216,12 @@ impl RunStore {
         let mut found = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            found.push((id, self.reconcile_attempt(id, providers, call)?));
+            let state = self
+                .reconcile_attempt(id, providers, call)
+                .unwrap_or_else(|error| Reconciled::Uncertain {
+                    reason: error.to_string(),
+                });
+            found.push((id, state));
         }
         Ok(found)
     }
@@ -251,7 +280,7 @@ impl RunStore {
                     .clock
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))?;
-                self.withdraw(
+                let done = self.withdraw(
                     id,
                     AttemptState::Starting,
                     Outcome::Rejected,
@@ -259,7 +288,10 @@ impl RunStore {
                     now,
                     call,
                 )?;
-                Ok(Reconciled::Withdrawn)
+                Ok(match done {
+                    Some(_) => Reconciled::Withdrawn,
+                    None => Reconciled::Finished,
+                })
             }
             Err(error) => Ok(uncertain(&error)),
         }

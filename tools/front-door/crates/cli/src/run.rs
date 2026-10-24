@@ -94,6 +94,13 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
 pub struct Registry<'a> {
     pub roots: Option<&'a Roots>,
 }
+impl Registry<'_> {
+    /// Whether providers can continue an exact prior session. None can yet,
+    /// so `resume` refuses before it spends the attempt's one continuation.
+    pub const fn continues_sessions(&self) -> bool {
+        false
+    }
+}
 impl run::Providers for Registry<'_> {
     fn prepare(
         &self,
@@ -940,7 +947,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
-    let mut expired = false;
+    let mut status = Status::Ok;
     let mut out = reply(
         "cancel",
         (|| {
@@ -950,20 +957,43 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let session = open(edge, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [command.target];
+            let selected = select(&session, &targets, &call)?;
+            if selected.is_empty() {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    "NOT_FOUND",
+                    "no matching attempts",
+                ));
+            }
             let mut receipts = Vec::new();
             let mut human = String::new();
-            for id in select(&session, &targets, &call)? {
-                let receipt = session
-                    .store
-                    .cancel(id, reason, &request(&clock, &cancel)?)?;
-                human.push_str(&format!("{id} {}\n", state_tag(&receipt)));
-                receipts.push(json!({ "attempt_id": id, "receipt": receipt }));
+            for id in selected {
+                // One failure must not hide the receipts already earned.
+                let receipt = request(&clock, &cancel)
+                    .and_then(|call| Ok(session.store.cancel(id, reason, &call)?));
+                let row = match receipt {
+                    Ok(receipt) => {
+                        if matches!(receipt, run::CancelReceipt::Unobservable { .. }) {
+                            status = Status::Failed;
+                        }
+                        human.push_str(&format!("{id} {}\n", state_tag(&receipt)));
+                        json!({ "attempt_id": id, "receipt": receipt })
+                    }
+                    Err(fail) => {
+                        status = Status::Failed;
+                        human.push_str(&format!("{id} error: {}\n", fail.message));
+                        json!({ "attempt_id": id, "error": { "code": fail.code, "message": fail.message } })
+                    }
+                };
+                receipts.push(row);
             }
             let mut data = json!({ "operation_id": command.operation_id, "receipts": receipts });
             if let Some(seconds) = command.wait {
                 let (lanes, rendered, timed_out) =
                     wait_lanes(&session, &targets, Condition::All, seconds, edge)?;
-                expired = timed_out;
+                if timed_out && status == Status::Ok {
+                    status = Status::Timeout;
+                }
                 data["lanes"] = lanes["lanes"].clone();
                 data["condition_met"] = lanes["condition_met"].clone();
                 human.push_str(&rendered);
@@ -971,8 +1001,8 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             Ok((data, human))
         })(),
     );
-    if expired {
-        out.result.status = Status::Timeout;
+    if out.result.status == Status::Ok {
+        out.result.status = status;
     }
     out
 }
@@ -1000,6 +1030,13 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fai
         Some(path) => read_bounded(path)?,
         None => read_text(std::io::stdin().lock())?,
     };
+    if !(Registry { roots: None }).continues_sessions() {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "resume needs provider sessions, which providers do not expose yet",
+        ));
+    }
     let session = open(edge, &call)?;
     let record = session.store.record(prior, &call)?;
     if record.run_id != target.run || target.task.is_some_and(|task| task != record.task_id) {
@@ -1031,11 +1068,21 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fai
 
 /// Recover runs whose guardian or submitter died: commit durable exits,
 /// withdraw launches that never reached a guardian, and start queued work.
-/// Uncertain custody stays fenced and is reported.
+/// Uncertain custody stays fenced, is reported, and fails the command.
 pub fn reconcile(command: Reconcile, edge: &Edge<'_>) -> Reply {
-    reply("reconcile", reconcile_inner(command, edge))
+    let mut fenced = false;
+    let mut out = reply("reconcile", reconcile_inner(command, edge, &mut fenced));
+    if fenced && out.result.status == Status::Ok {
+        out.result.status = Status::Failed;
+    }
+    out
 }
-fn reconcile_inner(command: Reconcile, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+const SCAN: u64 = 320;
+fn reconcile_inner(
+    command: Reconcile,
+    edge: &Edge<'_>,
+    fenced: &mut bool,
+) -> Result<(Value, String), Fail> {
     if command.abandon_uncertain {
         return Err(Fail::new(
             Status::Refused,
@@ -1046,10 +1093,15 @@ fn reconcile_inner(command: Reconcile, edge: &Edge<'_>) -> Result<(Value, String
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
-    let runs = if command.id.is_empty() {
-        session.store.open_runs(&request(&clock, &cancel)?)?
+    let (runs, truncated) = if command.id.is_empty() {
+        let mut runs = session
+            .store
+            .open_runs(SCAN + 1, &request(&clock, &cancel)?)?;
+        let truncated = runs.len() as u64 > SCAN;
+        runs.truncate(SCAN as usize);
+        (runs, truncated)
     } else {
-        command.id
+        (command.id, false)
     };
     let registry = Registry {
         roots: Some(edge.roots),
@@ -1057,32 +1109,62 @@ fn reconcile_inner(command: Reconcile, edge: &Edge<'_>) -> Result<(Value, String
     let mut rows = Vec::new();
     let mut human = String::new();
     for run in runs {
-        // Each run gets a fresh call budget; recovery waits on custody locks.
-        let call = request(&clock, &cancel)?;
-        let found = session.store.reconcile(run, &registry, &call)?;
+        // Each step gets a fresh budget; recovery waits on custody locks.
+        let found = match request(&clock, &cancel)
+            .and_then(|call| Ok(session.store.reconcile(run, &registry, &call)?))
+        {
+            Ok(found) => found,
+            Err(fail) => {
+                *fenced = true;
+                human.push_str(&format!("{run} error: {}\n", fail.message));
+                rows.push(json!({ "run_id": run, "error": { "code": fail.code, "message": fail.message } }));
+                continue;
+            }
+        };
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
-            launch(&session, run, edge, &call)?
+            request(&clock, &cancel).and_then(|call| launch(&session, run, edge, &call))
         } else {
-            Vec::new()
+            Ok(Vec::new())
+        };
+        let (launched, unknown, launch_error) = match &started {
+            Ok(started) => (
+                started
+                    .iter()
+                    .filter(|s| matches!(s, run::Started::Launched(_)))
+                    .count(),
+                launch_unknown(started),
+                None,
+            ),
+            Err(fail) => (0, Vec::new(), Some(fail.message.clone())),
         };
         let attempts: Vec<Value> = found
             .iter()
             .map(|(id, state)| {
+                if matches!(state, run::Reconciled::Uncertain { .. }) {
+                    *fenced = true;
+                }
                 human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
                 json!({ "attempt_id": id, "found": state })
             })
             .collect();
+        *fenced |= !unknown.is_empty() || launch_error.is_some();
         rows.push(json!({
             "run_id": run,
             "attempts": attempts,
-            "launched": started.iter().filter(|s| matches!(s, run::Started::Launched(_))).count(),
-            "launch_unknown": launch_unknown(&started),
+            "launched": launched,
+            "launch_unknown": unknown,
+            "launch_error": launch_error,
         }));
     }
     if rows.is_empty() {
         human.push_str("no open runs\n");
     }
-    Ok((json!({ "runs": rows }), human))
+    if truncated {
+        human.push_str(&format!(
+            "more than {SCAN} open runs; name the rest with --id\n"
+        ));
+    }
+    Ok((json!({ "runs": rows, "truncated": truncated }), human))
 }
 
 /// Usage and cost over this project's terminal attempts, priced from the

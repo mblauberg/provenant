@@ -296,8 +296,16 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     );
 
     store.mark_starting(starting, &route(), &call)?;
+    // Before the handoff publishes its launch summary there is nothing to
+    // stop; cancel retries until its budget ends, then says so.
+    let system = provenant_supervisor::clock::SystemClock::new();
+    let spent = Request {
+        clock: &system,
+        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
+        cancel: &cancel,
+    };
     assert!(matches!(
-        store.cancel(starting, "stop", &call)?,
+        store.cancel(starting, "stop", &spent)?,
         CancelReceipt::Unobservable { .. }
     ));
     // Supervisor's stop writes cancel.json; the waiting guardian sees it.
@@ -357,6 +365,12 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.parent, Some(prior));
     assert_eq!(store.resume(&resume("r1", 0, 20)?, &call)?, continued);
+    let mut changed = resume("r1", 0, 20)?;
+    changed.prompt = "other".into();
+    assert!(matches!(
+        store.resume(&changed, &call),
+        Err(RunError::OperationConflict)
+    ));
     for expected in [0, 1] {
         assert!(matches!(
             store.resume(&resume("r2", expected, 30)?, &call),
