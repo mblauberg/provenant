@@ -71,13 +71,11 @@ pub enum RouteChoice {
 pub struct BoundedModels<const N: usize>(Vec<ModelId>);
 impl<const N: usize> BoundedModels<N> {
     pub fn new(models: Vec<ModelId>) -> Result<Self, RoutingError> {
-        if models.is_empty()
-            || models.len() > N
-            || models
-                .iter()
-                .enumerate()
-                .any(|(i, m)| models.iter().skip(i + 1).any(|v| v == m))
-        {
+        if models.is_empty() || models.len() > N {
+            return Err(RoutingError::Alternatives);
+        }
+        let unique = models.iter().collect::<std::collections::BTreeSet<_>>();
+        if unique.len() != models.len() {
             return Err(RoutingError::Alternatives);
         }
         Ok(Self(models))
@@ -125,4 +123,5 @@ pub struct RouteRequest {
 #[serde(deny_unknown_fields)]
 pub struct RouteListQuery {
     pub adapter: Option<String>,
+    pub pool: Option<String>,
 }

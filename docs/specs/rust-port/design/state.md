@@ -305,12 +305,20 @@ bytes/links as no-ops, including writes completed before a crash. Until
 That manifest is published after all other release entries; afterwards the
 release is immutable. Equal source digests with different manifest bytes fail
 with typed `ReleaseConflict`, naming both manifest digests and recovery.
-Upgrades remove unchanged owned entries dropped by each selected harness;
+Upgrades remove unchanged owned entries dropped by each selected target;
 changed or unmanaged entries remain. The sole installation lock is
 `<state>/install/install.lock`; no locks are left in harness or bin directories. Receipt
 records release identity, resolved targets, selectors, expected owned
 values and the optional absolute `legacy_checkout` substitution root plus
-compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last. No cross-file or two-host atomicity is claimed.
+compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last.
+A target is its harness plus resolved skills directory, so one receipt may hold
+several targets of a harness, such as one per `CLAUDE_CONFIG_DIR`. Targets never
+share a destination; each harness entry belongs to the target whose paths admit
+it. Install replaces only the selected targets and carries the rest over;
+`check install` verifies every recorded target. Uninstall selects the target
+matching an environment-supplied home, or else every recorded target of the
+harness. The receipt shape is unchanged, so version-one receipts still load.
+No cross-file or two-host atomicity is claimed.
 
 ### Harness registry
 
@@ -481,7 +489,7 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 `AttemptFact` lives in records and derives `Serialize` only. Run constructs
 it from its store: task, attempt number, operation, project, terminal state,
 exit, started_at/finished_at, resolved route (provider, model, effort, account
-label), usage counts (`u64`), output paths, reviewer and `delivery_id`.
+label), usage counts (`u64`), reviewer and `delivery_id`.
 Terminal records are immutable; highest attempt number selects the latest
 attempt. Telemetry's `stats(facts, &PriceTable, window) -> Stats` accepts any
 iterator of `AttemptFact`, filtering on `finished_at`, without revision dedupe.

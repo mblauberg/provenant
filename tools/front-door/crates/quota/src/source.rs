@@ -18,38 +18,21 @@ pub struct QuotaProbeInput {
     pub authority_ref: Option<String>,
 }
 
+/// What the supervisor does to obtain a capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaEffectKind {
+    HttpGet,
+    Command,
+    LocalLedger,
+}
+
 /// Effects are interpreted by supervisor, never executed by a source.
 /// Credential references are the account scope. Secret values never enter plans.
 #[derive(Debug)]
-pub enum QuotaProbePlan {
-    HttpGet {
-        account: AccountScope,
-        input: QuotaProbeInput,
-    },
-    Command {
-        account: AccountScope,
-        input: QuotaProbeInput,
-    },
-    LocalLedger {
-        account: AccountScope,
-        input: QuotaProbeInput,
-    },
-}
-impl QuotaProbePlan {
-    pub fn account(&self) -> &AccountScope {
-        match self {
-            Self::HttpGet { account, .. }
-            | Self::Command { account, .. }
-            | Self::LocalLedger { account, .. } => account,
-        }
-    }
-    pub fn input(&self) -> &QuotaProbeInput {
-        match self {
-            Self::HttpGet { input, .. }
-            | Self::Command { input, .. }
-            | Self::LocalLedger { input, .. } => input,
-        }
-    }
+pub struct QuotaProbePlan {
+    pub kind: QuotaEffectKind,
+    pub account: AccountScope,
+    pub input: QuotaProbeInput,
 }
 
 /// The process edge discovers configured accounts and interprets bounded effects.
@@ -66,6 +49,7 @@ pub trait QuotaEffects {
 #[serde(default, deny_unknown_fields)]
 pub struct QuotaDetails {
     pub plan: Option<String>,
+    pub billing_anchor: Option<String>,
     pub fingerprint: Option<String>,
     pub priority: Option<u64>,
     pub credit_balance: Option<String>,
@@ -131,25 +115,4 @@ pub trait QuotaSource: Sync {
         plan: &QuotaProbePlan,
         capture: &ProbeCapture,
     ) -> Result<QuotaSnapshot, crate::QuotaError>;
-}
-
-/// The binary injects provider registrations. Quota never imports providers.
-pub fn plan_probe(
-    sources: &[&dyn QuotaSource],
-    account: &AccountScope,
-    input: &QuotaProbeInput,
-) -> Result<QuotaProbePlan, crate::QuotaError> {
-    account.validate()?;
-    let duration = input
-        .deadline_unix_seconds
-        .checked_sub(input.now_unix_seconds)
-        .ok_or(crate::QuotaError::TimeRange)?;
-    if !(1..=crate::schedule::TICK_BUDGET_SECONDS).contains(&duration) {
-        return Err(crate::QuotaError::Invalid("probe deadline"));
-    }
-    sources
-        .iter()
-        .find(|s| s.adapter_id() == account.adapter)
-        .ok_or(crate::QuotaError::Disabled)?
-        .probe(account, input)
 }

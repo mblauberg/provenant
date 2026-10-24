@@ -109,10 +109,6 @@ impl Continuation {
             return Err(ProviderError::IdentityMismatch);
         }
         let session = outcome.session().ok_or(ProviderError::UnknownIdentity)?;
-        let account_key = route
-            .account_key
-            .clone()
-            .ok_or(ProviderError::UnknownIdentity)?;
         // Requested models cannot substitute for answering-model evidence.
         // Codex's exec stream has no model position; its resume argv pins the
         // same `-m`, and any model it does report must still match.
@@ -121,6 +117,24 @@ impl Continuation {
             None if !model_on_wire => {}
             _ => return Err(ProviderError::UnknownIdentity),
         }
+        Self::retained(adapter, session, route, grant_digest)
+    }
+    /// A continuation of a session the run store recorded for a prior
+    /// attempt. The caller has already matched the recorded route evidence
+    /// to `route`, which supplies the account, host, model and effort.
+    pub fn retained(
+        adapter: &str,
+        session: &str,
+        route: &ResolvedRoute,
+        grant_digest: &str,
+    ) -> Result<Self, ProviderError> {
+        if route.adapter != adapter || session.is_empty() {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let account_key = route
+            .account_key
+            .clone()
+            .ok_or(ProviderError::UnknownIdentity)?;
         Ok(Self {
             adapter: adapter.into(),
             session: session.into(),

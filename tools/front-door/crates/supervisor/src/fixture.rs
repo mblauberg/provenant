@@ -166,8 +166,15 @@ pub fn guardian_exit_status(
 }
 
 fn process_identity_is_live(identity: &crate::census::ProcessIdentity) -> bool {
+    // End-to-end command fixtures launch the production guardian, while
+    // lower-level custody fixtures explicitly inject the recorded boot.
+    let observation = if identity.boot == "fixture-recorded-boot-v1" {
+        RecordedBootObserver.observe(identity.pid)
+    } else {
+        crate::census::SystemProcessObserver.observe(identity.pid)
+    };
     matches!(
-        RecordedBootObserver.observe(identity.pid),
+        observation,
         crate::census::ProcessObservation::Present(fact) if fact.identity == *identity
     )
 }
@@ -370,12 +377,15 @@ impl ReaperFixture {
         let env = environment(root);
         let child = crate::sys::raw_exec::OwnedPid::spawn(
             permit,
-            &argv,
-            Some(&env),
-            root,
-            false,
-            false,
-            false,
+            crate::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root,
+                input: false,
+                secret_input: None,
+                capture_stdout: false,
+                capture_stderr: false,
+            },
         )?;
         drop(child);
         Ok(())
@@ -752,12 +762,18 @@ pub fn dispatch() -> io::Result<bool> {
             ready.write_all(b"\n")?;
             wait_for_eof(&mut ready)?;
         }
-        "s2-setsid-provider" => {
+        "s2-setsid-provider" | "s2-group-provider" => {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;
             let root = std::env::current_dir()?;
             let mut descendant = ChildGuard::new(
-                command_with_args("s2-setsid-descendant", &[ready_socket], &root, true)?.spawn()?,
+                command_with_args(
+                    "s2-setsid-descendant",
+                    &[ready_socket],
+                    &root,
+                    scenario == "s2-setsid-provider",
+                )?
+                .spawn()?,
             );
             let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
             gate.write_all(b"R")?;

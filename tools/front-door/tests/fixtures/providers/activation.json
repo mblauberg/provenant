@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "author_route": "codex/gpt-6.1-sol@xhigh",
+  "author_route": "codex/gpt-6.1-sol@high",
   "default_enabled": false,
   "required_evidence": [
     "cli_version_and_platform",
@@ -40,8 +40,8 @@
       "capture_refs": [
         "claude-live-worktree_write-fresh"
       ],
-      "shell_enabled": false,
-      "shell_reason": "requires_pro_writer_bash_and_keychain_denial_recording"
+      "shell_enabled": true,
+      "shell_reason": "live_bash_subprocess_scrub_and_cli_version_capture"
     },
     {
       "adapter": "claude",
@@ -52,8 +52,8 @@
       "capture_refs": [
         "claude-live-worktree_write-resume"
       ],
-      "shell_enabled": false,
-      "shell_reason": "requires_pro_writer_bash_and_keychain_denial_recording"
+      "shell_enabled": true,
+      "shell_reason": "live_bash_subprocess_scrub_and_cli_version_capture"
     },
     {
       "adapter": "codex",

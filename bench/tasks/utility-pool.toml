@@ -1,0 +1,6 @@
+repo = "mblauberg/provenant"
+parent_sha = "01feee697f5e59220c7a5b97235b58dbca4eb4e4"
+merge_sha = "e395d2d9de0530b680ec8d1725c82fee368cad06"
+prompt = "Implement utility route selection and preserve the free opt-in behavior from PR #1421."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-routing --lib utility_pool_resolves_and_confidential_skips_training_members"
+split = "search"

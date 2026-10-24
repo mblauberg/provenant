@@ -16,6 +16,10 @@ final class QuotaModel {
     private(set) var error: String?
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
+    /// Lanes that may need attention, from `provenant lanes`; the panel classifies them against its own clock.
+    private(set) var lanes: [Lane] = []
+    @ObservationIgnored private var lanesTimer: Timer?
+    @ObservationIgnored private var readingLanes = false
     /// The status item's content, replaced only when it changes.
     private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
@@ -40,7 +44,7 @@ final class QuotaModel {
     init() {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.timer?.invalidate() }
+            MainActor.assumeIsolated { self?.timer?.invalidate(); self?.lanesTimer?.invalidate() }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.woke() }
@@ -56,13 +60,37 @@ final class QuotaModel {
         }
         network.start(queue: .main)
         loadCurrent()
+        refreshLanes()
+        let poll = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshLanes() } }
+        poll.tolerance = 10
+        lanesTimer = poll
+        RunLoop.main.add(poll, forMode: .common)
     }
+
+    /// Reads the lane list on the quota refresh cadence: every tick and panel open, and once a minute between.
+    private func refreshLanes() {
+        guard !fixture, !readingLanes else { return }
+        readingLanes = true
+        let cached = launcher
+        Task {
+            let (resolved, outcome) = await Task.detached(priority: .utility) { CLI.lanes(cached) }.value
+            readingLanes = false
+            launcher = launcher ?? resolved
+            switch outcome {
+            case .success(let found): if found != lanes { lanes = found }
+            case .failure(let failure): log.error("\(failure.message, privacy: .public)")   // the last list stays
+            }
+        }
+    }
+
+    var stateRoot: URL { LaneBoard.stateRoot(report: report) }
 
     /// ⌘R.
     func refresh() { run(.manual) }
 
     /// The panel can become key twice as it opens; avoid closely spaced ticks.
     func panelOpened() {
+        refreshLanes()
         if let updatedAt, Date.now.timeIntervalSince(updatedAt) < 5 { return }
         run(.panel)
     }
@@ -119,6 +147,7 @@ final class QuotaModel {
             if let rank = strength.firstIndex(of: trigger), rank > pending.flatMap(strength.firstIndex) ?? -1 { pending = trigger }
             return
         }
+        refreshLanes()
         isRefreshing = true
         let arguments = ["quota", "tick", "--trigger", trigger.rawValue, "--power", power.rawValue, "--json"]
         log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power.rawValue, privacy: .public)")

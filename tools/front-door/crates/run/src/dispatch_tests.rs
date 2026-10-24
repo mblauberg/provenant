@@ -10,6 +10,153 @@ use provenant_supervisor::{
 use std::cell::{Cell, RefCell};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn nested_lane_depth_stops_at_the_configured_maximum() {
+    assert!(matches!(next_lane_depth(0, 2), Ok(1)));
+    assert!(matches!(next_lane_depth(1, 2), Ok(2)));
+    assert!(matches!(
+        next_lane_depth(2, 2),
+        Err(RunError::DepthExceeded {
+            depth: 3,
+            max_depth: 2
+        })
+    ));
+}
+
+#[test]
+fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    for (depth, proposed_parent, valid) in [
+        (Some(2), Some(parent), true),
+        (Some(1), Some(parent), false),
+        (None, Some(parent), false),
+        (Some(2), Some(AttemptId::from_bytes([8; 16])), false),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = depth;
+        nested.request.parent_attempt = proposed_parent;
+        let record = store.create(&nested, &call)?;
+        assert_eq!(record.parent, None);
+        assert_eq!(record.parent_attempt, proposed_parent);
+        assert_eq!(store.run(record.run_id, &call)?, record);
+        assert_eq!(store.queued_runs(&call)?, vec![record.run_id]);
+        assert_eq!(
+            store
+                .validate_child(
+                    record.run_id,
+                    parent,
+                    &input().request.tasks[0],
+                    1,
+                    2,
+                    &call
+                )
+                .is_ok(),
+            valid
+        );
+        if !valid {
+            store.refuse_queued(record.run_id, "host refused child metadata", &call)?;
+            assert!(store.queued_runs(&call)?.is_empty());
+            assert!(matches!(
+                store.record(nested.attempts[0].attempt_id, &call)?.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected,
+                    ..
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let writer = || WriterRequest {
+        project: "/project".into(),
+        worktree: "/project/.worktrees/sibling".into(),
+    };
+    let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: branch.into(),
+        open_pr,
+    };
+    let read_only = input().request.tasks[0].clone();
+    let mut writing = read_only.clone();
+    writing.writer = Some(writer());
+    let mut delivering = writing.clone();
+    delivering.deliver = Some(deliver("feature", false));
+    for (parent_task, writer_child, child_delivery, valid, case) in [
+        (
+            &read_only,
+            false,
+            None,
+            true,
+            "read-only child of read-only parent",
+        ),
+        (
+            &read_only,
+            true,
+            None,
+            false,
+            "writer child of read-only parent",
+        ),
+        (
+            &read_only,
+            true,
+            Some(deliver("feature", false)),
+            false,
+            "delivery child of read-only parent",
+        ),
+        (&writing, true, None, true, "writer child of writer parent"),
+        (
+            &writing,
+            true,
+            Some(deliver("feature", false)),
+            false,
+            "delivery child of non-delivering parent",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("feature", false)),
+            true,
+            "delivery within parent grant",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("other", false)),
+            false,
+            "delivery to another branch",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("feature", true)),
+            false,
+            "pull request beyond parent grant",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        nested.request.tasks[0].writer = writer_child.then(writer);
+        nested.request.tasks[0].deliver = child_delivery;
+        let record = store.create(&nested, &call)?;
+        let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
+        assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
+    }
+    Ok(())
+}
+
 struct Host {
     available: u64,
 }
@@ -49,17 +196,24 @@ impl Providers for Fake {
         }
         unreachable!("these tests never hand off to a guardian")
     }
-    fn decode(&self, applied: &RouteRecord, stdout: &[u8], _: &ExitObservation) -> Decoded {
+    fn decode(
+        &self,
+        applied: &RouteRecord,
+        stdout: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
-        Decoded {
+        Ok(Decoded {
             outcome: Outcome::Succeeded,
             result: String::from_utf8_lossy(stdout).into_owned(),
             complete: true,
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
+            session: None,
             reason: None,
-        }
+        })
     }
 }
 fn two_tasks(concurrency: u64) -> PreparedRun {
@@ -75,7 +229,7 @@ fn two_tasks(concurrency: u64) -> PreparedRun {
     });
     run
 }
-fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
+pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
     let mut value = serde_json::to_value(exit)?;
     let object = value.as_object_mut().ok_or("exit fixture")?;
     object.remove("publication");
@@ -106,7 +260,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     store.create(&serial, &call)?;
     let [first, second] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
     for id in [first, second] {
-        store.mark_starting(id, &route(), &[], &call)?;
+        store.mark_starting(id, &route(), &[], None, &call)?;
     }
     let running = store
         .claim(first, now, &call)?
@@ -126,7 +280,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
     store.create(&spaced, &call)?;
     let id = spaced.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], &call)?;
+    store.mark_starting(id, &route(), &[], None, &call)?;
     assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
 
     let attempt = store.attempt_dir(spaced.run_id, id, false)?;
@@ -140,7 +294,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], &call)?;
+    store.mark_starting(id, &route(), &[], None, &call)?;
     let starved = Host { available: 1 };
     assert!(matches!(
         store.admit(id, &attempt, &starved, &clock, &cancel),
@@ -211,7 +365,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     };
     for (index, code) in [(0, 0), (1, 1)] {
         let id = batch.attempts[index].attempt_id;
-        store.mark_starting(id, &route(), &[], &call)?;
+        store.mark_starting(id, &route(), &[], None, &call)?;
         store.claim(id, now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
@@ -256,7 +410,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let run = input();
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], &call)?;
+    store.mark_starting(id, &route(), &[], None, &call)?;
     let mut observed = exit();
     observed.scope.generation = 1;
     observed.never_spawned = true;
@@ -330,6 +484,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
+        session: None,
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(!terminal_tmp.exists());
@@ -372,7 +527,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         CancelReceipt::AlreadyTerminal
     );
 
-    store.mark_starting(starting, &route(), &[], &call)?;
+    store.mark_starting(starting, &route(), &[], None, &call)?;
     // Before the handoff publishes its launch summary there is nothing to
     // stop; cancel retries until its budget ends, then says so.
     let system = provenant_supervisor::clock::SystemClock::new();
@@ -414,6 +569,9 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
+    let outer_parent = AttemptId::from_bytes([19; 16]);
+    run.request.lane_depth = Some(1);
+    run.request.parent_attempt = Some(outer_parent);
     run.request.tasks[0].account = Some("fixture-account".into());
     store.create(&run, &call)?;
     let prior = run.attempts[0].attempt_id;
@@ -489,7 +647,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
 
     // The guardian sealed an exit but died before its terminal commit.
-    store.mark_starting(exited, &route(), &[], &call)?;
+    store.mark_starting(exited, &route(), &[], None, &call)?;
     store
         .claim(exited, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -508,7 +666,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     seal_exit(&store, &observed)?;
 
     // A handoff whose reservation never reached a guardian.
-    store.mark_starting(orphan, &route(), &[], &call)?;
+    store.mark_starting(orphan, &route(), &[], None, &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -549,7 +707,7 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    store.mark_starting(id, &route(), &[], &call)?;
+    store.mark_starting(id, &route(), &[], None, &call)?;
     let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -587,7 +745,14 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         std::fs::metadata(&first_tmp)?.permissions().mode() & 0o777,
         0o700
     );
-    store.mark_starting(first, &route(), &[".agent-run/locks".into()], &call)?;
+    let observed = provenant_core::GitOid::Sha1([7; 20]);
+    store.mark_starting(
+        first,
+        &route(),
+        &[".agent-run/locks".into()],
+        Some(observed),
+        &call,
+    )?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
     assert_eq!(
@@ -595,6 +760,9 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         [".agent-run/locks"]
     );
     assert!(store.record(second, &call)?.read_only_writable.is_empty());
+    // The host-observed head of a read-only lane persists; unobserved stays absent.
+    assert_eq!(store.record(first, &call)?.head, Some(observed));
+    assert_eq!(store.record(second, &call)?.head, None);
     // Old v1 records omit the added field and retain an empty default.
     let mut record = serde_json::to_value(store.record(first, &call)?)?;
     record

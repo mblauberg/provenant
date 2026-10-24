@@ -7,6 +7,22 @@ Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
 below. The [cross-area decisions](README.md#cross-area-decisions) bind state,
 layout, commands, waits, records and hooks; cli owns the exact flag freeze.
 
+## Audit implementation notes
+
+The supervisor audit captures provider identity before exec with a bounded
+child/observer handshake, retries transient cleanup census failures and feeds
+cleanup/publication outcomes into the machine. CPU/cancellation and safety
+census observations stay at 100 ms; process checkpoints publish immediately and
+then at 1 s intervals, with unchanged-byte writes skipped. Routine identity and
+tracking updates atomically replace the reservation; the exit publisher's
+reservation commit hook is reserved for the final cleanup facts. Census retries
+and journal failures warn once per failure episode. The reservation's census
+completeness describes the latest observation; exit warnings retain prior journal
+failures. Terminal grace uses `root_flush_ms`; the unused private `terminal_ms`
+field is removed. See the crate's [port notes](../../../../tools/front-door/crates/supervisor/PORT.md#supervisor-audit-corrections)
+for the remaining consumer wiring and platform limits. `PathIo`, strict utility
+text decoding and typed reconcile remain required APIs despite missing callers.
+
 ## Purpose
 
 `provenant-supervisor` holds processes, output and kernel locks from launch
@@ -149,7 +165,26 @@ A macOS daemon that escapes with `setsid` before ever being sampled and closes
 the inherited lease is the residual: libproc cannot reconstruct that missing
 history. It grants no signalling authority. Census observations never grant
 arbitrary PID or process-group signal authority; only the unreaped provider
-and kernel-confirmed adopted children may receive signals.
+and kernel-confirmed adopted children may receive signals. The one exception
+is the provider's own group: while the provider leader is unreaped (a live
+process or a `WNOWAIT` zombie, either of which reserves the PGID) the guardian
+sends TERM, then KILL after the descendant grace, to that group, which the
+provider leads by construction. This happens on explicit cancellation,
+including a cancel that lands after the provider exited, and on every natural
+exit during cleanup, so a same-group background child (`npm run dev &`) cannot
+outlive the attempt. A member that left the group is never
+signalled; cleanup that ends with such tracked descendants possibly alive
+publishes their PIDs in the exit's `unresolved_pids`, and reconcile reports
+them as `escaped` (still fenced) rather than a bare `uncertain`.
+After publishing an unresolved exit the guardian stays alive, holding the
+leader, and keeps running cleanup: it polls for cancellation and for the group
+emptying. On cancel it signals the group (TERM, grace, KILL; a reaped leader
+needs a live `kill(-pgid, 0)` probe first) unless a spared or protected owner
+shares the group. When cleanup then proves quiescence it makes the reservation
+resolved and replaces `process-exit.json` once with the settled facts (the only
+replace of that file); a supervisor signal ends the wait. Reconcile reports
+`escaped` while a named pid is alive (signal-0 probe only); when none is, it
+reports `held` if a guardian holds the lease and `uncertain` otherwise.
 
 
 Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
@@ -231,8 +266,8 @@ clock supplies timestamps; no locale or Python-start-string emulation remains.
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
 read roots, network policy and named capabilities. Hold verified path anchors;
 reject traversal, symlinked state/lock leaves, credential roots and broad home
-or tmp grants. Writers may change their linked tree, private Git index/HEAD,
-objects and exactly their branch/ref lock/reflog. Keep `.git`, `commondir`,
+or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE/merge state/ORIG_HEAD,
+objects, exactly their branch/ref lock/reflog and the common `packed-refs.lock`. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
 and protected instructions immutable. The task's network policy never blocks the
 selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads
@@ -255,18 +290,68 @@ rechecks the held cache's owner and mode. The cache gets read/write authority,
 with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
+Nested provider setup and launch run in the parent guardian's host-side worker,
+using each child's own grants. Parent profiles need no symlink exception. The
+holder's provider-exit callback joins that worker before descendant cleanup;
+errors become warnings and never provider stop reasons. Host-launched child
+guardians are siblings of the provider and retain their own custody; they do
+not enter its descendant sparing registry. The host holder forwards explicit
+parent stop requests to its own accepted child scopes. See execution-route.md
+for the queued submission path.
+
+Shell-capable Claude writers use the same Rust recipe as Codex: immutable
+`~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and
+`~/.rustup/settings.toml`, with `CARGO_TARGET_DIR` inside the exact lane cache and
+`CARGO_HOME` in attempt scratch (registry linked read-only). Host Cargo configuration and credentials receive no grant.
+On macOS with CLT installed, the recipe selects
+`/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
+with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
+is executable. This lets the compiler/linker load `libxcrun.dylib` and SDK
+resources without a read or write grant to Xcode apps or CLT's parent.
+Without CLT, this recipe promises no macOS Rust build support. Shell Git is
+host-selected and linked (Claude shell lanes: wrapped by a config-pinning script) at `scratch/bin/git`; the exact selected executable
+and non-system linked libraries remain immutable. The required macOS lane
+preparation regression checks Git and builds/runs a test crate through the
+compiled Claude writer profile using a cloned immutable toolchain and isolated
+home. It does not prove a live provider's Bash or environment scrubbing.
 
 For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every
 packed branch, and common `config`/`config.lock` cannot be narrowed to one
 `branch.<name>` section. Remote-tracking refs, packed refs and common config
-therefore remain host-owned. The launch composition must fetch on the host
-before dispatch, let the lane push an explicit `HEAD:<branch>`, then fetch
-and set `branch.<name>.remote`/`merge` on the host after confirmed lane exit;
-verify `git status -sb` reports the upstream. The directory preparation and
-cache grants are implemented in confinement; the full fetch/push/upstream
-conformance row and runtime composition remain outstanding. A lane's
-`git push -u` may push successfully but fail to persist upstream locally.
+therefore remain host-owned. Git's files ref backend may probe
+`packed-refs.lock` while preparing a commit's ref update; the sandbox denial is
+harmless when the selected branch is updated through its granted loose ref,
+which is why the commit can succeed with that warning. Do not grant the common
+lock: that would let the writer enter the shared packed-ref update path. The
+common Git `info/exclude` file is an exact read-only grant for status and build
+fingerprinting. A writer `TaskRequest` may explicitly carry
+`deliver: {remote, branch, open_pr}`. Run binds the configured remote's single
+push URL and lane branch under writer custody, then fetches before provider
+launch. After a complete, identity-verified successful writer exit and terminal
+confinement checks, the live host holder pushes the final commit OID to
+`refs/heads/<branch>`, fetches that destination into its remote-tracking ref,
+and requires it to equal the lane's final head. It sets the lane branch's
+`remote`, `merge` and `pushRemote` config and verifies upstream and status
+before optionally running `gh pr create --head <branch> --fill` for the bound
+repository. Host commands run from the protected primary root with the lane's
+Git directory, so relative credential helpers cannot select lane files. Helper
+search paths and configuration paths exclude the writer worktree; shell SSH
+overrides and opaque shell credential helpers are refused before dispatch.
+Plain executable helpers and gh's standard credential helper remain supported.
+Hooks, fsmonitor, implicit tag pushes and submodule pushes are disabled.
+
+The host's normal credential discovery environment travels only on the private
+guardian handoff pipe, separately from the provider environment. Embedded HTTP
+URL credentials are refused rather than exposed as process arguments. Neither
+provider prose nor generic terminal recovery can start delivery. Cancelled,
+failed, stopped and recovered attempts never initiate it. A sealed start marker
+prevents repeating external effects after interruption; terminal publication
+retains a typed delivered, failed-stage or interrupted receipt and the selected
+head for chair pickup. The local bare-remote conformance test covers host fetch,
+linked-worktree commit, push, tracking/upstream verification, receipt publication
+and interrupted delivery without a second push. Live host credential and PR
+acceptance remains a chair gate for #1246 and #1255.
 
 The providers owner loads and verifies profile fixtures, then constructs the typed
 profile data consumed by confinement. Provider profiles contain fixture-proven
@@ -296,7 +381,11 @@ protected disk/index/HEAD patches, blobs and digests before restoration.
 Automatically restore only attributable ordinary `.agents/` edits. Policy or
 control-file changes, concurrent edits or unaccountable history require review;
 retain evidence and publish a terminal failure, without resetting unrelated
-work or rewriting history. Protected-tip verification returns a pinned SHA;
+work or rewriting history. A tracked symlink at a protected path (mode 120000,
+such as `CLAUDE.md -> AGENTS.md`) is protected evidence whose bytes are the link
+target, read with readlink and checked against the committed blob; it is never
+followed, and a retargeted, removed or retyped link is archived and reviewed
+like any changed control file. Protected-tip verification returns a pinned SHA;
 workflow/chair authority separately releases that exact tip.
 
 Safe Git uses a trusted executable, typed operations, literal pathspecs after

@@ -154,14 +154,17 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human = rig.execute_os(binary, &human_args, None)?;
     assert_eq!(code(&human), 0);
     let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
-    assert!(human_stdout.contains("create"));
-    assert!(human_stdout.contains("action(s)"));
+    assert!(human_stdout.contains("links"));
+    assert!(human_stdout.contains("hooks"));
+    assert!(human_stdout.contains("MCP"));
+    assert!(human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n",
+        // Sections other commands write must not block installation.
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n",
     )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
@@ -181,6 +184,13 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     assert_eq!(code(&reapplied), 0);
     let result: serde_json::Value = serde_json::from_slice(&reapplied.stdout.bytes)?;
     assert_eq!(result["data"]["outcome"]["actions"], serde_json::json!([]));
+    let mut human_reapply_args = args(&stage, false);
+    human_reapply_args.retain(|arg| arg != "--json");
+    let human_reapply = rig.execute_os(binary, &human_reapply_args, None)?;
+    assert_eq!(code(&human_reapply), 0);
+    let human_reapply = String::from_utf8_lossy(&human_reapply.stdout.bytes);
+    assert!(human_reapply.contains("0 changed hooks"));
+    assert!(human_reapply.contains("0 changed MCP"));
     let config = rig.root.join("codex/config.toml");
     let text = fs::read_to_string(&config)?;
     assert!(text.contains("--state-dir"));

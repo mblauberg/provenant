@@ -9,7 +9,9 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
-use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
+use provenant_providers::{
+    Access, OutcomeStatus, ProviderEvent, REGISTRY, Session as ProviderSession, mode_enabled,
+};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
 use provenant_run as run;
@@ -22,9 +24,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod children;
 mod provider;
+mod remote;
+pub use children::HostHolder;
+pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
-pub use provider::writer_fixture_plan;
+pub use provider::{prepare_fixture, writer_fixture_plan};
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -60,6 +66,7 @@ impl From<run::RunError> for Fail {
         use run::RunError as E;
         let (status, code) = match &error {
             E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
+            E::WorktreeUnregistered(_) => (Status::Refused, "WORKTREE_UNREGISTERED"),
             E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
             E::Validation(_) | E::TooLarge { .. } => (Status::Invalid, "INVALID"),
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
@@ -68,6 +75,7 @@ impl From<run::RunError> for Fail {
             E::Conflict => (Status::Refused, "CONFLICT"),
             E::Cancelled => (Status::Error, "CANCELLED"),
             E::Refused => (Status::Refused, "REFUSED"),
+            E::DepthExceeded { .. } | E::DepthOverflow => (Status::Refused, "LANE_DEPTH"),
             E::Capacity => (Status::Refused, "QUEUE_FULL"),
             E::Contention => (Status::Error, "CONTENTION"),
             _ => (Status::Error, "IO"),
@@ -118,15 +126,46 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
 pub struct Registry<'a> {
     pub roots: Option<&'a Roots>,
     pub home: Option<&'a Path>,
+    pub assets: Option<&'a Path>,
     pub cwd: Option<&'a Path>,
     pub state_root: Option<&'a Path>,
     pub project_id: Option<provenant_core::ProjectId>,
+    pub host: Option<&'a run::HostLaunchContext>,
 }
 impl Registry<'_> {
-    /// Whether providers can continue an exact prior session. None can yet,
-    /// so `resume` refuses before it spends the attempt's one continuation.
-    pub const fn continues_sessions(&self) -> bool {
-        false
+    /// Whether any adapter has a recorded resume recipe. Each attempt must
+    /// still carry a session handle; `continue_attempt` checks that first.
+    pub fn continues_sessions(&self) -> bool {
+        REGISTRY.iter().any(|registration| {
+            [Access::ReadOnly, Access::WorktreeWrite]
+                .into_iter()
+                .any(|access| {
+                    mode_enabled(registration.adapter.id(), access, ProviderSession::Resume)
+                })
+        })
+    }
+    /// Refuse before the attempt's one continuation is spent.
+    fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
+        let unsupported = |message: String| Fail::new(Status::Refused, "UNSUPPORTED", message);
+        let adapter = prior
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.provider.as_deref())
+            .ok_or_else(|| unsupported("the attempt launched no provider to resume".into()))?;
+        if ![Access::ReadOnly, Access::WorktreeWrite]
+            .into_iter()
+            .any(|access| mode_enabled(adapter, access, ProviderSession::Resume))
+        {
+            return Err(unsupported(format!(
+                "{adapter} has no enabled resume recipe; dispatch a new lane with the prior result as context"
+            )));
+        }
+        if prior.session.is_none() {
+            return Err(unsupported(
+                "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
+            ));
+        }
+        Ok(())
     }
 }
 impl run::Providers for Registry<'_> {
@@ -137,7 +176,21 @@ impl run::Providers for Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        provider::prepare(self, task, prompt, paths, resume)
+        let prepared = provider::prepare(self, task, prompt, paths, resume)?;
+        #[cfg(feature = "fixture")]
+        let prepared = {
+            let mut prepared = prepared;
+            if self.host.is_some_and(|host| host.fixture_state_write)
+                && let Some(confinement) = &mut prepared.confinement
+            {
+                confinement.profile.observations.insert(
+                    provenant_confinement::permissions::FixtureOperation::StateWrite,
+                    provenant_confinement::permissions::FixtureOutcome::Allowed,
+                );
+            }
+            prepared
+        };
+        Ok(prepared)
     }
 
     fn decode(
@@ -145,13 +198,15 @@ impl run::Providers for Registry<'_> {
         route: &run::RouteRecord,
         stdout: &[u8],
         exit: &ExitObservation,
-    ) -> run::Decoded {
+        provider_state: &Path,
+    ) -> Result<run::Decoded, String> {
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: false,
             observed_route: None,
             usage: run::UsageRecord::default(),
+            session: None,
             reason: Some(reason.into()),
         };
         let Some(adapter) = REGISTRY
@@ -159,10 +214,10 @@ impl run::Providers for Registry<'_> {
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
             .map(|r| r.adapter)
         else {
-            return failed("route names no registered adapter");
+            return Ok(failed("route names no registered adapter"));
         };
         let Ok(mut state) = adapter.stream(None) else {
-            return failed("provider stream is unavailable");
+            return Ok(failed("provider stream is unavailable"));
         };
         let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
         let code = match exit.termination {
@@ -175,24 +230,55 @@ impl run::Providers for Registry<'_> {
             state,
             provenant_providers::ExitObservation { code, timed_out },
         ) else {
-            return failed("provider outcome is malformed");
+            return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        let rollout = (adapter.id() == "codex").then(|| {
+            outcome
+                .session()
+                .ok_or(provenant_providers::ProviderError::UnknownIdentity)
+                .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
+        });
+        // The typed reason survives into the terminal record for diagnosis.
+        let rollout_error = rollout
+            .as_ref()
+            .and_then(|observed| observed.as_ref().err())
+            .map(|error| format!("Codex rollout identity: {error}"));
+        let rollout = rollout.and_then(Result::ok);
+        let observed_model = if adapter.id() == "codex" {
+            // Missing or invalid rollout evidence cannot fall back to another source.
+            rollout.as_ref().map(|turn| turn.model.as_str())
+        } else {
+            outcome.model()
+        };
         let mut decoded = run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: true,
-            observed_route: outcome.model().map(|model| run::RouteRecord {
+            observed_route: observed_model.map(|model| run::RouteRecord {
                 provider: Some(adapter.id().into()),
                 model: Some(if model.contains('/') {
                     model.into()
                 } else {
                     format!("{}/{model}", adapter.id())
                 }),
-                effort: route.effort.clone(),
-                account_label: None,
+                effort: rollout
+                    .as_ref()
+                    .map_or_else(|| route.effort.clone(), |turn| turn.effort.clone()),
+                account_label: route.account_label.clone(),
+                account_key: route.account_key.clone(),
+                source: Some(
+                    if rollout.is_some() {
+                        "codex_rollout"
+                    } else {
+                        "provider_stream"
+                    }
+                    .into(),
+                ),
+                pool_selection: None,
             }),
             usage: run::UsageRecord::default(),
+            session: outcome.session().map(str::to_owned),
             reason: None,
         };
         for event in &events {
@@ -227,7 +313,10 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
-        if let Some(ProviderEvent::QuotaLimited { message, .. }) = events
+        if decoded.reason.is_none() {
+            decoded.reason = rollout_error;
+        }
+        if let Some(ProviderEvent::QuotaLimited { message, pool }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
@@ -238,14 +327,37 @@ impl run::Providers for Registry<'_> {
                 .unwrap_or_else(|| {
                     "provider quota exhausted (message redaction unavailable)".into()
                 });
-            let mut end = reason.len().min(8192);
+            let repair = if pool.as_deref() == Some("opencode-free") {
+                "; free tier exhausted; use a paid route or wait for its allowance reset"
+            } else {
+                ""
+            };
+            let mut end = reason.len().min(8192 - repair.len());
             while !reason.is_char_boundary(end) {
                 end -= 1;
             }
             reason.truncate(end);
+            // Routing reads the shared quota store, which a lane can neither
+            // read nor write: a nested refusal stays in the attempt reason
+            // rather than landing in a child store nothing routes from.
+            let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
+            if let Some(pool) = pool.as_deref().filter(|_| !lane) {
+                if let Some(state_root) = provider_state.ancestors().nth(5) {
+                    crate::quota::persist_provider_refusal(
+                        state_root,
+                        route,
+                        Some(pool),
+                        jiff::Timestamp::now().as_second(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if self.roots.is_some() {
+                    return Err("quota evidence has no state root".into());
+                }
+            }
+            reason.push_str(repair);
             decoded.reason = Some(reason);
         }
-        decoded
+        Ok(decoded)
     }
 }
 fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequest, String> {
@@ -293,18 +405,47 @@ fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::R
         cancel,
     })
 }
+/// Shared Fabric identity/config, isolated Run custody for a lane's children.
+pub fn execution_state(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+) -> Result<provenant_core::StateRoot, Fail> {
+    let Some(path) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) else {
+        return Ok(roots.state.clone());
+    };
+    let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
+    inputs.state_dir = Some(path.into());
+    let state = inputs
+        .resolve(&provenant_supervisor::fs::LocalFs)
+        .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
+        .state;
+    if !state
+        .as_path()
+        .starts_with(roots.state.as_path().join("children"))
+    {
+        return Err(Fail::new(
+            Status::Refused,
+            "LANE_CONTEXT",
+            "child Run store is outside the lane namespace",
+        ));
+    }
+    Ok(state)
+}
+
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
     };
     Ok(Session {
-        store: run::RunStore::open(&context, call)?,
+        store: run::RunStore::open(&context, call)?
+            .with_writer_registry(edge.roots.state.as_path()),
         context,
     })
 }
@@ -316,7 +457,7 @@ fn open_read_only(
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
@@ -354,6 +495,7 @@ struct ManifestTask {
     #[serde(default)]
     fallback: Vec<String>,
     delivery_id: Option<DeliveryId>,
+    deliver: Option<run::WriterDeliveryRequest>,
     account: Option<String>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
@@ -382,12 +524,24 @@ fn read_text(source: impl Read) -> Result<String, Fail> {
     String::from_utf8(bytes)
         .map_err(|_| Fail::new(Status::Invalid, "INVALID", "input is not UTF-8"))
 }
-/// Exactly one of `ADAPTER/ID` or a named route.
+/// Exactly one of `ADAPTER/ID` or a named route. `ADAPTER/ID@EFFORT`, the
+/// form route receipts print, is accepted when no separate effort is given.
 pub fn requested(
     model: Option<&str>,
     route: Option<&str>,
     effort: Option<String>,
 ) -> Result<run::RequestedRoute, Fail> {
+    let (model, effort) = match model.and_then(|m| m.rsplit_once('@')) {
+        Some(_) if effort.is_some() => {
+            return Err(Fail::new(
+                Status::Invalid,
+                "INVALID",
+                "give the effort once: ADAPTER/ID@EFFORT or --effort",
+            ));
+        }
+        Some((model, suffix)) => (Some(model), Some(suffix.to_owned())),
+        None => (model, effort),
+    };
     match (model, route) {
         (Some(model), None) => {
             let id = ModelId::parse(model)
@@ -428,6 +582,7 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
                 model: Some(model.clone()),
                 effort: None,
                 account_label: None,
+                ..Default::default()
             })
         })
         .collect()
@@ -483,6 +638,7 @@ pub struct Submitted {
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
+    pub deliver: Option<run::WriterDeliveryRequest>,
     pub worktree: Option<PathBuf>,
 }
 pub struct Submission {
@@ -499,6 +655,7 @@ pub fn submit(
     submission: Submission,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
     let config = provenant_config::read_with_domains(
@@ -515,23 +672,43 @@ pub fn submit(
     let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
     for task in submission.tasks {
         scan(&task.prompt)?;
+        if task.deliver.is_some() && task.worktree.is_none() {
+            return Err(Fail::new(
+                Status::Invalid,
+                "INVALID",
+                "delivery requires a writer worktree",
+            ));
+        }
         let writer = task
             .worktree
             .as_ref()
             .map(|path| {
-                let writer =
-                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?;
-                run::prepare_writer(
-                    &writer,
-                    session.context.state_root.as_path(),
-                    session.context.project_id,
-                )?;
+                // A lane cannot read another worktree's registration; the host
+                // verifies the proposal before it launches the child.
+                let writer = if parent_attempt.is_some() {
+                    run::resolve_writer_proposal(
+                        session.context.state_root.as_path(),
+                        edge.cwd,
+                        path,
+                    )?
+                } else {
+                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?
+                };
+                if parent_attempt.is_none() {
+                    run::prepare_writer(
+                        &writer,
+                        edge.roots.state.as_path(),
+                        session.context.project_id,
+                    )?;
+                }
                 Ok::<_, run::RunError>(writer)
             })
             .transpose()?;
         #[derive(serde::Serialize)]
         struct RunAuthority<'a> {
             writer: Option<&'a run::WriterRequest>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            deliver: Option<&'a run::WriterDeliveryRequest>,
             cwd: &'a Path,
             network: bool,
         }
@@ -540,6 +717,7 @@ pub fn submit(
             2,
             &RunAuthority {
                 writer: writer.as_ref(),
+                deliver: task.deliver.as_ref(),
                 cwd: edge.cwd,
                 network: false,
             },
@@ -557,6 +735,7 @@ pub fn submit(
             writer,
             provider_timeout_seconds: task.provider_timeout,
             delivery_id: task.delivery_id,
+            deliver: task.deliver,
         });
         attempts.push(run::NewAttempt {
             attempt_id: fresh(AttemptId::from_bytes)?,
@@ -572,12 +751,18 @@ pub fn submit(
             tasks: requests,
             concurrency,
             parent: None,
+            lane_depth: Some(lane_depth),
+            parent_attempt,
         },
         attempts,
         created_at: now(call.clock)?,
     };
     let record = session.store.create(&prepared, call)?;
-    let started = launch(session, record.run_id, edge, call)?;
+    let started = if parent_attempt.is_some() {
+        Vec::new()
+    } else {
+        launch(session, record.run_id, edge, call)?
+    };
     Ok((record, started))
 }
 
@@ -603,8 +788,13 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     {
         return unsupported("network, capability or read-root access");
     }
-    if command.host.is_some() {
-        return unsupported("remote host dispatch");
+    if command.host.is_some() && matches!(access.mode, Mode::WorktreeWrite) {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "worktree-write dispatch to a peer host is not available in this build (#1457); \
+             use --mode read-only",
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -621,6 +811,15 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
+    let flag_delivery =
+        command
+            .deliver_remote
+            .zip(command.deliver_branch)
+            .map(|(remote, branch)| run::WriterDeliveryRequest {
+                remote,
+                branch,
+                open_pr: command.open_pr,
+            });
     if let Some(path) = &command.input.manifest {
         let manifest: Manifest = provenant_records::decode_v1(
             read_bounded(path)?.as_bytes(),
@@ -632,7 +831,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
         if manifest.schema_version != 1 || !(1..=64).contains(&manifest.tasks.len()) {
             return Err(Fail::new(
-                Status::Invalid,
+                Status::Refused,
                 "INVALID",
                 "manifest needs schema_version 1 and 1-64 tasks",
             ));
@@ -676,17 +875,20 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
             };
+            let effort = task.effort.or(flag_route.2.clone());
             tasks.push((
                 task_id,
                 prompt,
-                requested(
-                    model.as_deref(),
-                    route.as_deref(),
-                    task.effort.or(flag_route.2.clone()),
-                )?,
+                requested(model.as_deref(), route.as_deref(), effort.clone())?,
+                remote::RouteText {
+                    model,
+                    route,
+                    effort,
+                },
                 fallback,
                 task.delivery_id,
                 task.account,
+                task.deliver.or_else(|| flag_delivery.clone()),
             ));
         }
     } else {
@@ -706,9 +908,15 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 flag_route.1.as_deref(),
                 flag_route.2.clone(),
             )?,
+            remote::RouteText {
+                model: flag_route.0.clone(),
+                route: flag_route.1.clone(),
+                effort: flag_route.2.clone(),
+            },
             flag_route.3.clone(),
             command.delivery_id,
             None,
+            flag_delivery,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -716,10 +924,43 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     } else {
         Some(1)
     };
+    if let Some(host) = &command.host {
+        let mut placed = Vec::new();
+        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver)) in
+            tasks.into_iter().enumerate()
+        {
+            // The peer derives task IDs from the operation and has no fallback field.
+            if task_id != derived_task(&command.operation_id, index)? {
+                return unsupported("an explicit task ID with --host");
+            }
+            if !fallback.is_empty() {
+                return unsupported("route fallback with --host");
+            }
+            placed.push(remote::Task {
+                prompt,
+                route,
+                account,
+                delivery_id,
+                deliver,
+            });
+        }
+        return remote::dispatch(
+            edge,
+            host,
+            remote::Batch {
+                operation_id: command.operation_id,
+                tasks: placed,
+                concurrency,
+                knobs: command.knobs,
+                provider_timeout: command.provider_timeout,
+            },
+            command.wait,
+        );
+    }
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id, account)| Submitted {
+            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver)| Submitted {
                 task_class: None,
                 task_id,
                 prompt,
@@ -728,6 +969,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 account,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
+                deliver,
                 worktree: access.worktree.clone(),
             },
         )
@@ -747,6 +989,126 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     report(&session, &record, &started, command.wait, edge, &call)
 }
 
+fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
+    let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
+    let config = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )
+    .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+    let max_depth = config
+        .knobs
+        .get("lanes.max_depth")
+        .and_then(|knob| knob.value.as_u64())
+        .ok_or_else(|| {
+            Fail::new(
+                Status::Error,
+                "CONFIG",
+                "lanes.max_depth is missing or invalid",
+            )
+        })?;
+    lane_dispatch_values(
+        parent_depth.as_deref(),
+        parent_attempt.as_deref(),
+        max_depth,
+        roots.state.as_path(),
+        std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+fn environment_text(name: &str) -> Result<Option<String>, Fail> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Fail::new(
+            Status::Invalid,
+            "LANE_CONTEXT",
+            "lane context environment value is not valid text",
+        )),
+    }
+}
+
+fn lane_dispatch_values(
+    parent_depth: Option<&str>,
+    parent_attempt: Option<&str>,
+    max_depth: u64,
+    state: &Path,
+    run_state: Option<&Path>,
+) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = parent_depth
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "LANE_CONTEXT",
+                "lane depth environment value must be a non-negative integer",
+            )
+        })?;
+    let parent_attempt = parent_attempt
+        .map(AttemptId::parse)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "PARENT_ATTEMPT",
+                "parent attempt environment value is invalid",
+            )
+        })?;
+    if let Some(run_state) = run_state {
+        let invalid = || {
+            Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane environment must match its child Run store path",
+            )
+        };
+        let relative = run_state.strip_prefix(state).map_err(|_| invalid())?;
+        let mut parts = relative.components();
+        let mut depth = 0;
+        let mut parent = None;
+        while let Some(part) = parts.next() {
+            if part.as_os_str() != "children" {
+                return Err(invalid());
+            }
+            let id = parts
+                .next()
+                .and_then(|part| part.as_os_str().to_str())
+                .ok_or_else(invalid)?;
+            parent = Some(AttemptId::parse(id).map_err(|_| invalid())?);
+            depth += 1;
+        }
+        if depth == 0 || parent_depth != Some(depth) || parent_attempt != parent {
+            return Err(invalid());
+        }
+        return Ok((run::next_lane_depth(depth, max_depth)?, parent));
+    }
+    let parent_depth = match (parent_depth, parent_attempt) {
+        (None, None) => 0,
+        (Some(depth), Some(_)) if depth >= 1 => depth,
+        (Some(_), Some(_)) => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "nested lane context requires a depth of at least 1",
+            ));
+        }
+        _ => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane depth and parent attempt must be supplied together",
+            ));
+        }
+    };
+    let lane_depth = run::next_lane_depth(parent_depth, max_depth)?;
+    Ok((lane_depth, parent_attempt))
+}
+
 /// Hand every queued attempt of `run` to its own guardian. Fabric's facade
 /// shares this path with the CLI leaves.
 pub fn launch(
@@ -755,29 +1117,105 @@ pub fn launch(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
+    // Every lane-facing launch path is submission-only. Only its host holder
+    // prepares providers, including credentials and the child's OS profile.
+    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+        return Ok(Vec::new());
+    }
+    launch_on_host(session, run, edge, call, None)
+}
+fn launch_on_host(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    inherited: Option<&run::HostLaunchContext>,
+) -> Result<Vec<run::Started>, Fail> {
+    let host = match inherited {
+        Some(host) => host.clone(),
+        None => run::HostLaunchContext {
+            configuration_root: edge.roots.state.as_path().into(),
+            cwd: edge.cwd.into(),
+            executables: ["codex", "claude", "opencode"]
+                .into_iter()
+                .filter_map(|name| {
+                    provider::resolve_executable(name)
+                        .ok()
+                        .map(|path| (name.into(), path))
+                })
+                .collect(),
+            git: provenant_supervisor::git::git_executable()
+                .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        },
+    };
+    let submission = session.store.request(run, call)?;
+    let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
+    let request = session.store.request(run, call)?;
     let holder = |attempt: &run::AttemptRecord| {
+        let mut host = host.clone();
+        if let Some(writer) = submission
+            .tasks
+            .iter()
+            .find(|task| task.task_id == attempt.task_id)
+            .and_then(|task| task.writer.as_ref())
+        {
+            host.cwd = writer.worktree.clone();
+        }
         run::HolderContext {
             schema_version: 1,
             roots: seed.clone(),
             project_id: attempt.project_id,
-            actor_id: session.context.actor_id,
+            actor_id: requester,
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
+            host_delivery: request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == attempt.task_id)
+                .and_then(|task| task.deliver.as_ref())
+                .map(|_| run::HostDeliveryContext::capture()),
+            launch: Some(host),
         }
         .encode()
     };
     let registry = Registry {
         roots: Some(edge.roots),
         home: Some(edge.home),
+        assets: Some(edge.assets),
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
+        host: Some(&host),
     };
+    // Fixture guardians observe a recorded boot key, so the reservation must be
+    // taken against the same key as on the lane-launch path of the test host.
+    #[cfg(feature = "fixture")]
+    if host.fixture_state_write {
+        return Ok(session.store.start_with_writer_lease(
+            run,
+            &registry,
+            &holder,
+            &|directory, scope, binding| {
+                provenant_supervisor::fixture::acquire_writer_with_binding(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            call,
+        )?);
+    }
     Ok(session.store.start(run, &registry, &holder, call)?)
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
@@ -809,7 +1247,8 @@ fn report(
             let page = session
                 .store
                 .lanes(&lane_query(&[target], true, 100, 0), call)?;
-            let (data, human) = render_lanes(&page.lanes, None, edge);
+            let (data, human) =
+                render_lanes(&page.lanes, None, session.context.state_root.as_path());
             (data, human, false)
         }
     };
@@ -835,10 +1274,15 @@ fn lane_query(targets: &[Target], all: bool, limit: u64, after: u64) -> run::Lan
         all,
         limit,
         after,
+        newest_first: false,
+        owner: None,
+        unseen_after: None,
     }
 }
-fn artifact(edge: &Edge<'_>, record: &run::AttemptRecord, name: &str) -> PathBuf {
-    edge.roots.state.as_path().join(format!(
+/// Artifact paths live under the session's execution root, which a nested
+/// lane keeps apart from the global configuration root.
+fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> PathBuf {
+    root.join(format!(
         "runs/{}/attempts/{}/{name}",
         record.run_id, record.attempt_id
     ))
@@ -855,11 +1299,7 @@ fn state_name(state: &run::AttemptState) -> String {
             .unwrap_or_default(),
     }
 }
-fn render_lanes(
-    lanes: &[run::AttemptRecord],
-    next: Option<u64>,
-    edge: &Edge<'_>,
-) -> (Value, String) {
+fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
         .iter()
@@ -882,7 +1322,7 @@ fn render_lanes(
             let result = lane
                 .result
                 .as_ref()
-                .map(|_| artifact(edge, lane, "result.md"));
+                .map(|_| artifact(root, lane, "result.md"));
             let account = lane
                 .applied_route
                 .as_ref()
@@ -898,6 +1338,18 @@ fn render_lanes(
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default()
             ));
+            if let Some(delivery) = &lane.delivery {
+                human.push_str(&format!(
+                    "  delivery {}:{} {:?} head={}\n",
+                    delivery.remote,
+                    delivery.branch,
+                    delivery.state,
+                    delivery
+                        .head
+                        .map(|h| h.to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                ));
+            }
             json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -913,7 +1365,10 @@ fn render_lanes(
                 "queued_at": lane.queued_at,
                 "started_at": lane.started_at,
                 "finished_at": finished_at,
+                "last_output_at": lane.last_output_at,
                 "delivery_id": lane.delivery_id,
+                "head": lane.head,
+                "delivery": lane.delivery,
                 "result_path": result,
             })
         })
@@ -934,19 +1389,34 @@ fn settled(state: &run::AttemptState) -> (bool, bool) {
         _ => (false, false),
     }
 }
+/// Whether a lane selection satisfies a wait condition. Input required ends
+/// an all-lanes wait because it cannot progress unattended.
+fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
+    let states: Vec<(bool, bool)> = lanes.iter().map(|l| settled(&l.state)).collect();
+    states.is_empty()
+        || match condition {
+            Condition::Any => states.iter().any(|(done, _)| *done),
+            Condition::All => {
+                states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
+            }
+        }
+}
 /// Snapshot every attempt the targets name. Without targets, the selection is
-/// the current nonterminal work; host caps bound it.
+/// this actor's nonterminal work; host caps bound it. With `seen`, terminal
+/// lanes at or before that event cursor are already acknowledged and dropped.
 fn select(
     session: &Session,
     targets: &[Target],
+    seen: Option<u64>,
     call: &run::Request<'_>,
 ) -> Result<Vec<AttemptId>, Fail> {
     let mut selected = Vec::new();
     let mut after = 0;
     loop {
-        let page = session
-            .store
-            .lanes(&lane_query(targets, !targets.is_empty(), 100, after), call)?;
+        let mut query = lane_query(targets, !targets.is_empty() || seen.is_some(), 100, after);
+        query.owner = targets.is_empty().then_some(session.context.actor_id);
+        query.unseen_after = seen;
+        let page = session.store.lanes(&query, call)?;
         selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
         match page.next {
             Some(next) if selected.len() < 1000 => after = next,
@@ -961,8 +1431,31 @@ fn select(
         }
     }
 }
+/// The seen-cursor key for a wait selection.
+fn selection_key(targets: &[Target]) -> String {
+    let mut keys: Vec<String> = targets
+        .iter()
+        .map(|t| {
+            let part = |v: Option<String>| v.unwrap_or_else(|| "*".into());
+            format!(
+                "{}/{}/{}",
+                t.run,
+                part(t.task.map(|v| v.to_string())),
+                part(t.attempt.map(|v| v.to_string()))
+            )
+        })
+        .collect();
+    keys.sort();
+    if keys.is_empty() {
+        "default".into()
+    } else {
+        keys.join(",")
+    }
+}
 /// Snapshot the selection at entry and poll until the condition holds or the
-/// reader deadline expires. Expiry never stops a provider.
+/// reader deadline expires. Expiry never stops a provider. A default or `Any`
+/// wait skips terminal lanes the actor has already seen and acknowledges the
+/// ones it returns, so repeated waits neither miss nor replay a completion.
 fn wait_lanes(
     session: &Session,
     targets: &[Target],
@@ -973,24 +1466,35 @@ fn wait_lanes(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let selected = select(session, targets, &request(&clock, &cancel)?)?;
+    // Explicit `All` waits report the whole named set, seen or not.
+    let selection =
+        (targets.is_empty() || matches!(condition, Condition::Any)).then(|| selection_key(targets));
+    let entry = request(&clock, &cancel)?;
+    let seen = selection
+        .as_deref()
+        .map(|key| session.store.seen_cursor(key, targets.is_empty(), &entry))
+        .transpose()?;
+    let selected = select(session, targets, seen, &entry)?;
     loop {
         let call = request(&clock, &cancel)?;
         let lanes = selected
             .iter()
             .map(|id| session.store.record(*id, &call))
             .collect::<Result<Vec<_>, _>>()?;
-        let states: Vec<(bool, bool)> = lanes.iter().map(|l| settled(&l.state)).collect();
-        let met = states.is_empty()
-            || match condition {
-                Condition::Any => states.iter().any(|(done, _)| *done),
-                Condition::All => {
-                    states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
-                }
-            };
+        let met = condition_met(&lanes, condition);
         let expired = Instant::now() >= deadline;
         if met || expired {
-            let (mut data, human) = render_lanes(&lanes, None, edge);
+            if let Some(key) = selection.as_deref().filter(|_| met) {
+                let mut latest = 0;
+                for lane in lanes.iter().filter(|l| settled(&l.state).0) {
+                    latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &call)?);
+                }
+                if latest > 0 {
+                    open(edge, &call)?.store.ack_seen(key, latest, &call)?;
+                }
+            }
+            let (mut data, human) =
+                render_lanes(&lanes, None, session.context.state_root.as_path());
             data["condition_met"] = json!(met);
             return Ok((data, human, !met));
         }
@@ -1004,12 +1508,16 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
     reply_waited(
         "lanes",
         (|| {
+            if let Some(placed) = remote::lanes(&command, edge)? {
+                return Ok(placed);
+            }
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
             let (context, store) = open_read_only(edge, &call)?;
             let Some(store) = store else {
-                let (data, human) = render_lanes(&[], None, edge);
+                let root = execution_state(edge.roots, edge.home, edge.assets)?;
+                let (data, human) = render_lanes(&[], None, root.as_path());
                 return Ok((data, human, false));
             };
             let session = Session { store, context };
@@ -1022,11 +1530,54 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                     .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid cursor"))?,
                 None => 0,
             };
-            let page = session.store.lanes(
-                &lane_query(&command.id, command.all, command.limit, after),
-                &call,
-            )?;
-            let (data, human) = render_lanes(&page.lanes, page.next, edge);
+            let mut query = lane_query(&command.id, command.all, command.limit, after);
+            let filtered = !command.states.is_empty() || command.since.is_some();
+            query.newest_first = filtered;
+            let threshold = command
+                .since
+                .map(|since| WallTime::from_micros(since.as_microsecond()))
+                .transpose()
+                .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+            let (lanes, next) = if filtered {
+                query.limit = 100;
+                let mut matches = Vec::new();
+                let mut next = None;
+                loop {
+                    let page = session.store.lanes(&query, &call)?;
+                    for lane in page.lanes {
+                        let state_matches = command.states.is_empty()
+                            || command
+                                .states
+                                .iter()
+                                .any(|state| state.as_str() == state_name(&lane.state));
+                        let since_matches = threshold.is_none_or(|since| lane.queued_at >= since);
+                        if state_matches && since_matches {
+                            matches.push(lane);
+                        }
+                        if matches.len() > command.limit as usize {
+                            let last =
+                                matches.get(command.limit as usize - 1).ok_or_else(|| {
+                                    Fail::new(Status::Error, "INTERNAL", "lane page invariant")
+                                })?;
+                            next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
+                            matches.truncate(command.limit as usize);
+                            break;
+                        }
+                    }
+                    if next.is_some() {
+                        break;
+                    }
+                    match page.next {
+                        Some(cursor) => query.after = cursor,
+                        None => break,
+                    }
+                }
+                (matches, next)
+            } else {
+                let page = session.store.lanes(&query, &call)?;
+                (page.lanes, page.next)
+            };
+            let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
             Ok((data, human, false))
         })(),
     )
@@ -1036,6 +1587,9 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
 fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    if let Some(placement) = remote::find(edge.roots, command.attempt.0.run)? {
+        return remote::output(&command, &placement, edge);
+    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -1096,6 +1650,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
+    align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     Ok((
         json!({
@@ -1115,9 +1670,31 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     ))
 }
 
+/// A clipped page that ends inside a UTF-8 character stops before it, so the
+/// next offset starts the character whole and paged text concatenates exactly.
+fn align_utf8_tail(chunk: &mut run::OutputChunk) {
+    if !chunk.clipped {
+        return;
+    }
+    let Err(error) = std::str::from_utf8(&chunk.bytes) else {
+        return;
+    };
+    let valid = error.valid_up_to();
+    if error.error_len().is_none() && valid > 0 {
+        chunk.next_offset -= (chunk.bytes.len() - valid) as u64;
+        chunk.bytes.truncate(valid);
+        chunk.encoding = "utf8";
+    }
+}
+
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
+    match remote::find(edge.roots, command.target.run) {
+        Ok(Some(placement)) => return remote::cancel(&command, &placement, edge),
+        Ok(None) => {}
+        Err(fail) => return reply("cancel", Err(fail)),
+    }
     let mut status = Status::Ok;
     let mut out = reply(
         "cancel",
@@ -1128,7 +1705,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let session = open(edge, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [command.target];
-            let selected = select(&session, &targets, &call)?;
+            let selected = select(&session, &targets, None, &call)?;
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
@@ -1210,13 +1787,7 @@ pub fn continue_attempt(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
-    if !(Registry::default()).continues_sessions() {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "resume needs provider sessions, which providers do not expose yet",
-        ));
-    }
+    (Registry::default()).check_continuable(&session.store.record(prior, call)?)?;
     let run = session.store.resume(
         &run::Resume {
             prior,
@@ -1309,9 +1880,11 @@ fn reconcile_inner(
     let registry = Registry {
         roots: Some(edge.roots),
         home: Some(edge.home),
+        assets: Some(edge.assets),
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
+        host: None,
     };
     let mut rows = Vec::new();
     let mut human = String::new();
@@ -1347,7 +1920,10 @@ fn reconcile_inner(
         let attempts: Vec<Value> = found
             .iter()
             .map(|(id, state)| {
-                if matches!(state, run::Reconciled::Uncertain { .. }) {
+                if matches!(
+                    state,
+                    run::Reconciled::Uncertain { .. } | run::Reconciled::Escaped { .. }
+                ) {
                     *fenced = true;
                 }
                 human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
@@ -1427,7 +2003,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
             store
                 .attempts(
                     run::AttemptFilter {
-                        run_id: None,
+                        run_id: command.run_id,
                         task_id: None,
                     },
                     &call,
@@ -1468,6 +2044,9 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
                 all: false,
                 limit: 100,
                 after,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
             },
             &call,
         )?;
@@ -1492,12 +2071,97 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 }
 
 #[cfg(test)]
+mod lane_depth_tests {
+    use super::*;
+
+    #[test]
+    fn shared_submit_context_refuses_depth_above_the_limit() {
+        let parent = AttemptId::from_bytes([7; 16]).to_string();
+        let state = Path::new("/state");
+        let child = state
+            .join("children")
+            .join(&parent)
+            .join("children")
+            .join(&parent);
+        let result = lane_dispatch_values(Some("2"), Some(&parent), 2, state, Some(&child));
+        let Err(failure) = result else {
+            panic!("depth above the configured maximum must be refused");
+        };
+        assert_eq!(failure.status, Status::Refused);
+        assert_eq!(failure.code, "LANE_DEPTH");
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_and_parent() {
+        let parent = AttemptId::from_bytes([8; 16]);
+        let parent_text = parent.to_string();
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent_text);
+        let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2, state, Some(&child));
+        assert!(matches!(result, Ok((2, Some(found))) if found == parent));
+    }
+
+    #[test]
+    fn shared_submit_context_refuses_incomplete_or_zero_nested_context() {
+        let parent = AttemptId::from_bytes([9; 16]).to_string();
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent);
+        for (depth, parent_attempt) in [
+            (None, None),
+            (Some("2"), Some(parent.as_str())),
+            (Some("1"), Some("00000000000000000000000000000000")),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 3, state, Some(&child))
+                .expect_err("stripped or forged lineage must be refused");
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
+        for (depth, parent_attempt) in [
+            (Some("1"), None),
+            (None, Some(parent.as_str())),
+            (Some("0"), Some(parent.as_str())),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 2, Path::new("/state"), None)
+                .expect_err("incomplete or zero nested context must be refused");
+            assert_eq!(failure.status, Status::Refused);
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_without_parent() {
+        assert!(matches!(
+            lane_dispatch_values(None, None, 2, Path::new("/state"), None),
+            Ok((1, None))
+        ));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use provenant_run::Providers;
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+    #[test]
+    fn paged_output_never_splits_a_character() {
+        let bytes = "a☀b".as_bytes();
+        let mut chunk = run::OutputChunk {
+            bytes: bytes[..3].to_vec(),
+            len: bytes.len() as u64,
+            offset: 0,
+            next_offset: 3,
+            eof: false,
+            clipped: true,
+            complete: true,
+            encoding: "utf8-fragment",
+            digest: provenant_records::CanonicalV1::file_digest(b""),
+        };
+        align_utf8_tail(&mut chunk);
+        assert_eq!(chunk.bytes, b"a");
+        assert_eq!(chunk.next_offset, 1);
+        assert_eq!(chunk.encoding, "utf8");
+    }
     #[test]
     fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         let exit = ExitObservation {
@@ -1519,6 +2183,7 @@ mod tests {
             omitted_warnings: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
+            unresolved_pids: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
@@ -1531,9 +2196,11 @@ mod tests {
         let registry = Registry {
             roots: None,
             home: None,
+            assets: None,
             cwd: None,
             state_root: None,
             project_id: None,
+            host: None,
         };
         for (message, expected) in [
             (
@@ -1546,12 +2213,26 @@ mod tests {
             ),
         ] {
             let event = json!({"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":message}}}});
-            let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+            let decoded = registry
+                .decode(
+                    &route,
+                    event.to_string().as_bytes(),
+                    &exit,
+                    Path::new("/unused"),
+                )
+                .unwrap();
             assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
-            assert_eq!(decoded.reason.as_deref(), Some(expected));
+            assert_eq!(decoded.reason.as_deref(), Some(format!("{expected}; free tier exhausted; use a paid route or wait for its allowance reset").as_str()));
         }
         let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
-        let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+        let decoded = registry
+            .decode(
+                &route,
+                event.to_string().as_bytes(),
+                &exit,
+                Path::new("/unused"),
+            )
+            .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
         let reason = decoded.reason.unwrap();
         assert!(
@@ -1559,5 +2240,93 @@ mod tests {
             "reason must leave room in the terminal record"
         );
         assert!(reason.ends_with('☀'));
+    }
+
+    fn clean_exit() -> ExitObservation {
+        ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: RunId::from_bytes([1; 16]),
+                attempt: AttemptId::from_bytes([2; 16]),
+                generation: 1,
+            },
+            termination: Some(provenant_supervisor::exec::Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            unresolved_pids: vec![],
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        }
+    }
+
+    #[test]
+    fn codex_rollout_error_reaches_the_decoded_reason() {
+        let exit = clean_exit();
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            ..Default::default()
+        };
+        let registry = Registry {
+            roots: None,
+            home: None,
+            assets: None,
+            cwd: None,
+            state_root: None,
+            project_id: None,
+            host: None,
+        };
+        let stream = [
+            json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"OK"}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+        ]
+        .map(|frame| format!("{frame}\n"))
+        .concat();
+        let decoded = registry
+            .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(
+            decoded.session.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(decoded.observed_route.is_none());
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("Codex rollout identity: provider continuation identity is unknown")
+        );
+    }
+
+    #[test]
+    fn claude_session_reaches_the_decoded_attempt() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = include_str!("../../../tests/fixtures/providers/claude/fresh.jsonl");
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(
+            decoded.session.as_deref(),
+            Some("FIXTURE_SESSION_IDENTIFIER_003")
+        );
     }
 }

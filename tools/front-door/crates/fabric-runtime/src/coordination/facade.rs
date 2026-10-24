@@ -49,6 +49,8 @@ pub struct SubmittedTask {
     pub timeout_ms: u64,
     #[serde(default)]
     pub delivery_id: Option<DeliveryId>,
+    #[serde(default)]
+    pub deliver: Option<provenant_records::run::WriterDeliveryRequest>,
 }
 
 bounded_input! {
@@ -66,6 +68,10 @@ bounded_input! {
             concurrency: Option<u16>,
             #[serde(default)]
             knobs: Vec<String>,
+            /// Explicit peer placement; read-only tasks only. Omitted when
+            /// absent, so a peer that predates the field still accepts it.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            host: Option<HostId>,
         },
     }
 }
@@ -164,6 +170,8 @@ pub enum FacadeError {
     LaunchUnknown { operation_id: OperationId },
     #[error("run continuation is unsupported")]
     ContinuationUnsupported,
+    #[error("lane depth exceeds lanes.max_depth")]
+    LaneDepth,
     #[error("request violates confinement")]
     ConfinementRefused,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
@@ -198,6 +206,7 @@ impl FacadeError {
             ("launch_unknown", Some(operation_id)) => Self::LaunchUnknown { operation_id },
             ("continuation_unsupported", _) => Self::ContinuationUnsupported,
             ("confinement_refused", _) => Self::ConfinementRefused,
+            ("lane_depth", _) => Self::LaneDepth,
             ("worktree_missing", _) => Self::WorktreeMissing,
             ("output_too_large", _) => Self::OutputTooLarge,
             ("state_corrupt", _) => Self::StateCorrupt,
@@ -221,6 +230,7 @@ impl FacadeError {
             Self::PeerVersion => "peer_version",
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
+            Self::LaneDepth => "lane_depth",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
             Self::OutputTooLarge => "output_too_large",

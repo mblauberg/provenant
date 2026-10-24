@@ -58,8 +58,8 @@ before writing findings.
   may supply the method. Do not mutate source or Git state during review: no
   Git write verbs (`orchestrate` lists them); read other refs with `git show`.
 - Artifact-only authority permits named outputs under the assigned run
-  directory; it does not permit arbitrary repo-root scratch. Use
-  `.agent-run/scratch/` when no run directory exists. Never redirect a command
+  directory; it does not permit arbitrary repo-root scratch. Use the session
+  scratchpad when no run directory exists. Never redirect a command
   over a wildcard/list that can include its own growing output; keep
   captures bounded.
 - Language, framework, UI, security, and project skills add specialised lenses;

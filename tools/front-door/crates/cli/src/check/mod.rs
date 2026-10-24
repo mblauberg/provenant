@@ -24,25 +24,35 @@ mod harness;
 mod release;
 #[derive(Debug, Subcommand)]
 pub enum Check {
+    /// Check configuration files
     Config(Page),
+    /// Check the installed release
     Install {
+        /// Release directory to check; the installed one when omitted
         #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
         source: Option<PathBuf>,
         #[command(flatten)]
         page: Page,
     },
+    /// Check harness instruction and skill files
     Harness(Page),
+    /// Check a release range for blocking findings
     Release {
+        /// Base commit of the range
         #[arg(long, requires = "head")]
         base: Option<GitOid>,
+        /// Head commit of the range
         #[arg(long, requires = "base")]
         head: Option<GitOid>,
         #[command(flatten)]
         page: Page,
     },
+    /// Check prose files against writing rules
     Writing {
+        /// Files to check
         #[arg(required = true, num_args = 1..=256)]
         paths: Vec<PathBuf>,
+        /// Writing rule set
         #[arg(long, value_enum, default_value = "general")]
         rules: Rules,
         #[command(flatten)]

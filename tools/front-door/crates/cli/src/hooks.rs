@@ -25,35 +25,17 @@ pub struct HookSpec {
 }
 pub static HOOK_SPECS: &[HookSpec] = &[
     HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "PreToolUse",
-            matcher: Some("Bash"),
-            timeout: None,
-            command: &["hook", "claude", PRE_TOOL_USE],
-        },
+        registration: provenant_config::CLAUDE_HOOKS[0],
         handler: Handler::Guard,
         fixture: Some("pre-tool-use.json"),
     },
     HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "PreCompact",
-            matcher: None,
-            timeout: Some(5),
-            command: &["hook", "claude", PRE_COMPACT],
-        },
+        registration: provenant_config::CLAUDE_HOOKS[1],
         handler: Handler::PreCompact,
         fixture: Some("pre-compact.json"),
     },
     HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "SessionStart",
-            matcher: Some("compact"),
-            timeout: Some(5),
-            command: &["hook", "claude", COMPACT],
-        },
+        registration: provenant_config::CLAUDE_HOOKS[2],
         handler: Handler::Compact,
         fixture: Some("compact.json"),
     },

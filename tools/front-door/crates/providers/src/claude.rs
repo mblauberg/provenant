@@ -6,7 +6,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -110,6 +110,76 @@ pub fn keychain_suffix(config_dir: &[u8]) -> String {
     hex.get(..8).unwrap_or(hex).to_owned()
 }
 
+/// Task-scoped non-secret authority, derived from a validated registration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialSource {
+    File { path: std::path::PathBuf },
+    Keychain { service: String, account: String },
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct CredentialAuthority {
+    pub actor: String,
+    pub source: CredentialSource,
+    pub purpose: String,
+    pub expires_unix_ms: u64,
+}
+impl CredentialAuthority {
+    pub fn for_dispatch(
+        actor: String,
+        login: &Login<'_>,
+        expires_unix_ms: u64,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            actor,
+            source: credential_source(login)?,
+            purpose: "lane dispatch".into(),
+            expires_unix_ms,
+        })
+    }
+    fn check(&self, source: &CredentialSource, now: u64) -> Result<(), ProviderError> {
+        if self.actor.is_empty()
+            || self.purpose != "lane dispatch"
+            || self.expires_unix_ms <= now
+            || &self.source != source
+        {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        Ok(())
+    }
+}
+fn credential_source(login: &Login<'_>) -> Result<CredentialSource, ProviderError> {
+    let path = login.config_dir.join(".credentials.json");
+    let directory = provenant_supervisor::fs::Directory::open_anchor(login.config_dir)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    match directory.metadata_at(OsStr::new(".credentials.json"), false) {
+        Ok(meta) if meta.kind == provenant_supervisor::fs::FileKind::Regular && meta.links == 1 => {
+            return Ok(CredentialSource::File { path });
+        }
+        Ok(_) => return Err(ProviderError::CredentialUnavailable),
+        Err(error) if error.is_not_found() => {}
+        Err(_) => return Err(ProviderError::CredentialUnavailable),
+    }
+    if !cfg!(target_os = "macos") {
+        return Ok(CredentialSource::File { path });
+    }
+    Ok(keychain_source(login))
+}
+fn keychain_source(login: &Login<'_>) -> CredentialSource {
+    let service = if login.config_dir == login.home.join(".claude") {
+        KEYCHAIN_SERVICE.into()
+    } else {
+        format!(
+            "{KEYCHAIN_SERVICE}-{}",
+            keychain_suffix(login.config_dir.as_os_str().as_bytes())
+        )
+    };
+    CredentialSource::Keychain {
+        service,
+        account: login.user.to_string_lossy().into_owned(),
+    }
+}
+
 /// Reads one identity's login token outside the sandbox. When it expires
 /// within the refresh window, runs the CLI once at zero cost to refresh it,
 /// then reads again and accepts a token with at least a minute left. The
@@ -122,7 +192,16 @@ pub fn refresh_if_expiring(
     login: &Login<'_>,
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    let source = if authority.is_some() {
+        credential_source(login)?
+    } else {
+        keychain_source(login)
+    };
+    if let Some(authority) = authority {
+        authority.check(&source, now_ms())?;
+    }
     let budget = |cap: Duration| -> Result<Duration, ProviderError> {
         match deadline_ms.saturating_sub(now_ms()) {
             0 => Err(ProviderError::CredentialUnavailable),
@@ -142,6 +221,23 @@ pub fn refresh_if_expiring(
         env.push(("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()));
     }
     let read = || -> Result<OauthToken, ProviderError> {
+        if authority.is_some() && credential_source(login)? != source {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        if let Some(authority) = authority {
+            authority.check(&source, now_ms())?;
+        }
+        if let CredentialSource::File { path } = &source {
+            let directory = provenant_supervisor::fs::Directory::open_anchor(
+                path.parent().ok_or(ProviderError::CredentialUnavailable)?,
+            )
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+            let bytes = directory
+                .read_bounded(OsStr::new(".credentials.json"), 65536)
+                .map_err(|_| ProviderError::CredentialUnavailable)?;
+            return OauthToken::parse(&bytes, now_ms())
+                .map_err(|_| ProviderError::CredentialUnavailable);
+        }
         let argv: Vec<OsString> = [
             "/usr/bin/security".as_ref(),
             "find-generic-password".as_ref(),
@@ -169,6 +265,12 @@ pub fn refresh_if_expiring(
     match read() {
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(_) => {}
+    }
+    if authority.is_some() && credential_source(login)? != source {
+        return Err(ProviderError::CredentialUnavailable);
+    }
+    if let Some(authority) = authority {
+        authority.check(&source, now_ms())?;
     }
     let argv: Vec<OsString> = [
         login.executable.as_os_str(),
@@ -212,6 +314,34 @@ pub fn refresh_for_account(
     account: &crate::identity::RegisteredAccount,
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
+) -> Result<OauthToken, ProviderError> {
+    refresh_account(executor, login, account, now_ms, deadline_ms, None)
+}
+pub fn refresh_for_account_authorised(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: &CredentialAuthority,
+) -> Result<OauthToken, ProviderError> {
+    authority.check(&credential_source(login)?, now_ms())?;
+    refresh_account(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        Some(authority),
+    )
+}
+fn refresh_account(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
     if account.adapter() != "claude" || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
@@ -270,17 +400,18 @@ pub fn refresh_for_account(
         Ok(())
     };
     check()?;
-    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms)?;
+    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?;
     check()?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)
 }
 
 /// Claude uses the selected config directory. The host reads its login token
-/// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
-/// unreadable. Recorded writer-shell activation additionally denies keychain
-/// services and the security executable, and uses a private config directory.
-/// Until that proof is accepted, writers retain file tools only.
+/// and passes it through an inherited pipe, so the keychain stays
+/// unreadable. Writers additionally deny keychain services and the security
+/// executable, use private configuration and ask Claude to scrub subprocess
+/// credentials. The shell_enabled knob retains the file-tools-only fallback.
+/// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -288,7 +419,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // No credential path is granted: the token arrives in the environment.
+    // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -312,7 +443,6 @@ fn prepare(
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "-p".as_ref(),
-        "--safe-mode".as_ref(),
         "--strict-mcp-config".as_ref(),
         "--disable-slash-commands".as_ref(),
         "--permission-prompts".as_ref(),
@@ -331,7 +461,7 @@ fn prepare(
     let shell = shell_enabled("claude", access, session);
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
-        Access::WorktreeWrite if shell => ("bypassPermissions", "Read,Grep,Glob,Edit,Write,Bash"),
+        Access::WorktreeWrite if shell => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
         Access::WorktreeWrite => ("acceptEdits", "Read,Grep,Glob,Edit,Write"),
     };
     argv.extend(
@@ -357,21 +487,34 @@ fn prepare(
     let transcript_dir = project.join(&session_id);
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
-    let mut env = base_env(input, scratch, "/usr/bin:/bin");
+    // Scrub mode forces default permissions, regardless of --permission-mode.
+    let allowed_tools = if shell {
+        "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+    } else {
+        "mcp__fabric__*"
+    };
+    let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
+
+    let path = if shell {
+        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
+    } else {
+        "/usr/bin:/bin".into()
+    };
+    let mut env = base_env(input, scratch, &path);
+    input
+        .provenant
+        .environment(scratch, &mut env, &mut setup, shell)?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
             ("DISABLE_AUTOUPDATER", "1".as_ref()),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".as_ref()),
-            ("CLAUDE_CODE_OAUTH_TOKEN", token.access.as_ref()),
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
-    let mut setup = if shell {
-        Vec::new()
-    } else {
-        vec![SetupStep::CreateDir(transcript_dir.clone())]
-    };
+    if !shell {
+        setup.push(SetupStep::CreateDir(transcript_dir.clone()));
+    }
     if shell {
         let config = plan
             .private_state
@@ -384,10 +527,35 @@ fn prepare(
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
-    Ok(LaunchSpec {
+    let mut runtime_reads = vec![subtree(package)];
+    let mut tool_exec_roots = Vec::new();
+    if shell {
+        env.extend([
+            ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
+        // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
+        tool_exec_roots.push(subtree(scratch.join("bin")));
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
+        crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
+    }
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        secret_input: Some(provenant_supervisor::exec::SecretInput {
+            descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
+            bytes: token.access.as_bytes().to_vec(),
+        }),
         cwd: input.cwd.to_owned(),
         setup,
         profile: ProviderProfile {
@@ -395,18 +563,9 @@ fn prepare(
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
                 deny_keychain_access: shell,
-                tool_exec_roots: if shell {
-                    vec![
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        subtree("/usr/libexec"),
-                    ]
-                } else {
-                    Vec::new()
-                },
-                // Not `~/.claude.json`: it can hold MCP server secrets and the
-                // launch never needs it.
-                runtime_reads: vec![subtree(package)],
+                tool_exec_roots,
+                // Never the user's .claude.json, which can hold MCP secrets.
+                runtime_reads,
                 state_writes: if shell {
                     Vec::new()
                 } else {
@@ -424,7 +583,11 @@ fn prepare(
             observations: observations(OBSERVATIONS, access)?,
         },
         stream,
-    })
+    };
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, true);
+    Ok(spec)
 }
 
 /// Claude's per-project transcript directory name: every byte outside ASCII
@@ -506,6 +669,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
                 events.push(E::Model(message.model));
             }
+            let failed = error.is_some() || is_api_error_message;
             if let Some(error) = error {
                 events.push(if error == "authentication_failed" {
                     E::AuthRequired
@@ -515,9 +679,13 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             } else if is_api_error_message {
                 events.push(E::Error);
             }
-            for content in message.content {
-                if let Content::Text { text } = content {
-                    events.push(E::Text(text));
+            // The result event repeats the final answer, so assistant text is
+            // kept only as error evidence; otherwise every answer lands twice.
+            if failed {
+                for content in message.content {
+                    if let Content::Text { text } = content {
+                        events.push(E::Text(text));
+                    }
                 }
             }
             if let Some(usage) = message.usage {

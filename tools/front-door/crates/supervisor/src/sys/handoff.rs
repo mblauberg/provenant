@@ -24,26 +24,20 @@ fn deadline(timeout: Duration) -> io::Result<Instant> {
         .ok_or_else(|| io::ErrorKind::InvalidInput.into())
 }
 fn transfer(
-    stream: &mut UnixStream,
-    bytes: &mut [u8],
-    writing: bool,
+    length: usize,
+    mut operation: impl FnMut(usize) -> io::Result<usize>,
     deadline: Instant,
     cancel: &CancelToken,
 ) -> io::Result<()> {
     let mut offset = 0;
-    while offset < bytes.len() {
+    while offset < length {
         if cancel.is_cancelled() {
             return Err(io::ErrorKind::Interrupted.into());
         }
         if Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        let part = bytes.get_mut(offset..).ok_or(io::ErrorKind::InvalidData)?;
-        let result = if writing {
-            stream.write(part)
-        } else {
-            stream.read(part)
-        };
+        let result = operation(offset);
         match result {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(count) => offset += count,
@@ -67,9 +61,19 @@ pub(crate) fn send(
     }
     stream.set_nonblocking(true)?;
     let deadline = deadline(timeout)?;
-    let mut length = (bytes.len() as u64).to_be_bytes();
-    transfer(stream, &mut length, true, deadline, cancel)?;
-    transfer(stream, &mut bytes.to_vec(), true, deadline, cancel)
+    let length = (bytes.len() as u64).to_be_bytes();
+    transfer(
+        length.len(),
+        |offset| stream.write(&length[offset..]),
+        deadline,
+        cancel,
+    )?;
+    transfer(
+        bytes.len(),
+        |offset| stream.write(&bytes[offset..]),
+        deadline,
+        cancel,
+    )
 }
 pub(crate) fn receive(stream: &mut UnixStream, timeout: Duration) -> io::Result<Vec<u8>> {
     let cancel = CancelToken::new();
@@ -83,14 +87,24 @@ pub(crate) fn receive_cancellable(
     stream.set_nonblocking(true)?;
     let deadline = deadline(timeout)?;
     let mut length = [0_u8; 8];
-    transfer(stream, &mut length, false, deadline, cancel)?;
+    transfer(
+        length.len(),
+        |offset| stream.read(&mut length[offset..]),
+        deadline,
+        cancel,
+    )?;
     let length =
         usize::try_from(u64::from_be_bytes(length)).map_err(|_| io::ErrorKind::InvalidData)?;
     if length > MESSAGE_LIMIT {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let mut bytes = vec![0; length];
-    transfer(stream, &mut bytes, false, deadline, cancel)?;
+    transfer(
+        bytes.len(),
+        |offset| stream.read(&mut bytes[offset..]),
+        deadline,
+        cancel,
+    )?;
     Ok(bytes)
 }
 

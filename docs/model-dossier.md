@@ -174,10 +174,12 @@ the reader, not the decider.
 
 ### Cheap bulk and scouting
 
-The `utility` pool is the only configured pool. It tries Claude Haiku at low
-effort, then Codex Luna, and skips OpenCode entries while that adapter is
-disabled. Task-class presets adjust knobs; they do not map task classes to
-models.
+Use `utility` for mechanical work: Claude Haiku has no explicit effort, Codex
+Luna uses its recorded `low` control, and the OpenCode free models come last.
+Use the named junior, senior or principal pools for increasing judgement, or
+the writing and design pools for those crafts. Check `route list` for cached
+availability. Task-class presets adjust knobs; they do not map task classes to
+routes.
 
 ### Human-facing final polish
 
@@ -210,9 +212,10 @@ actual task before relying on it.
 ## Current preferences
 
 Use `provenant route list` and `provenant route resolve` to inspect current
-choices and the resolved model and effort. The catalogue currently has one
-`utility` pool; use explicit route choices for other work. This dossier does
-not configure route weights or order.
+choices and the resolved model and effort. The bundled catalogue defines the
+`utility`, `junior`, `senior`, `principal`, `writing` and `design` pools in
+preference order. This advisory dossier does not change their membership or
+order.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do

@@ -1,5 +1,5 @@
 //! Fabric process composition: MCP, fixed peer ingress and host observations.
-mod context;
+use provenant_cli::fabric::Context;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
     stdio,
@@ -43,12 +43,10 @@ pub enum EdgeError {
     Io(#[from] io::Error),
     #[error("invalid Fabric setup")]
     Invalid,
-    #[error("Git executable is unavailable")]
-    GitUnavailable,
 }
 
 struct Factory {
-    context: context::Context,
+    context: Context,
     clock: SystemClock,
     backoff: ThreadWait,
     executor: SystemExecutor,
@@ -352,7 +350,7 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
         let home = crate::roots::home()?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         if let Some(client) = client {
             context.config.client_label = serde_json::to_value(client)?
                 .as_str()
@@ -396,7 +394,7 @@ fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::err
     let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
     let roots = crate::roots::roots(globals, &assets, &cwd)?;
     let home = crate::roots::home()?;
-    let context = context::Context::open(roots, &home, &cwd)?;
+    let context = Context::open(roots, &home, &cwd)?;
     Ok(Factory {
         context,
         clock: SystemClock::new(),
@@ -461,7 +459,7 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
         };
         let assets = crate::roots::product_root()?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -718,7 +716,7 @@ fn landing_error_code(error: &(dyn std::error::Error + 'static)) -> &'static str
 
 #[allow(clippy::too_many_arguments)]
 fn landing_local(
-    context: &context::Context,
+    context: &Context,
     executor: &SystemExecutor,
     proof: LandingProof,
     operation_id: &provenant_core::OperationId,
@@ -918,9 +916,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
     match error {
         RunError::NotFound => FacadeError::NotFound,
-        RunError::Refused | RunError::Writer(_) | RunError::Confinement(_) => {
-            FacadeError::ConfinementRefused
-        }
+        RunError::Refused => FacadeError::ConfinementRefused,
+        RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
+        RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
         RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
@@ -935,6 +933,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     match fail.code {
         "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
+        "LANE_DEPTH" => FacadeError::LaneDepth,
+        "LANE_CONTEXT" | "PARENT_ATTEMPT" => FacadeError::InvalidInput,
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
@@ -964,7 +964,12 @@ impl BinaryRunOwner<'_> {
     ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: ctx.roots.state.clone(),
+            state_root: provenant_cli::run::execution_state(
+                &ctx.roots,
+                &self.factory.home,
+                &crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?,
+            )
+            .map_err(fail_error)?,
             project_id: ctx.identity.project,
             actor_id: ctx.identity.inbox.actor,
             read_prompts: false,
@@ -1022,6 +1027,9 @@ impl BinaryRunOwner<'_> {
                     all: true,
                     limit: 100,
                     after: 0,
+                    newest_first: false,
+                    owner: None,
+                    unseen_after: None,
                 },
                 call,
             )
@@ -1126,53 +1134,15 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<PeerResult, FacadeError> {
-        let ctx = &self.factory.context;
-        let peer = ctx
-            .config
-            .peers
-            .values()
-            .find(|p| p.host == host)
-            .ok_or(FacadeError::HomeUnavailable)?;
-        let project = ProjectLocator::new(&ctx.identity, &self.factory.home)
-            .map_err(|_| FacadeError::ConfinementRefused)?;
-        let request = PeerRequest {
-            version: 1,
-            target_host: host,
-            source_host: ctx.identity.host,
-            agent: ctx.identity.inbox.agent.clone(),
-            project,
+        self.factory.context.peer_with(
+            &self.factory.executor,
+            &self.factory.clock,
+            host,
             action,
-        };
-        let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
-            ctx.config.ssh_executable.as_deref(),
+            budget,
+            cancel,
         )
-        .map_err(|_| FacadeError::HomeUnavailable)?;
-        let transport = SshTransport {
-            executor: &self.factory.executor,
-            clock: &self.factory.clock,
-            home: &self.factory.home,
-            cwd: &self.factory.cwd,
-            executable,
-            seconds: ctx.config.limits.peer_seconds,
-        };
-        match transport
-            .exchange(peer, &request, budget, cancel)
-            .map_err(|error| {
-                let operation_id = match &error {
-                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
-                    _ => None,
-                };
-                FacadeError::from_code(error.code(), operation_id)
-            })?
-            .result
-        {
-            PeerResult::Error { code, operation_id } => Err(peer_error(&code, operation_id)),
-            value => Ok(value),
-        }
     }
-}
-fn peer_error(code: &str, operation_id: Option<provenant_core::OperationId>) -> FacadeError {
-    FacadeError::from_code(code, operation_id)
 }
 impl BinaryRunOwner<'_> {
     fn capabilities(&self) -> RunCapabilities {
@@ -1201,7 +1171,36 @@ impl BinaryRunOwner<'_> {
             tasks,
             concurrency,
             knobs,
+            host,
         } = input;
+        // Explicit placement forwards the whole batch; the peer confines it.
+        if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
+            if !self.allow_remote {
+                return Err(FacadeError::ConfinementRefused);
+            }
+            // Peer writers need worktree transport (#1457).
+            if tasks
+                .iter()
+                .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
+            {
+                return Err(FacadeError::OwnerUnavailable);
+            }
+            let input = SubmitInput::Submission {
+                operation_id,
+                tasks,
+                concurrency,
+                knobs,
+                host: None,
+            };
+            return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
+                PeerResult::Submitted(receipt)
+                    if receipt.targets.iter().all(|t| t.host == Some(host)) =>
+                {
+                    Ok(receipt)
+                }
+                _ => Err(FacadeError::StateCorrupt),
+            };
+        }
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
@@ -1234,6 +1233,7 @@ impl BinaryRunOwner<'_> {
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
                 delivery_id: task.delivery_id,
+                deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
             });
         }
@@ -1611,6 +1611,9 @@ impl BinaryRunOwner<'_> {
                             all: true,
                             limit: u64::from(limit),
                             after: after_sequence,
+                            newest_first: false,
+                            owner: None,
+                            unseen_after: None,
                         },
                         &call,
                     )
@@ -1689,46 +1692,61 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         route: &provenant_fabric_runtime::graph::GraphRoute,
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
+        stored_ref: Option<&str>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
-        let operation_id = graph_operation("graph-attempt-operation", key)?;
-        let input = SubmitInput::Submission {
-            operation_id,
-            tasks: vec![SubmittedTask {
-                account: None,
-                access,
-                worktree: worktree.map(str::to_owned),
-                prompt: prompt.into(),
-                route: RoutePreference {
-                    adapter: Some(route.adapter.clone()),
-                    model: route.model.clone(),
-                    route: route.alias.clone(),
-                    role: None,
-                    task_class: None,
-                    effort: route.effort.clone(),
-                },
-                timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
-                delivery_id: None,
-            }],
-            concurrency: Some(1),
-            knobs: vec![],
-        };
         let mut owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
         };
-        let receipt = owner.submit(input, self.budget, self.cancel)?;
-        let target = receipt
-            .targets
-            .into_iter()
-            .next()
-            .ok_or(FacadeError::StateCorrupt)?;
-        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
-        let reference = Some(format!(
-            "{}/{}",
-            target.host.unwrap_or(self.factory.context.identity.host),
-            target.attempt
-        ));
+        let (target, reference) = if let Some(reference) = stored_ref {
+            // An accepted attempt is observed by reference: operation replay is
+            // actor-scoped, so resubmitting under another actor would launch again.
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            (target, Some(reference.to_owned()))
+        } else {
+            let operation_id = graph_operation("graph-attempt-operation", key)?;
+            let input = SubmitInput::Submission {
+                operation_id,
+                tasks: vec![SubmittedTask {
+                    account: None,
+                    access,
+                    worktree: worktree.map(str::to_owned),
+                    prompt: prompt.into(),
+                    route: RoutePreference {
+                        adapter: Some(route.adapter.clone()),
+                        model: route.model.clone(),
+                        route: route.alias.clone(),
+                        role: None,
+                        task_class: None,
+                        effort: route.effort.clone(),
+                    },
+                    timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
+                    delivery_id: None,
+                    deliver: None,
+                }],
+                concurrency: Some(1),
+                knobs: vec![],
+                host: None,
+            };
+            let receipt = owner.submit(input, self.budget, self.cancel)?;
+            let target = receipt
+                .targets
+                .into_iter()
+                .next()
+                .ok_or(FacadeError::StateCorrupt)?;
+            let reference = Some(format!(
+                "{}/{}",
+                target.host.unwrap_or(self.factory.context.identity.host),
+                target.attempt
+            ));
+            (target, reference)
+        };
+        let attempt = owner.snapshot(target, self.budget, self.cancel)?;
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
@@ -1850,39 +1868,22 @@ impl Factory {
                 factory: self,
                 allow_remote: true,
             };
+            // One unresolvable target must not strand the others; report the first failure last.
+            let mut first_error = None;
             for node in &checkpoint.nodes {
                 for attempt in &node.attempts {
                     if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
                         continue;
                     }
-                    let reference = match attempt.attempt_ref.as_deref() {
-                        Some(reference) => reference,
-                        None => {
-                            return Err(FacadeError::LaunchUnknown {
-                                operation_id: graph_operation(
-                                    "graph-attempt-operation",
-                                    &attempt.key,
-                                )?,
-                            });
-                        }
-                    };
-                    let (host, attempt_id) =
-                        reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-                    let operation_id = graph_operation("graph-cancel", &attempt.key)?;
-                    owner.run(
-                        RunInput::Cancel {
-                            target: AttemptTarget {
-                                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
-                                attempt: attempt_id
-                                    .parse()
-                                    .map_err(|_| FacadeError::StateCorrupt)?,
-                            },
-                            operation_id,
-                        },
-                        budget,
-                        cancel,
-                    )?;
+                    if let Err(error) =
+                        self.cancel_graph_attempt(&mut owner, attempt, budget, cancel)
+                    {
+                        first_error.get_or_insert(error);
+                    }
                 }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
             }
         }
         let status = if checkpoint.cancelled {
@@ -1899,6 +1900,58 @@ impl Factory {
             GraphStatus::Complete
         };
         Ok(GraphRun { status, checkpoint })
+    }
+}
+impl Factory {
+    /// Cancel one live graph attempt. A missing checkpoint reference (a crash
+    /// between acceptance and the save) is recovered from the stable operation ID.
+    fn cancel_graph_attempt(
+        &self,
+        owner: &mut BinaryRunOwner<'_>,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        let operation_id = graph_operation("graph-cancel", &attempt.key)?;
+        let targets = match attempt.attempt_ref.as_deref() {
+            Some(reference) => {
+                let (host, attempt_id) =
+                    reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                vec![AttemptTarget {
+                    host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                    attempt: attempt_id.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                }]
+            }
+            None => {
+                let accepted = graph_operation("graph-attempt-operation", &attempt.key)?;
+                let store = owner.store(budget, cancel)?;
+                let call = owner.call(budget, cancel);
+                // An operation this actor never accepted launched nothing to stop.
+                match store.operation(&accepted, &call).map_err(run_error)? {
+                    Some(record) => store
+                        .pending_attempts(record.run_id, &call)
+                        .map_err(run_error)?
+                        .into_iter()
+                        .map(|record| AttemptTarget {
+                            host: Some(self.context.identity.host),
+                            attempt: record.attempt_id,
+                        })
+                        .collect(),
+                    None => vec![],
+                }
+            }
+        };
+        for target in targets {
+            owner.run(
+                RunInput::Cancel {
+                    target,
+                    operation_id: operation_id.clone(),
+                },
+                budget,
+                cancel,
+            )?;
+        }
+        Ok(())
     }
 }
 fn graph_operation(
@@ -2158,7 +2211,11 @@ mod peer_tests {
             "publication_failed",
             "home_unavailable",
         ] {
-            assert_eq!(super::peer_error(code, None).code(), code, "{code}");
+            assert_eq!(
+                super::FacadeError::from_code(code, None).code(),
+                code,
+                "{code}"
+            );
         }
     }
 
@@ -2185,7 +2242,7 @@ mod peer_tests {
             return Err("expected a peer refusal".into());
         };
         assert!(matches!(
-            super::peer_error(&code, operation_id),
+            super::FacadeError::from_code(&code, operation_id),
             super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop"
         ));
         Ok(())

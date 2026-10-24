@@ -23,6 +23,21 @@ pub struct RootSeed {
     pub checkout: PathBuf,
     pub state_root: PathBuf,
 }
+/// Host-only launch inputs, passed on the custody pipe rather than through
+/// lane-writable state. Provider credentials are resolved afresh on the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLaunchContext {
+    pub configuration_root: PathBuf,
+    pub cwd: PathBuf,
+    pub executables: std::collections::BTreeMap<String, PathBuf>,
+    pub git: PathBuf,
+    pub codex_home: Option<PathBuf>,
+    /// Synthetic fake-provider evidence; absent from installed builds.
+    #[cfg(feature = "fixture")]
+    #[serde(default)]
+    pub fixture_state_write: bool,
+}
 /// Opaque to supervisor; travels on the handoff pipe only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +48,26 @@ pub struct HolderContext {
     pub actor_id: ActorId,
     pub run_id: RunId,
     pub attempt_id: AttemptId,
+    /// Private handoff only, never copied to the attempt or provider environment.
+    #[serde(default)]
+    pub host_delivery: Option<crate::HostDeliveryContext>,
+    pub launch: Option<HostLaunchContext>,
+}
+
+enum Completion<'a> {
+    Live {
+        custody: &'a custody::Recovery,
+        delivery: Option<&'a crate::HostDeliveryContext>,
+    },
+    Recovered(Option<&'a custody::Recovery>),
+}
+impl Completion<'_> {
+    fn custody(&self) -> Option<&custody::Recovery> {
+        match self {
+            Self::Live { custody, .. } => Some(custody),
+            Self::Recovered(custody) => *custody,
+        }
+    }
 }
 impl HolderContext {
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -40,7 +75,7 @@ impl HolderContext {
     }
     /// Open the store, retrying transient failures for about 30 s so a busy
     /// host does not turn into a refused or stranded attempt.
-    fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
+    pub fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
         let mut delay = std::time::Duration::from_millis(100);
         for _ in 0..10 {
             match Self::open_once(raw) {
@@ -71,7 +106,14 @@ impl HolderContext {
             actor_id: context.actor_id,
             read_prompts: false,
         };
-        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?;
+        let registry = context
+            .launch
+            .as_ref()
+            .map_or(context.roots.state_root.as_path(), |host| {
+                host.configuration_root.as_path()
+            });
+        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
+            .with_writer_registry(registry);
         Ok((context, store))
     }
 }
@@ -119,7 +161,10 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 context.attempt_id,
                 attempt,
                 exit,
-                Some(recovery),
+                Completion::Live {
+                    custody: recovery,
+                    delivery: context.host_delivery.as_ref(),
+                },
                 self.providers,
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
             )
@@ -148,11 +193,8 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing"))?;
         let recovery = if let Some(writer) = &task.writer {
-            let mut writer = crate::prepare_writer(
-                writer,
-                self.context.state_root.as_path(),
-                record.project_id,
-            )?;
+            let mut writer =
+                crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
             let (directory, _) = writer.custody.take().ok_or(RunError::UnsafePath)?;
             if matches!(record.state, AttemptState::Terminal { .. }) {
                 match directory.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
@@ -168,8 +210,14 @@ impl RunStore {
         } else {
             None
         };
-        let record =
-            self.finish_in_custody(id, attempt, exit, recovery.as_ref(), providers, call)?;
+        let record = self.finish_in_custody(
+            id,
+            attempt,
+            exit,
+            Completion::Recovered(recovery.as_ref()),
+            providers,
+            call,
+        )?;
         crate::writer::settle_launch_staging(attempt)?;
         if let Some(recovery) = recovery {
             custody::publish_release(attempt, exit.scope)
@@ -189,10 +237,11 @@ impl RunStore {
         id: AttemptId,
         attempt: &Directory,
         exit: &ExitObservation,
-        recovery: Option<&custody::Recovery>,
+        completion: Completion<'_>,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
+        let recovery = completion.custody();
         let record = self.record(id, call)?;
         if exit.scope != Self::scope(&record)
             || recovery.is_some_and(|recovery| recovery.scope() != exit.scope)
@@ -218,6 +267,7 @@ impl RunStore {
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
+                session: None,
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -231,6 +281,7 @@ impl RunStore {
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
+                session: None,
                 reason: Some(
                     exit.warnings
                         .first()
@@ -240,7 +291,22 @@ impl RunStore {
             },
             (Some(route), false) => {
                 let stdout = read_sealed(attempt, "stdout.log", CAPTURE_LIMIT)?.unwrap_or_default();
-                providers.decode(route, &stdout, exit)
+                providers
+                    .decode(
+                        route,
+                        &stdout,
+                        exit,
+                        &self
+                            .context
+                            .state_root
+                            .as_path()
+                            .join("runs")
+                            .join(record.run_id.to_string())
+                            .join("attempts")
+                            .join(id.to_string())
+                            .join("provider-state"),
+                    )
+                    .map_err(RunError::ProviderEvidence)?
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
@@ -259,16 +325,14 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         if let Some(writer) = &task.writer {
-            let check =
-                crate::prepare_writer(writer, self.context.state_root.as_path(), record.project_id)
-                    .and_then(|writer| {
-                        writer.terminal(
-                            self.context.state_root.as_path(),
-                            attempt,
-                            recovery
-                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
-                        )
-                    });
+            let check = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
+                .and_then(|writer| {
+                    writer.terminal(
+                        self.context.state_root.as_path(),
+                        attempt,
+                        recovery.ok_or(RunError::Validation("writer terminal custody missing"))?,
+                    )
+                });
             match check {
                 Ok(false) => {}
                 Ok(true) => {
@@ -342,8 +406,32 @@ impl RunStore {
             };
             if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
-                decoded.reason = Some(reason.into());
+                // Keep the decoder's typed identity evidence error, if any.
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(detail) if reason == "provider identity was not observed" => {
+                        format!("{reason}: {detail}")
+                    }
+                    _ => reason.into(),
+                });
             }
+        }
+        // Recovered/result-only publication never starts external delivery.
+        // A succeeded outcome already proves the provider's terminal event in
+        // the sealed stdout, so no live frame observation is required.
+        let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
+        if !result_orphan
+            && decoded.outcome == Outcome::Succeeded
+            && !cancelled
+            && exit.stop_reason.is_none()
+            && !exit.unresolved_cleanup
+            && exit.publication == custody::PublicationState::Durable
+            && let Completion::Live {
+                delivery: Some(host),
+                ..
+            } = &completion
+            && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
+        {
+            crate::delivery::deliver_once(host, writer, deliver, attempt)?;
         }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
@@ -361,9 +449,10 @@ impl RunStore {
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
             usage: decoded.usage,
+            session: decoded.session,
         };
         // A result sealed without intent predates a crash: keep its bytes.
-        if read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some() {
+        if result_orphan {
             return self.recover_result_only(id, &publication, exit, call);
         }
         self.publish_terminal(id, record.revision, &publication, exit, call)

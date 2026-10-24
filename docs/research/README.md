@@ -39,7 +39,7 @@ links and verify volatile provider or model claims at the live runtime.
 |---|---|
 | Harness policy and topology | [`HARNESS.md`](../../HARNESS.md) |
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
-| Skill names and catalogue | [Repository README](../../README.md#skill-library) and `skills/*/SKILL.md` |
+| Skill names and catalogue | [Skill catalogue](../../skills/) and `skills/*/SKILL.md` |
 | Fabric | [Fabric Rust design](../specs/rust-port/design/fabric.md) |
 | Provider activation | [`activation.json`](../../tools/front-door/tests/fixtures/providers/activation.json) |
 | Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |

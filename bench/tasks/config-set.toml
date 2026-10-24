@@ -1,0 +1,6 @@
+repo = "mblauberg/provenant"
+parent_sha = "f7071194f2a5899a6a2eb499d3ae74574374ed6d"
+merge_sha = "37138f83a2825f85bde9da7ff275f8fc9d62aade"
+prompt = "Implement the config set behavior from PR #1419, feat/config-set."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-config --lib"
+split = "search"

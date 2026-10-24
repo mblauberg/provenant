@@ -106,8 +106,8 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
         return deny("hook input rejected: bounded-input error (invalid Bash command)");
     };
-    if provenant_confinement::shell_command::check(&tool.command).is_err() {
-        return deny(provenant_confinement::shell_command::DENY_REASON);
+    if let Err(refusal) = provenant_confinement::shell_command::check(&tool.command) {
+        return deny(refusal.0.message());
     }
     let cwd = event
         .cwd
@@ -232,7 +232,7 @@ fn with_git<T>(
         &CancelToken,
     ) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let temp = std::fs::canonicalize("/tmp")?;
+    let temp = std::fs::canonicalize(std::env::temp_dir())?;
     let anchor = LocalFs.open_anchor(&temp)?;
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;

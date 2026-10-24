@@ -4,6 +4,7 @@ mod admission;
 mod artifacts;
 mod controls;
 mod db;
+mod delivery;
 mod holder;
 mod launch;
 mod plan;
@@ -15,12 +16,17 @@ pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
-pub use holder::{HolderContext, RootSeed, RunHolder};
+pub use delivery::HostDeliveryContext;
+pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,
 };
-pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
+pub use plan::read_only_plan;
+pub use writer::{
+    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
+    resolve_writer_proposal,
+};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
@@ -31,14 +37,35 @@ pub use reader::{
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
 
+pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
+pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
+
+/// Return the depth of the run being dispatched under this lane.
+pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
+    let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
+    if depth > max_depth {
+        return Err(RunError::DepthExceeded { depth, max_depth });
+    }
+    Ok(depth)
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("host writer delivery failed at {0:?}; inspect the attempt delivery receipt")]
+    Delivery(WriterDeliveryStage),
+    #[error("provider evidence could not be committed: {0}")]
+    ProviderEvidence(String),
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {0}")]
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
+    #[error(
+        "worktree {0} is not registered with Provenant; create it with \
+         `provenant worktree create --base <branch> <branch>`"
+    )]
+    WorktreeUnregistered(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
@@ -63,6 +90,10 @@ pub enum RunError {
     TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
+    #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
+    DepthExceeded { depth: u64, max_depth: u64 },
+    #[error("nested lane depth overflowed")]
+    DepthOverflow,
     #[error("host queue is full")]
     Capacity,
     #[error("run store is contended or its call budget expired")]
@@ -79,12 +110,14 @@ pub enum RunError {
     Decode(#[from] provenant_records::DecodeError),
     #[error(transparent)]
     Canonical(#[from] provenant_records::CanonicalError),
-    #[error("run filesystem I/O failed")]
+    #[error("run filesystem I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]

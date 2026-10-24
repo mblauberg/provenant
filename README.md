@@ -1,265 +1,206 @@
-# Provenant
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/brand/provenant-icon-dark.svg">
+    <img src="./assets/brand/provenant-icon-light.svg" width="128" height="128" alt="Provenant icon">
+  </picture>
+</p>
 
-**A personal harness for Claude Code and Codex that turns agent work into a
-scoped, verified and independently reviewed delivery workflow.**
+<h1 align="center">Provenant</h1>
 
-[![CI](https://github.com/mblauberg/provenant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mblauberg/provenant/actions/workflows/ci.yml)
-[![Licence: MIT](https://img.shields.io/github/license/mblauberg/provenant)](LICENSE)
+<p align="center">Rust tooling for confined coding-agent lanes, Fabric coordination, and quota-aware routing.</p>
 
-Provenant is a personal harness, used daily by its author. Interfaces change
-without notice and support is best effort. Propose changes through
-[GitHub issues](https://github.com/mblauberg/provenant/issues); report
-vulnerabilities privately through [`SECURITY.md`](SECURITY.md).
+<p align="center">
+  <a href="https://github.com/mblauberg/provenant/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mblauberg/provenant/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/mblauberg/provenant/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/mblauberg/provenant?label=latest%20release"></a>
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/github/license/mblauberg/provenant"></a>
+  <a href="tools/front-door/Cargo.toml"><img alt="Rust MSRV 1.99.1" src="https://img.shields.io/badge/Rust%20MSRV-1.99.1-orange?logo=rust"></a>
+  <a href="apps/quota-menubar/README.md"><img alt="macOS quota menu bar app" src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple"></a>
+</p>
 
-## Why Provenant
+Provenant coordinates coding agents as bounded work lanes. Each lane has an
+explicit access mode and recorded result; the Rust host routes work, tracks
+quota and run state, carries Fabric messages, and controls how writer changes
+are delivered.
 
-A bare coding agent will write and "finish" a change in one pass, with its own
-author as the only reviewer. Provenant puts structure around that:
+It is for developers who run coding agents in parallel and need isolated
+worktrees, shared task communication, predictable model selection, and a
+reviewable path from a writer lane back to a remote branch.
 
-- it **scopes** work in dialogue with the user, returning open decisions as
-  questions, and requires approval before implementation starts;
-- it runs **deterministic checks** before any result surfaces for review;
-- substantial work adds **one independent review** from another provider
-  family when available, with review depth increasing at higher risk tiers; and
-- it meets **acceptance through checks and required review**, with separate user authority for release.
+## Features
 
-A change therefore arrives already scoped, verified and read by a context that
-did not write it, so user attention goes to judgement rather than to catching an
-agent's own mistakes.
+- **Confined provider lanes.** Claude Code and Codex lanes run with read-only
+  or worktree-write access plans, and provider output and terminal state are
+  recorded. Agy, Cursor, and OpenCode adapters are catalogued but stay
+  execution-disabled until a live confinement capture proves each mode.
+- **Fabric messaging and dispatch.** The CLI and Fabric MCP surface provide
+  messages, tasks, agent identity, host links, and local dispatch. Read-only
+  lanes can run on a configured peer host with `dispatch --host`; peer-host
+  writers are not available yet.
+- **Weighted, paced routes.** Named pools select among eligible models by
+  configured weight and provider pacing. Inspect routes with
+  `provenant route list`; edit pools with `provenant route set` and provider
+  pacing with `provenant route pacing`.
+- **Quota-aware admission.** Provider quota windows and account status inform
+  route eligibility and dispatch admission. Inspect snapshots with
+  `provenant quota show` and refresh them with `provenant quota tick`.
+- **Host-side writer delivery.** A worktree writer can request delivery with
+  `--worktree`, `--deliver-remote`, and `--deliver-branch`. The host verifies
+  and transfers the final writer head using host Git authority; `--open-pr`
+  optionally asks the host to create a pull request after verifying the pushed
+  head.
+- **Harness integration and hooks.** Installation can register Fabric MCP and
+  supported client files for Claude Code, Codex, Cursor, Agy, and OpenCode.
+  Hook handlers are explicit: Claude Code events and
+  `provenant hook git pre-push` are implemented; other clients do not receive
+  generic hooks.
+- **Git worktrees.** `provenant worktree create`, `list`, and `remove` manage
+  isolated project worktrees for concurrent lanes.
+- **Quota menu bar app.** The optional macOS app displays account quota
+  snapshots and lanes needing attention. It reads reports through the CLI and
+  does not read credentials itself.
 
-## How it fits together
+## Install
 
-Three parts act on every request at once: the constitution sets the rules, a
-skill supplies the procedure, and cross-provider dispatch runs and cross-reviews
-the work.
-None of them is a stage the work passes through.
+Build the Rust binary and package a staged release from a checkout. Rust
+1.99.1 is the minimum toolchain. The [front-door runbook](docs/runbooks/front-door.md)
+documents release contents, installation targets, and recovery.
 
-```mermaid
-flowchart TB
-    accTitle: The three parts and the delivery loop they serve
-    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules: authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric providing messages, tasks, activity and a thin front door to the existing dispatch owners.
-    U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
-    LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
-    H["HARNESS.md: the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library: 25 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
-    F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
-    classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
-    class OUT out
+From the repository root:
+
+```sh
+cd tools/front-door
+export PATH="$HOME/.cargo/bin:$PATH"
+CARGO_PARENT="$(mktemp -d)"
+export CARGO_TARGET_DIR="$CARGO_PARENT/cargo-target"
+RELEASE_PARENT="$(mktemp -d)"
+RELEASE="$RELEASE_PARENT/release"
+cargo build --release --locked --bin provenant
+cargo run --locked --example package-release -- --out "$RELEASE"
+cd ../..
 ```
 
-- **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
-  authority, the delivery lifecycle, and how much review pressure each risk tier
-  owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
-  procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
-  sit in permanent context; a full body loads only when the task matches it.
-- Host clients may provide extra skills such as `codebase-polish`,
-  `cross-verify` and `implement-run`. Those are external to this repository.
-- **Fabric:** messages, shared tasks and activity between agents working on one
-  project, plus two MCP tools that delegate ordinary dispatch and finite batches
-  to the existing owners. One SQLite file, no daemon, nothing to provision.
+In the same shell session, preview an install for one selected harness,
+inspect the proposed changes, and then apply it. This example installs Claude
+Code and uses the current checkout as the legacy-entry inventory:
+
+```sh
+LEGACY_CHECKOUT="$(git rev-parse --show-toplevel)"
+STATE="$HOME/.local/share/provenant/v1"
+"$RELEASE/bin/provenant" --state-dir "$STATE" install \
+  --source "$RELEASE" --harness claude \
+  --bin-dir "$HOME/.local/bin" \
+  --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
+# After reviewing the preview, apply the install:
+"$RELEASE/bin/provenant" --state-dir "$STATE" install \
+  --source "$RELEASE" --harness claude \
+  --bin-dir "$HOME/.local/bin" \
+  --legacy-checkout "$LEGACY_CHECKOUT"
+"$RELEASE/bin/provenant" --state-dir "$STATE" check install --source "$RELEASE"
+```
+
+Close each selected harness and configuration editor before applying an
+install. `--hooks` defaults to `off`; use only the hook handlers provided by
+the selected integration. Repeat `--harness` to select more than one client.
+See [Fabric MCP registration](docs/runbooks/fabric-mcp-registration.md) and
+the [install runbook](docs/runbooks/front-door.md) before changing a live
+installation. Build the optional menu bar app from its
+[macOS instructions](apps/quota-menubar/README.md).
 
 ## Quick start
 
-The Rust `provenant-config` crate packages verified releases and manages
-selected harness entries. Bootstrap from the binary in the staged release,
-with an explicit fresh state root and harness names. The state path must be
-absolute and outside every protected legacy root. Quit Claude Code before
-installation because it rewrites `~/.claude.json` while running. Close the
-other selected clients and config editors before preview, and keep them closed
-through installation and `check install`.
+With Rust 1.99.1 installed, build from `tools/front-door`, where the pinned
+toolchain file lives, and inspect the available commands and routes:
 
 ```sh
-PROVENANT="$RELEASE/bin/provenant"
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
-"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+cd tools/front-door
+BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/provenant"
+cargo build --release --locked --bin provenant
+"$BIN" help
+"$BIN" route list
+"$BIN" route resolve --route junior
+"$BIN" quota show
+printf '%s\n' 'Summarise this repository structure in three bullets.' | \
+  "$BIN" dispatch \
+    --operation-id "readme-smoke-$(date +%s)" --prompt-stdin \
+    --route junior --mode read-only
+"$BIN" lanes --all
 ```
 
-`RELEASE` and `LEGACY_CHECKOUT` are absolute paths. `--legacy-checkout` is
-needed when the plan must match entries from that exact checkout; it never
-authorises a broad scan. Repeat `--harness` for each selected client.
-`--adopt-existing` adopts only compatible existing client entries whose
-configuration uses the supported selector fields and no environment values.
-Hooks default off. `--hooks on` requires recorded `HookSpec` policies and
-fixtures. Review the complete dry-run output before applying it. Unresolved
-legacy entries remain visible in the install result and `check install`
-findings. `uninstall --harness NAME` removes unchanged owned entries and keeps
-the state root, release assets and running binary.
+The dispatch command starts a real read-only provider lane. Install and sign in
+to a supported provider CLI first; the run uses that provider's quota. Use
+`provenant help dispatch` for all dispatch controls and
+`provenant help route` for route commands.
 
-For checkout development, use the Rust workspace. An uninstalled binary needs
-an absolute `PROVENANT_ROOT` pointing at the checkout:
+## Architecture
 
-```sh
-export PROVENANT_ROOT="$PWD"
-(cd tools/front-door && cargo check --workspace --all-targets)
-PROVENANT_ROOT="$PWD" cargo run --manifest-path tools/front-door/Cargo.toml -- check harness
-```
-
-Run only focused crate tests locally. CI runs workspace tests, Rust lint,
-macOS release checks, spelling, workflow lint and Markdown link checks.
-`provenant check harness` validates tracked skills, assets, links and issue forms.
-
-## Providers
-
-The [Fabric MCP registration notes](docs/runbooks/fabric-mcp-registration.md)
-describe registration through `provenant install` and preservation of unrelated
-client configuration. Fabric registration and direct provider execution are
-separate. Use `provenant install --help` to see supported harness clients. Run
-`provenant route list` to inspect current route availability. Execution
-activation is recorded in
-[`activation.json`](tools/front-door/tests/fixtures/providers/activation.json);
-only Claude and Codex are enabled today.
-
-Claude account selection preserves the inherited `CLAUDE_CONFIG_DIR` when using
-its ambient identity, including leaving it unset. Confined non-default lanes use
-their configured directory and its `.claude.json`, without access to `~/.claude.json`.
-On macOS, Keychain items are shared across accounts: folder isolation is not
-credential isolation. Account directories separate CLI state, not the Keychain.
-
-## Core workflows
-
-Each task has a front-door skill; the agent loads it when a request matches.
-
-| Need | Skill |
-|---|---|
-| Agree what to build | [`scope`](skills/scope/SKILL.md) |
-| Deliver an approved code change | [`implement`](skills/implement/SKILL.md) |
-| Deliver research, analysis or documents | [`deliver`](skills/deliver/SKILL.md) |
-| Find a root cause | [`diagnose`](skills/diagnose/SKILL.md) |
-| Review without changing the code | [`code-review`](skills/code-review/SKILL.md) |
-| Coordinate parallel agents | [`orchestrate`](skills/orchestrate/SKILL.md) |
-| Promote an accepted artefact | [`release`](skills/release/SKILL.md) |
-
-## Lifecycle
-
-Every change runs the delivery loop. Users approve scope and one-way doors;
-objective checks and tier-required review meet delivery acceptance. The chair
-reports the outcome and the user may still reject it. Explicit user acceptance
-is required only for `terminal` work or when the approved scope asks for it.
-A project may name its landing gate as acceptance. Release keeps its separate
-user authority; receipts declare approval rather than authenticating it.
+The `provenant` binary is the CLI and composition edge. The run crate owns
+dispatch and attempt state; routing, quota, providers, confinement, and the
+supervisor own their separate decisions. Fabric MCP reaches the same run
+service through the Fabric runtime. The quota app reads the CLI's reports.
 
 ```mermaid
 flowchart TB
-    accTitle: The delivery loop and its user gates
-    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using the risk-scaled HARNESS.md Review ladder. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Checks and required review meet acceptance; terminal work and approved scope may require explicit user acceptance. The chair reports the outcome and the user may reject it. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
-    SC["scope · spec, risk tier, acceptance criteria"] --> G1{{"USER · approve the spec"}}
-    G1 -. "send back" .-> SC
-    G1 --> IM["implement · test first when behaviour changes"]
-    IM --> VF["verify · deterministic checks"]
-    VF --> RV["review · fresh context<br/>risk-scaled HARNESS.md ladder"]
-    RV -. "blocking finding" .-> IM
-    RV --> AC["acceptance · checks + required review<br/>or project landing gate"]
-    AC --> Q{"terminal or explicit acceptance<br/>required by approved scope?"}
-    Q -- "yes" --> G2{{"USER · accept"}}
-    Q -- "no" --> OUT["chair reports outcome"]
-    G2 --> OUT
-    OUT --> RT["retrospect"]
-    OUT -. "only if it ships" .-> G3{{"USER · authorise the action"}}
-    G3 --> RL["release · observe"]
-
-    classDef gate fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
-    class G1,G2,G3 gate
+    App["Quota menu bar app"] -->|"quota show and tick"| CLI["provenant CLI"]
+    CLI --> Run["run"]
+    CLI --> Workflow["workflow"]
+    CLI --> Telemetry["telemetry"]
+    CLI --> MCP["fabric-mcp"]
+    MCP --> Runtime["fabric-runtime"]
+    Runtime --> Run
+    Runtime --> FabricStore["fabric-store"]
+    Run --> Routing["routing"]
+    Run --> Quota["quota"]
+    Run --> Providers["providers"]
+    Run --> Confinement["confinement"]
+    Run --> Supervisor["supervisor"]
+    Run --> Records["records"]
+    Routing --> Quota
+    Routing --> Providers
+    Config["config"] -.-> Routing
+    Config -.-> Run
+    Config -.-> Workflow
+    Telemetry --> Records
+    Workflow --> Records
+    Records --> Core["core"]
 ```
 
-Gold hexagons are user gates. Specification approval and any required explicit
-acceptance can return work for revision. Scoping is usually a conversation:
-a decision packet with choices and a recommendation, owner calls parked as named questions rather
-than guesses, and the [`grill-me`](skills/grill-me/SKILL.md) interview, one
-question per round, while material decisions stay unresolved.
+The CLI writes run state under the selected state root. Fabric uses its own
+SQLite store for messages, tasks, and host records. By default the state root
+is `~/.local/share/provenant/v1`; `--state-dir` selects another root.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains the wider system and
+the [Rust design index](docs/specs/rust-port/design/README.md) lists crate
+responsibilities.
 
-The loop is [`deliver`](skills/deliver/SKILL.md), the kernel binding one run to one receipt;
-[`implement`](skills/implement/SKILL.md) is its software front door, and the
-full lifecycle lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+## Platform
 
-## What the harness guarantees
+The quota menu bar companion requires macOS 14 or later. CI runs Rust workspace
+checks on Linux and builds the release binary on macOS; see
+[the CI workflow](.github/workflows/ci.yml). The platform badge refers to the
+optional menu bar app.
 
-**Review pressure scales with risk.** Routine work uses the chair and objective
-checks. Substantial work adds one independent cross-family review when available;
-crucial work needs two with distinct lenses and two non-chair families when
-available. Terminal work adds an adversarial lens. The
-[`HARNESS.md` Review ladder](HARNESS.md#review-ladder) owns the thresholds and
-recorded-blocker fallback when cross-family coverage is unavailable.
+## Documentation
 
-Only passing independent reviews count towards coverage. Evidence and
-corroboration, not model votes, make a finding blocking.
+| Guide | Use it for |
+| --- | --- |
+| [Rust design index](docs/specs/rust-port/design/README.md) | Crate owners, command boundaries, and current Rust decisions |
+| [Architecture](docs/ARCHITECTURE.md) | Product components and system flow |
+| [Rust rewrite rulebook](docs/specs/rust-port/PORTING.md) | Rust implementation constraints and checks |
+| [Release and install runbook](docs/runbooks/front-door.md) | Build, package, install, and recover a release |
+| [Model routing](docs/runbooks/model-routing.md) | Pools, weights, provider pacing, and quota eligibility |
+| [Fabric MCP registration](docs/runbooks/fabric-mcp-registration.md) | Register Fabric with supported clients |
+| [Fabric hosts](docs/runbooks/fabric-hosts.md) | Configure peer hosts and peer-host dispatch |
+| [Quota menu bar](apps/quota-menubar/README.md) | Build and run the optional macOS app |
+| [Benchmark runbook](docs/runbooks/bench.md) | Mine, verify, and replay benchmark tasks |
 
-**Durable boundaries hold regardless of tier:**
+## Contributing
 
-- access and credentials never grant authority;
-- creating branches and worktrees for implementation is pre-authorised;
-  merge authority comes from the owning repository (this repo grants it through
-  its [GitHub runbook](docs/runbooks/github-workflow.md)); deletion beyond
-  post-merge pruning, force-removal and unauthorised shared-branch pushes stay
-  gated;
-- no two agents write one source surface at once; and
-- specification approval and release remain user decisions; final acceptance needs a user only for `terminal` work or approved scope
-  ([`HARNESS.md`](HARNESS.md)).
+Read [AGENTS.md](AGENTS.md) for repository-wide instructions and
+[the GitHub work-item workflow](docs/runbooks/github-workflow.md) for branch,
+issue, and delivery mechanics. Rust changes live under `tools/front-door/`;
+the package is intentionally split into libraries by responsibility. Keep
+changes within the owning crate and follow the accepted design before changing
+its public command or record contract.
 
-Provider workers can be dispatched through Fabric MCP or the direct command
-line; both paths use the same orchestration owners and retain full output in run
-files. Fabric also carries messages, shared tasks and activity between agents.
-[Herdr](https://herdr.dev) is optional: it observes and sends fire-and-forget
-steering; it does not provide wake, callback or completion delivery.
+## Licence
 
-## Skill library
-
-The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
-
-<!-- skill-catalogue:start -->
-<details>
-<summary>All 25 skills</summary>
-
-| Area | Skills |
-|---|---|
-| Delivery | [`session`](skills/session/SKILL.md), [`scope`](skills/scope/SKILL.md), [`grill-me`](skills/grill-me/SKILL.md), [`deliver`](skills/deliver/SKILL.md), [`implement`](skills/implement/SKILL.md), [`tdd`](skills/tdd/SKILL.md), [`refactor`](skills/refactor/SKILL.md), [`diagnose`](skills/diagnose/SKILL.md), [`code-review`](skills/code-review/SKILL.md), [`evaluate`](skills/evaluate/SKILL.md), [`release`](skills/release/SKILL.md), [`retrospect`](skills/retrospect/SKILL.md), [`work-map`](skills/work-map/SKILL.md), [`setup-repo`](skills/setup-repo/SKILL.md), [`tracker`](skills/tracker/SKILL.md) |
-| Orchestration | [`orchestrate`](skills/orchestrate/SKILL.md), [`autopilot`](skills/autopilot/SKILL.md) |
-| Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
-| Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
-| Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
-
-</details>
-<!-- skill-catalogue:end -->
-
-### Stack library
-
-[`library/`](library/) holds four stack skills kept apart from the workflow
-skills above: [`playwright`](library/playwright/SKILL.md),
-[`react-performance`](library/react-performance/SKILL.md),
-[`tanstack-query`](library/tanstack-query/SKILL.md) and
-[`typescript-clean-code`](library/typescript-clean-code/SKILL.md). They install
-through the same installer and manifest, into the same `skills/` directory of
-each client, as managed links. A library skill may not share a name with a
-workflow skill. Removing a folder from `library/` and re-running the installer
-prunes its link.
-
-## Documentation and help
-
-Use `provenant help` for the current command tree. Common command groups are
-`config show|set|unset`, `route`, `dispatch`, `lanes`, `output`, `cancel`,
-`resume`, `reconcile`, `workflow`, `quota`, `telemetry stats` and `worktree`.
-For writing checks, use `provenant check writing PATH...`. Operational examples
-live in the [runbooks](docs/runbooks/), including [model routing](docs/runbooks/model-routing.md),
-[Fabric hosts](docs/runbooks/fabric-hosts.md), and
-[landing leases](docs/runbooks/landing-lease.md).
-
-- [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
-- [`Specifications`](docs/specs/README.md): the component contracts.
-- [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
-- [Landing lease](docs/runbooks/landing-lease.md): Fabric landing-lease operations and advisory coordination.
-- [Local telemetry](docs/runbooks/telemetry.md): supervised attempt usage, API-equivalent cost estimates and provider quota.
-- [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
-- [`Research`](docs/research/README.md): evidence and owners.
-- [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
-- [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.
-- [`Security`](SECURITY.md): private vulnerability reporting.
-- [GitHub issues](https://github.com/mblauberg/provenant/issues): normal feedback and change proposals.
-
-Historical archives, effort route maps, handoffs and superseded evaluation
-bundles were pruned from the working tree; they stay reachable at the
-`docs-archive-2026-09-02` tag.
-
-Legal: [MIT licence](LICENSE) · [Notices](NOTICE) ·
-[Third-party notices](THIRD_PARTY_NOTICES.md) ·
-[Acknowledgements](ACKNOWLEDGEMENTS.md)
+Provenant is available under the [MIT licence](LICENSE).

@@ -23,6 +23,8 @@ enum Error {
     #[error(transparent)]
     Worktree(#[from] WorktreeError),
     #[error(transparent)]
+    Permissions(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
@@ -36,6 +38,11 @@ enum Error {
     Budget,
     #[error("invalid worktree removal scope")]
     InvalidScope,
+}
+
+#[allow(clippy::print_stderr)]
+fn warn_cache_sweep(error: &impl std::fmt::Display) {
+    eprintln!("warning: could not sweep orphaned lane caches: {error}");
 }
 
 impl Error {
@@ -188,7 +195,20 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                     },
                 }
             };
-            Data::Removed(worktrees::remove(&context, request, &cancel)?)
+            let removed = worktrees::remove(&context, request, &cancel)?;
+            match roots::home() {
+                Ok(home) => {
+                    if let Err(error) =
+                        provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(
+                            &home,
+                        )
+                    {
+                        warn_cache_sweep(&error);
+                    }
+                }
+                Err(error) => warn_cache_sweep(&error),
+            }
+            Data::Removed(removed)
         }
     };
     drop(utility_home);

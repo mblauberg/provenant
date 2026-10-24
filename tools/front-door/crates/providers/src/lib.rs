@@ -1,13 +1,18 @@
 //! Sans-I/O provider mechanics. No processes, credential reads or mutable registry.
 #![forbid(unsafe_code)]
 
+pub mod accounts;
 pub mod agy;
 pub mod claude;
 pub mod codex;
+pub mod codex_rollout;
 mod contract;
 pub mod cursor;
+mod dylib;
 pub mod identity;
+mod lane;
 mod launch;
+pub use lane::LaneRuntime;
 pub mod opencode;
 pub mod quota;
 mod stream;

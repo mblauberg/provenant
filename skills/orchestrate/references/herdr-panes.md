@@ -12,7 +12,7 @@ on 15 July 2026. The installed CLI and its runtime command surfaces are the
 syntax authority. Provider versions are not compatibility gates. The upstream
 [`SKILL.md` at commit `c76e968`](https://github.com/ogulcancelik/herdr/blob/c76e96878b866bf01639c8a1d8beb9c93a8ab95f/SKILL.md)
 was consulted on 2026-07-15, not copied or vendored. That upstream component is
-licensed AGPL-3.0-or-later or commercially; this repository has no runtime or
+licensed Apache-2.0; this repository has no runtime or
 mutable-branch dependency on it.
 
 ## Use a pane when
@@ -34,8 +34,9 @@ rule). Dispatch through Fabric, observe with
 `provenant lanes --all --wait N --condition all`, read retained events with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
 bounded slices with `fabric_output`'s `read` operation, and steer with
-`provenant fabric mail send` or `fabric_run`'s `resume` operation using the run
-target and prompt (`resume` also answers `input_required` lanes).
+`provenant fabric mail send` or `fabric_run`'s `resume` operation using
+`target: { attempt: ATTEMPT }`, `expected_generation`, `operation_id` and the
+prompt (`resume` also answers `input_required` lanes).
 
 Long-running watchable processes go to a background shell with output to a run
 file.

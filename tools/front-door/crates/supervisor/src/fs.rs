@@ -194,19 +194,25 @@ impl FsError {
     pub fn is_exists(&self) -> bool {
         self.raw_os_error() == Some(errno::EEXIST)
     }
+    /// A sandbox or mode denial, as opposed to a missing or malformed path.
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self.raw_os_error(), Some(errno::EPERM | errno::EACCES))
+    }
     pub fn is_symlink(&self) -> bool {
         matches!(self, Self::Symlink { .. }) || self.is_loop()
     }
-    pub fn is_loop(&self) -> bool {
+    fn is_loop(&self) -> bool {
         self.raw_os_error() == Some(errno::ELOOP)
     }
     pub fn is_cross_device(&self) -> bool {
         self.raw_os_error() == Some(errno::EXDEV)
     }
-    pub fn is_not_directory(&self) -> bool {
+    #[cfg(test)]
+    fn is_not_directory(&self) -> bool {
         self.raw_os_error() == Some(errno::ENOTDIR)
     }
-    pub fn is_unsupported(&self) -> bool {
+    #[cfg(test)]
+    fn is_unsupported(&self) -> bool {
         self.raw_os_error().is_some_and(|code| {
             [
                 errno::EINVAL,
@@ -631,6 +637,11 @@ impl Directory {
         let name = mutable_component(name)?;
         os::symlink(target, &self.file, name).map_err(error("symlinkat", &self.path.join(name)))
     }
+    /// Read a link's stored target without following it.
+    pub fn read_link(&self, name: &OsStr) -> Result<PathBuf> {
+        let name = component(name)?;
+        os::read_link(&self.file, name).map_err(error("readlinkat", &self.path.join(name)))
+    }
     pub fn sync(&self) -> Result<()> {
         self.file
             .sync_all()
@@ -929,6 +940,19 @@ impl FileHandle {
         self.file
             .sync_all()
             .map_err(error("fsync file", &self.path))
+    }
+    /// Give the owner execute permission through the open descriptor.
+    pub fn make_owner_executable(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = self
+            .file
+            .metadata()
+            .map_err(error("fstat file", &self.path))?
+            .permissions()
+            .mode();
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(mode | 0o700))
+            .map_err(error("fchmod file", &self.path))
     }
     /// Read at most limit+1 bytes from the current offset, then refuse oversize.
     /// Metadata alone is never used to enforce the cap (files can grow).

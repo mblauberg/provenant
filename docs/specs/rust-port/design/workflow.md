@@ -61,8 +61,9 @@ Evidence of a call in a skill is evidence of a supported path, not a measured
 invocation count. State sampling is read-only, bounded and excludes prompt,
 message and credential contents.
 
-At the evidence baseline, the legacy telemetry ledger at
-`~/.local/state/agent-harness/fabric/telemetry.sqlite3` exists: about 565 MB,
+At the evidence baseline, the historical survey telemetry ledger at
+`~/.local/state/agent-harness/fabric/telemetry.sqlite3`, distinct from the v1
+state root `~/.local/share/provenant/v1`, exists: about 565 MB,
 566,185 usage rows, 566,877 usage-file rows, 111,191 observations, 46,923 events,
 13 deliveries and zero changes at the baseline inspection. A repair-pass
 read-only aggregate query confirms **13 deliveries, none accepted**, no
@@ -370,7 +371,7 @@ adds no execution verbs and never calls old orchestrate scripts.
 Hooks are rows in cli's `HookSpec` table, invoked as `hook claude pre-compact`
 and `hook claude compact`, with host-native stdout/exit contracts rather than the CLI envelope. They read
 at most 1 MiB host JSON stdin and emit at most 8 KiB context. Advisory callbacks
-exit 0 even for missing/invalid state, with a bounded diagnostic. SessionStart
+exit 0 even for missing/invalid state, with a bounded diagnostic. When a read or clock step fails, the diagnostic names the cause as an OS kind and code or a typed error, never a path. SessionStart
 obtains the actual session ID from the host event and injects the validated key
 and this save command with the actual ID substituted:
 `provenant workflow session save <session-id> --file <checkpoint.md>`.
@@ -886,9 +887,14 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 
 - Review facts are bound at the cli edge from run's `AttemptFact` plus a chair
   `ReviewClaim` (lens, verdict, findings, tier). Routing publishes no tiers, so
-  the claim supplies them; the observed reviewer family comes from the attempt,
-  and chair-attested families never count as verified. A PR subject requires
-  the attempt head to equal the subject head. A Document subject relies on the
+  the claim supplies them. The reviewer identity is the dispatched attempt's
+  own execution identity, never the submitting chair. The cli edge takes the
+  family from the routing catalogue entry of the observed model; an adapter
+  name is not a family, and a model missing from the catalogue or listed
+  without one stays unknown. Chair-attested families never
+  count as verified. A PR subject requires the attempt head to equal the
+  subject head; a read-only lane's head is the checkout HEAD the host read at
+  dispatch, never lane output. A Document subject relies on the
   claim and output digest.
 - `LegBlocker` and `user_approval` are chair-supplied evidence references the
   CLI records but does not verify.

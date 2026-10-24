@@ -31,6 +31,11 @@ pub enum SetupStep {
     /// directories created here get mode 0700; existing ones are never
     /// chmodded.
     CreateDir(PathBuf),
+    /// Create a mode-0600 file with these bytes, refusing an existing entry.
+    /// The launcher writes and syncs it before anchoring the profile.
+    WriteFile { path: PathBuf, bytes: Vec<u8> },
+    /// Like `WriteFile`, then mark the file owner-executable.
+    WriteExecutable { path: PathBuf, bytes: Vec<u8> },
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },
 }
@@ -44,6 +49,8 @@ pub struct LaunchSpec {
     /// The complete child environment; nothing is inherited.
     pub env: Vec<(OsString, OsString)>,
     pub stdin: Stdin,
+    /// Credential bytes delivered through an inherited pipe, never the environment.
+    pub secret_input: Option<provenant_supervisor::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
     pub profile: ProviderProfile,
@@ -73,6 +80,7 @@ pub struct PrepareInput<'a> {
     pub cwd: &'a Path,
     /// Caller-supplied randomness; Claude uses it as a fresh session id.
     pub nonce: [u8; 16],
+    pub provenant: crate::LaneRuntime<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -128,8 +136,8 @@ pub fn mode_enabled(adapter: &str, access: Access, session: Session) -> bool {
     })
 }
 
-/// Shell activation needs its own writer proof. The recorder alone can
-/// prepare the candidate before that evidence has been accepted.
+/// The explicit writer-shell policy knob is separate from live provider
+/// activation. Recording builds can prepare a disabled candidate for probes.
 pub(crate) fn shell_enabled(adapter: &str, access: Access, session: Session) -> bool {
     access == Access::WorktreeWrite
         && (cfg!(feature = "recording")
@@ -236,12 +244,130 @@ pub(crate) fn base_env(
     ]
 }
 
+/// Immutable Rust tools and writable build output use the same bounded
+/// recipe for every shell-capable writer. Host Cargo credentials are excluded.
+pub(crate) fn rust_tools(
+    input: &PrepareInput<'_>,
+    access: Access,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut Vec<(OsString, OsString)>,
+    setup: &mut Vec<SetupStep>,
+) {
+    let cargo = input.home.join(".cargo");
+    let rustup = input.home.join(".rustup");
+    let cache = match &input.confined.permissions().mode {
+        provenant_confinement::permissions::AccessMode::ReadOnly => {
+            &input.confined.permissions().scratch.path
+        }
+        provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
+            &authority.cargo_cache().path
+        }
+    };
+    // Cargo home is attempt scratch in both modes, so the host can link the
+    // existing registry cache (read-only) into it. Build output lives in `cache`.
+    let cargo_home = input.confined.permissions().scratch.path.join("cargo-home");
+    let target = cache.join("target");
+    // The host prepares the writer cache itself under custody. Cargo
+    // creates target/ and cargo-home/ after launch, so anchor the cache.
+    tool_exec_roots.push(subtree(if access == Access::ReadOnly {
+        &target
+    } else {
+        cache
+    }));
+    for directory in [cargo.join("bin"), rustup.join("toolchains")] {
+        runtime_reads.push(subtree(&directory));
+        tool_exec_roots.push(subtree(directory));
+    }
+    runtime_reads.extend([
+        subtree(cargo.join("registry")),
+        exact(rustup.join("settings.toml")),
+    ]);
+    env.extend([
+        ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
+        ("RUSTUP_HOME".into(), rustup.into_os_string()),
+        ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
+    ]);
+    // Cargo's system LibreSSL loads its public default configuration at start.
+    #[cfg(target_os = "macos")]
+    runtime_reads.push(exact("/private/etc/ssl/openssl.cnf"));
+    // Rust's system linker also goes through xcrun. Select the real CLT
+    // installation when present, rather than opening the selected Xcode app.
+    #[cfg(target_os = "macos")]
+    {
+        let developer = Path::new("/Library/Developer/CommandLineTools");
+        if developer.is_dir() {
+            runtime_reads.push(subtree(developer));
+            tool_exec_roots.push(subtree(developer.join("usr/bin")));
+            env.extend([
+                ("DEVELOPER_DIR".into(), developer.into()),
+                ("SDKROOT".into(), developer.join("SDKs/MacOSX.sdk").into()),
+            ]);
+        }
+    }
+    if access == Access::ReadOnly {
+        setup.push(SetupStep::CreateDir(target));
+    }
+    setup.extend([
+        SetupStep::CreateDir(cargo_home.clone()),
+        SetupStep::Symlink {
+            link: cargo_home.join("registry"),
+            target: cargo.join("registry"),
+        },
+    ]);
+    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
+    // Children inherit this profile, so exec stays confined; read and write
+    // grants and the protected and credential denials are unchanged.
+    tool_exec_roots.push(subtree(input.cwd));
+}
+
+/// A Homebrew Node toolchain (node, npm, pnpm through corepack) for every
+/// shell-capable lane. The prefix's `bin`, `Cellar`, `opt` and `lib` become
+/// readable and executable, and its `bin` joins the end of `PATH`. Its `etc/`
+/// and `var/` stay unreadable, and nothing under the prefix becomes writable.
+pub(crate) fn node_tools(
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut [(OsString, OsString)],
+) {
+    for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
+        if prefix.join("bin/node").exists() {
+            homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
+            return;
+        }
+    }
+}
+
+pub(crate) fn homebrew_tools(
+    prefix: &Path,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut [(OsString, OsString)],
+) {
+    for directory in ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name)) {
+        runtime_reads.push(subtree(&directory));
+        tool_exec_roots.push(subtree(directory));
+    }
+    if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
+        path.push(":");
+        path.push(prefix.join("bin"));
+    }
+}
+
 /// The CLI's own install directory: the parent of a `bin/` directory, or the
-/// executable's directory. A shared prefix (`/opt/homebrew`, `/usr/local`,
+/// executable's directory. A `bin/` directly under a hidden home tool tree
+/// (`~/.cargo/bin`, `~/.local/bin`) grants only that `bin/`, never the tree
+/// (`credentials.toml`, `share/`). A shared prefix (`/opt/homebrew`, `/usr/local`,
 /// `/usr`) is refused: its `etc/` and `var/` must never become readable.
 pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
     let package = match executable.parent() {
-        Some(bin) if bin.file_name() == Some("bin".as_ref()) => bin.parent(),
+        Some(bin) if bin.file_name() == Some("bin".as_ref()) => {
+            let tree = bin.parent();
+            let hidden = tree
+                .and_then(Path::file_name)
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
+            if hidden { Some(bin) } else { tree }
+        }
         parent => parent,
     }
     .ok_or(ProviderError::InvalidPath)?;

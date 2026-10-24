@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 #[serde(deny_unknown_fields)]
 pub struct ResolvedRoute {
     pub adapter: String,
-    /// Full provider/model path; never split beyond the adapter separator.
+    /// Provider-native model identifier, retaining all segments after the adapter separator.
     pub model: String,
     pub effort: Option<String>,
     pub catalogue_revision: String,
@@ -16,6 +16,42 @@ pub struct ResolvedRoute {
     pub eligibility: RouteEligibility,
     pub readiness: RouteReadiness,
     pub confidentiality: RouteConfidentiality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_selection: Option<RouteSelectionReceipt>,
+}
+
+/// Auditable outcome of a weighted pool selection. Factors use basis points,
+/// with 10,000 representing 1.0.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSelectionReceipt {
+    pub pool: String,
+    pub candidates: Vec<RouteSelectionCandidate>,
+    pub roll: u64,
+    pub total_weight: u64,
+    pub pick: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redraws: Vec<RouteSelectionRedraw>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSelectionRedraw {
+    pub rejected_pick: String,
+    pub roll: u64,
+    pub total_weight: u64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSelectionCandidate {
+    pub model: String,
+    pub weight: u8,
+    pub factor_basis_points: u32,
+    pub effort: Option<String>,
+    pub readiness: Option<RouteReadiness>,
+    pub exclusion: Option<String>,
 }
 
 /// An explicit fallback has the same access and disclosure requirements as the

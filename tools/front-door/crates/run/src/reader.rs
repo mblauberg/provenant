@@ -62,24 +62,40 @@ impl Iterator for Attempts<'_> {
         Some(fact)
     }
 }
-/// Reviewer attribution: the owning actor and the provider family the
-/// observed route reports, or `Unknown` without an observed provider.
-fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Option<ReviewerFact> {
-    let actor_id = owner?;
-    let family = observed
+/// Reviewer attribution. The submitter owns the attempt but is not the
+/// reviewer: each dispatched attempt is its own execution identity, derived
+/// from the attempt ID, so a chair's dispatched reviews are never its own
+/// decision-maker reviews and distinct attempts stay distinct reviewers.
+/// An observed provider is an adapter, not a model family; run holds no
+/// catalogue, so the family stays unknown here and the edge fills it from the
+/// routing catalogue.
+fn reviewer_fact(
+    attempt: AttemptId,
+    owner: Option<ActorId>,
+    observed: Option<&RouteRecord>,
+) -> Option<ReviewerFact> {
+    owner?;
+    let digest = provenant_records::CanonicalV1::file_digest(
+        &[
+            b"provenant.reviewer-execution.v1:".as_slice(),
+            attempt.as_bytes(),
+        ]
+        .concat(),
+    );
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.bytes()[..16]);
+    let observed_provider = observed
         .and_then(|r| r.provider.as_deref())
-        .filter(|p| !p.is_empty())
-        .map(str::to_ascii_lowercase);
+        .is_some_and(|p| !p.is_empty());
     Some(ReviewerFact {
-        provenance: if family.is_some() {
+        provenance: if observed_provider {
             ReviewerProvenance::Observed
         } else {
             ReviewerProvenance::Unknown
         },
-        actor_id,
-        family,
+        actor_id: ActorId::from_bytes(id),
+        family: None,
         model: observed.and_then(|r| r.model.clone()),
-        outcome: None,
     })
 }
 impl AttemptReader for RunStore {
@@ -111,8 +127,7 @@ impl AttemptReader for RunStore {
             finished_at,
             resolved_route: r.resolved_route.map(Into::into),
             usage: r.usage.into(),
-            output_paths: vec![output.path.clone()],
-            reviewer: reviewer_fact(r.verified_owner, r.observed_route.as_ref()),
+            reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
             delivery_id: r.delivery_id,
             subject: r.subject,
             head: r.head,
@@ -191,6 +206,9 @@ pub struct LaneTarget {
     pub task: Option<TaskId>,
     pub attempt: Option<AttemptId>,
 }
+/// Optional lane filters: the submitting actor, and terminal lanes already seen.
+const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
+const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
 #[derive(Clone, Debug)]
 pub struct LaneQuery {
     /// Exact selections include terminal lanes. Without them the page holds
@@ -200,6 +218,12 @@ pub struct LaneQuery {
     pub limit: u64,
     /// Exclusive attempt-sequence cursor.
     pub after: u64,
+    /// Return highest sequence first; `after` then acts as an exclusive upper bound.
+    pub newest_first: bool,
+    /// Without targets, restrict the page to runs this actor submitted.
+    pub owner: Option<ActorId>,
+    /// Drop terminal lanes whose last event is at or before this cursor.
+    pub unseen_after: Option<u64>,
 }
 #[derive(Debug)]
 pub struct LanePage {
@@ -263,14 +287,59 @@ impl RunStore {
         }
         Ok(run)
     }
+    /// Snapshot nonterminal refs before a host accepts a child's launch. The
+    /// refs survive partial handoff errors and authorise only that child scope.
+    pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
+        let ids: Vec<String> = call.retry(|| {
+            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence")?;
+            let rows = query.query_map(params![run.to_string(), self.context.project_id.to_string()], |row| row.get(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        ids.into_iter()
+            .map(|id| {
+                let id =
+                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+                self.record(id, call)
+            })
+            .collect()
+    }
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         call.retry(|| {
             let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
-            let record: AttemptRecord = decode(&raw)?;
+            let mut record: AttemptRecord = decode(&raw)?;
             if record.attempt_id != id || record.project_id != self.context.project_id || record.run_id.to_string() != run_id || record.task_id.to_string() != task_id || sql_int(record.attempt_number)? != number || sql_int(record.revision)? != revision || matches!(record.state, AttemptState::Terminal { .. }) != terminal { return Err(RunError::Validation("attempt index identity")); }
             let run = self.run_on(&self.db, record.run_id)?;
             if run.operation_id != record.operation_id || !run.task_ids.contains(&record.task_id) { return Err(RunError::Validation("attempt run association")); }
             validate_attempt(&record)?;
+            let checkpoint = match self.attempt_dir(record.run_id, id, false) {
+                Ok(directory) => {
+                    crate::artifacts::read_sealed(&directory, "process.json", RECORD_LIMIT)?
+                }
+                Err(RunError::Filesystem(error)) if error.is_not_found() => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(bytes) = checkpoint {
+                #[derive(serde::Deserialize)]
+                struct ProcessCheckpoint {
+                    schema_version: u64,
+                    scope: provenant_supervisor::custody::Scope,
+                    #[serde(default)]
+                    last_output_at: Option<WallTime>,
+                }
+                let observation: ProcessCheckpoint = serde_json::from_slice(&bytes)
+                    .map_err(|_| RunError::Validation("process observation"))?;
+                if observation.schema_version != 1
+                    || observation.scope
+                    != (provenant_supervisor::custody::Scope {
+                        run: record.run_id,
+                        attempt: record.attempt_id,
+                        generation: record.generation,
+                    })
+                {
+                    return Err(RunError::Validation("process observation scope"));
+                }
+                record.last_output_at = observation.last_output_at;
+            }
             Ok(record)
         })
     }
@@ -384,21 +453,37 @@ impl RunStore {
         let project = self.context.project_id.to_string();
         let after = sql_int(query.after)?;
         let fetch = sql_int(query.limit + 1)?;
+        let owner = query.owner.map(|actor| actor.to_string());
+        let unseen = query.unseen_after.map(sql_int).transpose()?;
         let mut rows: Vec<(i64, String)> = call.retry(|| {
             let mut found = Vec::new();
             if query.targets.is_empty() {
-                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0) ORDER BY sequence LIMIT ?4")?;
-                let page = statement.query_map(params![project, after, query.all, fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
+                };
+                let mut statement = self.db.prepare(&sql)?;
+                let page = statement.query_map(params![project, after, query.all, fetch, owner, unseen], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             for target in &query.targets {
-                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence LIMIT ?6")?;
-                let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
+                };
+                let mut statement = self.db.prepare(&sql)?;
+                let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch, unseen], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             Ok(found)
         })?;
-        rows.sort();
+        if query.newest_first {
+            rows.sort_by(|a, b| b.cmp(a));
+        } else {
+            rows.sort();
+        }
         rows.dedup();
         let more = rows.len() as u64 > query.limit;
         rows.truncate(query.limit as usize);
@@ -414,6 +499,56 @@ impl RunStore {
             })
             .collect::<Result<_>>()?;
         Ok(LanePage { lanes, next })
+    }
+    /// The seen cursor (an event sequence) for one actor's wait selection. A
+    /// selection never acknowledged starts at the log's end when `from_now`,
+    /// else at the beginning.
+    pub fn seen_cursor(&self, selection: &str, from_now: bool, call: &Request<'_>) -> Result<u64> {
+        let found: Option<i64> = call.retry(|| {
+            let stored = self
+                .db
+                .query_row(
+                    "SELECT sequence FROM cursors WHERE project=?1 AND actor=?2 AND selection=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        selection
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if stored.is_some() || !from_now {
+                return Ok(stored);
+            }
+            Ok(self.db.query_row(
+                "SELECT MAX(sequence) FROM events WHERE project=?1",
+                params![self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(found.map_or(0, |sequence| sequence as u64))
+    }
+    /// Latest event sequence of each attempt, for acknowledging displayed rows.
+    pub fn last_event_sequence(&self, id: AttemptId, call: &Request<'_>) -> Result<u64> {
+        let found: Option<i64> = call.retry(|| {
+            Ok(self.db.query_row(
+                "SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(found.map_or(0, |sequence| sequence as u64))
+    }
+    /// Acknowledge rows up to `sequence`; the cursor never moves back.
+    pub fn ack_seen(&self, selection: &str, sequence: u64, call: &Request<'_>) -> Result<()> {
+        let sequence = sql_int(sequence)?;
+        self.write(call, |tx| {
+            tx.execute(
+                "INSERT INTO cursors VALUES (?1,?2,?3,?4) ON CONFLICT(project,actor,selection) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
+                params![self.context.project_id.to_string(), self.context.actor_id.to_string(), selection, sequence],
+            )?;
+            Ok(())
+        })
     }
     pub fn events(
         &self,
@@ -459,6 +594,21 @@ impl RunStore {
     }
 }
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if let Some(delivery) = &r.delivery
+        && (delivery.schema_version != 1
+            || delivery.head != r.head
+            || !matches!(
+                r.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded,
+                    ..
+                }
+            )
+            || matches!(delivery.state, WriterDeliveryState::Delivered { .. })
+                && delivery.head.is_none())
+    {
+        return Err(RunError::Validation("delivery receipt"));
+    }
     if !valid_read_only_writable(&r.read_only_writable) {
         return Err(RunError::Validation("invalid read-only writable paths"));
     }
@@ -541,6 +691,9 @@ pub(crate) fn verified_route(
                 && a.provider == o.provider
                 && r.model == a.model
                 && a.model == o.model
+                && a.effort
+                    .as_ref()
+                    .is_none_or(|effort| Some(effort) == o.effort.as_ref())
         }
         _ => false,
     }

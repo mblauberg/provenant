@@ -34,17 +34,9 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|p| provenant_supervisor::sys::is_executable(p))
-    .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(git)?, home).map_err(error)
+    let git = provenant_supervisor::git::git_executable()
+        .ok_or(RunError::Validation("Git executable unavailable"))?;
+    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(&git)?, home).map_err(error)
 }
 fn budget() -> Result<UtilityBudget> {
     UtilityBudget::bounded(Duration::from_secs(5)).map_err(error)
@@ -52,6 +44,20 @@ fn budget() -> Result<UtilityBudget> {
 /// Resolve relative paths from the selected repository's primary root. Git's
 /// linked-worktree registration proves membership and excludes the primary.
 pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterRequest> {
+    resolve_writer_with(state, cwd, path, true)
+}
+/// A lane's writer proposal: the path is resolved but not registry-verified,
+/// because a confined lane cannot read another worktree's `.git`. The host
+/// verifies the registration in `prepare_writer` before it launches the child.
+pub fn resolve_writer_proposal(state: &Path, cwd: &Path, path: &Path) -> Result<WriterRequest> {
+    resolve_writer_with(state, cwd, path, false)
+}
+fn resolve_writer_with(
+    state: &Path,
+    cwd: &Path,
+    path: &Path,
+    verify: bool,
+) -> Result<WriterRequest> {
     let utility = runtime(state)?;
     let executor = SystemExecutor::new(1).map_err(error)?;
     let selected = utility
@@ -69,6 +75,15 @@ pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterReq
             error.into()
         }
     })?;
+    if !verify {
+        if !path.starts_with(project) {
+            return Err(RunError::UnsafePath);
+        }
+        return Ok(WriterRequest {
+            project: project.to_path_buf(),
+            worktree: path,
+        });
+    }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     Ok(WriterRequest {
@@ -136,8 +151,21 @@ pub fn prepare_writer(
     )
     .map_err(error)?;
     let state_dir = Directory::open_anchor(state)?;
-    let projects = state_dir.open_verified_directory(OsStr::new("worktrees"))?;
-    let project_state = projects.open_verified_directory(OsStr::new(&project.to_string()))?;
+    // Git knows the worktree but Provenant holds no state for it: it was not
+    // created by `provenant worktree create`.
+    let unregistered = |error: provenant_supervisor::fs::FsError| {
+        if error.is_not_found() {
+            RunError::WorktreeUnregistered(request.worktree.clone())
+        } else {
+            error.into()
+        }
+    };
+    let projects = state_dir
+        .open_verified_directory(OsStr::new("worktrees"))
+        .map_err(unregistered)?;
+    let project_state = projects
+        .open_verified_directory(OsStr::new(&project.to_string()))
+        .map_err(unregistered)?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, project, &worktree, &branch, base)?;
     Ok(WriterLaunch {
@@ -205,9 +233,7 @@ impl crate::RunStore {
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
         let path = self
-            .context
-            .state_root
-            .as_path()
+            .writer_registry
             .join("worktrees")
             .join(self.context.project_id.to_string());
         let directory = match Directory::open_anchor(&path) {

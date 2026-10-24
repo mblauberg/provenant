@@ -58,6 +58,8 @@ pub enum CleanupObservation {
     Unknown,
     Pending,
     DescendantsPresent,
+    /// Cleanup exhausted its budget; publish the unresolved facts and retain the fence.
+    Unresolved,
     Complete,
 }
 
@@ -152,6 +154,13 @@ impl State {
             stop_attempts: Vec::new(),
             publication: None,
             last_progress_ms: None,
+        }
+    }
+
+    pub(crate) fn never_spawned() -> Self {
+        Self {
+            phase: Phase::Exited,
+            ..Self::prepared(Budgets::new(0))
         }
     }
 
@@ -379,7 +388,10 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             }
         }
         Phase::Cleaning => {
-            if tick.cleanup == Some(CleanupObservation::Complete) {
+            if matches!(
+                tick.cleanup,
+                Some(CleanupObservation::Complete | CleanupObservation::Unresolved)
+            ) {
                 state.phase = Phase::Exited;
                 effects.push(Effect::PublishExit);
             } else if tick.cleanup == Some(CleanupObservation::DescendantsPresent)
@@ -589,6 +601,19 @@ mod tests {
         let (state, effects) = step(state, Event::ObservationFailure, tick);
         assert_eq!(state.phase(), Phase::Cleaning);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn unresolved_cleanup_still_publishes_exit_without_signalling() {
+        let mut tick = Tick::at(1);
+        tick.observed_exit = Some(Termination::Exit(0));
+        let (state, _) = step(running(), Event::Silence, tick);
+        let mut tick = Tick::at(2);
+        tick.cleanup = Some(CleanupObservation::Unresolved);
+        let (state, effects) = step(state, Event::Silence, tick);
+        assert_eq!(state.phase(), Phase::Exited);
+        assert_eq!(effects, vec![Effect::PublishExit]);
+        assert!(state.stop_attempts().is_empty());
     }
 
     #[test]

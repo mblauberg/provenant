@@ -61,7 +61,9 @@ pub enum InstallError {
     Config(#[from] crate::ConfigError),
     #[error("invalid harness configuration: {0}")]
     InvalidConfig(&'static str),
-    #[error("symlinked or non-regular harness config refused: {0}")]
+    #[error(
+        "symlinked or non-regular harness config refused: {0}; replace the link with a regular copy, then rerun install"
+    )]
     ConfigFile(PathBuf),
     #[error("preview output failed")]
     Preview(#[source] std::io::Error),
@@ -152,6 +154,21 @@ pub struct Targets {
     pub protected_roots: Vec<PathBuf>,
     pub(crate) configured_homes: BTreeSet<Harness>,
     pub(crate) configured_configs: BTreeSet<Harness>,
+    /// Harnesses whose home came from `CLAUDE_CONFIG_DIR`/`CODEX_HOME`.
+    /// Uninstall limits these to the matching recorded target.
+    pub(crate) environment_homes: BTreeSet<Harness>,
+}
+/// One receipt may record several targets of a harness, such as one per
+/// `CLAUDE_CONFIG_DIR`. A target is its harness plus skills directory; every
+/// harness entry belongs to the recorded target whose paths permit it.
+pub(crate) type TargetId = (Harness, PathBuf);
+impl HarnessTarget {
+    pub(crate) fn id(&self) -> TargetId {
+        (self.harness, self.skills_dir.clone())
+    }
+}
+fn recorded_id(target: &ResolvedHarnessTarget) -> Result<TargetId, InstallError> {
+    Ok((target.harness, target.skills_dir.to_path_buf()?))
 }
 impl Targets {
     /// Defaults from captured HOME. Composition applies explicit config/flag
@@ -190,6 +207,7 @@ impl Targets {
             protected_roots: Vec::new(),
             configured_homes: BTreeSet::new(),
             configured_configs: BTreeSet::new(),
+            environment_homes: BTreeSet::new(),
         }
     }
     /// Composition calls this after config, environment and flags. Resolve
@@ -248,14 +266,14 @@ impl Targets {
         {
             return Err(InstallError::HarnessSelection);
         }
+        // Hooks apply to the selected harnesses that have specs; refuse only
+        // when none does, so one install can cover every client.
         if self.hooks
-            && (self.hook_specs.is_empty()
-                || self.harnesses.iter().any(|target| {
-                    !self
-                        .hook_specs
-                        .iter()
-                        .any(|spec| spec.harness == Some(target.harness))
-                }))
+            && !self.harnesses.iter().any(|target| {
+                self.hook_specs
+                    .iter()
+                    .any(|spec| spec.harness == Some(target.harness))
+            })
         {
             return Err(InstallError::HooksUnavailable);
         }
@@ -445,14 +463,13 @@ impl Snapshots {
             }) => Some(decode_receipt(bytes, targets.roots.state.as_path())?),
             Some(_) => return Err(InstallError::Conflict(receipt_path.clone())),
         };
-        let selected: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
+        let selected: BTreeSet<_> = targets.harnesses.iter().map(HarnessTarget::id).collect();
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
-                    || entry
-                        .harness
-                        .is_some_and(|harness| selected.contains(&harness))
+                    || entry_owner(entry, previous, targets.roots.state.as_path())?
+                        .is_some_and(|owner| selected.contains(&owner))
                 {
                     paths.insert(entry.path.to_path_buf()?);
                 }
@@ -661,9 +678,9 @@ fn validate_removal(
                 value: Value::Link(actual),
                 ..
             }),
-        ) => crate::legacy::git_hook_links(checkout)?
-            .iter()
-            .any(|link| path == directory.join(&link.name) && actual == &link.target),
+        ) => crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
+            path == directory.join(&link.name) && same_link_target(actual, &link.target)
+        }),
         _ => false,
     };
     if path.starts_with(targets.roots.state.as_path())
@@ -696,6 +713,19 @@ pub(crate) fn matches_owned(value: &Value, expected: &OwnedValue) -> bool {
     owned(value).is_ok_and(|v| &v == expected)
 }
 
+pub(crate) fn same_link_target(actual: &Path, expected: &Path) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (
+        provenant_supervisor::fs::canonicalize(actual),
+        provenant_supervisor::fs::canonicalize(expected),
+    ) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
 pub fn plan_install(
     release: Release,
     targets: Targets,
@@ -722,7 +752,9 @@ pub fn plan_install(
             targets.hooks
                 && snapshots.harness.authorised.contains(path)
                 && crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
-                    link.retained && path == &directory.join(&link.name) && actual == &link.target
+                    link.retained
+                        && path == &directory.join(&link.name)
+                        && same_link_target(actual, &link.target)
                 })
         } else {
             false
@@ -752,7 +784,8 @@ pub fn plan_install(
             },
         );
     }
-    let selected: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
+    let state_root = targets.roots.state.as_path();
+    let selected: BTreeSet<_> = targets.harnesses.iter().map(HarnessTarget::id).collect();
     let mut actions = Vec::new();
     let mut entries = snapshots.harness.owned.clone();
     let mut manual_includes = Vec::new();
@@ -783,7 +816,17 @@ pub fn plan_install(
                     && !was_owned
                     && matches!(current.value, Value::File { .. })
                 {
-                    if let Value::Link(include) = &want.value {
+                    // A file that already names the shared instructions includes them itself.
+                    let shared = targets.home.join(".agents/AGENTS.md");
+                    let shared = shared.to_string_lossy();
+                    let already_includes_shared = matches!(
+                        &current.value,
+                        Value::File { bytes, .. }
+                            if [b"~/.agents/AGENTS.md".as_slice(), shared.as_bytes()]
+                                .iter()
+                                .any(|name| bytes.windows(name.len()).any(|part| part == *name))
+                    );
+                    if !already_includes_shared && let Value::Link(include) = &want.value {
                         manual_includes.push(ManualInclude {
                             path: AbsolutePath::new(path)?,
                             include: AbsolutePath::new(include)?,
@@ -839,13 +882,16 @@ pub fn plan_install(
         }
     }
 
-    // Selected harnesses and the stable binary drop old owned paths that are
+    // Selected targets and the stable binary drop old owned paths that are
     // no longer desired. Exact old links become Remove actions; edited links
     // are relinquished as unmanaged state. Missing links are already settled.
+    // Entries of unselected targets, including other targets of a selected
+    // harness, carry over unchanged.
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
+            let owner = entry_owner(entry, previous, state_root)?;
             if matches!(entry.expected, OwnedValue::Selector { .. }) {
-                if !entry.harness.is_some_and(|h| selected.contains(&h)) {
+                if !owner.is_some_and(|id| selected.contains(&id)) {
                     entries.push(entry.clone());
                 }
                 continue;
@@ -858,10 +904,10 @@ pub fn plan_install(
                 continue;
             }
             if entry.selector != "binary" {
-                let Some(harness) = entry.harness else {
+                let Some(owner) = owner else {
                     continue;
                 };
-                if !selected.contains(&harness) {
+                if !selected.contains(&owner) {
                     entries.push(entry.clone());
                     continue;
                 }
@@ -933,14 +979,15 @@ pub fn plan_install(
     let mut resolved_targets = BTreeMap::new();
     if let Some(previous) = &snapshots.receipt {
         for target in &previous.harness_targets {
-            if !selected.contains(&target.harness) {
-                resolved_targets.insert(target.harness, target.clone());
+            let id = recorded_id(target)?;
+            if !selected.contains(&id) {
+                resolved_targets.insert(id, target.clone());
             }
         }
     }
     for target in &targets.harnesses {
         resolved_targets.insert(
-            target.harness,
+            target.id(),
             ResolvedHarnessTarget {
                 harness: target.harness,
                 skills_dir: AbsolutePath::new(&target.skills_dir)?,
@@ -958,7 +1005,13 @@ pub fn plan_install(
             },
         );
     }
-    let harnesses: Vec<_> = resolved_targets.keys().copied().collect();
+    distinct_target_paths(resolved_targets.values())?;
+    let harnesses: Vec<_> = resolved_targets
+        .keys()
+        .map(|(harness, _)| *harness)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let receipt = InstallReceipt {
         schema_version: 1,
         source_digest: release.manifest.source_digest,
@@ -1554,8 +1607,10 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
         }
     }
     let mut target_harnesses = BTreeSet::new();
+    let mut target_ids = BTreeSet::new();
     for target in &receipt.harness_targets {
-        if !target_harnesses.insert(target.harness) {
+        target_harnesses.insert(target.harness);
+        if !target_ids.insert(recorded_id(target)?) {
             return Err(InstallError::Manifest("duplicate receipt target"));
         }
         normal_absolute(&target.skills_dir.to_path_buf()?)?;
@@ -1572,6 +1627,8 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
             "receipt harness targets do not match harnesses",
         ));
     }
+    distinct_target_paths(receipt.harness_targets.iter())
+        .map_err(|_| InstallError::Manifest("receipt targets share a path"))?;
     let mut paths = BTreeSet::new();
     for entry in &receipt.entries {
         if !paths.insert((entry.path.to_path_buf()?, entry.selector.clone())) {
@@ -1593,6 +1650,36 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
         return Err(InstallError::Manifest("receipt requires one binary entry"));
     }
     Ok(receipt)
+}
+/// Recorded targets never share a destination, so each entry has one owner.
+fn distinct_target_paths<'a>(
+    targets: impl Iterator<Item = &'a ResolvedHarnessTarget>,
+) -> Result<(), InstallError> {
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        let instruction = target
+            .instruction
+            .as_ref()
+            .map(AbsolutePath::to_path_buf)
+            .transpose()?;
+        let paths = [
+            Some(target.skills_dir.to_path_buf()?),
+            Some(target.mcp_file.to_path_buf()?),
+            target
+                .hook_file
+                .as_ref()
+                .map(AbsolutePath::to_path_buf)
+                .transpose()?,
+            instruction.as_ref().map(|p| p.with_file_name("HARNESS.md")),
+            instruction,
+        ];
+        for path in paths.into_iter().flatten() {
+            if !seen.insert(path.clone()) {
+                return Err(InstallError::Conflict(path));
+            }
+        }
+    }
+    Ok(())
 }
 fn asset_target(target: &Path, state_root: &Path, expected_tail: &Path) -> bool {
     let releases = state_root.join("releases");
@@ -1644,13 +1731,27 @@ fn permitted_entry(
                     if target.to_path_buf()? == expected_target
             ));
     }
-    let Some(target) = receipt
-        .harness_targets
-        .iter()
-        .find(|target| Some(target.harness) == entry.harness)
-    else {
-        return Ok(false);
-    };
+    Ok(entry_owner(entry, receipt, state_root)?.is_some())
+}
+/// The recorded target that owns a harness entry; `None` for shared entries.
+fn entry_owner(
+    entry: &OwnedEntry,
+    receipt: &InstallReceipt,
+    state_root: &Path,
+) -> Result<Option<TargetId>, InstallError> {
+    for target in &receipt.harness_targets {
+        if Some(target.harness) == entry.harness && permitted_for(entry, target, state_root)? {
+            return Ok(Some(recorded_id(target)?));
+        }
+    }
+    Ok(None)
+}
+fn permitted_for(
+    entry: &OwnedEntry,
+    target: &ResolvedHarnessTarget,
+    state_root: &Path,
+) -> Result<bool, InstallError> {
+    let path = entry.path.to_path_buf()?;
     if matches!(entry.expected, OwnedValue::Selector { .. }) {
         return crate::harness::permitted_selector(entry, target);
     }
@@ -1853,9 +1954,11 @@ fn check_install_inspected(
     Ok(findings)
 }
 
-/// Removes unchanged selected harness entries, preserves user edits, and
-/// forgets the selected harnesses in the receipt. State and the stable command
-/// remain installed.
+/// Removes unchanged entries of the selected recorded targets, preserves user
+/// edits, and forgets those targets in the receipt. A harness whose home came
+/// from the environment selects only its matching recorded target; otherwise
+/// every recorded target of the harness is selected. State and the stable
+/// command remain installed.
 fn not_installed(
     receipt_path: &Path,
     reporter: &mut dyn InstallReporter,
@@ -1891,27 +1994,36 @@ pub fn uninstall(
     let Some(mut receipt) = read_receipt(targets, fs)? else {
         return not_installed(&receipt_path, reporter);
     };
-    let requested: BTreeSet<_> = targets
-        .harnesses
-        .iter()
-        .map(|target| target.harness)
-        .collect();
-    let registered: BTreeSet<_> = receipt.harnesses.iter().copied().collect();
-    let selected: BTreeSet<_> = requested.intersection(&registered).copied().collect();
+    let mut registered = BTreeSet::new();
+    let mut selected = BTreeSet::new();
+    for recorded in &receipt.harness_targets {
+        let id = recorded_id(recorded)?;
+        if targets.harnesses.iter().any(|target| {
+            target.harness == recorded.harness
+                && (!targets.environment_homes.contains(&target.harness) || target.id() == id)
+        }) {
+            selected.insert(id.clone());
+        }
+        registered.insert(id);
+    }
     if selected.is_empty() {
         return not_installed(&receipt_path, reporter);
     }
+    let mut owners = Vec::with_capacity(receipt.entries.len());
+    for entry in &receipt.entries {
+        owners.push(entry_owner(entry, &receipt, state_root)?);
+    }
+    let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
+        owner.as_ref().is_some_and(|id| selected.contains(id))
+            || (entry.selector == "git-hook:pre-push" && selected == registered)
+    };
 
     let mut removals = Vec::new();
     let mut findings = Vec::new();
     let mut actions = Vec::new();
     let mut selector_files = BTreeMap::new();
-    for entry in &receipt.entries {
-        if !entry
-            .harness
-            .is_some_and(|harness| selected.contains(&harness))
-            && !(entry.selector == "git-hook:pre-push" && selected == registered)
-        {
+    for (entry, owner) in receipt.entries.iter().zip(&owners) {
+        if !removed(entry, owner) {
             continue;
         }
         if !permitted_entry(entry, &receipt, state_root)? {
@@ -1973,18 +2085,21 @@ pub fn uninstall(
         }
     }
 
-    receipt.entries.retain(|entry| {
-        !entry
-            .harness
-            .is_some_and(|harness| selected.contains(&harness))
-            && !(entry.selector == "git-hook:pre-push" && selected == registered)
-    });
+    let mut owners = owners.iter();
     receipt
-        .harnesses
-        .retain(|harness| !selected.contains(harness));
+        .entries
+        .retain(|entry| owners.next().is_none_or(|owner| !removed(entry, owner)));
     receipt
         .harness_targets
-        .retain(|target| !selected.contains(&target.harness));
+        .retain(|target| recorded_id(target).is_ok_and(|id| !selected.contains(&id)));
+    let remaining: BTreeSet<_> = receipt
+        .harness_targets
+        .iter()
+        .map(|target| target.harness)
+        .collect();
+    receipt
+        .harnesses
+        .retain(|harness| remaining.contains(harness));
     let receipt_bytes = provenant_records::encode(&receipt)?;
     actions.push(Action {
         path: AbsolutePath::new(&receipt_path)?,

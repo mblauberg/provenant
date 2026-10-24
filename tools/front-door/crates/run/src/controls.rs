@@ -45,6 +45,9 @@ pub enum Reconciled {
     Finished,
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
+    /// Cleanup ended with these descendants possibly alive (for example one
+    /// that left the process group); custody stays fenced until they exit.
+    Escaped { pids: Vec<i64> },
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: String },
 }
@@ -178,11 +181,14 @@ impl RunStore {
                     fallback: vec![],
                     authority_digest: prior.authority_digest,
                     writer: task.writer.clone(),
+                    deliver: task.deliver.clone(),
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
                 }],
                 concurrency: 1,
                 parent: Some(input.prior),
+                lane_depth: request.lane_depth,
+                parent_attempt: request.parent_attempt,
             },
             attempts: vec![NewAttempt {
                 attempt_id: input.attempt_id,
@@ -325,6 +331,29 @@ impl RunStore {
                 let budget = provenant_core::WaitBudget::cli(call.clock.mono_now(), 1)
                     .map_err(|_| RunError::Validation("observation budget"))?;
                 match custody::observe(&handle, budget, call.cancel, call.clock) {
+                    Ok(Observation::Exited(exit))
+                        if exit.unresolved_cleanup && !exit.unresolved_pids.is_empty() =>
+                    {
+                        if custody::any_pid_alive(&exit.unresolved_pids) {
+                            return Ok(Reconciled::Escaped {
+                                pids: exit.unresolved_pids,
+                            });
+                        }
+                        // None of the named processes is alive. A live guardian
+                        // republishes the settled exit; the next pass commits it.
+                        // Without one, only chair recovery can clear the fence.
+                        match custody::acquire_recovery(
+                            dir()?,
+                            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                            call.cancel,
+                            call.clock,
+                        ) {
+                            Ok(_) => Ok(uncertain(
+                                &"descendants are gone but no guardian can settle the exit; chair recovery required",
+                            )),
+                            Err(_) => Ok(Reconciled::Held),
+                        }
+                    }
                     Ok(Observation::Exited(exit)) => {
                         let attempt = dir()?;
                         self.finish(id, &attempt, &exit, providers, call)?;

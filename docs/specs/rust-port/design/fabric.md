@@ -23,6 +23,7 @@ protocols, Agent Skills format, MCP and Git survive as external contracts.
 Our verbs, tools, records and layouts change together. The installed product
 root stays frozen until cut-over under F0. Delete each old owner and its tests
 when its replacement and retained callers land; install once after integration.
+Fabric events stay mappable to ACP events; this design includes no adapter.
 Do not build selectors, adapters, recorded old-runtime judges or differential
 oracles. Native verification below replaces old parity gates. Leave old
 state stores and transcripts untouched; cut-over only reads the import source.
@@ -55,8 +56,9 @@ and the resulting retention decisions are recorded below; static references do
 not establish that a feature is used. Local inspection reads metadata only,
 never credentials, prompt bodies or transcript content.
 
-Rechecked on 24 October 2026 with one read-only SQLite snapshot of
-`~/.local/state/agent-harness/fabric/fabric.sqlite3`. Counts below exclude
+Rechecked on 24 October 2026 with one read-only SQLite snapshot of the
+historical survey database `~/.local/state/agent-harness/fabric/fabric.sqlite3`,
+distinct from the v1 state root `~/.local/share/provenant/v1`. Counts below exclude
 projects matching `project LIKE '%/T/%' OR project LIKE '%/tmp/%' OR
 project='/private/tmp'`, unless labelled raw. These temporary projects include
 lifecycle tests that wrote to the live root; they are not product adoption.
@@ -441,6 +443,14 @@ to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion
 
 All inputs use `op` to select one typed operation.
 
+Mutating operations in `fabric_mail`, `fabric_task`, `fabric_events`,
+`fabric_claim` and `fabric_landing` accept an optional top-level
+`operation_id`, validated as the shared `OperationId`. MCP passes a supplied
+ID to the coordination mutation receipt path so a caller can safely retry
+after a lost reply. If omitted, coordination generates a random ID; existing
+clients remain compatible. Observation operations reject this field. Run and
+submission operations keep their separately specified operation IDs.
+
 | Tool | Operations |
 |---|---|
 | `fabric_identity` | inspect |
@@ -477,8 +487,8 @@ the chair. Missing launch evidence counts as launched. Graph attempts use
 
 Cancellation persists the admission fence before asking the run owner to cancel
 accepted attempts. Resume checks the same document digest and reuses each
-attempt key. The `fabric_run` operation `list` remains unavailable; graph run,
-status, cancel and resume use the bound graph owner.
+attempt key. The `fabric_run` operation `list` is available; graph run, status,
+cancel and resume use the bound graph owner.
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
 exact route if known, and next cursor/artefact references. Do not repeat result
@@ -728,7 +738,7 @@ Libraries use thiserror enums with typed sources and relevant IDs/paths, without
 raw secret values. Expected contention, stale fences and uncertainty are data.
 Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `stale_fence`, `home_unavailable`, `peer_version`, `launch_unknown`,
-`continuation_unsupported`, `confinement_refused`, `worktree_missing`, `output_too_large`, `state_corrupt`,
+`continuation_unsupported`, `confinement_refused`, `lane_depth`, `worktree_missing`, `output_too_large`, `state_corrupt`,
 `publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. Use CLI's exits: 0 success,
 1 failed/refused/findings, 2 invalid input/version, 3 cannot proceed (setup,
@@ -1106,5 +1116,5 @@ requested contracts, not claims that the current crates implement them.
 | `run` | `events(RunCursor, usize) -> Result<Page<RunEvent>, RunError>`; `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>` | Replayable completion/input-required events, lazy home-host pulls with per-host cursor; aggregate readiness and host-local confinement paths |
 | `providers` | `continuation(&AdapterId) -> ContinuationSupport`; `doctor(&AdapterId, ProbeBudget) -> Result<AdapterHealth, ProviderError>` | Used by run; typed session token, supported mode and host-local health, no Fabric dependency |
 | `routing` | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>` | Used by run; exact applied route, fallback/confidentiality decisions, one pool implementation |
-| `quota` | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>` | Used by run; one admission owner across all entry points; permit tied to actual attempt |
+| `quota` | `Admission::check(&ResolvedRoute) -> Result<(), QuotaError>` | Used by run and route; one admission owner across all entry points; no operation-scoped permit |
 | `cli` | `FabricArgs::execute(&FabricService) -> Result<CliOutput, CliError>`; `hook_specs() -> &[HookSpec]` | CLI owns check subjects/Findings and shared installer HookSpec table; top-level dispatch/lanes/output/cancel/resume/reconcile owned by run; CLI envelope schema_version/command/status/data/error, 1 MiB cap; exits 0, 1, 2, 3, 124, 130; partial/input-required in data; no library imports cli |

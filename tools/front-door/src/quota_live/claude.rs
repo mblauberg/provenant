@@ -226,47 +226,29 @@ impl LiveQuota {
             })?
             && self.mark_refresh(account, fixed.expires.ok_or(ProbeFailure::Auth)?)?
         {
-            if cfg!(target_os = "macos") {
-                if let (Some(executable), Some(user)) = (
-                    claude_executable(),
-                    std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
-                ) && let (Ok(scratch), Ok(executor)) =
-                    (ProbeScratch::new(), SystemExecutor::new(1))
-                {
-                    let login = provenant_providers::claude::Login {
-                        executable: &executable,
-                        home: &self.home,
-                        user: user.as_os_str(),
-                        config_dir: &account.identity_dir,
-                        scratch: scratch.path(),
-                    };
-                    let now_ms = || (now().max(0) as u64).saturating_mul(1000);
-                    let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
-                    let _ = provenant_providers::claude::refresh_if_expiring(
-                        &executor,
-                        &login,
-                        &now_ms,
-                        deadline_ms,
-                    );
-                }
-            } else {
-                let _ = self.command(
-                    "claude",
-                    &[
-                        "-p",
-                        "x",
-                        "--model",
-                        "provenant-refresh-probe",
-                        "--max-turns",
-                        "1",
-                        "--strict-mcp-config",
-                        "--settings",
-                        r#"{"disableAllHooks":true}"#,
-                    ],
-                    self.claude_selector(&account.identity_dir),
+            // The shared refresh resolves the executable and applies the
+            // hardening flags on every platform; only its keychain read is
+            // macOS-specific, and the identity is re-read below regardless.
+            if let (Some(executable), Some(user)) = (
+                claude_executable(),
+                std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
+            ) && let (Ok(scratch), Ok(executor)) = (ProbeScratch::new(), SystemExecutor::new(1))
+            {
+                let login = provenant_providers::claude::Login {
+                    executable: &executable,
+                    home: &self.home,
+                    user: user.as_os_str(),
+                    config_dir: &account.identity_dir,
+                    scratch: scratch.path(),
+                };
+                let now_ms = || (now().max(0) as u64).saturating_mul(1000);
+                let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
+                let _ = provenant_providers::claude::refresh_if_expiring(
+                    &executor,
+                    &login,
+                    &now_ms,
+                    deadline_ms,
                     None,
-                    deadline,
-                    12,
                 );
             }
             fixed = self.claude_identity(&account.identity_dir, deadline);

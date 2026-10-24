@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-#[cfg(target_os = "macos")]
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -20,7 +21,7 @@ use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termina
 use provenant_supervisor::fs::Metadata;
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, SafeFs};
+use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -28,6 +29,10 @@ use thiserror::Error;
 use crate::repo::{GitRefName, VerifiedWorktree};
 
 const MAX_PATH_BYTES: usize = 4096;
+const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
+const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
+const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
+const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 #[cfg(any(target_os = "macos", test))]
 const MAX_PATH_GRANTS: usize = 128;
 #[cfg(any(target_os = "macos", test))]
@@ -112,6 +117,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 "#;
 #[cfg(target_os = "macos")]
@@ -191,6 +197,10 @@ pub enum PermissionError {
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
     HeadRead(#[source] std::io::Error),
+    #[error("lane cache sweep could not complete: {0}")]
+    CacheSweepIo(#[source] std::io::Error),
+    #[error("lane cache contents exceed the sweep depth bound")]
+    CacheSweepDepth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -311,6 +321,11 @@ pub struct WorktreeWriteAuthority {
 }
 
 impl WorktreeWriteAuthority {
+    /// Exact lane-only cache already bound into this writer authority.
+    pub fn cargo_cache(&self) -> &PathGrant {
+        &self.cargo_cache
+    }
+
     pub fn for_worktree(
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
@@ -362,6 +377,185 @@ pub fn worktree_cargo_cache(
     };
     validate_noncredential_grant(&grant)?;
     Ok(grant)
+}
+
+/// Remove only marked lane caches whose recorded worktree incarnation is absent.
+/// A sweep can race a lane preparing its cache only if the lane forged its own marker.
+pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, PermissionError> {
+    use provenant_supervisor::fs::LocalFs;
+    use std::io;
+
+    validate_absolute(home)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    match std::fs::symlink_metadata(&cache_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    }
+    let root = LocalFs
+        .open_anchor(&cache_root)
+        .map_err(PermissionError::Filesystem)?;
+    let mut removed = 0;
+    let mut failures = Vec::new();
+    for entry in root.entries().map_err(PermissionError::Filesystem)? {
+        let name = match entry {
+            Ok(name) => name,
+            Err(error) => {
+                failures.push(format!("unreadable lane cache entry: {error}"));
+                continue;
+            }
+        };
+        match prune_worktree_cache(root.as_ref(), &name) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(error) => failures.push(format!("{:?}: {error}", name)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(PermissionError::CacheSweepIo(std::io::Error::other(
+            failures.join("; "),
+        )));
+    }
+    Ok(removed)
+}
+
+fn prune_worktree_cache(
+    root: &dyn provenant_supervisor::fs::SafeDir,
+    name: &OsStr,
+) -> Result<bool, PermissionError> {
+    use std::io;
+
+    let Some(digest) = name.to_str() else {
+        return Ok(false);
+    };
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+    let metadata = match root.metadata_at(name, false) {
+        Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+        Ok(_) => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o7777 != 0o700
+    {
+        return Ok(false);
+    }
+    let cache = match root.open_verified_directory(name) {
+        Ok(cache) => cache,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    let marker_name = OsStr::new(CARGO_CACHE_OWNER);
+    let marker_meta = match cache.metadata_at(marker_name, false) {
+        Ok(metadata)
+            if metadata.kind == FileKind::Regular
+                && metadata.links == 1
+                && metadata.uid == provenant_supervisor::fs::effective_uid() =>
+        {
+            metadata
+        }
+        Ok(_) => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if marker_meta.size > 8192 {
+        return Ok(false);
+    }
+    let mut marker = Vec::with_capacity(marker_meta.size as usize);
+    let file = match cache.open_read(marker_name) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if let Err(error) = file.take(8193).read_to_end(&mut marker) {
+        return Err(PermissionError::CacheSweepIo(error));
+    }
+    if marker.len() > 8192 {
+        return Ok(false);
+    }
+    if marker.starts_with(LEGACY_CARGO_CACHE_OWNER_PREFIX) {
+        return Ok(false);
+    }
+    if !marker.starts_with(CARGO_CACHE_OWNER_PREFIX) {
+        return Ok(false);
+    }
+    let owner_bytes = &marker[CARGO_CACHE_OWNER_PREFIX.len()..];
+    // Legacy markers have no inode identity, so retain them rather than guess.
+    if owner_bytes.len() <= 16 {
+        return Ok(false);
+    }
+    let (identity, path_bytes) = owner_bytes.split_at(16);
+    let recorded_device = u64::from_le_bytes(
+        identity[..8]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
+    let recorded_inode = u64::from_le_bytes(
+        identity[8..]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
+    if path_bytes.is_empty() {
+        return Ok(false);
+    }
+    let owner = PathBuf::from(OsString::from_vec(path_bytes.to_vec()));
+    if !owner.is_absolute()
+        || owner
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(&owner) {
+        Ok(metadata) if metadata.dev() == recorded_device && metadata.ino() == recorded_inode => {
+            return Ok(false);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    }
+    remove_cache_contents(cache.as_ref())?;
+    drop(cache);
+    root.rmdir(name).map_err(PermissionError::Filesystem)?;
+    Ok(true)
+}
+
+fn remove_cache_contents(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+) -> Result<(), PermissionError> {
+    remove_cache_contents_at(directory, 0)
+}
+
+fn remove_cache_contents_at(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+    depth: usize,
+) -> Result<(), PermissionError> {
+    if depth >= MAX_CACHE_SWEEP_DEPTH {
+        return Err(PermissionError::CacheSweepDepth);
+    }
+    for entry in directory.entries().map_err(PermissionError::Filesystem)? {
+        let name = entry.map_err(PermissionError::Filesystem)?;
+        let metadata = directory
+            .metadata_at(&name, false)
+            .map_err(PermissionError::Filesystem)?;
+        if metadata.kind == FileKind::Directory {
+            let child = directory
+                .open_verified_directory(&name)
+                .map_err(PermissionError::Filesystem)?;
+            remove_cache_contents_at(child.as_ref(), depth + 1)?;
+            drop(child);
+            directory
+                .rmdir(&name)
+                .map_err(PermissionError::Filesystem)?;
+        } else {
+            directory
+                .unlink(&name)
+                .map_err(PermissionError::Filesystem)?;
+        }
+    }
+    Ok(())
 }
 
 fn verify_cache_metadata(
@@ -430,6 +624,22 @@ pub fn prepare_writer_directories(
             {
                 verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
             }
+            if traversed == authority.cargo_cache.path {
+                let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+                let identity = worktree.identity();
+                marker.extend_from_slice(&identity.device.to_le_bytes());
+                marker.extend_from_slice(&identity.inode.to_le_bytes());
+                marker.extend_from_slice(worktree.path().as_os_str().as_encoded_bytes());
+                directory
+                    .atomic_write(
+                        OsStr::new(CARGO_CACHE_OWNER),
+                        ".provenant-owner-",
+                        &marker,
+                        0o600,
+                        PublishMode::Replace,
+                    )
+                    .map_err(PermissionError::Filesystem)?;
+            }
         }
     }
     Ok(())
@@ -446,12 +656,25 @@ fn validate_writer_cache(
     Ok(())
 }
 
+/// A pathspec `git commit` holds its temporary index as
+/// `next-index-<pid>.lock` and unlinks it; the pid is not known in advance.
+const NEXT_INDEX_SAMPLE: &str = "next-index-0.lock";
+
 struct WorktreeWriteGrants {
     worktree: PathGrant,
     private_git_dir: PathGrant,
     common_git_dir: PathGrant,
     index: [PathGrant; 2],
-    head: [PathGrant; 4],
+    /// Sample member of the pathspec-commit temporary index family
+    /// (`next-index-<digits>.lock`) in the private git directory.
+    next_index: PathGrant,
+    /// Git reads this shared exclude file during status and build fingerprinting.
+    common_exclude: PathGrant,
+    /// Deleting any ref, even an unpacked pseudoref such as AUTO_MERGE, takes
+    /// this lock. `packed-refs` itself stays read-only, so the lock can never be
+    /// committed over it.
+    packed_refs_lock: PathGrant,
+    head: [PathGrant; 14],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
 }
@@ -475,8 +698,29 @@ impl WorktreeWriteGrants {
             private_git_dir: subtree(private.to_owned()),
             common_git_dir: subtree(common.to_owned()),
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
-            head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                .map(|name| exact(private.join(name))),
+            next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
+            common_exclude: exact(common.join("info/exclude")),
+            packed_refs_lock: exact(common.join("packed-refs.lock")),
+            // `git commit` writes its message buffer and clears AUTO_MERGE here;
+            // a local `git merge` records its state and ORIG_HEAD here too.
+            head: [
+                "HEAD",
+                "HEAD.lock",
+                "logs/HEAD",
+                "logs/HEAD.lock",
+                "COMMIT_EDITMSG",
+                "AUTO_MERGE",
+                "AUTO_MERGE.lock",
+                "MERGE_HEAD",
+                "MERGE_MSG",
+                "MERGE_MODE",
+                "ORIG_HEAD",
+                "ORIG_HEAD.lock",
+                // Rerere records conflicted paths here when <common>/rr-cache exists.
+                "MERGE_RR",
+                "MERGE_RR.lock",
+            ]
+            .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
             selected_ref: [
                 format!("refs/heads/{branch}"),
@@ -492,6 +736,8 @@ impl WorktreeWriteGrants {
         std::iter::once(&self.worktree)
             .chain([&self.private_git_dir, &self.common_git_dir])
             .chain(self.index.iter())
+            .chain(std::iter::once(&self.next_index))
+            .chain([&self.common_exclude, &self.packed_refs_lock])
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
@@ -499,7 +745,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v2\0");
+        digest.update(b"provenant-worktree-git-grants-v7\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1062,7 +1308,10 @@ fn compile_sbpl(
     }
     validate_profile_spec(&profile.spec)?;
     verify_requested_evidence(plan, profile)?;
-    for grant in plan.read_roots.iter().chain(&plan.protected_roots) {
+    for grant in &plan.read_roots {
+        validate_read_exec_grant(grant)?;
+    }
+    for grant in &plan.protected_roots {
         validate_noncredential_grant(grant)?;
     }
     let worktree_grants = match &plan.mode {
@@ -1666,17 +1915,35 @@ fn push_worktree_rule(
     let worktree = sbpl_path(&grants.worktree.path)?;
     let git_dir = sbpl_path(&grants.private_git_dir.path)?;
     let common_dir = sbpl_path(&grants.common_git_dir.path)?;
+    // Git in the lane reads its repository as read-only lanes do (#1061);
+    // writes stay limited to the exact grants below.
+    source.push_str(&format!(
+        "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
+    ));
+    push_rule(
+        source,
+        "allow",
+        "file-read*",
+        &grants.common_exclude.path,
+        PathScope::Exact,
+    )?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
     for grant in grants
         .index
         .iter()
+        .chain(std::iter::once(&grants.packed_refs_lock))
         .chain(&grants.head)
         .chain(&grants.selected_ref)
     {
         push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
     }
+    // Anchored to the private git directory: one path component, digits only.
+    let private = sbpl_regex_path(&grants.private_git_dir.path)?;
+    source.push_str(&format!(
+        "(allow file-write* (regex #\"^{private}/next-index-[0-9]+\\.lock$\"))\n"
+    ));
     let path = sbpl_path(&grants.objects.path)?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{path}\") (require-not (subpath \"{path}/info\"))))\n"
@@ -1865,13 +2132,13 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_noncredential_grant(executable)?;
+        validate_read_exec_grant(executable)?;
         if executable.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath);
         }
     }
     for grant in &spec.runtime_reads {
-        validate_noncredential_grant(grant)?;
+        validate_read_exec_grant(grant)?;
     }
     for grant in &spec.discovery_reads {
         grant.validate()?;
@@ -1920,7 +2187,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         validate_noncredential_grant(grant)?;
     }
     for root in &spec.tool_exec_roots {
-        validate_noncredential_grant(root)?;
+        validate_read_exec_grant(root)?;
         if root.scope != PathScope::Subtree {
             return Err(PermissionError::InvalidPath);
         }
@@ -1982,6 +2249,51 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
         return Err(PermissionError::CredentialRoot);
     }
     Ok(())
+}
+
+/// Validates a grant that confers only read and exec. It is the one place the
+/// Codex standalone package exception applies: writes, scratch, protected
+/// roots and private state keep the strict credential-root check.
+pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
+    grant.validate()?;
+    if is_codex_standalone_package(&grant.path) {
+        return Ok(());
+    }
+    validate_noncredential_grant(grant)
+}
+
+/// Exactly `<home>/.codex/packages/standalone/releases/<release>` or a path
+/// beneath it, where `<home>` is `/Users/<name>` or `/home/<name>`. Neither
+/// `~/.codex`, `packages`, `standalone`, `releases` nor any sibling (auth,
+/// config, sessions, state, logs) matches, and nothing credential-named may
+/// appear below the release directory.
+fn is_codex_standalone_package(path: &Path) -> bool {
+    let normal: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    let [
+        root,
+        _user,
+        codex,
+        packages,
+        standalone,
+        releases,
+        _release,
+        below @ ..,
+    ] = normal.as_slice()
+    else {
+        return false;
+    };
+    (*root == OsStr::new("Users") || *root == OsStr::new("home"))
+        && *codex == OsStr::new(".codex")
+        && *packages == OsStr::new("packages")
+        && *standalone == OsStr::new("standalone")
+        && *releases == OsStr::new("releases")
+        && !is_credential_root(&below.iter().collect::<PathBuf>())
 }
 
 fn validate_absolute(path: &Path) -> Result<(), PermissionError> {
@@ -2136,6 +2448,25 @@ fn push_rule(
     Ok(())
 }
 
+/// Escapes a path for a raw SBPL `#"..."` regex literal.
+#[cfg(target_os = "macos")]
+fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
+    let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => return Err(PermissionError::InvalidPath),
+            value if value.is_control() => return Err(PermissionError::InvalidPath),
+            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            value => escaped.push(value),
+        }
+    }
+    Ok(escaped)
+}
+
 #[cfg(target_os = "macos")]
 fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
@@ -2159,6 +2490,48 @@ mod tests {
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
+
+    #[test]
+    fn codex_standalone_package_is_read_exec_only() {
+        let grant = |path: &str| PathGrant {
+            path: PathBuf::from(path),
+            scope: PathScope::Subtree,
+        };
+        let release =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for path in [release, &format!("{release}/bin/codex")] {
+            assert!(validate_read_exec_grant(&grant(path)).is_ok(), "{path}");
+            assert!(
+                matches!(
+                    validate_noncredential_grant(&grant(path)),
+                    Err(PermissionError::CredentialRoot)
+                ),
+                "writes stay strict: {path}"
+            );
+        }
+        for path in [
+            "/Users/alice/.codex",
+            "/Users/alice/.codex/auth.json",
+            "/Users/alice/.codex/config.toml",
+            "/Users/alice/.codex/sessions",
+            "/Users/alice/.codex/packages",
+            "/Users/alice/.codex/packages/standalone",
+            "/Users/alice/.codex/packages/standalone/releases",
+            "/Users/alice/.codex/packages/standalone/current",
+            "/Users/alice/.codex/packages/other/releases/1",
+            "/Users/alice/.codex/packages/standalone/releases/1/.codex/auth.json",
+            "/Users/alice/.claude/packages/standalone/releases/1",
+            "/tmp/x/.codex/packages/standalone/releases/1",
+        ] {
+            assert!(
+                matches!(
+                    validate_read_exec_grant(&grant(path)),
+                    Err(PermissionError::CredentialRoot | PermissionError::BroadRoot)
+                ),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn broad_home_tmp_and_credential_roots_are_refused() {
@@ -2682,6 +3055,7 @@ mod tests {
             grants.digest(&authority.cargo_cache)
         );
         assert_eq!(grants.objects.path, common.join("objects"));
+        assert_eq!(grants.common_exclude.path, common.join("info/exclude"));
         assert!(
             grants
                 .selected_ref
@@ -2699,6 +3073,7 @@ mod tests {
             linked.path().to_owned(),
             private.clone(),
             common.clone(),
+            common.join("info"),
             common.join("objects"),
             authority.cargo_cache.path.clone(),
             private_logs.clone(),
@@ -2730,11 +3105,36 @@ mod tests {
         push_worktree_rule(&mut source, &verified_grants)?;
         assert!(source.contains("(require-not (subpath "));
         assert!(source.contains(&format!("{}/objects/info", common.display())));
+        // `git commit` needs its message buffer, only in the private directory.
+        assert!(source.contains(&format!("\"{}\"", private.join("COMMIT_EDITMSG").display())));
+        assert!(!source.contains(&format!("\"{}\"", common.join("COMMIT_EDITMSG").display())));
+        // A local `git merge` records its state only in the private directory.
+        for name in [
+            "MERGE_HEAD",
+            "MERGE_MSG",
+            "MERGE_MODE",
+            "MERGE_RR",
+            "ORIG_HEAD",
+            "ORIG_HEAD.lock",
+        ] {
+            assert!(source.contains(&format!("\"{}\"", private.join(name).display())));
+            assert!(!source.contains(&format!("\"{}\"", common.join(name).display())));
+        }
+        // Pathspec commits write `next-index-<pid>.lock`, only in the private directory.
+        let private_pattern = sbpl_regex_path(&private)?;
+        assert!(source.contains(&format!(
+            "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
+        )));
+        assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
+        // Ref deletion takes the packed-refs lock; packed-refs itself stays read-only.
+        assert!(source.contains(&format!(
+            "\"{}\"",
+            common.join("packed-refs.lock").display()
+        )));
         for relative in [
             "config",
             "config.lock",
             "packed-refs",
-            "packed-refs.lock",
             "refs/heads/main",
             "refs/remotes/origin",
             "refs/remotes/upstream",
@@ -2924,6 +3324,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -3018,6 +3419,7 @@ mod tests {
             linked.path().to_owned(),
             private.clone(),
             common.clone(),
+            common.join("info"),
             grants.objects.path.clone(),
             private_logs,
             common_heads,
@@ -3052,6 +3454,7 @@ mod tests {
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
         assert!(sbpl.contains("(deny file-link)"));
+        assert!(sbpl.contains("(allow sysctl-read)"));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -3102,6 +3505,17 @@ mod tests {
             "shell: {:?}; {}",
             shell_outcome.termination,
             String::from_utf8_lossy(&shell_outcome.stderr.bytes)
+        );
+        let memory_outcome = run(&executables[5], &[Path::new("-n"), Path::new("hw.memsize")]);
+        assert!(
+            successful_probe(&memory_outcome)
+                && String::from_utf8_lossy(&memory_outcome.stdout.bytes)
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|bytes| bytes > 0),
+            "hw.memsize sysctl-read failed under the compiled provider profile: {:?}; {}",
+            memory_outcome.termination,
+            String::from_utf8_lossy(&memory_outcome.stderr.bytes)
         );
         assert!(successful_probe(&run(
             &executables[0],
@@ -3378,5 +3792,99 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn lane_cache_sweep_removes_only_marked_caches_for_missing_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let orphan = cache_root.join("a".repeat(64));
+        let live = cache_root.join("b".repeat(64));
+        let unknown = cache_root.join("c".repeat(64));
+        let legacy = cache_root.join("d".repeat(64));
+        for cache in [&orphan, &live, &unknown, &legacy] {
+            std::fs::create_dir(cache)?;
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let existing_worktree = home.join("worktree");
+        std::fs::create_dir(&existing_worktree)?;
+        let old_worktree = home.join("removed-worktree");
+        std::fs::create_dir(&old_worktree)?;
+        let old_identity = std::fs::metadata(&old_worktree)?;
+        std::fs::rename(&old_worktree, home.join("previous-worktree"))?;
+        std::fs::create_dir(&old_worktree)?;
+        for (cache, owner, identity) in [
+            (&orphan, old_worktree, old_identity),
+            (
+                &live,
+                existing_worktree.clone(),
+                std::fs::metadata(&existing_worktree)?,
+            ),
+        ] {
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&identity.ino().to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
+        }
+        let legacy_owner = home.join("legacy-worktree");
+        std::fs::write(
+            legacy.join(CARGO_CACHE_OWNER),
+            [
+                LEGACY_CARGO_CACHE_OWNER_PREFIX,
+                legacy_owner.as_os_str().as_encoded_bytes(),
+            ]
+            .concat(),
+        )?;
+        std::fs::create_dir(orphan.join("release"))?;
+        std::fs::write(orphan.join("release/provenant"), b"lane artifact")?;
+
+        assert_eq!(prune_orphaned_worktree_cargo_caches(home)?, 1);
+        assert!(!orphan.exists());
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        assert!(legacy.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn lane_cache_sweep_skips_deep_cache_and_continues() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let deep = cache_root.join("a".repeat(64));
+        let ordinary = cache_root.join("b".repeat(64));
+        for cache in [&deep, &ordinary] {
+            std::fs::create_dir(cache)?;
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let missing_owner = home.join("missing-worktree");
+        let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+        marker.extend_from_slice(&1_u64.to_le_bytes());
+        marker.extend_from_slice(&2_u64.to_le_bytes());
+        marker.extend_from_slice(missing_owner.as_os_str().as_encoded_bytes());
+        for cache in [&deep, &ordinary] {
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), &marker)?;
+        }
+        let mut nested = deep.clone();
+        for _ in 0..MAX_CACHE_SWEEP_DEPTH + 1 {
+            nested.push("nested");
+            std::fs::create_dir(&nested)?;
+        }
+
+        let error = prune_orphaned_worktree_cargo_caches(home)
+            .expect_err("deep cache is skipped and reported after the sweep");
+        assert!(error.to_string().contains(&"a".repeat(64)));
+        assert!(deep.is_dir());
+        assert!(!ordinary.exists());
+        Ok(())
     }
 }

@@ -1,6 +1,5 @@
 //! Admission facts are constructed from current validated evidence, never decoded.
 use crate::*;
-use provenant_core::OperationId;
 use provenant_records::{ResolvedRoute, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
@@ -16,36 +15,24 @@ pub struct Refusal {
     pub observed_unix_seconds: i64,
     pub resets_unix_seconds: Option<i64>,
 }
-#[derive(Debug, Serialize)]
-pub struct AdmissionPermit {
-    operation_id: OperationId,
-    adapter: String,
-    model: String,
-    account_key: String,
-    snapshot_revision: Option<u64>,
-    expires_unix_seconds: i64,
-}
 pub struct Admission<'a> {
     pub now_unix_seconds: i64,
     pub records: &'a [AccountRecord],
-    pub refusals: &'a [Refusal],
     /// Only wire-verified model-to-pool bindings. An absent binding cannot
     /// turn an unrelated pool into a model-wide exhaustion.
     pub pools: &'a [String],
 }
 impl Admission<'_> {
-    pub fn admit(
-        &self,
-        route: &ResolvedRoute,
-        operation: &OperationId,
-    ) -> Result<AdmissionPermit, QuotaError> {
-        let expiry = match route.readiness {
+    /// Check provider readiness, current allowance and the account record's
+    /// persisted refusals.
+    pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
+        match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
                 ..
-            } if expires_unix_seconds > self.now_unix_seconds => expires_unix_seconds,
+            } if expires_unix_seconds > self.now_unix_seconds => {}
             _ => return Err(QuotaError::Refused("provider readiness")),
-        };
+        }
         let key = route
             .account_key
             .as_ref()
@@ -88,10 +75,9 @@ impl Admission<'_> {
                 return Err(QuotaError::Refused("allowance exhausted"));
             }
         }
-        for refusal in self
-            .refusals
-            .iter()
-            .chain(record.into_iter().flat_map(|r| r.refusals.iter()))
+        for refusal in record
+            .into_iter()
+            .flat_map(|r| r.refusals.iter())
             .filter(|r| {
                 r.account.adapter == route.adapter
                     && r.account.account_key == *key
@@ -137,22 +123,72 @@ impl Admission<'_> {
                     && refusal.model == route.model)
                     || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
-                return Err(QuotaError::Refused("scoped provider refusal"));
+                return Err(QuotaError::Refused(
+                    if refusal.pool.as_deref() == Some("opencode-free") {
+                        "free tier exhausted; use a paid route or wait for its allowance reset"
+                    } else {
+                        "scoped provider refusal"
+                    },
+                ));
             }
         }
-        Ok(AdmissionPermit {
-            operation_id: operation.clone(),
-            adapter: route.adapter.clone(),
-            model: route.model.clone(),
-            account_key: key.clone(),
-            snapshot_revision: snapshot.map(|s| s.revision),
-            expires_unix_seconds: expiry.min(
-                self.now_unix_seconds
-                    .checked_add(55)
-                    .ok_or(QuotaError::TimeRange)?,
-            ),
-        })
+        Ok(())
     }
+}
+
+/// Build a compare-and-swap update for structured provider quota evidence.
+/// The provider message is intentionally excluded from durable quota state.
+pub fn record_refusal(
+    current: Option<&AccountRecord>,
+    account: &AccountScope,
+    model: &str,
+    pool: &str,
+    now_unix_seconds: i64,
+) -> Result<UpdateIntent, QuotaError> {
+    account.validate()?;
+    let prefix = format!("{}/", account.adapter);
+    if !model.starts_with(&prefix)
+        || model.len() > 512
+        || model.chars().any(char::is_control)
+        || pool.is_empty()
+        || pool.len() > 256
+        || pool.chars().any(char::is_control)
+    {
+        return Err(QuotaError::Invalid("provider refusal"));
+    }
+    let model = model
+        .strip_prefix(&prefix)
+        .ok_or(QuotaError::Invalid("provider refusal model"))?;
+    if current.is_some_and(|record| record.account != *account) {
+        return Err(QuotaError::Conflict);
+    }
+    let mut record = current
+        .cloned()
+        .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.validate()?;
+    record.revision = record
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    record
+        .refusals
+        .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != Some(pool));
+    if record.refusals.len() >= MAX_WINDOWS {
+        return Err(QuotaError::Invalid("provider refusal bound"));
+    }
+    record.refusals.push(Refusal {
+        account: account.clone(),
+        model: model.into(),
+        pool: Some(pool.into()),
+        observed_unix_seconds: now_unix_seconds,
+        resets_unix_seconds: None,
+    });
+    record.validate()?;
+    Ok(UpdateIntent {
+        account: account.clone(),
+        expected: current.cloned(),
+        replacement: Some(record),
+    })
 }
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
@@ -161,27 +197,6 @@ fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
             && window
                 .split_once('.')
                 .is_some_and(|(group, _)| group == pool))
-}
-
-impl AdmissionPermit {
-    pub fn operation_id(&self) -> &OperationId {
-        &self.operation_id
-    }
-    pub fn adapter(&self) -> &str {
-        &self.adapter
-    }
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-    pub fn account_key(&self) -> &str {
-        &self.account_key
-    }
-    pub fn snapshot_revision(&self) -> Option<u64> {
-        self.snapshot_revision
-    }
-    pub fn expires_unix_seconds(&self) -> i64 {
-        self.expires_unix_seconds
-    }
 }
 
 #[cfg(test)]
@@ -217,6 +232,7 @@ mod admission_tests {
             confidentiality: provenant_records::RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         }
     }
     fn record(status: QuotaStatus) -> AccountRecord {
@@ -260,6 +276,8 @@ mod admission_tests {
             observed_unix_seconds: 900,
             resets_unix_seconds: None,
         };
+        let mut record = AccountRecord::empty(refusal.account.clone());
+        record.refusals.push(refusal.clone());
         for (key, pools, blocked) in [
             ("opaque", vec!["opencode-free".into()], true),
             ("other", vec!["opencode-free".into()], false),
@@ -269,11 +287,10 @@ mod admission_tests {
             assert_eq!(
                 Admission {
                     now_unix_seconds: 1000,
-                    records: &[],
-                    refusals: std::slice::from_ref(&refusal),
+                    records: std::slice::from_ref(&record),
                     pools: &pools
                 }
-                .admit(&route, &"free-limit".parse().unwrap())
+                .check(&route)
                 .is_err(),
                 blocked
             );
@@ -283,11 +300,10 @@ mod admission_tests {
         assert!(
             Admission {
                 now_unix_seconds: 1000,
-                records: &[],
-                refusals: &[refusal],
-                pools: &[]
+                records: &[record],
+                pools: &["opencode-free".into()]
             }
-            .admit(&route, &"same-free-limit".parse().unwrap())
+            .check(&route)
             .is_err()
         );
     }
@@ -299,10 +315,9 @@ mod admission_tests {
             Admission {
                 now_unix_seconds: 1000,
                 records: &[record],
-                refusals: &[],
                 pools: &["pool-a".into()],
             }
-            .admit(&route(), &"operation".parse().unwrap()),
+            .check(&route()),
             Err(QuotaError::Refused("allowance exhausted"))
         ));
     }
@@ -319,22 +334,21 @@ mod admission_tests {
             used_basis_points: 1000,
             resets_unix_seconds: Some(303400),
         });
-        let refusal = Refusal {
+        record.refusals.push(Refusal {
             account: record.account.clone(),
             model: route().model,
             pool: None,
             observed_unix_seconds: 1000,
             resets_unix_seconds: None,
-        };
+        });
         for (now, allowed) in [(1000, false), (4599, false), (4600, true)] {
             assert_eq!(
                 Admission {
                     now_unix_seconds: now,
                     records: std::slice::from_ref(&record),
-                    refusals: std::slice::from_ref(&refusal),
                     pools: &["pool-a".into(), "pool-b".into()],
                 }
-                .admit(&route(), &"operation".parse().unwrap())
+                .check(&route())
                 .is_ok(),
                 allowed,
                 "now={now}"
@@ -349,21 +363,20 @@ mod admission_tests {
             snapshot.observed_unix_seconds = 4990;
             snapshot.windows[0].used_basis_points = used;
             snapshot.windows[0].resets_unix_seconds = Some(1400);
-            let refusal = Refusal {
+            record.refusals.push(Refusal {
                 account: record.account.clone(),
                 model: route().model,
                 pool: Some("pool-a".into()),
                 observed_unix_seconds: 4980,
                 resets_unix_seconds: None,
-            };
+            });
             assert_eq!(
                 Admission {
                     now_unix_seconds: 5000,
                     records: &[record],
-                    refusals: &[refusal],
                     pools: &["pool-a".into()],
                 }
-                .admit(&route(), &"operation".parse().unwrap())
+                .check(&route())
                 .is_ok(),
                 allowed,
                 "used={used}"
@@ -374,21 +387,20 @@ mod admission_tests {
     fn stale_exhausted_snapshot_does_not_clear_newer_refusal() {
         let mut record = record(QuotaStatus::Exhausted);
         record.snapshot.as_mut().unwrap().observed_unix_seconds = 960;
-        let refusal = Refusal {
+        record.refusals.push(Refusal {
             account: record.account.clone(),
             model: "exact/model".into(),
             pool: Some("pool-a".into()),
             observed_unix_seconds: 950,
             resets_unix_seconds: None,
-        };
+        });
         assert!(matches!(
             Admission {
                 now_unix_seconds: 1300,
                 records: &[record],
-                refusals: &[refusal],
                 pools: &["pool-a".into()],
             }
-            .admit(&route(), &"operation".parse().unwrap()),
+            .check(&route()),
             Err(QuotaError::Refused("scoped provider refusal"))
         ));
     }
@@ -404,30 +416,23 @@ mod admission_tests {
             let context = Admission {
                 now_unix_seconds: now,
                 records: &records,
-                refusals: &[],
                 pools: &pools,
             };
-            assert!(
-                context
-                    .admit(&route(), &"operation".parse().unwrap())
-                    .is_ok()
-            );
+            assert!(context.check(&route()).is_ok());
         }
     }
     #[test]
     fn independent_pool_reset_and_refusal_scope() {
         let mut records = [record(QuotaStatus::Exhausted)];
         let mut pools = ["pool-b".into()];
-        let op = "operation".parse().unwrap();
         let r = route();
         assert!(
             Admission {
                 now_unix_seconds: 1000,
                 records: &records,
-                refusals: &[],
                 pools: &pools
             }
-            .admit(&r, &op)
+            .check(&r)
             .is_ok()
         );
         pools[0] = "pool-a".into();
@@ -435,10 +440,9 @@ mod admission_tests {
             Admission {
                 now_unix_seconds: 1000,
                 records: &records,
-                refusals: &[],
                 pools: &pools
             }
-            .admit(&r, &op)
+            .check(&r)
             .is_err()
         );
         records[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
@@ -446,38 +450,35 @@ mod admission_tests {
             Admission {
                 now_unix_seconds: 1000,
                 records: &records,
-                refusals: &[],
                 pools: &pools
             }
-            .admit(&r, &op)
+            .check(&r)
             .is_ok()
         );
-        let refusal = Refusal {
+        records[0].refusals.push(Refusal {
             account: records[0].account.clone(),
             model: r.model.clone(),
             pool: Some("pool-a".into()),
             observed_unix_seconds: 950,
             resets_unix_seconds: None,
-        };
+        });
         records[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(
             Admission {
                 now_unix_seconds: 1000,
                 records: &records,
-                refusals: std::slice::from_ref(&refusal),
                 pools: &pools
             }
-            .admit(&r, &op)
+            .check(&r)
             .is_err()
         );
         assert!(
             Admission {
                 now_unix_seconds: 4550,
                 records: &records,
-                refusals: &[refusal],
                 pools: &pools
             }
-            .admit(&r, &op)
+            .check(&r)
             .is_ok()
         );
     }
@@ -505,6 +506,7 @@ mod refusal_scope_tests {
             confidentiality: provenant_records::RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let account = AccountScope {
             adapter: "claude".into(),
@@ -518,7 +520,6 @@ mod refusal_scope_tests {
             observed_unix_seconds: 950,
             resets_unix_seconds: Some(1100),
         };
-        let op = "operation".parse().unwrap();
         let pools = ["pool".into()];
         for (model, key, pool, observed, now, allowed) in [
             ("other", "work", "pool", 900, 1000, true),
@@ -530,8 +531,10 @@ mod refusal_scope_tests {
         ] {
             let mut refusal = refusal.clone();
             refusal.model = model.into();
-            refusal.account.account_key = key.into();
+            let mut route = route.clone();
+            route.account_key = Some(key.into());
             let mut record = AccountRecord::empty(account.clone());
+            record.refusals.push(refusal);
             record.snapshot = Some(QuotaSnapshot {
                 schema_version: 1,
                 account: account.clone(),
@@ -553,10 +556,9 @@ mod refusal_scope_tests {
                 Admission {
                     now_unix_seconds: now,
                     records: &records,
-                    refusals: &[refusal],
                     pools: &pools
                 }
-                .admit(&route, &op)
+                .check(&route)
                 .is_ok(),
                 allowed,
                 "{model}/{key}/{pool}/{observed}/{now}"
@@ -570,6 +572,7 @@ mod refusal_scope_tests {
         refusal.account = account.clone();
         refusal.pool = Some("gemini".into());
         let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(refusal);
         record.snapshot = Some(QuotaSnapshot {
             schema_version: 1,
             account,
@@ -600,10 +603,9 @@ mod refusal_scope_tests {
                 Admission {
                     now_unix_seconds: 1000,
                     records: &[record.clone()],
-                    refusals: &[refusal.clone()],
                     pools: &["gemini".into()]
                 }
-                .admit(&route, &op)
+                .check(&route)
                 .is_ok(),
                 allowed
             );

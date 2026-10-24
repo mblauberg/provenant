@@ -62,9 +62,12 @@ pub(super) fn input() -> PreparedRun {
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,
+            lane_depth: Some(1),
+            parent_attempt: None,
         },
         attempts: vec![NewAttempt {
             task_id: task,
@@ -79,9 +82,10 @@ pub(super) fn route() -> RouteRecord {
         model: Some("fixture/model".into()),
         effort: Some("high".into()),
         account_label: None,
+        ..Default::default()
     }
 }
-fn publication() -> TerminalPublication<'static> {
+pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
         outcome: Outcome::Succeeded,
         finished_at: WallTime::from_micros(200).unwrap(),
@@ -95,6 +99,7 @@ fn publication() -> TerminalPublication<'static> {
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
+        session: None,
     }
 }
 pub(super) fn exit() -> ExitObservation {
@@ -115,12 +120,41 @@ pub(super) fn exit() -> ExitObservation {
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
-        terminal_observed: true,
+        // Production guardians have no live frame decoder; delivery must not need one.
+        terminal_observed: false,
         unresolved_cleanup: false,
+        unresolved_pids: vec![],
         settlement_evidence: SettlementEvidence::LinuxKernelChildren,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
     }
+}
+#[test]
+fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        open_pr: false,
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempts[0].attempt_id;
+    let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    let receipt = record.delivery.ok_or("delivery state missing")?;
+    assert_eq!(receipt.state, WriterDeliveryState::NotAttempted);
+    assert_eq!((receipt.remote.as_str(), receipt.head), ("origin", None));
+    Ok(())
 }
 #[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
@@ -225,7 +259,10 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         reviewer.provenance,
         provenant_records::ReviewerProvenance::Observed
     );
-    assert_eq!(reviewer.family.as_deref(), Some("fixture"));
+    // The adapter name is not a model family, and the submitter is not the reviewer.
+    assert_eq!(reviewer.family, None);
+    assert_ne!(reviewer.actor_id, context.actor_id);
+    assert_eq!(fact.verified_owner, Some(context.actor_id));
     assert_eq!(
         store
             .attempts(AttemptFilter::default(), &call)?
@@ -265,6 +302,38 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
             .attempts(AttemptFilter::default(), &call)?
             .count(),
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
+    let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+    artifacts::seal(
+        &directory,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "last_output_at": expected,
+            "publication_pending": false
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    assert_eq!(
+        store
+            .record(input.attempts[0].attempt_id, &call)?
+            .last_output_at,
+        Some(expected)
     );
     Ok(())
 }
@@ -813,5 +882,50 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
         store.record(id, &call)?.result.unwrap().digest,
         CanonicalV1::file_digest(raw.as_bytes())
     );
+    Ok(())
+}
+
+#[test]
+fn lane_selection_is_owned_and_skips_seen_completions() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let query = |owner: Option<ActorId>, unseen_after: Option<u64>| LaneQuery {
+        targets: vec![],
+        all: unseen_after.is_some(),
+        limit: 100,
+        after: 0,
+        newest_first: false,
+        owner,
+        unseen_after,
+    };
+    let count = |q: &LaneQuery| store.lanes(q, &call).map(|p| p.lanes.len());
+    // Another actor's chair sees none of this actor's active work.
+    assert_eq!(count(&query(Some(context.actor_id), None))?, 1);
+    assert_eq!(count(&query(Some(ActorId::from_bytes([9; 16])), None))?, 0);
+    assert_eq!(count(&query(None, None))?, 1);
+    // A completed lane is selected until its event is acknowledged.
+    seal_exit_fixture(&store, &input)?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    let last = store.last_event_sequence(id, &call)?;
+    assert!(last > 0);
+    assert_eq!(count(&query(Some(context.actor_id), Some(0)))?, 1);
+    assert_eq!(
+        store.seen_cursor("default", true, &call)?,
+        last,
+        "a fresh cursor starts at the log end"
+    );
+    assert_eq!(store.seen_cursor("default", false, &call)?, 0);
+    store.ack_seen("default", last, &call)?;
+    store.ack_seen("default", 0, &call)?;
+    let seen = store.seen_cursor("default", true, &call)?;
+    assert_eq!(seen, last, "the cursor never moves back");
+    assert_eq!(count(&query(Some(context.actor_id), Some(seen)))?, 0);
     Ok(())
 }

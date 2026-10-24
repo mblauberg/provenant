@@ -239,6 +239,7 @@ fn account_placement() -> Result {
             confidentiality: RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
@@ -255,6 +256,18 @@ fn account_placement() -> Result {
             token: None,
             cwd: &rig.project,
             nonce: [1; 16],
+            provenant: provenant_providers::LaneRuntime {
+                executable: &executable,
+                git: &std::fs::canonicalize(
+                    provenant_supervisor::git::git_executable().ok_or("Git unavailable")?,
+                )?,
+                state: &rig.state,
+                child_state: &rig.state.join(format!("children/{key}")),
+                home: &rig.home,
+                depth: 1,
+                attempt: provenant_core::AttemptId::from_bytes([1; 16]),
+                assets: &rig.project,
+            },
         })?;
         let auth = account.directory().join("auth.json");
         let selected = &spec.profile.spec.authentication[0];
@@ -265,6 +278,12 @@ fn account_placement() -> Result {
         for step in &spec.setup {
             match step {
                 SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
+                SetupStep::WriteFile { path, bytes } => std::fs::write(path, bytes)?,
+                SetupStep::WriteExecutable { path, bytes } => {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::write(path, bytes)?;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                }
                 SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
             }
         }

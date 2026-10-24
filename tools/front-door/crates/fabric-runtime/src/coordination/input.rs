@@ -38,7 +38,7 @@ macro_rules! bounded_input {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         $vis enum $name {
-            $( $variant { $( $field: $field_type ),* } ),*
+            $( $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
         }
 
         #[derive(serde::Deserialize)]
@@ -382,7 +382,7 @@ impl ValidateInput for SubmitInput {
                 knobs,
                 ..
             } => {
-                if tasks.is_empty() || tasks.len() > 100 {
+                if tasks.is_empty() || tasks.len() > 64 {
                     return Err(field("tasks"));
                 }
                 if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
@@ -403,6 +403,10 @@ impl ValidateInput for SubmitInput {
                         &format!("{path}.worktree"),
                         MAX_ARTIFACT_PATH_BYTES,
                     )?;
+                    if let Some(deliver) = &task.deliver {
+                        bounded_text(&deliver.remote, &format!("{path}.deliver.remote"), 64)?;
+                        bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
+                    }
                     route(&task.route, &format!("{path}.route"))?;
                     if !(1_000..=14_400_000).contains(&task.timeout_ms) {
                         return Err(field(&format!("{path}.timeout_ms")));
@@ -483,6 +487,28 @@ mod tests {
     }
 
     #[test]
+    fn submission_omits_absent_host_for_older_peers() {
+        let input = json!({
+            "op":"submission",
+            "operation_id":"place",
+            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}]
+        });
+        let local: SubmitInput = serde_json::from_value(input).unwrap();
+        assert!(serde_json::to_value(&local).unwrap().get("host").is_none());
+        let placed: SubmitInput = serde_json::from_value(json!({
+            "op":"submission",
+            "operation_id":"place",
+            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}],
+            "host":"07070707070707070707070707070707"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&placed).unwrap()["host"],
+            "07070707070707070707070707070707"
+        );
+    }
+
+    #[test]
     fn serde_rejects_out_of_bounds_task_text() {
         let input = serde_json::json!({
             "op": "create",
@@ -516,6 +542,11 @@ mod tests {
         rejects::<ClaimInput>(
             json!({"op":"acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_ms":1_000}),
             "scope.paths[0]",
+        );
+        let task = json!({"prompt":"do work","route":{},"timeout_ms":1_000});
+        rejects::<SubmitInput>(
+            json!({"op":"submission","operation_id":"work-1","tasks":vec![task; 65]}),
+            "tasks",
         );
         for name in ["adapter", "model", "route", "role", "task_class", "effort"] {
             let mut route = json!({});
@@ -634,16 +665,18 @@ mod tests {
             &backoff,
         );
 
-        let error = service
-            .task(
-                TaskInput::Claim {
-                    id: provenant_core::TaskId::from_bytes([3; 16]),
-                    lease_ms: 999,
-                },
-                budget,
-                &cancel,
-            )
-            .unwrap_err();
+        // Task mutations need an operation id; `mutate` supplies a fresh one.
+        let error = CoordinationApi::mutate(
+            &service,
+            crate::coordination::Mutation::Task(TaskInput::Claim {
+                id: provenant_core::TaskId::from_bytes([3; 16]),
+                lease_ms: 999,
+            }),
+            None,
+            budget,
+            &cancel,
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             CoordinationError::Input(error) if error.path == "lease_ms"

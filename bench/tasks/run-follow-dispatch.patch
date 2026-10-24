@@ -1,0 +1,265 @@
+diff --git a/tools/front-door/crates/providers/src/tests.rs b/tools/front-door/crates/providers/src/tests.rs
+index 8012ed1e..1b01d476 100644
+--- a/tools/front-door/crates/providers/src/tests.rs
++++ b/tools/front-door/crates/providers/src/tests.rs
+@@ -1184,0 +1185,50 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
++#[test]
++fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
++    // Synthetic protocol regression from #1216, not an activation recording.
++    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
++    for wrapped in [false, true] {
++        for string_body in [false, true] {
++            let body =
++                serde_json::json!({"error":{"type":"FreeUsageLimitError","message":message}});
++            let body = if string_body {
++                serde_json::Value::String(body.to_string())
++            } else {
++                body
++            };
++            let event =
++                serde_json::json!({"type":"provider.quota","status":429,"response":{"body":body}});
++            let event = if wrapped {
++                serde_json::json!({"type":"error","error":event})
++            } else {
++                event
++            };
++            let (events, outcome) = replay(
++                &opencode::OpenCode,
++                &(event.to_string() + "\n"),
++                ExitObservation {
++                    code: Some(1),
++                    timed_out: false,
++                },
++            )?;
++            assert_eq!(outcome.status(), OutcomeStatus::Refused);
++            assert!(events.contains(&ProviderEvent::QuotaLimited {
++                message: message.into(),
++                pool: Some("opencode-free".into())
++            }));
++        }
++    }
++    for response in [
++        serde_json::json!({}),
++        serde_json::json!({"body":{"error":{"code":429,"message":"provider quota message"}}}),
++    ] {
++        let event = serde_json::json!({"type":"provider.quota","message":"provider quota message","response":response});
++        let (events, outcome) = replay(&opencode::OpenCode, &(event.to_string() + "\n"), EXIT)?;
++        assert_eq!(outcome.status(), OutcomeStatus::Refused);
++        assert!(events.contains(&ProviderEvent::QuotaLimited {
++            message: "provider quota message".into(),
++            pool: None
++        }));
++    }
++    Ok(())
++}
++
+diff --git a/tools/front-door/crates/run/src/dispatch_tests.rs b/tools/front-door/crates/run/src/dispatch_tests.rs
+index 19b17b4a..844cba9c 100644
+--- a/tools/front-door/crates/run/src/dispatch_tests.rs
++++ b/tools/front-door/crates/run/src/dispatch_tests.rs
+@@ -10 +10 @@ use provenant_supervisor::{
+-use std::cell::Cell;
++use std::cell::{Cell, RefCell};
+@@ -32,0 +33 @@ struct Fake {
++    prompt: RefCell<String>,
+@@ -38 +39 @@ impl Providers for Fake {
+-        _: &str,
++        prompt: &str,
+@@ -40,0 +42 @@ impl Providers for Fake {
++        self.prompt.replace(prompt.into());
+@@ -163,0 +166,10 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
++    let prompt = fake.prompt.borrow();
++    let path = store.context.state_root.as_path().join(format!(
++        "runs/{}/attempts/{}",
++        run.run_id, run.attempts[0].attempt_id
++    ));
++    assert!(prompt.contains(&path.join("result.md").display().to_string()));
++    assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
++    assert!(prompt.contains("only durable outputs"));
++    assert!(prompt.contains("deleted"));
++    assert!(prompt.ends_with("exact prompt"));
+diff --git a/tools/front-door/crates/run/src/tests.rs b/tools/front-door/crates/run/src/tests.rs
+index 5edc52bb..5b36a396 100644
+--- a/tools/front-door/crates/run/src/tests.rs
++++ b/tools/front-door/crates/run/src/tests.rs
+@@ -772,0 +773,44 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
++
++#[test]
++fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
++    let temp = tempfile::tempdir()?;
++    let context = context(temp.path())?;
++    let clock = clock();
++    let cancel = CancelToken::new();
++    let call = call(&clock, &cancel);
++    let store = RunStore::open(&context, &call)?;
++    let input = input();
++    let id = input.attempts[0].attempt_id;
++    store.create(&input, &call)?;
++    seal_exit_fixture(&store, &input)?;
++    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
++    let raw = format!("prefix {secret} suffix");
++    let mut publication = publication();
++    publication.result = &raw;
++    store.publish_terminal(id, 1, &publication, &exit(), &call)?;
++    let output = store.read_output(
++        id,
++        ArtifactPart::Result,
++        ByteRange::default(),
++        &context,
++        &call,
++    )?;
++    assert_eq!(output.bytes, b"prefix [REDACTED] suffix");
++    assert_eq!(output.digest, CanonicalV1::file_digest(&output.bytes));
++    let fragment = store.read_output(
++        id,
++        ArtifactPart::Result,
++        ByteRange {
++            offset: 9,
++            max_bytes: 4,
++        },
++        &context,
++        &call,
++    )?;
++    assert_eq!(fragment.bytes, b"EDAC");
++    assert_eq!(
++        store.record(id, &call)?.result.unwrap().digest,
++        CanonicalV1::file_digest(raw.as_bytes())
++    );
++    Ok(())
++}
+diff --git a/tools/front-door/tests/fabric_transport.rs b/tools/front-door/tests/fabric_transport.rs
+index 88eb5351..f352bcc8 100644
+--- a/tools/front-door/tests/fabric_transport.rs
++++ b/tools/front-door/tests/fabric_transport.rs
+@@ -162,2 +162,2 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
+-    assert_eq!(run["isError"], true);
+-    assert_eq!(run["structuredContent"]["code"], "owner_unavailable");
++    assert_ne!(run["isError"], true, "{run}");
++    assert_eq!(run["structuredContent"]["page"]["items"], json!([]));
+@@ -238,2 +238,2 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
+-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
+-        TaskId, WaitBudget,
++        ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
++        RunId, TaskId, WaitBudget,
+@@ -269,2 +269,11 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
+-    let attempt = AttemptId::from_bytes([91; 16]);
+-    let task = TaskId::from_bytes([92; 16]);
++    let tasks = [
++        TaskId::from_bytes([92; 16]),
++        TaskId::from_bytes([93; 16]),
++        TaskId::from_bytes([94; 16]),
++    ];
++    let attempts = [
++        AttemptId::from_bytes([91; 16]),
++        AttemptId::from_bytes([95; 16]),
++        AttemptId::from_bytes([97; 16]),
++    ];
++    let attempt = attempts[0];
+@@ -273 +282 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
+-            run_id: RunId::from_bytes([93; 16]),
++            run_id: RunId::from_bytes([96; 16]),
+@@ -278,15 +287,18 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
+-                tasks: vec![TaskRequest {
+-                    profile: provenant_records::run::HarnessProfile::default(),
+-                    task_id: task,
+-                    prompt_digest: CanonicalV1::file_digest(b"prompt"),
+-                    route: RequestedRoute::Model {
+-                        provider: "fixture".into(),
+-                        model: "fixture".into(),
+-                        effort: None,
+-                    },
+-                    account: None,
+-                    fallback: vec![],
+-                    authority_digest: Digest::from_bytes([94; 32]),
+-                    provider_timeout_seconds: 60,
+-                    delivery_id: None,
+-                }],
++                tasks: tasks
++                    .iter()
++                    .map(|task_id| TaskRequest {
++                        profile: provenant_records::run::HarnessProfile::default(),
++                        task_id: *task_id,
++                        prompt_digest: CanonicalV1::file_digest(b"prompt"),
++                        route: RequestedRoute::Model {
++                            provider: "fixture".into(),
++                            model: "fixture".into(),
++                            effort: None,
++                        },
++                        account: None,
++                        fallback: vec![],
++                        authority_digest: Digest::from_bytes([94; 32]),
++                        provider_timeout_seconds: 60,
++                        delivery_id: None,
++                    })
++                    .collect(),
+@@ -296,5 +308,9 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
+-            attempts: vec![provenant_run::NewAttempt {
+-                attempt_id: attempt,
+-                task_id: task,
+-                prompt: "prompt".into(),
+-            }],
++            attempts: tasks
++                .iter()
++                .zip(attempts)
++                .map(|(task_id, attempt_id)| provenant_run::NewAttempt {
++                    attempt_id,
++                    task_id: *task_id,
++                    prompt: "prompt".into(),
++                })
++                .collect(),
+@@ -304,0 +321,55 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
++    let first = mcp(
++        &rig,
++        &[
++            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":1}}}),
++        ],
++    )?;
++    let first = &first
++        .iter()
++        .find(|reply| reply["id"] == 1)
++        .ok_or("first page")?["result"]["structuredContent"]["page"];
++    assert_eq!(first["items"][0]["attempt_id"], attempts[0].to_string());
++    assert_eq!(first["truncated"], true);
++    let cursor = first["next_after"].clone();
++    let local_host = HostId::parse(cursor["host"].as_str().ok_or("cursor host")?)?;
++    let mut remote_host_bytes = *local_host.as_bytes();
++    remote_host_bytes[0] ^= 1;
++    let mut remote_cursor = cursor.clone();
++    remote_cursor["host"] = json!(HostId::from_bytes(remote_host_bytes).to_string());
++    let remote = mcp(
++        &rig,
++        &[
++            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":remote_cursor,"limit":1}}}),
++        ],
++    )?;
++    let remote = &remote
++        .iter()
++        .find(|reply| reply["id"] == 1)
++        .ok_or("remote cursor")?["result"];
++    assert_eq!(remote["isError"], true);
++    assert_eq!(remote["structuredContent"]["code"], "owner_unavailable");
++    let second = mcp(
++        &rig,
++        &[
++            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
++        ],
++    )?;
++    let second = &second
++        .iter()
++        .find(|reply| reply["id"] == 1)
++        .ok_or("second page")?["result"]["structuredContent"]["page"];
++    assert_eq!(second["items"][0]["attempt_id"], attempts[1].to_string());
++    assert_eq!(second["truncated"], true);
++    let cursor = second["next_after"].clone();
++    let third = mcp(
++        &rig,
++        &[
++            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
++        ],
++    )?;
++    let third = &third
++        .iter()
++        .find(|reply| reply["id"] == 1)
++        .ok_or("third page")?["result"]["structuredContent"]["page"];
++    assert_eq!(third["items"][0]["attempt_id"], attempts[2].to_string());
++    assert_eq!(third["next_after"], Value::Null);

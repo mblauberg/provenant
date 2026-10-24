@@ -71,6 +71,7 @@ fn prepare(
             format!("model_reasoning_effort=\"{effort}\"").into(),
         ]);
     }
+    input.provenant.codex(&mut argv)?;
     argv.push("-".into());
 
     // Codex runs helpers from its own package (code-mode host, bundled `rg`
@@ -89,49 +90,33 @@ fn prepare(
         link: codex_home.join("auth.json"),
         target: credential.clone(),
     }];
-    let path = if access == Access::ReadOnly {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
+    let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
-    if access == Access::ReadOnly {
-        let cargo = input.home.join(".cargo");
-        let rustup = input.home.join(".rustup");
-        let cargo_home = plan.scratch.path.join("cargo-home");
-        let target = plan.scratch.path.join("target");
-        tool_exec_roots.push(subtree(&target));
-        for directory in [cargo.join("bin"), rustup.join("toolchains")] {
-            runtime_reads.push(subtree(&directory));
-            tool_exec_roots.push(subtree(directory));
-        }
-        runtime_reads.extend([
-            subtree(cargo.join("registry")),
-            exact(rustup.join("settings.toml")),
-        ]);
-        env.extend([
-            ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
-            ("RUSTUP_HOME".into(), rustup.into_os_string()),
-            (
-                "CARGO_TARGET_DIR".into(),
-                plan.scratch.path.join("target").into_os_string(),
-            ),
-        ]);
-        setup.extend([
-            SetupStep::CreateDir(cargo_home.clone()),
-            SetupStep::CreateDir(target),
-            SetupStep::Symlink {
-                link: cargo_home.join("registry"),
-                target: cargo.join("registry"),
-            },
-        ]);
-    }
+    input
+        .provenant
+        .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
+    crate::launch::rust_tools(
+        input,
+        access,
+        &mut runtime_reads,
+        &mut tool_exec_roots,
+        &mut env,
+        &mut setup,
+    );
+    crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
+    // Git may inspect global config even for status. Keep host hooks,
+    // includes and credential helpers outside the lane's environment.
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
         profile: ProviderProfile {
@@ -155,7 +140,11 @@ fn prepare(
             observations: observations(OBSERVATIONS, access)?,
         },
         stream,
-    })
+    };
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, false);
+    Ok(spec)
 }
 
 crate::quota_source!(Codex, "codex");

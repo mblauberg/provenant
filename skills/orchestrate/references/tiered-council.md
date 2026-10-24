@@ -3,23 +3,28 @@
 When several model families are available, work as a hierarchy, like an
 engineering team. Juniors from many families do the laid-out work and the
 fine-grained passes. Seniors judge that work, make the medium decisions and
-delegate to juniors. Principals make the critical calls. Each tier is a route
-pool, so a dispatch names its tier directly. The live roster and named routes
-are shown by `provenant route list`.
+delegate to juniors. Principals make the critical calls. `junior`, `senior` and
+`principal` are ordered route pools, so one task names one pool. The `writing`
+and `design` pools are craft choices, not extra risk tiers. `provenant route
+list` shows members in preference order and their cached availability.
 
 | Tier | Route | Job |
 |---|---|---|
 | Junior | `junior` | laid-out work and lens passes that need little judgement; overlap freely |
 | Senior | `senior` | judge the work and the junior claims; medium decisions; delegate to juniors |
-| Principal | `principal` | critical decisions, high-level judgement, consensus |
+| Principal | `principal` | critical decisions and high-level judgement |
 
-The same three names work as an adapter alias (`alias: "senior"`) for that
-adapter's own model of the tier. Task-class names resolve: `mechanical`, `lens`
-and `research` mean `junior`; `implementation` means `senior`. The retired names
-`scout`, `bulk`, `workhorse`, `strong`, `review` and `flagship` are rejected,
-naming their replacement. A
-Claude chair runs its own Claude members as native subagents: a pool hands them
-back with a spawn line ([routing-and-tiers.md](routing-and-tiers.md)).
+Rust routing resolves a pool in order and does not rotate members. A repeated
+`route: "junior"` can select the same model each time. To seat distinct
+families, inspect the pool and submit a separate task for each exact model.
+`task_class` applies configured knob presets; it does not alias a route. Claude
+chairs use native Claude subagents. Claude models stay in the pools for
+non-Claude chairs, which can dispatch them through Fabric.
+
+| Craft pool | Route | Job |
+|---|---|---|
+| Writing | `writing` | writing and accuracy work |
+| Design | `design` | visual and design judgement |
 
 ## Depth follows risk
 
@@ -34,10 +39,11 @@ Use the `HARNESS.md` risk tier as the mode, not a separate switch:
 
 1. **Split.** Cut the subject into parts small enough for one junior each:
    files, screens, claims or sources.
-2. **Juniors.** Give each part its own council, for example `route: "junior",
-   council: 3`. Councils seat new families first, so each part gets cross-family
-   cover for blind spots. Juniors return claims with evidence (path:line,
-   screenshot, source), not verdicts.
+2. **Juniors.** Submit one task per selected junior model for each part. A batch
+   may carry several tasks, but the chair chooses distinct exact models when
+   cross-family cover is needed; the router does not fill or diversify a
+   council. Juniors return claims with evidence (path:line, screenshot, source),
+   not verdicts.
 3. **Seniors.** Each senior works separately over a wider scope (several parts
    or the whole) and receives the subject plus the junior claims for that scope.
    It confirms, rejects or merges each claim and adds its own view.
@@ -62,11 +68,15 @@ overrule it.
 
 ## Practical limits
 
-- Free models rotate and rate-limit. Spread junior lenses across adapters rather
-  than stacking one free model, and treat `rate_limited` as a re-route signal.
-- Keep private or client data off prompt-training models: pass
-  `confidential: true` and the pools skip them.
-- A council of N reuses members once the pool's available models run out, with
-  a warning; widen the pool or accept the repeats.
+- Free OpenCode models sit last in the pools and require explicit free opt-in.
+  They do not rotate automatically. If a typed failure permits rerouting, the
+  chair chooses and records the next exact model.
+- The Rust Fabric task schema has no `confidential` field. For a CLI
+  eligibility check, run `provenant route resolve --route NAME --confidential`;
+  the resolver excludes models without `trains_on_prompts = false`. The newly
+  added Sol, Astra, Sonnet 5.5, Opus 5.5 and Gemini Flash rows remain
+  unclassified until privacy evidence is recorded.
+- A council of N is N explicit model tasks. Verify each task's resolved route;
+  do not count repeated selections as distinct family coverage.
 - Run the full hierarchy per wave (an integrated branch, a combined capture
   set), not on every small fix. A nit-only follow-up gets the chair's own read.

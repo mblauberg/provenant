@@ -1,0 +1,128 @@
+diff --git a/tools/front-door/crates/config/src/test_support.rs b/tools/front-door/crates/config/src/test_support.rs
+index c07578ee..d5002e04 100644
+--- a/tools/front-door/crates/config/src/test_support.rs
++++ b/tools/front-door/crates/config/src/test_support.rs
+@@ -15,0 +16,2 @@ pub fn assert_leaf_origins<T: Serialize>(snapshot: &ResolvedConfig<T>) {
++        // Knobs carry their own source layer rather than a leaf origin.
++        object.remove("knobs");
+diff --git a/tools/front-door/crates/config/src/tests.rs b/tools/front-door/crates/config/src/tests.rs
+index e802da2d..a1aa1567 100644
+--- a/tools/front-door/crates/config/src/tests.rs
++++ b/tools/front-door/crates/config/src/tests.rs
+@@ -132 +132,2 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
+-        ("schema_version=1\n[knobs]", "unknown_key"),
++        ("schema_version=1\n[knobs]\nnope=1", "unknown_key"),
++        ("schema_version=1\nknobs=42", "type"),
+@@ -955,0 +957,112 @@ fn empty_compiled_closed_section_rejects_unknown_keys() {
++
++fn state_roots(dir: &Path) -> Roots {
++    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
++    inputs.state_dir = Some(dir.into());
++    inputs.resolve(&Resolver).unwrap()
++}
++#[test]
++fn set_knob_is_written_atomically_and_shown_with_its_source() {
++    let dir = tempfile::tempdir().unwrap();
++    let roots = state_roots(dir.path());
++    let fs = provenant_supervisor::fs::LocalFs;
++    let path = dir.path().join("config.toml");
++    std::fs::write(
++        &path,
++        "schema_version = 1 # keep\nknobs = { \"effort.shift\" = 1 } # inline\n",
++    )
++    .unwrap();
++    edit_config(
++        &roots,
++        &fs,
++        KnobEdit::Set {
++            name: "effort.shift",
++            value: "-1",
++        },
++    )
++    .unwrap();
++    assert!(std::fs::read_to_string(&path).unwrap().contains("# inline"));
++    assert_eq!(read(&roots, &fs).unwrap().knobs["effort.shift"].value, -1);
++    edit_config(&roots, &fs, KnobEdit::Unset("effort.shift")).unwrap();
++    assert_eq!(
++        read(&roots, &fs).unwrap().knobs["effort.shift"].source,
++        KnobSource::Default
++    );
++    edit_config(&roots, &fs, KnobEdit::Profile("rigorous")).unwrap();
++    let mut rigorous = read(&roots, &fs).unwrap();
++    assert_eq!(rigorous.knobs["effort.shift"].value, 1);
++    rigorous.apply_task_class("mechanical").unwrap();
++    assert_eq!(rigorous.knobs["effort.shift"].value, 0);
++    edit_config(&roots, &fs, KnobEdit::Profile("economy")).unwrap();
++    edit_config(
++        &roots,
++        &fs,
++        KnobEdit::Set {
++            name: "lanes.max_concurrency",
++            value: "2",
++        },
++    )
++    .unwrap();
++    let text = std::fs::read_to_string(&path).unwrap();
++    assert!(text.contains("# keep"));
++    let shown = read(&roots, &fs).unwrap();
++    assert_eq!(shown.profile, Profile::Economy);
++    let knob = &shown.knobs["lanes.max_concurrency"];
++    assert_eq!(
++        (knob.value.as_i64(), knob.source),
++        (Some(2), KnobSource::Override)
++    );
++    assert_eq!(
++        shown.knobs["context.ceiling_tokens"].source,
++        KnobSource::Profile
++    );
++    edit_config(&roots, &fs, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
++    let shown = read(&roots, &fs).unwrap();
++    assert_eq!(
++        shown.knobs["lanes.max_concurrency"].source,
++        KnobSource::Profile
++    );
++}
++#[test]
++fn set_rejects_out_of_range_values_and_unknown_knobs() {
++    let dir = tempfile::tempdir().unwrap();
++    let roots = state_roots(dir.path());
++    let fs = provenant_supervisor::fs::LocalFs;
++    let set = |name, value| edit_config(&roots, &fs, KnobEdit::Set { name, value });
++    assert!(matches!(
++        set("lanes.max_concurrency", "99"),
++        Err(ConfigError::KnobValue {
++            rule: "outside_allowed_range",
++            ..
++        })
++    ));
++    match set("lanes.max_concurrenc", "2") {
++        Err(ConfigError::UnknownKnob { close, .. }) => {
++            assert_eq!(close, ["lanes.max_concurrency"]);
++        }
++        other => panic!("expected unknown knob, got {other:?}"),
++    }
++    assert!(!dir.path().join("config.toml").exists());
++}
++#[test]
++fn set_creates_a_missing_private_state_directory() {
++    use std::os::unix::fs::PermissionsExt;
++    let dir = tempfile::tempdir().unwrap();
++    let state = dir.path().join("state");
++    let roots = state_roots(&state);
++    edit_config(
++        &roots,
++        &provenant_supervisor::fs::LocalFs,
++        KnobEdit::Profile("rigorous"),
++    )
++    .unwrap();
++    assert_eq!(
++        std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
++        0o700
++    );
++    assert_eq!(
++        read(&roots, &provenant_supervisor::fs::LocalFs)
++            .unwrap()
++            .profile,
++        Profile::Rigorous
++    );
++}

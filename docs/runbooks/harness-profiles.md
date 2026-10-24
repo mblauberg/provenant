@@ -15,21 +15,33 @@ one run with `provenant dispatch --knob NAME=VALUE`.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values.
 
-The registry marks six knobs `wired`: `lanes.silence_seconds`,
-`lanes.max_concurrency`, `review.extra_reviewers`, `review.cross_family`,
-`review.rereview_scope` and `review.polish`. The other eight are advisory and
-do not alter Rust runtime behaviour. Use `config show` to see each knob's
-status and source. Install registrations with `provenant install --dry-run`
+The registry marks these knobs `wired`: `chair.auto_switch`,
+`chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
+`lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
+`review.cross_family`, `review.rereview_scope` and `review.polish`. The other
+eight are advisory and do not alter Rust runtime behaviour. Use `config show`
+to see each knob's status and source. Install registrations with
+`provenant install --dry-run`
 before applying an authorised install.
+
+## Routing pools
+
+Routing changes are stored per state root and apply on the next route command.
+To change routing, run `provenant route set` or `provenant route pacing`.
+Inspect effective weights, pacing factors and readiness with
+`provenant route list --pool NAME`. Remove a member with
+`provenant route remove POOL MODEL`; restore the bundled pool with
+`provenant route reset POOL`.
 
 ## Chair account switching
 
 Claude chair switching is opt-in and has no daemon. Register each account with
-an explicit `identity_dir` in `accounts.claude` in
-`$AGENT_FABRIC_INSTANCE_ROOT/config/telemetry.json` (default
-`~/.agents/config/telemetry.json`). Each directory must already exist and be
-signed in separately. Labels and directories must be distinct, with no nested
-account directories. The current `CLAUDE_CONFIG_DIR` must match a registration;
+`provenant accounts register <label> --adapter claude --directory <dir>`.
+Registrations live in the selected state directory's `config.toml`, alongside
+optional quota metadata such as `--plan`, `--priority` and `--billing-anchor`.
+Each directory must already exist and be signed in separately. Labels and
+directories must be distinct, with no nested account directories. The current
+`CLAUDE_CONFIG_DIR` must match a registration;
 when unset, `~/.claude` may be registered as the source only. Targets must use
 fixed identities such as `~/.claude-<label>`; the rotating `~/.claude` directory
 is refused as a target. Credentials and settings are never copied between directories.

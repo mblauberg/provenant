@@ -19,6 +19,7 @@ use thiserror::Error;
 
 #[derive(Debug, Args)]
 pub struct Filter {
+    /// Restrict to this adapter
     #[arg(long)]
     pub adapter: Option<String>,
 }
@@ -38,12 +39,16 @@ pub enum Power {
 }
 #[derive(Debug, Subcommand)]
 pub enum Quota {
+    /// Show recorded provider quota
     Show(Filter),
+    /// Refresh quota and record a pacing tick
     Tick {
         #[command(flatten)]
         adapter: Filter,
+        /// What caused this tick
         #[arg(long, value_enum, default_value = "manual")]
         trigger: Trigger,
+        /// Current power state
         #[arg(long, value_enum, default_value = "ac")]
         power: Power,
     },
@@ -69,7 +74,7 @@ impl From<Power> for schedule::Power {
     }
 }
 #[derive(Debug, Error)]
-enum EdgeError {
+pub(crate) enum EdgeError {
     #[error(transparent)]
     Quota(#[from] QuotaError),
     #[error(transparent)]
@@ -201,6 +206,81 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
     });
     Ok(records)
 }
+
+/// Read validated quota state without creating directories or refreshing providers.
+pub(crate) fn read_cache(roots: &Roots) -> Result<Vec<AccountRecord>, EdgeError> {
+    let root = match Directory::open_anchor(roots.state.as_path()) {
+        Ok(root) => root,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let directory = match root.open_verified_directory(OsStr::new("quota")) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    check_private(&root)?;
+    read_records(&directory)
+}
+
+/// Persist only typed quota scope from a provider event; its message stays in
+/// the redacted attempt reason and is never copied into quota state.
+pub(crate) fn persist_provider_refusal(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    pool: Option<&str>,
+    now_unix_seconds: i64,
+) -> Result<(), EdgeError> {
+    let Some(pool) = pool else {
+        return Ok(());
+    };
+    let adapter = route
+        .provider
+        .as_deref()
+        .ok_or(QuotaError::Invalid("provider refusal route"))?;
+    let model = route
+        .model
+        .as_deref()
+        .ok_or(QuotaError::Invalid("provider refusal route"))?;
+    let account = AccountScope {
+        adapter: adapter.to_owned(),
+        account_key: route
+            .account_key
+            .clone()
+            .ok_or(QuotaError::Invalid("provider refusal account"))?,
+        label: route
+            .account_label
+            .clone()
+            .ok_or(QuotaError::Invalid("provider refusal account label"))?,
+    };
+    account.validate()?;
+
+    let root = private(state_root)?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+    let _lock = directory.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|record| {
+            record.account.adapter == account.adapter
+                && record.account.account_key == account.account_key
+        })
+        .cloned();
+    let account = current.as_ref().map_or(&account, |record| &record.account);
+    let intent =
+        provenant_quota::record_refusal(current.as_ref(), account, model, pool, now_unix_seconds)?;
+    write_intent(&directory, &intent, &mut records)
+}
+
 fn write_intent(
     dir: &Directory,
     intent: &UpdateIntent,
@@ -338,18 +418,7 @@ fn execute(
         adapter: filter.adapter.clone(),
     };
     let Some(tick) = tick else {
-        let mut records = match Directory::open_anchor(roots.state.as_path()) {
-            Ok(root) => {
-                check_private(&root)?;
-                match root.open_verified_directory(OsStr::new("quota")) {
-                    Ok(dir) => read_records(&dir)?,
-                    Err(e) if e.is_not_found() => Vec::new(),
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Err(e) if e.is_not_found() => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
+        let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
         return Ok(schedule::report(
             &records,
@@ -362,19 +431,25 @@ fn execute(
     let root = private(roots.state.as_path())?;
     let dir = child(&root, OsStr::new("quota"))?;
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = dir.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
-    let mut records = read_records(&dir)?;
-    let plan = schedule::plan_tick_with_settings(&records, &detected, &tick, now, &settings)?;
-    for drop in &plan.drops {
-        write_intent(&dir, drop, &mut records)?;
-    }
+    let lock = || -> Result<_, EdgeError> {
+        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+        Ok(dir.lock(
+            OsStr::new("quota.lock"),
+            LockMode::Exclusive,
+            budget,
+            &cancel,
+            &clock,
+        )?)
+    };
+    let plan = {
+        let _lock = lock()?;
+        let mut records = read_records(&dir)?;
+        let plan = schedule::plan_tick_with_settings(&records, &detected, &tick, now, &settings)?;
+        for drop in &plan.drops {
+            write_intent(&dir, drop, &mut records)?;
+        }
+        plan
+    };
     for account in plan.batches.iter().flatten() {
         let at = clock
             .wall_now()
@@ -384,22 +459,33 @@ fn execute(
         if at >= plan.deadline_unix_seconds - 1 {
             break;
         }
-        let current = records
-            .iter()
-            .find(|r| {
-                r.account.adapter == account.adapter && r.account.account_key == account.account_key
-            })
-            .cloned();
         let token = format!("quota-{}-{at}", std::process::id());
-        let intent = schedule::reserve(
-            current.as_ref(),
-            account,
-            at,
-            &token,
-            tick.trigger,
-            tick.power,
-        )?;
-        write_intent(&dir, &intent, &mut records)?;
+        let current = {
+            let _lock = lock()?;
+            let mut records = read_records(&dir)?;
+            let current = records
+                .iter()
+                .find(|r| {
+                    r.account.adapter == account.adapter
+                        && r.account.account_key == account.account_key
+                })
+                .cloned();
+            let intent = match schedule::reserve(
+                current.as_ref(),
+                account,
+                at,
+                &token,
+                tick.trigger,
+                tick.power,
+            ) {
+                Ok(intent) => intent,
+                Err(QuotaError::Conflict) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            write_intent(&dir, &intent, &mut records)?;
+            current
+        };
+        // The durable claim owns this probe; never hold quota.lock across host I/O.
         let source = registry
             .iter()
             .filter_map(|r| r.quota_source)
@@ -429,15 +515,22 @@ fn execute(
             .map_err(|_| EdgeError::Time)?
             .as_timestamp()
             .as_second();
-        let reserved = records
-            .iter()
-            .find(|r| r.account == *account)
-            .ok_or(QuotaError::Conflict)?;
-        if finished < at + schedule::TICK_BUDGET_SECONDS {
-            let complete = schedule::complete(reserved, &token, finished, outcome, None)?;
-            write_intent(&dir, &complete, &mut records)?;
+        let _lock = lock()?;
+        let mut records = read_records(&dir)?;
+        if finished < at + schedule::TICK_BUDGET_SECONDS
+            && let Some(reserved) = records.iter().find(|r| {
+                r.account.adapter == account.adapter && r.account.account_key == account.account_key
+            })
+        {
+            match schedule::complete(reserved, &token, finished, outcome, None) {
+                Ok(complete) => write_intent(&dir, &complete, &mut records)?,
+                Err(QuotaError::Conflict) => {} // A newer claim or observation owns the record.
+                Err(error) => return Err(error.into()),
+            }
         }
     }
+    let _lock = lock()?;
+    let mut records = read_records(&dir)?;
     add_configured(&mut records, &configured);
     let now = clock
         .wall_now()

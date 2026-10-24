@@ -10,7 +10,6 @@ publish = false
 jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-provenant-core = { workspace = true }
 provenant-config = { workspace = true }
 provenant-records = { workspace = true }
 thiserror = { workspace = true }

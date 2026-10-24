@@ -11,7 +11,8 @@ current product does. A qualifying activation recording must establish that
 stderr/exit/answer combination and the finalisation input before Agy activation;
 no timeout inference is implemented from exit status alone.
 
-`routing` resolves explicit model choices and named routes; `providers` prepares
+`routing` resolves exact model choices, named routes and ordered catalogue
+pools; `providers` prepares
 CLI invocations and interprets provider evidence; `quota` schedules current
 allowance reads and supplies admission advice. Run owns the registry, atomic
 admission/operation insertion, attempts, retries and publication. Supervisor owns
@@ -30,9 +31,9 @@ Transcripts and run recordings are research inputs only, never runtime state.
 
 | Evidence | Decision |
 | --- | --- |
-| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council is a caller-supplied list of distinct exact models, expanded into ordinary tasks by run/Fabric; no council selector or filling algorithm. |
-| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`); no tier aliases. Named routes are one small TOML table. |
-| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Drop pools, weights, rotation, the selection store, `--commit-selection`, preferences and inferred class/size policy. Keep pure `route list\|resolve`. |
+| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, legacy pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council remains caller-side: submit distinct exact model tasks through run/Fabric and synthesise in the chair; no council selector or filling algorithm. |
+| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`). Add named catalogue pools `junior`, `senior`, `principal`, `writing` and `design`; they are exact route names, not adapter aliases or synonyms. Personal named routes still select one exact model. |
+| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Keep catalogue pools with weighted, paced selection seeded by the operation (user decision, 25 October 2026; see Resolution). Drop rotating pools, the selection store, `--commit-selection`, preferences and inferred class/size routing. Keep pure `route list\|resolve`; pool choices use `--route NAME`, with no separate `--pool` or `--council` flag. |
 | Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
 | Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
 | Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
@@ -44,17 +45,27 @@ commands and OpenCode's speculative spend estimator. Preserve current quota
 windows/reset advice and refusal backoff, without cooldown mutation commands.
 Provider quota pools are measured allowance scopes, not routing pools.
 No old transcript quota/identity reads, general home mirroring or Python shim
-survives. Confinement retains only a bounded safe Agy home recipe.
+survives. COMPOSE-B permits only the bounded post-exit identity projection
+from the current attempt's private Codex rollout, as execution-run specifies.
+Confinement retains only a bounded safe Agy home recipe.
 
 ## Resolution and command contract
 
 `RouteRequest` has exactly one `Model(ADAPTER/ID)` or `NamedRoute(NAME)`,
 optional effort and `Fallback::None | Models(BoundedModels<2>)`, default none.
-IDs retain the full provider/model path after the first adapter separator.
-A route name expands to one exact model and optional effort from TOML; it does
-not choose a tier, pool, account or native seat. No inferred adapter, model
-upgrade or hidden downgrade. An explicit unknown ID remains unverified and can
-run only if activation, disclosure and confinement are independently established.
+IDs retain the full provider/model path after the first adapter separator. A
+named route in the user config expands to one exact model and optional effort;
+a pool route draws among ready members that allow the effective effort, by
+weight times the provider's pacing factor (`pace` clamps quota headroom over
+remaining window to 0.25..2.0; `spend` and `max` stay at 1.0), with the RNG
+seeded from the operation ID and task index so retries pick the same model.
+Weight-0 members are fallback only, in list order. The receipt records each
+candidate's weight, factor, readiness, the roll and the pick. `config.toml`
+`[routing]` replaces bundled pools; `provenant route set|remove|reset|pacing`
+edit it. When none is ready it reports the first eligible candidate with its
+readiness blocker. No inferred adapter, model upgrade or hidden downgrade. An
+explicit unknown ID remains unverified and can run only if activation,
+disclosure and confinement are independently established.
 
 Resolve once against immutable catalogue, provider availability and quota
 snapshots. Validate activation/executable and access, filter confidentiality and
@@ -156,34 +167,69 @@ the whole config directory. These narrower grants and private Codex state follow
 the execution/confinement design over #1114's broader directory wording.
 Lane rows expose the applied account, or `unknown` when none was applied.
 
-Current acceptance boundary: production `cli::run::Registry::prepare` still
-refuses launches at the existing unwired launch-specification seam. The typed
-registration/preparation APIs and concurrent Codex stubs are covered, but durable
-registration discovery, launch-time Codex identity revalidation and end-to-end
-production placement are not complete. The concurrency test asserts generated
-grants and uses unconfined stubs; it does not establish OS-enforced isolation.
-#1114 stays open until that composition work and its confinement acceptance run.
+### COMPOSE-B cut-over decisions (24 October 2026)
 
-#1062 also remains open. Static inspection of the official Agy 1.4.7 macOS
-binary and matching call sites in the installed executable found Keychain
-service `gemini` and product-constant account arguments (`antigravity`, with a
-`jetski-cli` alternative). Those attributes do not establish a signed-in Google
-identity. The normal backend's complete caller chain was not established; no
-live Keychain or secret was read. A metadata-derived per-user fingerprint has
-therefore not been implemented. Existing `google-<12 hex>` log attribution
-remains in quota-live; a supported non-secret provider identity source is needed
-before closing the cooldown/routing work. Evidence: `LoadStoredToken` at
-`0x101aaf580`, `NewCLITokenStorage` at `0x102692520`, and `Daemon.SeedToken` at
-`0x102c2e400` in the inspected darwin-arm64 build. The service string is at file
-offset `0x33aa5e5`. These are static executable observations, not a claim that
-runtime account switching was tested.
+Chair-authorised implementation route: `codex/gpt-6.1-sol@xhigh` via Fabric.
+These decisions supersede issue wording where it asks for broader directory
+access or an inferred Agy identity.
+
+Account registrations live in `S/config.toml`, under
+`[domains.accounts.entries.<adapter>-<label>]`, with adapter, display label,
+provider-detected key and canonical directory. A Claude registration also records
+`org_fingerprint`, a hash of the `orgId` from `auth status`; the key stays
+email-only. Revalidation refuses with "changed identity; re-register it" when
+the stored and probed organisations are both present and differ. A legacy
+record gets the probed organisation on its next successful validation (trust
+on first use), and an absent probe organisation never refuses. `accounts register LABEL
+--adapter claude|codex --directory PATH` validates sign-in before saving;
+`accounts list` shows only these non-secret records. Claude labels bind exactly
+to `~/.claude-<label>`; rotating `~/.claude` is never a fixed registration.
+Codex discovers its effective `CODEX_HOME` (otherwise `~/.codex`) when no Codex
+registration exists. Preparation revalidates the selected registration and
+sets the lane's provider environment. Lane rows show the applied account label.
+Claude receives only its own transcript writes and an in-memory host-loaded
+token. Codex keeps an attempt-private home linked only to the selected auth file.
+These narrower grants govern #1114 over its whole-directory wording.
+
+Dispatch builds availability from the real executable/version and revalidated
+account, and supplies the validated task plan/disclosure reference, host ID and
+quota cache to resolution. Catalogue-backed exact model controls need no
+invented model-bearing preflight event; unlisted models still need a current
+provider observation. Applied argv and observed answering identity remain
+separate. Preview remains read-only and does not manufacture a task grant.
+Codex Luna `low` is the only effort control in the bundled route catalogue with
+an exact accepted invocation recording (`tools/front-door/tests/fixtures/providers/codex/recordings.json`).
+Claude recordings establish Haiku model identity but not an effort control;
+the previous Sonnet `low` smoke note has no matching invocation recording.
+Other requested efforts stay unset until their exact controls are recorded.
+Only OpenCode `*-free` models are marked free; Agy Gemini Flash is a paid
+subscription model. No fast or priority service is enabled.
+
+Claude's validated registration is durable credential authority. Each attempt
+records actor (dispatch run ID), exact `.credentials.json` or Keychain service
+and account, purpose `lane dispatch`, and the attempt deadline before the host
+loader runs. The service suffix is Claude Code's own eight-hex directory hash.
+The loader checks source and expiry before reads and refresh, rejects linked
+credential files, calls `refresh_if_expiring` on the host, and rechecks account
+identity. No secret is logged, persisted in the authority record or copied
+between identities. Login failures name the account and the sign-in command.
+
+#1062 closes as an unsupported-source decision, not an account detector.
+Agy's provider adapter has no signed-in identity source. The prior official
+1.4.7 darwin-arm64 static audit found Keychain service `gemini` and
+product-constant account attributes (`antigravity`, alternative `jetski-cli`),
+which cannot distinguish users. Audit locations: `LoadStoredToken`
+`0x101aaf580`, `NewCLITokenStorage` `0x102692520`, `Daemon.SeedToken`
+`0x102c2e400`; service string file offset `0x33aa5e5`. No live Keychain secret
+was read for that audit. Log-derived `google-<12 hex>` attribution is not a
+production dispatch identity. Agy stays unavailable rather than inheriting a
+shared `default` cooldown when a user switches accounts.
 
 Stored snapshots are typed, versioned serde records. Edge-built
-`VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
-`Serialize` only. Persist separate `AvailabilityRecord`, `FamilyEvidenceRecord`
-and run-owned `PermitRecord` projections (`Serialize, Deserialize`), never nested
-fact types. Permit records bind operation/attempt, quota snapshot revision and
-expiry. On recovery the owning edge validates stored evidence/revision/expiry
+`VerifiedLineage` and `ReviewAvailability` facts implement
+`Serialize` only. Persist separate `AvailabilityRecord` and
+`FamilyEvidenceRecord` projections (`Serialize, Deserialize`), never nested
+fact types. On recovery the owning edge validates stored evidence/revision/expiry
 before reconstructing a fact; stored bytes cannot assert fresh availability or
 admission. Records owns shared value types and bounded codecs; domain crates
 own validation. Provider envelopes may have extra fields but required
@@ -210,11 +256,15 @@ OpenCode `provider.quota` decodes its structured response body (JSON or a JSON
 string); `FreeUsageLimitError` supplies the shared `opencode-free` pool and its
 provider message, without searching stderr. The admission rule matches this
 pool across models only for the same account identity and a supplied pool
-binding. Production launch still needs to persist these events and supply those
-bindings. The quota tick's macOS Claude refresh calls the shared provider helper
+binding. Production terminal decoding persists these events under the applied account
+key, and dispatch admission supplies catalogue-backed free-pool bindings. A
+shared refusal blocks another free model on that same key until reset or the
+one-hour backoff; the repair hint names free-tier exhaustion. The private OpenCode profile has no stored login: its explicit `keyless`
+allowance is scoped to this host, rather than attributed to a guessed user.
+OpenCode remains disabled until its separate activation requirements are met. The quota tick's macOS Claude refresh calls the shared provider helper
 from the binary composition edge; quota itself cannot import providers because
-providers already depends on quota. The credential-file path on other platforms
-remains separate because that helper currently reads Keychain only.
+providers already depends on quota. The dispatch loader selects the registered directory
+credential file when present, otherwise its exact macOS Keychain item.
 
 Tick TTLs (timer/panel seconds): Claude 300/120, Codex 900/300, Cursor 1800/600,
 Agy 1200/900. Manual has a 30 s floor and respects backoff. Battery doubles
@@ -232,7 +282,7 @@ below abbreviate `Result<T, ProviderError>`; failures are always typed.
 | Owner / consumer | Contract |
 | --- | --- |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
-| quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account readiness only. Run stores its `PermitRecord` projection and consumes the validated permit for the exact attempt with its own resource reservation; no second admission ledger. |
+| quota / run | `Admission::check(&ResolvedRoute) -> Result<(), QuotaError>`; provider/account readiness and persisted refusals only. Run keeps its own resource reservation; no second admission ledger and no quota permit. |
 | providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
 | providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
 | routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |
@@ -270,8 +320,9 @@ decoder state, in memory.
 Persist only a redacted launch summary. Bound argv prompts to 64 KiB; prompt
 retention is run's confined artifact contract. `Continuation` binds exact
 adapter/session/account/host/model and sent controls; reject incompatible grants
-or identity changes. Confinement freezes Codex clean/inherited policy and denies
-unconfined hooks/MCP/plugins for read-only execution or fails closed. It supplies
+or identity changes. Confinement freezes Codex clean/inherited policy. Every enabled lane gets
+Provenant-only MCP configuration and the supported Provenant hooks, including
+junior lanes. User hook and MCP configuration is excluded. It supplies
 Agy's private home recipe and conflict-safe copy-back; providers adds no syscall.
 
 Observation decoders use documented event positions, never recursively search
@@ -325,21 +376,183 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL`, plus `CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` for read-only work; read-only `PATH=~/.cargo/bin:/usr/bin:/bin`, writer `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only, plus `CLAUDE_CONFIG_DIR` when an account is selected; the access token is read and bound to that selected identity by the host. No shell tool, no keychain access, no exec beyond the CLI. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={...} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` plus dispatch lineage; `PATH=~/.cargo/bin:/usr/bin:/bin`. `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` plus dispatch lineage; default config directory, with the access token read by the host and delivered through a pipe, and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
 
-Read-only Codex recipes grant read and exec of `~/.cargo/bin` and
+### Lane MCP, hooks and nesting (2026-10-24)
+
+User decision: every lane can use Fabric and utility models, at every tier.
+The installer owns the stdio MCP generator; adapters reuse it with the selected
+binary and state root. Its current entry name is `fabric` (the executable is
+`provenant`). Claude writes two private JSON files in attempt scratch and loads
+only those settings and MCP servers. Its generated hooks use the installer's
+shared registrations: pre-tool-use, pre-compact and compact. The current Rust
+catalogue has no utility-output handler; no obsolete hook is fabricated.
+Safe mode is removed because it disables MCP and hooks; slash commands remain
+disabled. Direct MCP calls do not need slash-command or skill discovery; lanes
+can read applicable skill instructions supplied in their workspace or brief. Codex keeps its clean private home and injects the same MCP entry with
+`-c`; no Codex hooks are currently registered by the installer. OpenCode and Agy
+remain disabled in `activation.json`, so their launch controls are unchanged.
+
+The profile grants execution/read access to the exact Provenant binary. Shared
+Fabric writes are exact `fabric/fabric.sqlite3` and its WAL/SHM/journal paths,
+`fabric/locks/` for landing locks, and the exact host binding lock. Project
+bindings, config, host ID and routing observations are read-only; a lane looks
+up its parent's existing project binding rather than allocating another.
+Git is selected on the host through the shared resolver (`PROVENANT_GIT`
+override, otherwise the fixed list preferring Homebrew), canonicalised before
+preparation and pinned as `PROVENANT_GIT` in both provider and MCP environments.
+Every lane grants read and execution access to exactly that Git path. Fabric
+startup and hooks use the same resolver; they do not substitute Apple Git.
+Claude also gets its workflow checkpoint state and exact shell hook helper.
+
+Each attempt gets a dedicated child Run store at
+`RUN_STATE/children/<AttemptId>/`. The launch layer creates this directory and
+grants its subtree, never `STATE/runs/` or the parent Run database. The MCP
+keeps the original `--state-dir` for shared Fabric identity/config, while
+`PROVENANT_RUN_STATE_DIR` selects this separate Run database and `runs/` tree
+for both CLI Run commands and the MCP Run owner. Utility Git/results scratch
+also lives there. Descendants allocate another `children/<AttemptId>/` beneath
+their own Run state. Queries and controls from that MCP address its child
+store; host recovery selects it with `PROVENANT_RUN_STATE_DIR` while keeping the
+original `--state-dir` for identity/config.
+Parent custody/quarantine and other lanes' Run stores receive no write grant.
+The macOS state-write overlap check remains unchanged.
+Provider setup runs on the host, so lanes receive no child-setup symlink grant.
+Codex setup still links the registered `auth.json` on the host, preserving one
+source of truth for rotating credentials.
+
+The parent guardian hosts a child-launch worker through CLI's `HostHolder`
+composition. Fabric's `RunOwner` remains an in-process facade: it seals queued
+submissions in the child store and observes their state. The worker owns its
+SQLite connection and consumes that store without introducing a daemon or a
+second IPC transport. It uses the original config root, selected cwd, provider
+executables and Git from the host-only custody handoff. These inputs and all
+credential resolution stay outside the submitting lane. Each child receives
+its own confinement plan, provider credential grants and guardian custody.
+Child storage remains writable by the submitting lane and is not independent
+evidence against that lane. Parent custody, quarantine and terminal publication
+stay under the parent Run root.
+
+Run supplies the allocated attempt ID and depth before provider preparation.
+The adapter writes `PROVENANT_LANE_DEPTH` (root lanes are 1),
+`PROVENANT_PARENT_ATTEMPT_ID` and `PROVENANT_RUN_STATE_DIR` into both the provider
+environment and the generated MCP entry's explicit environment. MCP setup also
+pins `HOME` and `PROVENANT_ROOT`; lineage does not depend on the provider
+forwarding arbitrary environment variables. The shared CLI/Fabric submission
+path refuses a child above `lanes.max_depth`, default 2, before creating its
+records. When `PROVENANT_RUN_STATE_DIR` is set, its path must consist of
+`children/<AttemptId>` pairs below the original state root. The pair count and
+last ID determine the parent depth and attempt; missing or disagreeing
+environment values refuse submission. A lane may deepen its granted child path
+but cannot reset its depth by stripping those variables.
+Nested parent metadata remains separate from continuation ancestry and
+grants no cancellation authority. This is a recursion limit, not an authority
+boundary.
+
+The MCP `fabric_submit` path seals queued child records without preparing or
+launching providers. The host worker rechecks the request's parent AttemptId and
+depth against its own parent run's sealed request and the current
+`lanes.max_depth`, and bounds each child task by the parent attempt's sealed
+task: a read-only parent cannot propose a writer, and child delivery needs the
+parent's own delivery grant for the same remote and branch, with a pull request
+only when the parent may open one. Invalid proposals terminate as rejected
+before provider preparation. Environment and path checks provide early feedback but do not
+supply host launch authority.
+
+The guardian stops and joins its worker on observed provider exit, before
+cleanup, with a final bounded scan of queued submissions. Children already
+handed off retain independent custody. Host-launched guardians are siblings of
+the parent provider, so they do not enter its provider-descendant sparing
+registry. Explicit parent cancellation,
+wall deadline or supervisor signal sends cooperative cancel requests to only
+those child scopes accepted by this host worker. Normal parent completion
+leaves their independent custody intact. Worker failure records a guardian
+warning and cannot construct a provider stop reason. A provider-written parent
+ID or child journal confers no cancellation authority.
+
+The macOS fixture runs the configured MCP inside the parent's compiled profile
+and requires a launched fake Codex child and a marker written by that child,
+for read-only and writer parents from both Codex and Claude. Writer parents
+submit a writer child on another registered worktree. Registration validation
+and writer custody use the original host state root; the lane only resolves
+its requested project/worktree paths and queues the proposal. A held reader
+child also checks explicit parent cancellation after provider launch. Synthetic
+state-write evidence is confined to fixture builds. Live provider execution
+remains subject to the activation gates below; the fixture does not establish
+live-provider acceptance. Host recovery selects the child store explicitly.
+
+`STAGING` is `ATTEMPT/scratch/candidate-N/` for writers and
+`ATTEMPT/tmp/candidate-N/` for read-only tasks, following the attempt's temporary
+settlement policy. Generated mode-0600 JSON files stay there; private provider
+setup stays in `ATTEMPT/provider-state/candidate-N/`. Each explicit
+fallback has its own numbered subdirectory, so partially applied setup cannot
+make the next candidate fail on an existing file. Existing entries are never
+replaced. Behaviour tests drive CLI preparation for read-only and writer tasks,
+including generated Claude files, poisoned first-candidate setup and a fake
+provider that clears inherited MCP environment. Required macOS CI compiles the
+real plan/profile with synthetic fake-provider state-write evidence and probes
+custody/quarantine denial and host-supervised child execution below the depth
+limit.
+Setup opens existing shared ancestors before attempting creation, so it does
+not request writes to read-only anchors. Claude transcript setup is restricted
+to its existing `.claude` config subtree, separately from Run state; generated
+files remain restricted to staging. That synthetic evidence does not activate
+Codex or establish live nested-provider execution acceptance.
+
+The CLI production `Registry::prepare` now calls `provider::prepare`, and Run
+passes attempt scratch and provider-state paths into that preparation for both
+read-only and writer launches. Host-side Codex recordings for `read_only` and
+`worktree_write` observe `state_write: allowed` for Fabric state, so Codex
+compiles its profile under the same observation gate. The earlier blanket
+no-customisation launch policy is superseded by this explicit user decision.
+
+Codex's own package may live under `~/.codex` (standalone install: the
+`current` link resolves to `~/.codex/packages/standalone/releases/<release>`).
+Confinement carves exactly that resolved release directory, and paths beneath
+it, out of the credential-root refusal, for read and exec grants only
+(`validate_read_exec_grant`). `~/.codex` itself, `packages`, the `current`
+link, `auth.json`, config, sessions, state and logs stay refused, as does any
+write, scratch or protected-root grant there.
+
+Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
 `~/.rustup/toolchains`, plus read of `~/.rustup/settings.toml` and
-`~/.cargo/registry`. Setup creates a private `CARGO_HOME` inside the attempt's
-`tmp/`, linking only its `registry` to the existing cache. `CARGO_TARGET_DIR`
-and executable test output stay inside that private temporary directory.
+`~/.cargo/registry`. Read-only setup creates a private `CARGO_HOME` inside the
+attempt's `tmp/`, linking only its `registry` to the existing cache.
+Read-only `CARGO_TARGET_DIR` and executable test output stay inside that private
+temporary directory.
 `RUSTUP_HOME` selects the existing toolchains. No read or write of
 `~/.cargo/credentials*`, no whole-Cargo-home grant, and no toolchain writes are
 added. These recipes require the named toolchain/cache directories to exist;
-missing required anchors refuse prelaunch.
+missing required anchors refuse prelaunch. Codex also pins
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so shell Git commands
+can use the repository's readable config without loading the user's global
+hooks, includes or credential helpers or failing on a denied global-config read.
+
+Writer `CARGO_TARGET_DIR` selects `target/` inside the exact cache bound by
+`WorktreeWriteAuthority`. The host prepares the cache under writer custody
+before anchoring; Cargo creates its children after launch. Writer `CARGO_HOME`
+is `cargo-home/` in attempt scratch, as for read-only lanes, with only its
+`registry` linked to the user's existing cache, so offline resolution finds
+crates without any credential or config grant. Build output may execute within
+the granted cache, and host Cargo/rustup configuration and toolchains remain
+immutable. The lane's working directory (the worktree, or a read-only lane's read root)
+also gains exec, so repository scripts such as a Cargo rustc wrapper run
+directly. Children inherit the profile, so this widens no read, write or
+credential access. Writers also get exact write access to the linked worktree's
+private `COMMIT_EDITMSG`, `AUTO_MERGE`, `AUTO_MERGE.lock`, `MERGE_HEAD`,
+`MERGE_MSG`, `MERGE_MODE`, `MERGE_RR` (and lock), `ORIG_HEAD` and `ORIG_HEAD.lock`, so `git commit` and a
+local `git merge` complete; the common `.git` stays read-only apart from the
+listed ref grants and the exact `packed-refs.lock` that any ref deletion takes
+(`packed-refs` itself stays read-only, so the lock can never replace it), so
+fetches stay host-side. When a Homebrew prefix
+(`/opt/homebrew`, else `/usr/local`) has `bin/node`, shell-capable lanes also
+read and exec its `bin`, `Cellar`, `opt` and `lib`, and its `bin` ends `PATH`;
+the prefix's `etc/` and `var/` stay unreadable and nothing under it is
+writable.
 
 OpenCode's discovery recipe grants literal directory reads of `.agents`,
 `.claude` and `.codex` along cwd ancestry. These reads never grant their child
@@ -379,7 +592,8 @@ macOS 27.0.1 arm64, 2026-10-24):
   preferences, trust, DNS and directory services, `/dev` nodes, zoneinfo).
   Secret and protected denials still override it.
 - Exec roots grant exec only, never reads. Readable install files come from
-  the CLI's own package (`package_root`: the parent of its `bin/`); a shared
+  the CLI's own package (`package_root`: the parent of its `bin/`, or the `bin/`
+  itself under a hidden home tree such as `~/.cargo` or `~/.local`); a shared
   prefix such as `/opt/homebrew` or `/usr/local` is refused, so its `etc/` and
   `var/` stay unreadable.
 - Codex: refreshing its token rewrites `~/.codex/auth.json` in place through
@@ -396,7 +610,9 @@ macOS 27.0.1 arm64, 2026-10-24):
   directory reads that service with its path-digest suffix and sets
   `CLAUDE_CONFIG_DIR`, so accounts never cross). Stdout is captured in memory
   and never logged or stored; only `accessToken` and `expiresAt` are kept, and
-  the token is passed as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15
+  the token is passed through an inherited pipe named by
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. No token value enters the child's
+  start environment. If it expires within 15
   minutes the host first runs the CLI once outside the sandbox (`claude -p x
   --model provenant-refresh-probe --max-turns 1`: the CLI refreshes its stored
   token, then the API rejects the model, so no usage is spent) and reads
@@ -407,10 +623,10 @@ macOS 27.0.1 arm64, 2026-10-24):
   skips the keychain) in an empty scratch directory. A probe with a
   `SessionStart` hook in the working directory's `.claude/settings.json` fired
   without these flags and did not fire with them. The model still gets no
-  shell, only file tools.
+  shell, but lanes now receive the Provenant MCP and hooks described above.
   `~/.claude.json` is not readable (it can hold MCP secrets and the launch
-  does not need it). The only writable state is this session's transcript
-  under `~/.claude/projects`.
+  does not need it). Transcript writes stay under this session in `~/.claude/projects`;
+  Provenant also receives the bounded state grants described above.
 - Expired Claude sign-in (#1260): the sandbox never refreshes or writes the
   keychain; the host refreshes first. Not reproduced on 2026-10-24 (the token
   was valid). A token the API still rejects decodes as `authentication_failed`,
@@ -447,43 +663,129 @@ hooks/extensions/skills/plans/ai-tracking, and shared npm state. Disabled
 adapters refuse before returning grants; the recording feature exercises the
 prepared OpenCode recipe without enabling it. Agy's private-home test also
 proves controls are neither seeded nor copied back. These are policy tests,
-not new live smoke rows; Agy/Cursor activation and the outstanding #927 live
-rows remain unverified. Kiro is retired.
+not new live smoke rows; Agy/Cursor activation and their live rows move to
+#1471. The production Codex writer path passes the narrowed
+provider profile to confinement compilation. A CLI-dispatch integration fixture
+probes the host config/hook/extension/npm write denials and provider-state
+symlink denial through that path; this is a fake-provider confinement test,
+not a new live provider smoke row. The live rows for the enabled adapters are
+recorded: on 2026-10-25 a Claude writer lane ran Git (including a two-parent
+merge), node and npm under the narrowed grants, and Codex writer lanes run
+daily under them. Agy and Cursor stay refused until #1471.
+Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
+installation, so granting that shim alone does not make shell Git work.
+Host selection now prefers package-manager Git, then the real CLT executable
+at `/Library/Developer/CommandLineTools/usr/bin/git`, before the system
+fallback. Each Codex/Claude preparation creates `scratch/bin/git` for the
+host-selected canonical executable and prepends that directory to `PATH`;
+`PROVENANT_GIT` pins MCP and hook Git independently. For Claude shell lanes it
+is a host-written POSIX sh wrapper (mode 0700) that sets `GIT_CONFIG_GLOBAL=
+/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, then execs the selected Git, because
+Claude's `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` removes `GIT_CONFIG_GLOBAL` from
+Bash subprocesses and the sandbox denies `~/.gitconfig`, which aborts Git.
+`scratch/bin` is an executable subtree grant (a profile's exec roots are
+subtrees; an exact grant inside scratch would overlap the private scratch
+check); the lane could rewrite the wrapper but gains nothing a confined shell
+lacks. Other lanes keep the symlink. Existing exact
+executable/library read grants apply. No Xcode app directory is granted.
+The required macOS `lane_prepare_isolates_nested_state` case runs `git
+--version`, linked-worktree `git status --porcelain` and a real one-test
+`cargo test --lib --offline` through the compiled Claude writer profile.
+These are native runtime probes with a synthetic provider, not live #927 rows.
+Kiro is retired.
 
-Claude has a writer-shell candidate under the recorder only. It keeps the
-host-read `CLAUDE_CODE_OAUTH_TOKEN` in memory and puts `CLAUDE_CONFIG_DIR`
-inside retained private state; no credential file is written (R7 takes
-precedence over #1414's file-backed suggestion). It uses `bypassPermissions`
-with `Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, allows system
-tool execution, and explicitly denies `/usr/bin/security` and keychain IPC
-(`SecurityServer`, `securityd`, `securityd.xpc`). User keychain files have no
-read grant. The recorder requires a matching successful Bash tool result with the exact
-probe output,
-denied keychain-tool execution and denied zero-byte keychain-file opening,
-plus the existing confinement probes, for fresh and resume launches.
-Keychain IPC denial is currently a compiled policy rule only: neither the
-denied executable nor the file-open probe reaches that IPC call. Until an
-allowed-client IPC probe is implemented and recorded, the recorder marks this
-candidate ineligible for activation (`keychain_ipc_proof: false`). The shell
-can see its selected provider token in the inherited environment; no token
-scrubbing is claimed, and other credentials must remain inaccessible.
+Claude writer Bash is enabled per mode through the activation matrix's
+`shell_enabled` knob, on by live pro-account captures (CLI 2.1.310, #1455) that
+prove Bash, scrub and the CLI version. The recorder binds the token to the
+`~/.claude-pro` registration by its fingerprint. The earlier default-on decision is
+superseded by REVIEW-FIX-2: each enabled shell mode must cite its own live
+capture proving successful Bash execution, `subprocess_env_scrub: true` and
+an identified CLI version. Historical file-tool captures prove none of these.
+Recording builds can prepare the shell candidate without activating it.
+R7 takes precedence over #1414's credential-file suggestion.
 
-Claude recording requires `--account pro` and always selects the host's
-default `.claude` identity; it has no alternate-account fallback.
-Before enabling the activation matrix's `shell_enabled`, narrow Claude's
-current any-host TCP 443 rule (`claude.rs`, `provider_api`) to the required
-provider endpoints, or remove `CLAUDE_CODE_OAUTH_TOKEN` from the shell's
-environment. The current combination lets shell commands send that token to
-any HTTPS host. This is an activation prerequisite alongside a chair-approved
-pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
-both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
-any shell activation; no old file-edit capture enables Bash. The pro quota
+The host delivers the selected OAuth token through a dedicated pipe and sets
+only `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` to its read descriptor number.
+`CLAUDE_CODE_OAUTH_TOKEN` is absent from the complete child environment. The
+supervisor bounds the pipe input to 512 bytes, closes the write end before
+spawn, inherits only the read end alongside the existing custody descriptor,
+and closes its own reader after spawn. All other descriptors remain
+close-on-exec. Closing the provider's reader before it spawns Bash belongs to
+Claude; our pipe is already at EOF after its token has been consumed. The
+inspected 2.1.310 binary implements this descriptor interface. This removes the
+token from macOS `KERN_PROCARGS2` start-environment inspection: Seatbelt's
+`sysctl-read` and process-info denials do not prevent that same-user access,
+so changing the sysctl rule is not a credential boundary.
+
+Shell candidates set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. In 2.1.310 this
+forces permission mode to `default`, ignoring bypass mode. Candidates therefore
+pass `--allowedTools Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*` explicitly,
+as well as the corresponding `--tools` list. Read-only and file-tool lanes keep
+their narrower MCP allow-list and tool list. Shell candidates deny
+`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`; keychain
+files have no read grant. Live acceptance must record fresh and resume Bash
+results, confirm the child has neither OAuth environment variable and record
+the CLI version. Native tests prove the pipe/argv/profile contracts, not the
+installed CLI's handling of inherited descriptors or subprocess scrubbing.
+Claude still holds the token in memory and has any-host HTTPS egress, so this
+does not claim perfect credential isolation from a compromised provider.
+
+The private `CLAUDE_CONFIG_DIR` is within writable provider state: Bash can
+modify it, and terminal staging cleanup retains it. Adapter resume with that
+same private-state root can read those changes. `--setting-sources ""` and
+`--strict-mcp-config` mitigate settings/MCP injection; the directory is not an
+immutable trust boundary. The current dispatch composition refuses continuation
+until it has a provider session, so this is not a claim of working run resume.
+
+The per-worktree Cargo cache is both writable and executable, and subsequent
+lanes for the same worktree incarnation reuse it. A planted
+`cargo-home/config.toml` or executable can affect later lane builds. Host code
+only prepares and anchors the cache; it never runs Cargo with that home or
+executes cache contents. Lane children execute those contents inside their
+confinement profile. CLT `usr/libexec/git-core` is readable but has no exec
+grant. `git status`, `git diff` and `git commit` are built-ins and need no
+helpers there; commands needing external Git helpers remain outside this grant.
+
+After the chair approves the pro account, quota and throwaway-worktree run,
+record both shell sessions from the repository root (the recorder does not
+flip `shell_enabled`):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/private/tmp CARGO_BUILD_JOBS=4
+export RUSTUP_TOOLCHAIN=1.99.1
+export CARGO_TARGET_DIR=/private/tmp/provenant-cargo-target-fix-v1-review-2
+cargo build --manifest-path tools/front-door/Cargo.toml -p provenant
+record_root=$(mktemp -d /private/tmp/provenant-claude-shell.XXXXXX)
+cargo run --manifest-path tools/front-door/Cargo.toml -p provenant-providers \
+  --features recording --example record -- claude worktree_write \
+  --account pro --model claude-haiku-5-5 --root "$record_root" \
+  --provenant "$CARGO_TARGET_DIR/debug/provenant" --assets "$PWD" --write
+```
+
+Review the redacted captures and the recorder's separate keychain-IPC gate
+before enabling either mode. No live recording was made by REVIEW-FIX-2.
+
+The native regression checks actual security-tool execution and synthetic
+keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume
+and allowed-client IPC recordings remain a chair gate. The recorder continues
+to mark unproved IPC captures ineligible; historical captures are unchanged.
+Claude recording requires `--account pro`, selects only the host's default
+`.claude` identity and needs chair-approved throwaway-worktree authority. The pro quota
 and account gate applies before running this recorder, including retries;
-never use the anese identity. The Rust writer launcher must also consume
-confinement's host-prepared directories and per-worktree cargo cache described
-in [supervisor](supervisor.md). Shared Git config and packed refs stay
-read-only under that design; #1255's host fetch/upstream handoff still needs
-runtime composition and its conformance test.
+never use the anese identity. The Rust writer launcher consumes confinement's
+host-prepared directories and per-worktree cargo cache described in
+[supervisor](supervisor.md). Shared Git config and packed refs stay
+read-only under that design. Run owns #1246/#1255 host delivery: an explicit
+`TaskRequest.deliver` binds a configured remote and destination branch, with
+optional PR creation. The host fetches before launch and, only on live verified
+writer success, pushes the final commit, fetches and compares the remote ref,
+then sets and verifies upstream. The host credential environment is private
+handoff data, never provider environment or a persisted record. Attempts retain
+a typed delivery receipt, including failed stages and interrupted operations;
+recovery never repeats delivery and provider prose is never push evidence.
+The local bare-remote conformance row covers fetch/commit/push/upstream and
+receipt publication; live host credentials and PR creation remain chair gates.
+This does not grant shared Git writes or host credentials to the sandbox.
 
 Each capture manifest records source provenance, CLI version/platform, redacted
 argv, fresh/resume and access mode, exit and redaction rules. It must prove the
@@ -694,7 +996,8 @@ confinement or custody acceptance.
    alternatives, family/availability facts and route CLI. Delete routing Rust
    emulation, old golden judges and only leaves/config/schemas/help/docs whose
    importers/callers are all retired in this area. Shared routing Python waits
-   for the matrix gate. No preferences, rotation or pool engine.
+   for the matrix gate. No preferences or selection transaction. Routing
+   resolves catalogue pools by seeded weighted draw, without rotation.
    Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
    in step 3, which removes `task_classifier`'s utility calls, gated on their last
    importer. This includes CLI removing utility verbs and the output-digest hook.
@@ -764,18 +1067,19 @@ refreshed in an SSH session with a locked or unavailable keychain.
 
 The cut-over request also restores model-backed `digest`, `classify` and
 `extract`, superseding their earlier removal decision. Restoration is still
-blocked on execution composition: current Run exposes persistence/read APIs
-only, every provider's `prepare`/`preflight` returns `Disabled`, and both launch
-plan types are uninhabited. Confinement's `utility` module is a closed Git
-boundary, not an inference runner. Bypassing Run through a CLI-owned process
-would lose custody/confinement guarantees. No placeholder command or unused
-retry seam is added.
+pending its utility-specific command composition. Run now launches supported
+provider specs through custody (#1429 and COMPOSE-B); that launch capability
+alone does not implement these utility commands or their retry policy.
+Confinement's `utility` module is a closed Git boundary, not an inference
+runner. Utility commands must consume Run so their execution retains custody
+and confinement. No placeholder command or unused retry seam is added.
 
 The utility execution owner must consume an ordered, explicit cross-adapter
 candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:
 Claude utility model, Codex `gpt-6-luna` at low effort, an eligible recorded
 OpenCode free model for non-confidential input, then a recorded Agy Gemini Flash
-model. Do not retry the same Claude route as a junior fallback. Each candidate
+model (a paid subscription model). Do not retry the same Claude route as a
+junior fallback. Each candidate
 needs its own disclosure, availability and confinement checks; confidential
 input must never reach a free model without an explicit non-training guarantee.
 A sandboxed 401 takes this route-around path rather than receiving wider auth

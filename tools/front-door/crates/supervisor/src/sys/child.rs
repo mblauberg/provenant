@@ -1,10 +1,49 @@
 //! Strict exec boundary shared by direct utility runners.
 use std::ffi::{CString, OsString};
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+
+/// Owns the sole read end until spawn returns. `std::io::pipe` creates both
+/// ends close-on-exec. Only this reader is passed to the selected child.
+pub(crate) struct SecretPipe(std::io::PipeReader);
+impl SecretPipe {
+    pub(crate) fn new(input: &crate::exec::SecretInput) -> io::Result<Self> {
+        // An empty pipe can hold at least POSIX's 512-byte PIPE_BUF without
+        // blocking. Refuse larger secrets rather than needing a writer thread.
+        if input.bytes.is_empty() || input.bytes.len() > 512 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret pipe size",
+            ));
+        }
+        let (reader, mut writer) = std::io::pipe()?;
+        writer.write_all(&input.bytes)?;
+        drop(writer);
+        Ok(Self(reader))
+    }
+
+    pub(crate) fn fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+
+    pub(crate) fn environment(
+        &self,
+        input: &crate::exec::SecretInput,
+        env: &[(OsString, OsString)],
+    ) -> Vec<(OsString, OsString)> {
+        let mut env = env.to_vec();
+        env.retain(|(key, _)| key != input.descriptor_env.as_str());
+        env.push((
+            input.descriptor_env.clone().into(),
+            self.0.as_raw_fd().to_string().into(),
+        ));
+        env
+    }
+}
 
 /// Install the same strict argv/PATH/env syscall boundary for all utilities.
 pub(crate) fn configure_command(

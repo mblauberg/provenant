@@ -326,6 +326,13 @@ pub enum LandingResult {
 /// Narrow seam consumed by MCP and implemented by the runtime composition.
 /// The service is worker-local because each `Store` owns one SQLite connection.
 pub trait CoordinationApi {
+    fn mutate(
+        &self,
+        input: Mutation,
+        operation_id: Option<provenant_core::OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError>;
     fn mail(
         &self,
         input: MailInput,
@@ -512,6 +519,22 @@ impl<'a> LocalCoordination<'a> {
 }
 
 impl CoordinationApi for LocalCoordination<'_> {
+    fn mutate(
+        &self,
+        input: Mutation,
+        operation_id: Option<provenant_core::OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError> {
+        let operation_id = operation_id.unwrap_or(
+            provenant_core::OperationId::parse(&provenant_core::hex(
+                &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+            ))
+            .map_err(|_| CoordinationError::EntropyEncoding)?,
+        );
+        LocalCoordination::mutate(self, input, &operation_id, budget, cancel)
+    }
+
     fn mail(
         &self,
         input: MailInput,
@@ -1090,7 +1113,7 @@ mod tests {
                 actor: ActorId::from_bytes([2; 16]),
             }
         }
-        fn service(&self) -> CoordinationService<'_> {
+        fn service(&self) -> LocalCoordination<'_> {
             let budget = WaitBudget::cli(self.clock.mono_now(), 5).expect("test budget");
             let cancel = CancelToken::new();
             let request = Request {
@@ -1100,7 +1123,7 @@ mod tests {
                 backoff: &self.backoff,
             };
             let store = Store::open(&self.root, &request).expect("isolated store");
-            CoordinationService::new(store, self.project, self.actor, &self.clock, &self.backoff)
+            LocalCoordination::new(store, self.project, self.actor, &self.clock, &self.backoff)
         }
         fn budget(&self) -> WaitBudget {
             WaitBudget::mcp(self.clock.mono_now(), 5).expect("test MCP budget")
@@ -1145,7 +1168,7 @@ mod tests {
         let backoff = ThreadWait;
         let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
         let cancel = CancelToken::new();
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &root,
             ProjectId::from_bytes([31; 16]),
             ActorId::from_bytes([32; 16]),
@@ -1362,7 +1385,7 @@ mod tests {
             panic!("update result")
         };
         assert_eq!(updated.objective, "review and report");
-        let other = CoordinationService::new(
+        let other = LocalCoordination::new(
             Store::open(
                 &fixture.root,
                 &Request {
@@ -1466,7 +1489,7 @@ mod tests {
         let fixture = Fixture::new();
         let clock = AdvancingClock::new();
         let cancel = CancelToken::new();
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &fixture.root,
             fixture.project,
             fixture.actor,
@@ -1532,7 +1555,7 @@ mod tests {
         let clock = SimulatedClock(std::cell::Cell::new(0));
         let cancel = CancelToken::new();
         let budget = || WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &fixture.root,
             fixture.project,
             fixture.actor,

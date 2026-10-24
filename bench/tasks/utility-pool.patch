@@ -1,0 +1,311 @@
+diff --git a/tools/front-door/crates/fabric-mcp/src/stdio_tests.rs b/tools/front-door/crates/fabric-mcp/src/stdio_tests.rs
+index f0188aca..baaee206 100644
+--- a/tools/front-door/crates/fabric-mcp/src/stdio_tests.rs
++++ b/tools/front-door/crates/fabric-mcp/src/stdio_tests.rs
+@@ -443,0 +444,2 @@ fn completed(id: &Id) -> Event {
++        tool: "fabric_identity",
++        started: Instant::now(),
+@@ -519,0 +522 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
++        &FakeFactory::new(Arc::new(Gate::default())),
+diff --git a/tools/front-door/crates/routing/src/tests.rs b/tools/front-door/crates/routing/src/tests.rs
+index 30b5adff..d0af2ccb 100644
+--- a/tools/front-door/crates/routing/src/tests.rs
++++ b/tools/front-door/crates/routing/src/tests.rs
+@@ -30,0 +31,2 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
++        confidential: false,
++        allow_free: false,
+@@ -86,0 +89 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
++        trains_on_prompts: None,
+@@ -100,0 +104,2 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
++        confidential: false,
++        allow_free: false,
+@@ -117,0 +123,85 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
++#[test]
++fn utility_pool_resolves_and_confidential_skips_training_members()
++-> Result<(), Box<dyn std::error::Error>> {
++    let mut catalogue = Catalogue::bundled()?;
++    catalogue
++        .models
++        .iter_mut()
++        .find(|row| row.model.as_str() == "claude/claude-haiku-5-5")
++        .expect("utility member is catalogued")
++        .trains_on_prompts = Some(true);
++    let config = RoutingConfig::default();
++    let mut context = context(&catalogue, &config, now()?);
++    let mut query = RouteRequest {
++        choice: RouteChoice::NamedRoute("utility".into()),
++        effort: None,
++        confidential: true,
++        allow_free: false,
++        fallback: Fallback::Models(BoundedModels::new(vec![
++            ModelId::parse("claude/claude-haiku-5-5")?,
++            ModelId::parse("codex/unclassified")?,
++        ])?),
++    };
++    let route = resolve(&query, &context)?;
++    assert_eq!(route.model, "gpt-6-luna");
++    assert!(route.alternatives.as_slice().is_empty());
++    query.fallback = Fallback::None;
++
++    query.confidential = false;
++    assert_eq!(resolve(&query, &context)?.model, "claude-haiku-5-5");
++    let registry = [
++        provenant_providers::Registration {
++            adapter: &provenant_providers::claude::Claude,
++            quota_source: None,
++        },
++        provenant_providers::Registration {
++            adapter: &RecordedFixture(&provenant_providers::codex::Codex),
++            quota_source: None,
++        },
++    ];
++    let mut records = [availability()];
++    records[0].observed_models = vec!["gpt-6-luna".into()];
++    let access = [AccessContext {
++        adapter: "codex",
++        disclosure_ref: "policy",
++        confinement_ref: "grant",
++    }];
++    context.registry = &registry;
++    context.availability = &records;
++    context.access = &access;
++    let route = resolve(&query, &context)?;
++    assert_eq!(route.model, "gpt-6-luna");
++    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
++    Ok(())
++}
++
++#[test]
++fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
++-> Result<(), Box<dyn std::error::Error>> {
++    let mut catalogue = Catalogue::bundled()?;
++    let config = RoutingConfig::default();
++    let query = serde_json::json!({"choice":{"kind":"named_route","value":"utility"},"effort":null,"confidential":true});
++    let request: RouteRequest = serde_json::from_value(query.clone())?;
++    assert_eq!(
++        resolve(&request, &context(&catalogue, &config, now()?))?
++            .effort
++            .as_deref(),
++        Some("low")
++    );
++    // Confidential callers cannot use the paid members in this fixture.
++    for row in &mut catalogue.models {
++        if row.model.adapter() != "opencode" {
++            row.trains_on_prompts = Some(true);
++        }
++    }
++    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
++    let mut query = query;
++    query["allow_free"] = serde_json::json!(true);
++    let request: RouteRequest = serde_json::from_value(query)?;
++    assert_eq!(
++        resolve(&request, &context(&catalogue, &config, now()?))?.model,
++        "opencode/deepseek-v4.1-flash-free"
++    );
++    Ok(())
++}
++
+@@ -174,0 +265 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
++        trains_on_prompts: None,
+@@ -194 +285 @@ fn availability() -> AvailabilityRecord {
+-        catalogue_revision: "recordings-20261024-v1".into(),
++        catalogue_revision: "recordings-20261024-utility-v1".into(),
+@@ -370,0 +462 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
++        trains_on_prompts: None,
+diff --git a/tools/front-door/src/usage/tests.rs b/tools/front-door/src/usage/tests.rs
+new file mode 100644
+index 00000000..223d7ded
+--- /dev/null
++++ b/tools/front-door/src/usage/tests.rs
+@@ -0,0 +1,73 @@
++// The worktree integration target includes main.rs with its own test harness.
++#![allow(dead_code)]
++use super::*;
++use provenant_core::{PathResolver, RootInputs};
++use std::path::PathBuf;
++type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
++struct Resolver;
++impl PathResolver for Resolver {
++    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
++        Ok(path.to_owned())
++    }
++}
++fn roots(path: &Path) -> Result<Roots> {
++    let mut inputs = RootInputs::new(path.join("home"), path.join("checkout"));
++    inputs.state_dir = Some(path.join("state"));
++    Ok(inputs.resolve(&Resolver)?)
++}
++#[test]
++fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
++    let temp = tempfile::tempdir_in("/tmp")?;
++    let roots = roots(temp.path())?;
++    record_cli(&roots, "root", 0, 4);
++    let log = roots.state.as_path().join(LOG);
++    assert!(!roots.state.as_path().join(LOCK).exists());
++    let directory = Directory::open_anchor(roots.state.as_path())?;
++    let lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
++    let before = std::fs::read(&log)?;
++    record_cli(&roots, "root", 0, 1);
++    assert!(std::fs::read(&log)?.len() > before.len());
++    let stats = Stats {
++        usage: true,
++        since: None,
++        until: None,
++        detail: false,
++    };
++    let count = |data: Report| {
++        data.units
++            .into_iter()
++            .find(|u| u.unit == "root")
++            .map(|u| u.calls)
++    };
++    assert_eq!(count(report(&roots, &stats)?), Some(2));
++    std::fs::OpenOptions::new()
++        .write(true)
++        .open(&log)?
++        .set_len(CAP)?;
++    record_cli(&roots, "root", 0, 1);
++    assert!(std::fs::metadata(&log)?.len() > CAP);
++    assert_eq!(count(report(&roots, &stats)?), Some(2));
++    drop(lock);
++    // MCP logging only appends; existing workers perform rotation.
++    record_tool(&roots, "fabric_identity", "ok", 1);
++    assert!(!roots.state.as_path().join(BACKUP).exists());
++    maintain_tools(&roots);
++    // Rotation is permitted again; the old log is retained as the backup.
++    record_cli(&roots, "root", 0, 1);
++    assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
++    assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
++    assert_eq!(count(report(&roots, &stats)?), Some(3));
++    // A torn line is ignored, including an event appended to that line.
++    std::fs::write(&log, b"{partial")?;
++    record_cli(&roots, "root", 0, 1);
++    record_cli(&roots, "root", 0, 1);
++    std::fs::remove_file(roots.state.as_path().join(BACKUP))?;
++    assert_eq!(count(report(&roots, &stats)?), Some(1));
++    let target = temp.path().join("foreign");
++    std::fs::write(&target, "unchanged")?;
++    std::fs::remove_file(&log)?;
++    std::os::unix::fs::symlink(&target, &log)?;
++    record_cli(&roots, "root", 0, 1);
++    assert_eq!(std::fs::read_to_string(target)?, "unchanged");
++    Ok(())
++}
+diff --git a/tools/front-door/tests/route.rs b/tools/front-door/tests/route.rs
+index e25b113e..67745d66 100644
+--- a/tools/front-door/tests/route.rs
++++ b/tools/front-door/tests/route.rs
+@@ -75,0 +76,6 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
++    let pool = call(
++        &rig,
++        &["route", "resolve", "--route", "utility", "--confidential"],
++        0,
++    )?;
++    assert_eq!(pool["data"]["model"], "claude-haiku-5-5");
+diff --git a/tools/front-door/tests/support/mod.rs b/tools/front-door/tests/support/mod.rs
+index 8172e229..580c9cca 100644
+--- a/tools/front-door/tests/support/mod.rs
++++ b/tools/front-door/tests/support/mod.rs
+@@ -55,0 +56 @@ impl TestRig {
++            ("PROVENANT_USAGE_STATE_DIR", root.join("usage-state")),
+@@ -97,0 +99,4 @@ impl TestRig {
++    pub fn enable_usage(&mut self) {
++        self.env
++            .retain(|(key, _)| key != "PROVENANT_USAGE_STATE_DIR");
++    }
+diff --git a/tools/front-door/tests/usage.rs b/tools/front-door/tests/usage.rs
+new file mode 100644
+index 00000000..2883d660
+--- /dev/null
++++ b/tools/front-door/tests/usage.rs
+@@ -0,0 +1,90 @@
++mod support;
++use serde_json::{Value, json};
++use std::{fs, path::Path};
++use support::{Result, TestRig, code, mcp::McpClient};
++
++#[test]
++fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
++    let mut rig = TestRig::new()?;
++    rig.enable_usage();
++    let out = rig.command(&["output", "--id", "sensitive-argument", "--json"])?;
++    assert_ne!(code(&out), 0);
++    assert_eq!(code(&rig.command(&["root", "--json"])?), 0);
++    let mut client = McpClient::default();
++    client.initialise("2025-11-25")?;
++    client.initialised()?;
++    client.call("fabric_identity", json!({"op":"inspect"}))?;
++    client.call("fabric_mail", json!({"op":"send","body":"secret-body"}))?;
++    client.call("secret-unknown-tool", json!({"secret":"secret-value"}))?;
++    client.call("fabric_run", json!({"op":"list","limit":1,"cursor":null}))?;
++    client.eof(
++        &rig,
++        Path::new(env!("CARGO_BIN_EXE_provenant")),
++        &["fabric", "mcp", "--client", "codex"],
++    )?;
++    let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
++    assert!(!log.contains("sensitive-argument"));
++    assert!(!log.contains("secret"));
++    let events = log
++        .lines()
++        .map(serde_json::from_str::<Value>)
++        .collect::<std::result::Result<Vec<_>, _>>()?;
++    assert_eq!(events.len(), 7);
++    assert_eq!(events[0]["unit"], "parse");
++    assert_eq!(events[0]["exit_code"], code(&out));
++    for event in &events {
++        let object = event.as_object().ok_or("event")?;
++        assert_eq!(object.len(), 5);
++        assert!(event["duration_ms"].is_u64());
++        assert!(event["timestamp"].is_string());
++        assert!(object.keys().all(|key| {
++            [
++                "kind",
++                "unit",
++                "exit_code",
++                "outcome",
++                "duration_ms",
++                "timestamp",
++            ]
++            .contains(&key.as_str())
++        }));
++    }
++    for (tool, outcome) in [
++        ("fabric_identity", "ok"),
++        ("fabric_mail", "error"),
++        ("unknown", "error"),
++        ("fabric_run", "error"),
++    ] {
++        assert!(events.iter().any(|row| row["kind"] == "mcp.tool"
++            && row["unit"] == tool
++            && row["outcome"] == outcome));
++    }
++    rig.assert_legacy_unchanged()
++}
++
++#[test]
++fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
++    let mut rig = TestRig::new()?;
++    rig.enable_usage();
++    let report = rig.command(&["telemetry", "stats", "--usage", "--since", "30d", "--json"])?;
++    assert_eq!(
++        code(&report),
++        0,
++        "{}",
++        String::from_utf8_lossy(&report.stdout.bytes)
++    );
++    let report: Value = serde_json::from_slice(&report.stdout.bytes)?;
++    let units = report["data"]["units"].as_array().ok_or("units")?;
++    assert!(units.iter().all(|v| v["calls"] == 0));
++    assert!(
++        units
++            .iter()
++            .any(|v| v["kind"] == "cli.verb" && v["unit"] == "quota tick")
++    );
++    assert!(
++        units
++            .iter()
++            .any(|v| v["kind"] == "mcp.tool" && v["unit"] == "fabric_identity")
++    );
++    rig.assert_legacy_unchanged()
++}

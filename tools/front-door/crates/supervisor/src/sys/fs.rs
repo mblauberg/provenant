@@ -119,20 +119,33 @@ pub(crate) fn open_anchor(path: &Path) -> io::Result<File> {
     while bytes.len() > 1 && bytes.last() == Some(&b'/') {
         bytes = &bytes[..bytes.len() - 1];
     }
-    open_at(
-        libc::AT_FDCWD,
-        OsStr::from_bytes(bytes),
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        0,
-    )
+    open_directory_at(libc::AT_FDCWD, OsStr::from_bytes(bytes), libc::O_NOFOLLOW)
 }
 pub(crate) fn open_directory(dir: &File, name: &OsStr, follow: bool) -> io::Result<File> {
-    open_at(
+    open_directory_at(
         dir.as_raw_fd(),
         name,
-        libc::O_RDONLY | libc::O_DIRECTORY | if follow { 0 } else { libc::O_NOFOLLOW },
-        0,
+        if follow { 0 } else { libc::O_NOFOLLOW },
     )
+}
+/// A macOS sandbox may grant a confined lane exact files inside a directory
+/// without listing it. Such a directory still opens for search, which permits
+/// fstat and *at operations but no listing, so it confers no added access.
+fn open_directory_at(directory: i32, path: &OsStr, flags: i32) -> io::Result<File> {
+    let result = open_at(
+        directory,
+        path,
+        libc::O_RDONLY | libc::O_DIRECTORY | flags,
+        0,
+    );
+    #[cfg(target_os = "macos")]
+    if result
+        .as_ref()
+        .is_err_and(|error| error.raw_os_error() == Some(libc::EPERM))
+    {
+        return open_at(directory, path, libc::O_SEARCH | flags, 0);
+    }
+    result
 }
 pub(crate) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(

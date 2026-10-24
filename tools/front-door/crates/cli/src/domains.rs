@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Domains {
+    pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
     pub fabric: provenant_fabric_runtime::config::FabricConfig,
     pub guard: provenant_confinement::guard::GuardConfig,
 }
-static ENTRIES: [DomainSection; 4] = [
+static ENTRIES: [DomainSection; 5] = [
+    provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
     provenant_fabric_runtime::config::SECTION,

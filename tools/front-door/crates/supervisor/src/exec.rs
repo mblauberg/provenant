@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::io::{self, Write};
 use std::path::Path;
+#[cfg(any(test, feature = "fixture"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -58,7 +59,9 @@ pub enum QueueLoss {
 pub trait NonblockingSink: Send + Sync {
     fn try_send(&self, bytes: &[u8]) -> Result<(), QueueLoss>;
 }
+#[cfg(any(test, feature = "fixture"))]
 pub struct TeeQueue(SyncSender<Vec<u8>>);
+#[cfg(any(test, feature = "fixture"))]
 impl NonblockingSink for TeeQueue {
     fn try_send(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
         if bytes.len() > FRAME_LIMIT {
@@ -72,6 +75,7 @@ impl NonblockingSink for TeeQueue {
             })
     }
 }
+#[cfg(any(test, feature = "fixture"))]
 pub fn tee_queue(frames: usize) -> Result<(TeeQueue, Receiver<Vec<u8>>), ExecError> {
     if frames == 0 || frames > 1024 {
         return Err(ExecError::InvalidLimit);
@@ -124,11 +128,25 @@ pub trait CaptureFilter {
         Ok(Vec::new())
     }
 }
+/// Memory-only bytes for one inherited read pipe. Only its descriptor number
+/// enters the child's environment; the write end closes before spawn.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SecretInput {
+    pub descriptor_env: String,
+    pub bytes: Vec<u8>,
+}
+impl std::fmt::Debug for SecretInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretInput(redacted)")
+    }
+}
+
 pub struct ExecOptions<'a> {
     pub argv: &'a [OsString],
     pub env: Option<&'a [(OsString, OsString)]>,
     pub cwd: &'a Path,
     pub stdin: Option<&'a [u8]>,
+    pub secret_input: Option<&'a SecretInput>,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
@@ -148,6 +166,7 @@ impl<'a> ExecOptions<'a> {
             env: None,
             cwd,
             stdin: None,
+            secret_input: None,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
             stdout_decoder: None,
@@ -237,12 +256,15 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     let permit = reaper.reserve().ok_or(ExecError::Busy)?;
     let mut child = RawChild::spawn(
         permit,
-        options.argv,
-        options.env,
-        options.cwd,
-        options.stdin.is_some(),
-        options.stdout.piped(),
-        options.stderr.piped(),
+        crate::sys::raw_exec::SpawnSpec {
+            argv: options.argv,
+            env: options.env,
+            cwd: options.cwd,
+            input: options.stdin.is_some(),
+            secret_input: options.secret_input,
+            capture_stdout: options.stdout.piped(),
+            capture_stderr: options.stderr.piped(),
+        },
     )
     .map_err(io_error("spawn"))?;
     let mut stdout = child.stdout.take();

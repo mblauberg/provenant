@@ -1142,6 +1142,58 @@ fn regular_user_instructions_are_preserved_with_manual_include_advice() {
 }
 
 #[test]
+fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenced() {
+    let f = Fixture::new();
+    let assets = f.source.join("instructions");
+    fs::create_dir_all(&assets).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let p = assets.join(name);
+        fs::write(&p, b"release instructions").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let instruction = f.home.join(".codex/AGENTS.md");
+    fs::create_dir_all(instruction.parent().unwrap()).unwrap();
+    let text = b"See ~/.agents/AGENTS.md for shared instructions";
+    fs::write(&instruction, text).unwrap();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let result = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        result.manual_includes.is_empty(),
+        "{:?}",
+        result.manual_includes
+    );
+    assert_eq!(fs::read(&instruction).unwrap(), text);
+}
+
+#[test]
+fn legacy_link_targets_match_after_canonicalization() {
+    let f = Fixture::new();
+    let checkout = f.home.join("LegacyCheckout");
+    fs::create_dir_all(&checkout).unwrap();
+    let alias = f.home.join("checkout-alias");
+    symlink(&checkout, &alias).unwrap();
+
+    let actual = alias.join("AGENTS.md");
+    let expected = checkout.join("AGENTS.md");
+    fs::write(&expected, "legacy instructions").unwrap();
+    assert!(crate::managed::same_link_target(&actual, &expected));
+
+    let case_variant = f.home.join("legacycheckout/AGENTS.md");
+    if case_variant.exists() {
+        assert!(crate::managed::same_link_target(&case_variant, &expected));
+    }
+}
+
+#[test]
 fn completed_immutable_release_missing_a_file_is_not_repaired() {
     let f = Fixture::new();
     let plan = f.plan();
@@ -1893,7 +1945,7 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     assert_eq!(
         err.to_string(),
         format!(
-            "symlinked or non-regular harness config refused: {}",
+            "symlinked or non-regular harness config refused: {}; replace the link with a regular copy, then rerun install",
             config.display()
         )
     );
@@ -2164,6 +2216,155 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
     );
     let loaded = crate::load(&f.targets.roots, Some(config.as_bytes())).unwrap();
     crate::test_support::assert_leaf_origins(&loaded);
+}
+
+#[test]
+fn claude_config_dir_moves_its_mcp_registration() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    assert_eq!(f.targets.harnesses[0].mcp_file, f.home.join(".claude.json"));
+    let alternate = f.home.join(".claude-alt");
+    f.targets.apply_environment(Some(&alternate), None).unwrap();
+    assert_eq!(
+        f.targets.harnesses[0].mcp_file,
+        alternate.join(".claude.json")
+    );
+    assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
+}
+
+#[test]
+fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let path = f.source.join("instructions").join(name);
+        fs::write(&path, b"release instruction").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (roots, home) = (f.targets.roots.clone(), f.home.clone());
+    let claude = |dir: Option<&Path>| {
+        let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
+        targets.hooks = true;
+        targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        targets.apply_environment(dir, None).unwrap();
+        targets
+    };
+    let (default, alternate) = (home.join(".claude"), home.join(".claude-pro"));
+    let (default_mcp, alternate_mcp) = (home.join(".claude.json"), alternate.join(".claude.json"));
+    let installed = |dir: &Path, mcp: &Path| {
+        dir.join("skills/example").is_symlink()
+            && dir.join("CLAUDE.md").is_symlink()
+            && dir.join("HARNESS.md").is_symlink()
+            && fs::read_to_string(mcp).is_ok_and(|text| text.contains("\"fabric\""))
+            && fs::read_to_string(dir.join("settings.json"))
+                .is_ok_and(|text| text.contains("pre-tool-use"))
+    };
+    let inspect = |targets: &Targets| {
+        inspect_install(
+            targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &CancelToken::new(),
+        )
+        .unwrap()
+        .findings
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let release = f.release();
+    let mut apply = |targets: Targets| {
+        f.targets = targets;
+        install(
+            &f.plan_for(release.clone()),
+            &context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
+    };
+    apply(claude(None));
+    apply(claude(Some(&alternate)));
+    assert!(installed(&default, &default_mcp));
+    assert!(installed(&alternate, &alternate_mcp));
+    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.harnesses, vec![Harness::Claude]);
+    assert_eq!(receipt.harness_targets.len(), 2);
+
+    // Check covers every recorded target, whichever one the environment names.
+    assert!(inspect(&claude(None)).is_empty());
+    let link = default.join("skills/example");
+    fs::remove_file(&link).unwrap();
+    assert!(inspect(&claude(Some(&alternate))).iter().any(|finding| {
+        finding.rule == "owned_entry_drift" && finding.path.to_path_buf().unwrap() == link
+    }));
+    apply(claude(None));
+    assert!(installed(&default, &default_mcp));
+    assert!(installed(&alternate, &alternate_mcp));
+
+    uninstall(
+        &claude(Some(&alternate)),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
+    assert!(installed(&default, &default_mcp));
+    assert!(fs::symlink_metadata(alternate.join("skills/example")).is_err());
+    assert!(fs::symlink_metadata(alternate.join("CLAUDE.md")).is_err());
+    assert!(
+        !fs::read_to_string(&alternate_mcp)
+            .unwrap()
+            .contains("\"fabric\"")
+    );
+    assert!(
+        !fs::read_to_string(alternate.join("settings.json"))
+            .unwrap()
+            .contains("pre-tool-use")
+    );
+    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.harness_targets.len(), 1);
+    assert_eq!(
+        receipt.harness_targets[0].skills_dir.to_path_buf().unwrap(),
+        default.join("skills")
+    );
+    assert!(inspect(&claude(None)).is_empty());
+}
+
+#[test]
+fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::CLAUDE_HOOKS.to_vec();
+    let settings = f.home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        b"{\n\"z\":{\"first\":1,\"second\":2,},\"hooks\":{},}",
+    )
+    .unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let text = fs::read_to_string(settings).unwrap();
+    assert!(text.find("\"z\"").unwrap() < text.find("\"hooks\"").unwrap());
+    assert!(
+        text.contains("\n  \"z\": {\n    \"first\": 1,\n    \"second\": 2\n  },\n  \"hooks\": {"),
+        "{text}"
+    );
+    assert!(!text.contains("\"hooks\":[{"));
+    assert!(!text.contains("fixture comment"));
+    assert!(!text.contains(",\n}"));
+    let _: serde_json::Value = serde_json::from_str(&text).unwrap();
 }
 
 #[test]

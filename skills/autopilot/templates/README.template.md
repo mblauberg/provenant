@@ -12,9 +12,11 @@ not maintain a parallel queue or lease ledger.
 
 ## Resume and recovery
 
-After interruption, run `provenant reconcile`, inspect the existing tasks and
-outputs, and use `provenant resume` to continue the run. Preserve useful partial
-work and verify results against their owners.
+After interruption, run `provenant reconcile --id RUN`, inspect the existing
+tasks and outputs, and resume the exact attempt with
+`provenant resume RUN/TASK/ATTEMPT --operation-id ID (--prompt-file PATH |
+--prompt-stdin)`. Preserve useful partial work and verify results against
+their owners.
 
 ## Session checkpoint
 

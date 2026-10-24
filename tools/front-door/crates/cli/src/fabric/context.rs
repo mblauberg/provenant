@@ -1,12 +1,17 @@
 use super::{EdgeError, Lease};
-use provenant_core::{CancelToken, Roots};
+use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
+    coordination::facade::FacadeError,
+    hosts::{
+        PeerAction, PeerError, PeerRequest, PeerResult, PeerTransport, ProjectLocator,
+        SshTransport, discover_ssh_executable,
+    },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
 use provenant_records::{AbsolutePath, CommandResult};
 use provenant_supervisor::{
-    exec::SystemExecutor,
+    exec::{Executor, SystemExecutor},
     fs::{Directory, LocalFs, PublishMode},
 };
 use serde::Serialize;
@@ -18,10 +23,10 @@ use std::{
     time::Duration,
 };
 
-pub(super) struct Context {
+pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
-    pub(super) config: FabricConfig,
+    pub config: FabricConfig,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
@@ -29,7 +34,7 @@ pub(super) struct Context {
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_supervisor::fs::canonicalize(path)?)
 }
-fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
+pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
     let mut dir = match Directory::open_anchor(root) {
         Ok(dir) => dir,
         Err(error) if error.is_not_found() => {
@@ -55,12 +60,18 @@ fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
         .components()
     {
         if let Component::Normal(name) = part {
-            match dir.mkdir(name, 0o700) {
-                Ok(()) => dir.sync()?,
-                Err(error) if error.is_exists() => {}
+            dir = match dir.open_verified_directory(name) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => {
+                    match dir.mkdir(name, 0o700) {
+                        Ok(()) => dir.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    dir.open_verified_directory(name)?
+                }
                 Err(error) => return Err(error.into()),
-            }
-            dir = dir.open_verified_directory(name)?;
+            };
             if dir.metadata()?.mode & 0o077 != 0 {
                 return Err(EdgeError::Invalid);
             }
@@ -78,27 +89,28 @@ impl Context {
                 .domains
                 .fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
-        let utility_home = roots.state.as_path().join("tmp/git-home");
+        let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| roots.state.as_path().to_owned());
+        let utility_home = utility_root.join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
-        .ok_or(EdgeError::Invalid)?;
+        let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+            || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
+        let git = provenant_supervisor::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),
-            canonical(git)?,
+            canonical(&git)?,
             &utility_home,
         )?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let binding = provenant_config::bind_project(&roots, discovered.location, &LocalFs)?;
+        let binding = if lane {
+            provenant_config::lookup_project(&roots, &discovered.location, &LocalFs)?
+                .ok_or(EdgeError::Invalid)?
+        } else {
+            provenant_config::bind_project(&roots, discovered.location, &LocalFs)?
+        };
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
                 Ok(key) => Some(key),
@@ -145,6 +157,82 @@ impl Context {
         }
         Ok(())
     }
+    /// Resolve a configured peer by its label or host ID.
+    pub fn peer_host(&self, name: &str) -> Option<HostId> {
+        if let Some(peer) = self.config.peers.get(name) {
+            return Some(peer.host);
+        }
+        let host = HostId::parse(name).ok()?;
+        self.config
+            .peers
+            .values()
+            .any(|peer| peer.host == host)
+            .then_some(host)
+    }
+    /// One bounded request to a configured peer's fixed `fabric peer` entrypoint.
+    pub fn peer(
+        &self,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResult, FacadeError> {
+        self.peer_with(&self.executor, clock, host, action, budget, cancel)
+    }
+    /// [`Context::peer`] through a caller-owned executor.
+    pub fn peer_with(
+        &self,
+        executor: &dyn Executor,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResult, FacadeError> {
+        let peer = self
+            .config
+            .peers
+            .values()
+            .find(|p| p.host == host)
+            .ok_or(FacadeError::HomeUnavailable)?;
+        let project = ProjectLocator::new(&self.identity, &self.home)
+            .map_err(|_| FacadeError::ConfinementRefused)?;
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: self.identity.host,
+            agent: self.identity.inbox.agent.clone(),
+            project,
+            action,
+        };
+        let executable = discover_ssh_executable(self.config.ssh_executable.as_deref())
+            .map_err(|_| FacadeError::HomeUnavailable)?;
+        let transport = SshTransport {
+            executor,
+            clock,
+            home: &self.home,
+            cwd: &self.cwd,
+            executable,
+            seconds: self.config.limits.peer_seconds,
+        };
+        match transport
+            .exchange(peer, &request, budget, cancel)
+            .map_err(|error| {
+                let operation_id = match &error {
+                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
+                    _ => None,
+                };
+                FacadeError::from_code(error.code(), operation_id)
+            })?
+            .result
+        {
+            PeerResult::Error { code, operation_id } => {
+                Err(FacadeError::from_code(&code, operation_id))
+            }
+            value => Ok(value),
+        }
+    }
     pub fn lease(&self, lease: Lease) -> Result<u64, EdgeError> {
         if lease.lease_seconds > self.config.limits.lease_seconds {
             return Err(EdgeError::Invalid);
@@ -152,15 +240,16 @@ impl Context {
         Ok(lease.lease_seconds * 1000)
     }
 }
-pub(super) fn publish<T: Serialize>(
-    value: &CommandResult<T>,
-    roots: &Roots,
-) -> io::Result<AbsolutePath> {
+/// Publish a result in the selected lane or host result area.
+pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Result<AbsolutePath> {
     fn perform<T: Serialize>(
         value: &CommandResult<T>,
         roots: &Roots,
     ) -> Result<AbsolutePath, EdgeError> {
-        let path = roots.state.as_path().join("tmp/results");
+        let base = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| roots.state.as_path().to_owned());
+        let path = base.join("tmp/results");
         let dir = private_dir(roots.state.as_path(), &path)?;
         let name = provenant_supervisor::fs::temporary_name()?;
         let bytes = serde_json::to_vec(value)?;

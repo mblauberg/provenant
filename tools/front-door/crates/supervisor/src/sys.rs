@@ -328,6 +328,32 @@ pub fn replace_process(
     child::replace_process(&command, env)
 }
 
+/// Read a fixture's inherited secret directly, without opening `/dev/fd/N`
+/// through a filesystem policy. Duplicate it so the caller keeps its reader.
+#[cfg(feature = "fixture")]
+pub fn fixture_read_secret_pipe(fd: i32) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    if fd <= 2 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: fcntl validates the numeric descriptor and returns a fresh owned
+    // duplicate or an error. It retains no pointers and leaves fd's flags alone.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful F_DUPFD_CLOEXEC returns a new owning descriptor;
+    // this File is its sole owner and closes it on every return path.
+    let file = unsafe { std::fs::File::from_raw_fd(copy) };
+    let mut bytes = Vec::new();
+    file.take(513).read_to_end(&mut bytes)?;
+    if bytes.len() > 512 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(bytes)
+}
+
 /// Create deliberately inheritable state only in the isolated fixture process.
 #[cfg(feature = "fixture")]
 pub(crate) fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {

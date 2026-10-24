@@ -1,6 +1,10 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 mod context;
 
+pub(crate) use context::private_dir;
+/// Shared identity/config setup for CLI leaves and the binary MCP transport.
+pub use context::{Context, publish};
+
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
     roots: provenant_core::Roots,
@@ -24,44 +28,62 @@ use std::{io, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Fabric {
+    /// Serve the Fabric MCP transport on standard input and output
     Mcp {
+        /// Harness the client is
         #[arg(long, value_parser = crate::install::harness_parser())]
         client: Option<provenant_records::Harness>,
     },
+    /// Show this agent's project and inbox identity
     Identity,
+    /// List known hosts
     #[command(subcommand)]
     Host(Host),
     #[command(hide = true)]
     Peer,
+    /// Run and track task graphs
     #[command(subcommand)]
     Graph(Graph),
+    /// Send and read inbox messages
     #[command(subcommand)]
     Mail(Mail),
+    /// Create, claim and finish shared tasks
     #[command(subcommand)]
     Task(Task),
+    /// Read and add to the activity log
     #[command(subcommand)]
     Events(Events),
+    /// Claim issues, paths and worktrees
     #[command(subcommand)]
     Claim(Claim),
+    /// Fence and land pushes to a shared reference
     #[command(subcommand)]
     Landing(Landing),
 }
 #[derive(Debug, Subcommand)]
 pub enum Host {
+    /// List hosts
     List,
 }
 #[derive(Debug, Subcommand)]
 pub enum Graph {
+    /// Run a task graph document
     Run {
+        /// Task graph document file
         #[arg(long)]
         document: PathBuf,
     },
+    /// Show a task graph's status
     Status {
+        /// Graph ID
         id: String,
     },
+    /// Cancel a task graph
     Cancel {
+        /// Graph ID
         id: String,
     },
+    /// Resume a task graph from its document
     Resume {
         #[arg(long)]
         document: PathBuf,
@@ -70,18 +92,22 @@ pub enum Graph {
 
 #[derive(Debug, Args)]
 pub struct Operation {
+    /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
     pub operation_id: OperationId,
 }
 #[derive(Debug, Args)]
 pub struct Lease {
+    /// Lease duration in seconds (1 to 3600)
     #[arg(long, default_value = "300", value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub lease_seconds: u64,
 }
 #[derive(Debug, Args)]
 pub struct SequencePage {
+    /// Return entries after this sequence number
     #[arg(long, value_parser = clap::value_parser!(i64).range(0..))]
     pub after: Option<i64>,
+    /// Maximum entries (1 to 100)
     #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,
 }
@@ -93,23 +119,31 @@ pub enum Kind {
 }
 #[derive(Debug, Subcommand)]
 pub enum Mail {
+    /// Send a message to one or more inboxes
     Send {
         /// Inbox label on this host, or HOST_ID/LABEL.
         #[arg(long, required = true)]
         to: Vec<String>,
+        /// Message kind
         #[arg(long, value_enum, default_value = "note")]
         kind: Kind,
+        /// Message body
         #[arg(long)]
         body: String,
+        /// Message this replies to
         #[arg(long)]
         reply_to: Option<provenant_core::MessageId>,
+        /// Task this message concerns
         #[arg(long)]
         task: Option<TaskId>,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Read inbox messages
     Read(SequencePage),
+    /// Mark messages read up to a sequence number
     MarkRead {
+        /// Last sequence number to mark read
         #[arg(value_parser = clap::value_parser!(i64).range(0..))]
         through: i64,
         #[command(flatten)]
@@ -163,13 +197,16 @@ impl FromStr for Token {
 }
 #[derive(Debug, Args)]
 pub struct Fence {
+    /// Fence generation
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     generation: u64,
+    /// Fence token (32 lowercase hex digits)
     #[arg(long)]
     token: Token,
 }
 #[derive(Debug, Args)]
 pub struct TaskFence {
+    /// Task ID
     id: TaskId,
     #[command(flatten)]
     fence: Fence,
@@ -185,29 +222,39 @@ impl TaskFence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Task {
+    /// Create a shared task
     Create {
+        /// Task objective
         #[arg(long)]
         objective: String,
+        /// Note to attach
         #[arg(long)]
         note: Option<String>,
         #[command(flatten)]
         operation: Operation,
     },
+    /// List shared tasks
     List {
+        /// Only tasks in this state
         #[arg(long, value_enum)]
         state: Option<State>,
+        /// Return tasks after this ID
         #[arg(long)]
         after: Option<TaskId>,
+        /// Maximum tasks (1 to 100)
         #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
         limit: u64,
     },
+    /// Claim a task under a lease
     Claim {
+        /// Task ID
         id: TaskId,
         #[command(flatten)]
         lease: Lease,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Update a claimed task
     Update {
         #[command(flatten)]
         fence: TaskFence,
@@ -218,14 +265,17 @@ pub enum Task {
         #[command(flatten)]
         operation: Operation,
     },
+    /// Finish a claimed task
     Finish {
         #[command(flatten)]
         fence: TaskFence,
+        /// Final state
         #[arg(long, value_enum, default_value = "done")]
         state: FinishState,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Release a claimed task
     Release {
         #[command(flatten)]
         fence: TaskFence,
@@ -235,13 +285,17 @@ pub enum Task {
 }
 #[derive(Debug, Subcommand)]
 pub enum Events {
+    /// Read activity log entries
     Read {
         #[command(flatten)]
         page: SequencePage,
+        /// Wait up to this many seconds for new entries
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
         wait: Option<u64>,
     },
+    /// Add a note to the activity log
     Note {
+        /// Note text
         #[arg(long)]
         note: String,
         #[command(flatten)]
@@ -251,10 +305,13 @@ pub enum Events {
 #[derive(Debug, Args)]
 #[group(id = "claim_scope", required = true, multiple = false)]
 pub struct Scope {
+    /// Claim an issue by key
     #[arg(long)]
     issue: Option<String>,
+    /// Claim this path (repeatable)
     #[arg(long)]
     path: Vec<PathBuf>,
+    /// Claim this worktree
     #[arg(long)]
     worktree: Option<PathBuf>,
 }
@@ -278,6 +335,7 @@ impl Scope {
 }
 #[derive(Debug, Args)]
 pub struct ClaimFence {
+    /// Claim ID
     id: ClaimId,
     #[command(flatten)]
     fence: Fence,
@@ -293,6 +351,7 @@ impl ClaimFence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Claim {
+    /// Acquire a work claim
     Acquire {
         #[command(flatten)]
         scope: Scope,
@@ -301,6 +360,7 @@ pub enum Claim {
         #[command(flatten)]
         operation: Operation,
     },
+    /// Renew a work claim
     Renew {
         #[command(flatten)]
         fence: ClaimFence,
@@ -309,26 +369,34 @@ pub enum Claim {
         #[command(flatten)]
         operation: Operation,
     },
+    /// Verify a work claim is still held
     Verify(ClaimFence),
+    /// Release a work claim
     Release {
         #[command(flatten)]
         fence: ClaimFence,
         #[command(flatten)]
         operation: Operation,
     },
+    /// List work claims
     List {
+        /// Return claims after this ID
         #[arg(long)]
         after: Option<ClaimId>,
+        /// Maximum claims (1 to 100)
         #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
         limit: u64,
     },
 }
 #[derive(Debug, Args)]
 pub struct LandingFence {
+    /// Git reference being landed
     #[arg(long)]
     reference: String,
+    /// Landing lease ID
     #[arg(long)]
     id: ClaimId,
+    /// Lease generation
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     generation: u64,
 }
@@ -359,23 +427,28 @@ impl LandingFence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Landing {
+    /// Push the candidate under a landing lease
     Push {
         #[command(flatten)]
         fence: LandingFence,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Settle an interrupted landing push
     Reconcile {
         #[command(flatten)]
         fence: LandingFence,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Acquire a landing lease on a reference
     Acquire {
         #[arg(long)]
         reference: String,
+        /// Commit the reference must currently point to
         #[arg(long)]
         expected: GitOid,
+        /// Commit to land
         #[arg(long)]
         candidate: GitOid,
         #[command(flatten)]
@@ -383,6 +456,7 @@ pub enum Landing {
         #[command(flatten)]
         operation: Operation,
     },
+    /// Renew a landing lease
     Renew {
         #[command(flatten)]
         fence: LandingFence,
@@ -391,25 +465,31 @@ pub enum Landing {
         #[command(flatten)]
         operation: Operation,
     },
+    /// Verify a landing lease is still held
     Verify(LandingFence),
+    /// Release a landing lease
     Release {
         #[command(flatten)]
         fence: LandingFence,
         #[command(flatten)]
         operation: Operation,
     },
+    /// Wait for a reference's landing generation to advance
     Wait {
+        /// Git reference to watch
         #[arg(long)]
         reference: String,
+        /// Generation to wait beyond
         #[arg(long)]
         generation: u64,
+        /// Seconds to wait (1 to 14400)
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
         wait: u64,
     },
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum EdgeError {
+pub enum EdgeError {
     #[error(transparent)]
     Exec(#[from] provenant_supervisor::exec::ExecError),
     #[error(transparent)]
@@ -432,6 +512,8 @@ pub(crate) enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
+    #[error("Git executable is unavailable")]
+    GitUnavailable,
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)

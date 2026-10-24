@@ -62,10 +62,17 @@ pub struct RunStore {
     pub(crate) db: Connection,
     pub(crate) root: Directory,
     pub(crate) context: ExecutionContext,
+    pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// The trusted host config root owns worktree registrations even when this
+    /// store contains nested runs. Supplied by the host composition edge.
+    pub fn with_writer_registry(mut self, state: &std::path::Path) -> Self {
+        self.writer_registry = state.to_owned();
+        self
+    }
     /// Opens an existing, initialised store without creating or changing files.
     /// A missing store or schema is an empty read; unsupported versions fail.
     pub fn open_read_only(
@@ -106,6 +113,7 @@ impl RunStore {
             db,
             root,
             context: context.clone(),
+            writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             _owner: PhantomData,
         }))
@@ -116,10 +124,14 @@ impl RunStore {
         let mut root = Directory::root(true)?;
         for component in context.state_root.as_path().components() {
             if let Component::Normal(name) = component {
-                match root.mkdir(name, 0o700) {
-                    Ok(()) => root.sync()?,
-                    Err(e) if e.is_exists() => {}
-                    Err(e) => return Err(e.into()),
+                match root.metadata_at(name, false) {
+                    Ok(_) => {}
+                    Err(error) if error.is_not_found() => match root.mkdir(name, 0o700) {
+                        Ok(()) => root.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    },
+                    Err(error) => return Err(error.into()),
                 }
                 let before = root.metadata_at(name, false)?;
                 let opened = root.open_directory(name)?;
@@ -165,6 +177,7 @@ impl RunStore {
             db,
             root,
             context: context.clone(),
+            writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             _owner: PhantomData,
         };

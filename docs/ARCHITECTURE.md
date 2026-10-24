@@ -195,10 +195,8 @@ distinct families, are dispatched through Fabric MCP or the direct command
 line. Both front doors delegate to the same `orchestrate` owners; Fabric does
 not implement provider mechanics. Dispatching a worker and claiming
 independence are separate things: ordinary dispatch records that it makes no
-independence claim, and the Fabric MCP execution tools reject an assurance
-selector as a typed input error, so a review leg that must carry an
-independence claim runs the assurance path in
-`provenant dispatch` ([ADR
+independence claim. A review leg that must carry an independence claim uses
+`--delivery-id` and `provenant workflow review` ([ADR
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 
@@ -250,19 +248,24 @@ No Pi adapter is present in the Rust provider set.
 
 ## Routing, adapters and receipts
 
-The router separates policy from execution:
+The Rust router separates route policy from execution. The catalogue at
+`tools/front-door/crates/routing/assets/catalogue.toml` defines named weighted
+pools. `provenant-routing` combines those weights with provider pacing and
+eligibility; `provenant-quota` supplies account quota status and admission
+decisions. `provenant-run` owns dispatch and records the resolved route and
+provider result. `provenant-providers` supplies the Claude, Codex, Cursor, Agy,
+and OpenCode adapters.
 
-- `tools/front-door/crates/routing/assets/catalogue.toml` describes routes,
-  models and fallbacks;
-- `provenant route resolve` resolves a route from Rust routing policy;
-- Rust providers executes the resolved route;
-- receipts record requested and actual identity, effort and substitutions.
+`provenant route list` shows pool membership, weights, pacing, and readiness.
+`provenant route set`, `remove`, and `reset` manage pool overrides;
+`provenant route pacing` selects a provider policy (`pace`, `spend`, or
+`max`). Ready candidates are selected using their configured weight and
+pacing factor. Availability and quota eligibility are checked before
+dispatch. Route names and model identifiers are explicit; the router does not
+infer a route from a task class or synonym.
 
-The catalogue has one `utility` pool. Task classes are knob presets, not model
-pool mappings. Provider activation is controlled by
-[`activation.json`](../tools/front-door/tests/fixtures/providers/activation.json);
-only Claude and Codex are enabled today. Model listings and route decisions
-come from the Rust routing catalogue and live availability checks.
+Run records retain requested and resolved model identity, effort, and any
+fallback substitution. No Pi adapter is present in the Rust provider set.
 
 ## Review as a council, not a vote
 

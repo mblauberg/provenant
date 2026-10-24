@@ -30,8 +30,10 @@ const WAIT_SECONDS: u64 = 30;
 pub enum Workflow {
     /// Check bound reviews against the receipt's risk tier.
     Review(Input),
+    /// Show and save delivery receipts
     #[command(subcommand)]
     Receipt(Receipt),
+    /// Save and show session checkpoints
     #[command(subcommand)]
     Session(Session),
 }
@@ -43,10 +45,14 @@ pub struct Input {
 }
 #[derive(Debug, Subcommand)]
 pub enum Receipt {
+    /// Show a delivery receipt
     Show {
+        /// Delivery ID
         delivery_id: DeliveryId,
     },
+    /// Save a delivery receipt
     Save {
+        /// Delivery ID
         delivery_id: DeliveryId,
         /// Zero creates the receipt; otherwise the stored revision.
         #[arg(long)]
@@ -57,13 +63,17 @@ pub enum Receipt {
 }
 #[derive(Debug, Subcommand)]
 pub enum Session {
+    /// Save a session checkpoint
     Save {
+        /// Session ID
         session_id: String,
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
     },
+    /// Show a session checkpoint
     Show {
+        /// Session ID
         session_id: String,
     },
 }
@@ -146,6 +156,7 @@ impl From<ApprovalInput> for UserApproval {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRequest {
+    /// Delivery ID
     delivery_id: DeliveryId,
     #[serde(default)]
     reviews: Vec<ReviewInput>,
@@ -242,10 +253,15 @@ impl Edge {
             &call,
         )?;
         let policy = ReviewPolicy::default();
+        let catalogue =
+            provenant_routing::Catalogue::bundled().map_err(|e| invalid(e.to_string()))?;
         reviews
             .iter()
             .map(|r| {
-                let attempt = store.attempt(r.attempt_id, &call)?;
+                let mut attempt = store.attempt(r.attempt_id, &call)?;
+                if let Some(reviewer) = attempt.reviewer.as_mut() {
+                    reviewer.family = catalogue_family(&catalogue, reviewer.model.as_deref());
+                }
                 bind::review_fact(&attempt, &r.claim, subject, delivery, &policy).map_err(|e| {
                     Error::Refused {
                         code: "REVIEW_UNBOUND",
@@ -282,6 +298,17 @@ impl Edge {
             facts,
         ))
     }
+}
+
+/// Model family from the routing catalogue for the observed `adapter/model`.
+/// An adapter name is not a family: a model missing from the catalogue, or
+/// listed without a family, stays unknown.
+fn catalogue_family(
+    catalogue: &provenant_routing::Catalogue,
+    model: Option<&str>,
+) -> Option<String> {
+    let id = provenant_routing::ModelId::parse(model?).ok()?;
+    catalogue.model(&id)?.family.clone()
 }
 
 fn execute(
@@ -514,5 +541,32 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catalogue_family;
+    use provenant_routing::Catalogue;
+
+    #[test]
+    fn family_comes_from_the_catalogue_and_is_unknown_otherwise() {
+        let catalogue = Catalogue::bundled().unwrap();
+        let known = catalogue
+            .models()
+            .iter()
+            .find(|entry| entry.family.is_some())
+            .expect("a catalogue model with a family");
+        assert_eq!(
+            catalogue_family(&catalogue, Some(known.model.as_str())),
+            known.family
+        );
+        // A bare adapter name, an unlisted model and a missing model are unknown.
+        assert_eq!(catalogue_family(&catalogue, Some("codex")), None);
+        assert_eq!(
+            catalogue_family(&catalogue, Some("codex/not-a-model")),
+            None
+        );
+        assert_eq!(catalogue_family(&catalogue, None), None);
     }
 }

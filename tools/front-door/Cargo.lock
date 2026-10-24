@@ -553,6 +553,7 @@ name = "provenant-providers"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "provenant-config",
  "provenant-confinement",
  "provenant-core",
  "provenant-quota",
@@ -570,7 +571,6 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "provenant-config",
- "provenant-core",
  "provenant-records",
  "serde",
  "serde_json",

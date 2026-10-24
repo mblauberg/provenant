@@ -353,6 +353,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         confidentiality: provenant_records::RouteConfidentiality {
             evidence_ref: "fixture-policy".into(),
         },
+        pool_selection: None,
     }
 }
 #[test]
@@ -520,6 +521,20 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
+fn claude_answer_is_recorded_once() -> Result<(), ProviderError> {
+    let (events, _) = replay(&claude::Claude, fixture!("claude/fresh.jsonl"), EXIT)?;
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["FIXTURE_USER_OR_PROVIDER_TEXT_001"]);
+    Ok(())
+}
+
+#[test]
 fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result<(), ProviderError>
 {
     let mut state = claude::Claude.stream(None)?;
@@ -680,6 +695,16 @@ pub(super) fn fixture_input<'a>(
         token,
         cwd,
         nonce: [9; 16],
+        provenant: crate::LaneRuntime {
+            executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
+            git: std::path::Path::new("/fixture/git/bin/git"),
+            state: std::path::Path::new("/fixture/state"),
+            child_state: std::path::Path::new("/fixture/state/children/attempt"),
+            home: std::path::Path::new("/fixture/home"),
+            depth: 1,
+            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+            assets: std::path::Path::new("/fixture/provenant"),
+        },
     }
 }
 
@@ -698,9 +723,11 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let result = entry
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
+        // Recording builds may prepare disabled modes to gather their evidence.
         if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
             assert!(
-                matches!(result, Err(ProviderError::Disabled { .. })),
+                matches!(result, Err(ProviderError::Disabled { .. }))
+                    || (cfg!(feature = "recording") && result.is_ok()),
                 "{id}"
             );
             continue;
@@ -718,6 +745,8 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 "CARGO_HOME",
                 "RUSTUP_HOME",
                 "CARGO_TARGET_DIR",
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_NOSYSTEM",
                 "CODEX_HOME",
                 "SHELL",
             ],
@@ -725,15 +754,36 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-                "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             _ => &[],
         };
-        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG"]
-            .iter()
-            .chain(extra)
-            .copied()
-            .collect();
+        let mut expected: Vec<_> = [
+            "HOME",
+            "USER",
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "PROVENANT_ROOT",
+            "PROVENANT_GIT",
+            "PROVENANT_LANE_DEPTH",
+            "PROVENANT_PARENT_ATTEMPT_ID",
+            "PROVENANT_RUN_STATE_DIR",
+        ]
+        .iter()
+        .chain(extra)
+        .copied()
+        .collect();
+        if cfg!(target_os = "macos")
+            && id == "codex"
+            && Path::new("/Library/Developer/CommandLineTools").is_dir()
+        {
+            let index = expected
+                .iter()
+                .position(|key| *key == "CARGO_TARGET_DIR")
+                .expect("cargo env")
+                + 1;
+            expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
+        }
         assert_eq!(keys, expected, "{id}");
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
@@ -750,18 +800,43 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 );
             }
             "claude" => {
+                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
+                assert!(argv.iter().any(|arg| arg == "--settings"));
+                assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
+                let sources = argv
+                    .iter()
+                    .position(|arg| arg == "--setting-sources")
+                    .expect("isolated settings");
+                assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
                 assert_eq!(argv[tools + 1], "Read,Grep,Glob");
                 // The host's token is the only credential: no keychain or
-                // other credential path is readable and nothing else runs.
+                // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
                     spec.env
                         .iter()
-                        .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN"
-                            && value == FIXTURE_TOKEN)
+                        .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
                 );
+                let secret = spec.secret_input.as_ref().expect("token pipe");
+                assert_eq!(
+                    secret.descriptor_env,
+                    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
+                );
+                assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
+                let allowed = argv
+                    .iter()
+                    .position(|arg| arg == "--allowedTools")
+                    .expect("allow-list");
+                assert_eq!(argv[allowed + 1], "mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
-                assert_eq!(spec.profile.spec.process_executables.len(), 1);
+                assert!(
+                    spec.profile
+                        .spec
+                        .process_executables
+                        .iter()
+                        .any(|grant| grant.path
+                            == std::path::Path::new("/fixture/provenant/bin/provenant"))
+                );
                 assert!(matches!(
                     entry
                         .adapter
@@ -793,20 +868,42 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             Err(ProviderError::InvalidPath)
         ));
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
+        // Host-detected Homebrew Node toolchain directories (launch::node_tools).
+        let homebrew_node = |path: &Path| {
+            ["/opt/homebrew", "/usr/local"].iter().any(|prefix| {
+                ["bin", "Cellar", "opt", "lib"]
+                    .iter()
+                    .any(|name| path == Path::new(prefix).join(name))
+            })
+        };
+        assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+            grant.path == package
+                || homebrew_node(&grant.path)
+                || (id == "codex"
+                    && (grant.path.starts_with("/fixture/home")
+                        || grant.path == Path::new("/Library/Developer/CommandLineTools")
+                        || grant.path == Path::new("/private/etc/ssl/openssl.cnf")))
+                || [
+                    "/fixture/provenant/bin/provenant",
+                    "/fixture/git/bin/git",
+                    "/fixture/provenant/release.json",
+                    "/fixture/state/config.toml",
+                    "/fixture/state/host-id",
+                    "/fixture/state/projects",
+                    "/fixture/state/routing",
+                    "/fixture/state/fabric",
+                ]
                 .iter()
-                .all(|grant| grant.path == package
-                    || (id == "codex" && grant.path.starts_with("/fixture/home")))
-        );
+                .any(|path| grant.path == std::path::Path::new(path))
+        }));
         assert!(
             spec.profile
                 .spec
                 .tool_exec_roots
                 .iter()
-                .all(|grant| grant.path == package || !grant.path.starts_with("/opt"))
+                .all(|grant| grant.path == package
+                    || homebrew_node(&grant.path)
+                    || !grant.path.starts_with("/opt"))
         );
         // A read-only launch may only start inside a declared read root.
         assert!(matches!(
@@ -836,6 +933,10 @@ struct LiveCapture {
     argv: Vec<String>,
     #[serde(default)]
     writer_shell_proof: bool,
+    #[serde(default)]
+    subprocess_env_scrub: bool,
+    #[serde(default)]
+    cli_version: String,
     #[serde(default)]
     keychain_ipc_proof: bool,
 }
@@ -883,7 +984,12 @@ fn replay_live(
     };
     let outcome = adapter.finish(state, exit)?;
     assert_eq!(format!("{:?}", outcome.status()), capture.outcome, "{id}");
-    assert_eq!(outcome.model(), capture.answering_model.as_deref(), "{id}");
+    // Codex streams carry no model; its recorded answering model comes from the rollout.
+    let streamed = capture
+        .answering_model
+        .as_deref()
+        .filter(|_| adapter.id() != "codex");
+    assert_eq!(outcome.model(), streamed, "{id}");
     assert!(outcome.session().is_some(), "{id}");
     Ok(())
 }
@@ -963,13 +1069,25 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
             assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
             assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
             assert!(capture.activation_eligible, "{reference}");
-            if mode.shell_enabled {
-                assert_eq!(mode.access_mode, Access::WorktreeWrite);
-                assert!(capture.writer_shell_proof, "{reference}");
+            if mode.adapter == "claude" && mode.shell_enabled {
                 assert!(
-                    capture.keychain_ipc_proof,
-                    "{reference}: keychain IPC not probed"
+                    capture.writer_shell_proof,
+                    "{reference}: Bash must have run"
                 );
+                assert!(
+                    capture.subprocess_env_scrub,
+                    "{reference}: scrub must be enabled"
+                );
+                assert!(
+                    !capture.cli_version.is_empty(),
+                    "{reference}: CLI version required"
+                );
+            }
+            if capture.keychain_ipc_proof {
+                assert!(capture.writer_shell_proof, "{reference}");
+            }
+            if capture.writer_shell_proof {
+                assert_eq!(mode.access_mode, Access::WorktreeWrite);
                 assert!(
                     capture
                         .argv
@@ -1160,7 +1278,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             config_dir: Path::new(config),
             scratch: Path::new("/scratch/empty"),
         };
-        let result = refresh_if_expiring(&script, &login, &|| now, deadline);
+        let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
         (result, script.calls.into_inner().unwrap())
     };
     let hour = 3_600_000;
@@ -1552,6 +1670,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 .unwrap()
                 .adapter
                 .prepare(input)?;
+
             if adapter == "claude" {
                 let mut unattributed_route = route.clone();
                 unattributed_route.account_key = None;
@@ -1595,8 +1714,33 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                         .spec
                         .state_writes
                         .iter()
+                        .filter(|g| !g.path.starts_with("/fixture/state"))
                         .all(|g| g.path.starts_with(&dir))
                 );
+                let lane = spec
+                    .profile
+                    .spec
+                    .state_writes
+                    .iter()
+                    .filter(|g| g.path.starts_with("/fixture/state"))
+                    .collect::<Vec<_>>();
+                let mut expected = vec![
+                    crate::launch::subtree("/fixture/state/children/attempt"),
+                    crate::launch::subtree("/fixture/state/fabric/locks"),
+                    crate::launch::subtree("/fixture/state/workflow"),
+                ];
+                expected.extend(
+                    [
+                        "fabric/fabric.sqlite3",
+                        "fabric/fabric.sqlite3-wal",
+                        "fabric/fabric.sqlite3-shm",
+                        "fabric/fabric.sqlite3-journal",
+                        "host-binding.lock",
+                    ]
+                    .map(|name| crate::launch::exact(Path::new("/fixture/state").join(name))),
+                );
+                assert_eq!(lane.len(), expected.len());
+                assert!(expected.iter().all(|grant| lane.contains(&grant)));
             } else {
                 // The accepted design keeps runtime state per attempt. Only the
                 // selected identity's auth.json is linked into CODEX_HOME.
@@ -1617,7 +1761,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
 
 #[cfg(feature = "recording")]
 #[test]
-fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
+fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
 -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut route = route("claude", "fixture-model");
@@ -1637,9 +1781,79 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
             .iter()
             .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash")
     );
+    assert!(launch.argv.windows(2).any(|pair| {
+        pair[0] == "--allowedTools" && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+    }));
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
+    );
     assert!(launch.profile.spec.deny_keychain_access);
     assert!(launch.profile.spec.authentication.is_empty());
-    assert!(launch.profile.spec.state_writes.is_empty());
+    for (key, value) in [
+        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
+        ("CARGO_HOME", "/fixture/scratch/cargo-home"),
+        (
+            "CARGO_TARGET_DIR",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+        ),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+    ] {
+        assert!(
+            launch.env.iter().any(|(k, v)| k == key && v == value),
+            "{key}"
+        );
+    }
+    for path in [
+        "/fixture/home/.cargo/bin",
+        "/fixture/home/.rustup/toolchains",
+        "/fixture/home/Library/Caches/provenant-lane-cargo/fixture",
+    ] {
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .any(|g| g.path == Path::new(path)),
+            "{path}"
+        );
+    }
+    // The existing registry is linked read-only into scratch Cargo home, and the
+    // user's Cargo configuration and credentials are not granted.
+    assert!(launch.setup.contains(&crate::launch::SetupStep::Symlink {
+        link: "/fixture/scratch/cargo-home/registry".into(),
+        target: "/fixture/home/.cargo/registry".into(),
+    }));
+    // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
+    // wrapper that sets it, and its directory is executable.
+    assert!(launch.setup.iter().any(|step| matches!(
+        step,
+        crate::launch::SetupStep::WriteExecutable { path, .. } if path == Path::new("/fixture/scratch/bin/git")
+    )));
+    assert!(
+        launch
+            .profile
+            .spec
+            .tool_exec_roots
+            .iter()
+            .any(|g| g.path == Path::new("/fixture/scratch/bin"))
+    );
+    assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
+        !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
+    }));
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/home/.cargo")
+            && !grant.path.starts_with("/fixture/home/.rustup")
+    }));
+    // Only lane grants are writable: never the private config or the user's home.
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/state/claude-config")
+            && !grant.path.starts_with("/fixture/home")
+    }));
     assert!(
         launch
             .env
@@ -1647,37 +1861,188 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
             .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
                 && value == "/fixture/state/claude-config")
     );
-    assert!(
-        launch
-            .env
-            .iter()
-            .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == FIXTURE_TOKEN)
+    let secret = launch.secret_input.as_ref().expect("token pipe");
+    assert_eq!(
+        secret.descriptor_env,
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
     );
+    assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
     Ok(())
 }
 
-#[cfg(not(feature = "recording"))]
 #[test]
-fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), ProviderError> {
-    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let mut route = route("claude", "fixture-model");
+fn claude_account_probe_carries_user_for_keychain_selection() {
+    let script = KeychainScript {
+        items: Default::default(),
+        statuses: std::sync::Mutex::new(
+            vec![br#"{"loggedIn":true,"email":"fixture@example.test"}"#.to_vec()].into(),
+        ),
+        calls: std::sync::Mutex::new(vec![]),
+    };
+    let key = crate::accounts::detect(
+        &script,
+        "claude",
+        Path::new("/opt/homebrew/bin/claude"),
+        Path::new("/home/u"),
+        OsStr::new("u"),
+        Path::new("/home/u/.claude-pro"),
+        Path::new("/scratch/empty"),
+    );
+    assert!(key.is_ok());
+    let calls = script.calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].1.iter().any(|entry| entry == "USER=u"));
+}
+
+#[test]
+fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
+    let home = std::env::temp_dir().join(format!("provenant-rollout-{}", std::process::id()));
+    let day = home.join("sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    let long = format!(
+        "{{\"type\":\"response_item\",\"payload\":{{\"output\":\"{}\"}}}}\n",
+        "x".repeat(3 * 1024 * 1024)
+    );
+    let rollout = format!(
+        "{}\n{long}not json\n{{\"type\":\"event_msg\",\"payload\":{{\"model\":7}}}}\n{}\n",
+        serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+        serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+    );
+    std::fs::write(
+        day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+        rollout,
+    )
+    .unwrap();
+    let observed = crate::codex_rollout::observe(&home, thread);
+    std::fs::remove_dir_all(&home).unwrap();
+    let turn = observed.unwrap();
+    assert_eq!(turn.model, "gpt-6-luna");
+    assert_eq!(turn.effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn rust_tools_exec_repository_scripts_in_the_working_directory() {
+    let mut route = route("codex", "fixture-model");
     route.account_key = None;
+    let plan = read_only_plan("/fixture", Some("login"));
+    let prompt = Prompt::new("fixture".into());
+    let spec = crate::codex::Codex
+        .prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))
+        .unwrap();
+    let exec = &spec.profile.spec.tool_exec_roots;
+    assert!(exec.iter().any(|g| g.path == Path::new("/fixture/repo")
+        && g.scope == provenant_confinement::permissions::PathScope::Subtree));
+    // Exec does not widen reads: the worktree was already readable.
+    assert!(!exec.iter().any(|g| g.path == Path::new("/fixture/home")));
+}
+
+#[test]
+fn homebrew_node_tools_grant_toolchain_directories_but_not_etc_or_var() {
+    let prefix = std::path::Path::new("/opt/homebrew");
+    let (mut reads, mut exec) = (Vec::new(), Vec::new());
+    let mut env = vec![(
+        std::ffi::OsString::from("PATH"),
+        std::ffi::OsString::from("/usr/bin:/bin"),
+    )];
+    crate::launch::homebrew_tools(prefix, &mut reads, &mut exec, &mut env);
+    let paths: Vec<_> = reads.iter().map(|grant| grant.path.clone()).collect();
+    assert_eq!(
+        paths,
+        ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name))
+    );
+    assert_eq!(reads, exec);
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.ends_with("etc") || path.ends_with("var"))
+    );
+    assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
+}
+
+#[test]
+fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
-    let token = fixture_token();
-    let launch = claude::Claude.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        Some(&token),
-    ))?;
-    let tools = launch
-        .argv
-        .iter()
-        .position(|arg| arg == "--tools")
-        .expect("tools");
-    assert_eq!(launch.argv[tools + 1], "Read,Grep,Glob,Edit,Write");
-    assert!(!launch.profile.spec.deny_keychain_access);
-    assert!(launch.profile.spec.tool_exec_roots.is_empty());
+    let account_dir = std::path::Path::new("/fixture/identities/opaque");
+    for (id, session, flag) in [
+        ("claude", "5e55-claude-session", "--resume"),
+        ("codex", "5e55-codex-thread", "resume"),
+    ] {
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .expect("provider")
+            .adapter;
+        let route = route(id, "fixture-model");
+        let continuation = Continuation::retained(id, session, &route, "fixture")?;
+        let account = identity::RegisteredAccount::new(id, "opaque-account", account_dir.into())?;
+        let token =
+            (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
+        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), true);
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            token.as_ref(),
+        );
+        input.account = Some(&account);
+        input.continuation = Some(&continuation);
+        let launch = adapter.prepare(input)?;
+        let argv: Vec<_> = launch
+            .argv
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        let at = argv.iter().position(|arg| arg == flag).expect(flag);
+        assert_eq!(argv[at + 1], session, "{id}");
+    }
     Ok(())
+}
+
+#[test]
+fn package_root_never_grants_a_hidden_home_tool_tree() {
+    use crate::launch::package_root;
+    let direct = Path::new("/home/u/.cargo/bin/codex");
+    assert_eq!(
+        package_root(direct).unwrap(),
+        Path::new("/home/u/.cargo/bin")
+    );
+    let versioned = Path::new("/home/u/.local/share/claude/versions/2.1.310");
+    assert_eq!(
+        package_root(versioned).unwrap(),
+        Path::new("/home/u/.local/share/claude/versions")
+    );
+    let cask = Path::new("/opt/homebrew/Caskroom/codex/0.159.0/bin/codex");
+    assert_eq!(
+        package_root(cask).unwrap(),
+        Path::new("/opt/homebrew/Caskroom/codex/0.159.0")
+    );
+}
+
+#[test]
+fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
+    let mut entry = accounts::Registration {
+        adapter: "claude".into(),
+        label: "pro".into(),
+        key: "k".into(),
+        org_fingerprint: None,
+        directory: "/home/u/.claude-pro".into(),
+        plan: None,
+        priority: None,
+        billing_anchor: None,
+        limits: None,
+    };
+    assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    entry.org_fingerprint = Some("a".into());
+    assert_eq!(entry.check_org(Some("a")).unwrap(), None);
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    assert!(entry.check_org(Some("b")).is_err());
 }

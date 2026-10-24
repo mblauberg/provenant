@@ -38,6 +38,8 @@ pub struct TerminalPublication<'a> {
     pub applied_route: Option<RouteRecord>,
     pub observed_route: Option<RouteRecord>,
     pub usage: UsageRecord,
+    /// Provider session handle, kept so the attempt can be continued.
+    pub session: Option<String>,
 }
 impl RunStore {
     /// A result-only orphan predates durable terminal intent. The trusted
@@ -117,6 +119,7 @@ impl RunStore {
             applied_route: pending.applied_route.clone(),
             observed_route: pending.observed_route.clone(),
             usage: pending.usage.clone(),
+            session: pending.session.clone(),
         };
         self.publish_terminal(
             id,
@@ -201,6 +204,7 @@ impl RunStore {
             request_digest: digest,
             task_ids: input.request.tasks.iter().map(|t| t.task_id).collect(),
             parent: input.request.parent,
+            parent_attempt: input.request.parent_attempt,
             children: vec![],
             revision: 1,
             generation: 0,
@@ -269,8 +273,8 @@ impl RunStore {
                 let attempt = AttemptRecord {
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
-                    queued_at: input.created_at, started_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
+                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), subject: None, head: None, delivery: None, verified_owner: Some(context.actor_id), session: None,
+                    queued_at: input.created_at, started_at: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
@@ -441,6 +445,7 @@ impl RunStore {
             applied_route: None,
             observed_route: None,
             usage: UsageRecord::default(),
+            session: None,
         };
         self.commit_terminal(old, revision, &publication, None, None, false, call)
             .map(Some)
@@ -490,6 +495,7 @@ impl RunStore {
         next.applied_route = publication.applied_route.clone();
         next.observed_route = publication.observed_route.clone();
         next.usage = publication.usage.clone();
+        next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
             path: artifact_path(id, "result.md")?,
             digest: CanonicalV1::file_digest(publication.result.as_bytes()),
@@ -505,6 +511,36 @@ impl RunStore {
         };
         next.publication_error = None;
         next.exit_evidence = durable_exit;
+        if publication.outcome == Outcome::Succeeded {
+            let attempt = self.attempt_dir(old.run_id, id, false)?;
+            // Recovery reports uncertainty from the sealed start marker without
+            // repeating an external effect or inferring success from prose.
+            let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {
+                Some(raw) => Some(raw),
+                None => read_sealed(&attempt, "delivery-started.json", RECORD_LIMIT)?,
+            };
+            if let Some(raw) = raw {
+                let receipt: WriterDeliveryReceipt = decode(&raw)?;
+                next.head = receipt.head;
+                next.delivery = Some(receipt);
+            } else if let Some(deliver) = self
+                .request(old.run_id, call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == old.task_id)
+                .and_then(|task| task.deliver)
+            {
+                // Requested delivery that never ran must not read as success
+                // with no trace.
+                next.delivery = Some(WriterDeliveryReceipt {
+                    schema_version: 1,
+                    remote: deliver.remote,
+                    branch: deliver.branch,
+                    head: None,
+                    state: WriterDeliveryState::NotAttempted,
+                });
+            }
+        }
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
                 if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
@@ -584,6 +620,12 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     let mut attempts = std::collections::BTreeSet::new();
     let mut prompt_bytes = 0u64;
     for task in &input.request.tasks {
+        if let Some(deliver) = &task.deliver {
+            if task.writer.is_none() {
+                return Err(RunError::Validation("delivery requires a writer"));
+            }
+            crate::delivery::validate(deliver)?;
+        }
         if task.account.as_ref().is_some_and(|s| {
             s == "unknown"
                 || s.is_empty()

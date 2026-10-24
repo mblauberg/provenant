@@ -27,7 +27,9 @@ fn limits(harness: Harness) -> Limits {
 
 pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
     match h {
-        Harness::Claude => home.join(".claude.json"),
+        // Claude Code keeps `.claude.json` beside `CLAUDE_CONFIG_DIR` when set.
+        Harness::Claude if base == home.join(".claude") => home.join(".claude.json"),
+        Harness::Claude => base.join(".claude.json"),
         Harness::Codex => base.join("config.toml"),
         Harness::Cursor => base.join("mcp.json"),
         Harness::Agy => base.join("config/mcp_config.json"),
@@ -58,14 +60,19 @@ fn selector(h: Harness) -> &'static str {
     }
 }
 fn mcp(h: Harness, targets: &Targets) -> Result<Json, InstallError> {
-    let binary = targets.bin_dir.join("provenant");
+    mcp_entry(
+        h,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+    )
+}
+
+/// The installer and confined lanes use the same stdio registration.
+pub fn mcp_entry(h: Harness, binary: &Path, state: &Path) -> Result<Json, InstallError> {
     let binary = binary
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP command requires UTF-8"))?;
-    let state = targets
-        .roots
-        .state
-        .as_path()
+    let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP state path requires UTF-8"))?;
     let args = ["--state-dir", state, "fabric", "mcp", "--client", name(h)];
@@ -456,6 +463,7 @@ pub(crate) fn capture(
                 });
             }
             if updated != old {
+                updated = crate::splice::pretty_json(&updated)?;
                 plan.files.insert(
                     hook.clone(),
                     Value::File {
@@ -615,7 +623,7 @@ pub(crate) fn snapshot_target(
                         ..
                     }) = managed::snapshot(&directory, fs)?
                 {
-                    if actual == link.target {
+                    if managed::same_link_target(&actual, &link.target) {
                         return Ok(None);
                     }
                     return Err(InstallError::Conflict(directory));
@@ -886,6 +894,7 @@ impl Targets {
                 let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
                 if !default.harnesses.is_empty() {
                     if !self.configured_homes.contains(&target.harness) {
+                        self.environment_homes.insert(target.harness);
                         let instruction = target
                             .instruction
                             .as_ref()
@@ -1023,7 +1032,7 @@ fn legacy_links(
                     Some(Snapshot {
                         value: Value::Link(actual),
                         ..
-                    }) if actual == link.target => {
+                    }) if managed::same_link_target(&actual, &link.target) => {
                         if link.retained {
                             if targets.hooks {
                                 if let Some(spec) = targets
@@ -1095,7 +1104,7 @@ fn legacy_links(
                 value: Value::Link(actual),
                 ..
             }) = snap
-                && actual == link.target
+                && managed::same_link_target(&actual, &link.target)
             {
                 plan.authorised.insert(path.clone());
                 if !link.retained {
@@ -1195,7 +1204,7 @@ pub(crate) fn check_legacy(
                 if link.name.is_empty() {
                     blocked.push(path.clone());
                 }
-                if actual == link.target {
+                if managed::same_link_target(&actual, &link.target) {
                     add_finding(findings, "legacy_entry", &path)?;
                 }
             }
@@ -1255,7 +1264,7 @@ pub(crate) fn check_legacy(
                 Some(Snapshot {
                     value: Value::Link(actual),
                     ..
-                }) if actual == link.target => {
+                }) if managed::same_link_target(&actual, &link.target) => {
                     add_finding(findings, "legacy_entry", &path)?;
                 }
                 Some(current)
@@ -1272,7 +1281,7 @@ pub(crate) fn check_legacy(
     }
     let path = home.join(".agents/AGENTS.md");
     let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
-    if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if link==&checkout.join("AGENTS.md"))
+    if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if managed::same_link_target(link, &checkout.join("AGENTS.md")))
     {
         add_finding(findings, "legacy_entry", &path)?;
     }

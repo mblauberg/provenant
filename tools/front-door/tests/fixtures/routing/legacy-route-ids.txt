@@ -1,0 +1,36 @@
+# Sanitised ID-only projection of the legacy-routes.txt source supplied with
+# the route-pools task on 2026-10-25. It records active legacy pool membership
+# and exact adapter/model IDs only. It is not a provider invocation, effort
+# control, model-family proof, price record, or free-status source.
+
+principal
+  claude/claude-opus-5-5
+  codex/gpt-6-astra
+
+senior
+  claude/claude-sonnet-5-5
+  codex/gpt-6.1-sol
+  agy/gemini-3.8-flash
+
+junior
+  opencode/opencode/deepseek-v4.1-flash-free
+  opencode/opencode/glm-5.3-flash-free
+  claude/claude-haiku-5-5
+  codex/gpt-6-luna
+  agy/gemini-3.8-flash
+
+utility
+  claude/claude-haiku-5-5
+  codex/gpt-6-luna
+  opencode/opencode/deepseek-v4.1-flash-free
+  opencode/opencode/glm-5.3-flash-free
+
+design
+  claude/claude-sonnet-5-5
+  agy/gemini-3.8-flash
+  claude/claude-opus-5-5
+
+writing
+  agy/gemini-3.8-flash
+  claude/claude-sonnet-5-5
+  claude/claude-opus-5-5

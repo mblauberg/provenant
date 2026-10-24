@@ -121,5 +121,8 @@ directories, without following symlinks. Cleanup failure does not change the
 committed attempt. `read_only_plan` loads the bound project's `read-only.json`,
 applies the host Git binding and selects that temporary root. Start records
 the launching plan's relative write exceptions before custody handoff.
-Production `Registry::prepare` does not yet build its read-only plan through
-`read_only_plan`, so those grants are not yet applied to dispatch.
+Production `Registry::prepare` verifies the read-only repository against the
+persisted dispatch project binding and calls the same `read_only_plan` builder.
+Git reads and explicit project writes therefore reach both CLI and Fabric
+launches. Non-Git workspaces keep their existing directory read grant and have
+no repository exceptions.

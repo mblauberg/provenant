@@ -44,7 +44,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     assert_eq!(shown["command"], "quota show");
     assert_eq!(shown["data"]["coverage"]["known"], 0);
     assert_eq!(shown["data"]["accounts"][0]["account"]["adapter"], "codex");
-    assert!(!rig.state.exists());
+    assert!(!rig.state.join("quota").exists());
     let tick = rig.command(&["quota", "tick", "--json"])?;
     assert_eq!(
         code(&tick),
@@ -160,12 +160,12 @@ fn malformed_records_and_unsafe_directories_fail_without_replacing_report() -> R
 
 fn quota_rig() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
-    let config = rig.home.join(".agents/config");
-    std::fs::create_dir_all(&config)?;
-    std::fs::write(
-        config.join("telemetry.json"),
-        br#"{"accounts":{"claude":{},"codex":{"default":{}},"agy":{},"cursor":{},"opencode":{}}}"#,
-    )?;
+    let auth = serde_json::to_vec(&serde_json::json!({
+        "tokens": {"account_id": "quota-test"}
+    }))?;
+    let key = provenant_providers::identity::codex_account(&auth).ok_or("Codex fixture key")?;
+    std::fs::write(rig.root.join("codex/auth.json"), auth)?;
+    support::register_account(&rig, "codex", "default", &key, &rig.root.join("codex"))?;
     for key in [
         "XDG_DATA_HOME",
         "XDG_RUNTIME_DIR",
@@ -321,12 +321,12 @@ fn jiff_time() -> Result<i64> {
 }
 
 #[test]
-fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> Result {
+fn registered_accounts_have_distinct_quota_keys() -> Result {
     use std::fs;
     let rig = quota_rig()?;
-    let mut accounts = serde_json::Map::new();
+    support::clear_accounts(&rig)?;
+    let mut registrations = Vec::new();
     for provider in ["codex", "cursor"] {
-        let mut entries = serde_json::Map::new();
         for (name, identity) in [
             ("one", "fixture-account-one"),
             ("two", "fixture-account-two"),
@@ -360,17 +360,30 @@ fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> R
                     )?;
                 }
             }
-            entries.insert(name.into(), serde_json::json!({"identity_dir":dir}));
+            let key = if identity.is_empty() {
+                format!("{provider}-missing")
+            } else if provider == "codex" {
+                provenant_providers::identity::codex_account(&serde_json::to_vec(
+                    &serde_json::json!({"tokens":{"account_id":identity}}),
+                )?)
+                .ok_or("Codex account key")?
+            } else {
+                let token = match name {
+                    "one" => {
+                        "fixture.eyJzdWIiOiJhdXRoaDB8Zml4dHVyZS1hY2NvdW50LW9uZSIsImV4cCI6NDAwMDAwMDAwMH0.signature"
+                    }
+                    _ => {
+                        "fixture.eyJzdWIiOiJhdXRoaDB8Zml4dHVyZS1hY2NvdW50LXR3byIsImV4cCI6NDAwMDAwMDAwMH0.signature"
+                    }
+                };
+                provenant_providers::identity::cursor_account(token).ok_or("cursor account key")?
+            };
+            registrations.push((provider, name, key, dir));
         }
-        accounts.insert(provider.into(), entries.into());
     }
-    for provider in ["claude", "agy", "opencode"] {
-        accounts.insert(provider.into(), serde_json::json!({}));
+    for (provider, label, key, dir) in registrations {
+        support::register_account(&rig, provider, label, &key, &dir)?;
     }
-    fs::write(
-        rig.home.join(".agents/config/telemetry.json"),
-        serde_json::to_vec(&serde_json::json!({"accounts":accounts}))?,
-    )?;
     let out = rig.command(&["quota", "show", "--json"])?;
     assert_eq!(
         code(&out),
@@ -386,26 +399,22 @@ fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> R
             .filter(|r| r["account"]["adapter"] == provider)
             .collect();
         assert_eq!(rows.len(), 3);
-        let unknown = rows
-            .iter()
-            .filter(|r| r["account"]["account_key"] == "unknown")
-            .count();
-        assert_eq!(unknown, 1, "{provider}: unreadable sign-in must be unknown");
         let keys: std::collections::BTreeSet<_> = rows
             .iter()
             .map(|r| r["account"]["account_key"].as_str().unwrap())
             .collect();
         assert_eq!(keys.len(), 3);
         for key in keys {
-            assert!(key == "unknown" || key.starts_with(&format!("{provider}-")));
+            assert!(key.starts_with(&format!("{provider}-")));
         }
-        use provenant_quota::{AccountScope, Admission, ProbeCapture, QuotaProbeInput, Refusal};
+        use provenant_quota::{
+            AccountRecord, AccountScope, Admission, ProbeCapture, QuotaProbeInput, Refusal,
+        };
         use provenant_records::{
             ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
         };
         let known: Vec<AccountScope> = rows
             .iter()
-            .filter(|r| r["account"]["account_key"] != "unknown")
             .map(|r| serde_json::from_value(r["account"].clone()).unwrap())
             .collect();
         let at = jiff_time()?;
@@ -432,17 +441,18 @@ fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> R
             )?;
             assert_eq!(&snapshot.account, account);
         }
-        let refusals = [Refusal {
+        let mut record = AccountRecord::empty(known[0].clone());
+        record.refusals.push(Refusal {
             account: known[0].clone(),
             model: "fixture-model".into(),
             pool: None,
             observed_unix_seconds: at,
             resets_unix_seconds: Some(at + 300),
-        }];
+        });
+        let records = [record];
         let admission = Admission {
             now_unix_seconds: at,
-            records: &[],
-            refusals: &refusals,
+            records: &records,
             pools: &[],
         };
         let mut route = ResolvedRoute {
@@ -462,11 +472,11 @@ fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> R
             confidentiality: RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
-        let operation = provenant_core::OperationId::parse("fixture")?;
         for (account, allowed) in [(&known[0], false), (&known[1], true), (&known[0], false)] {
             route.account_key = Some(account.account_key.clone());
-            assert_eq!(admission.admit(&route, &operation).is_ok(), allowed);
+            assert_eq!(admission.check(&route).is_ok(), allowed);
         }
     }
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("fixture-account"));
