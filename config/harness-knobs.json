@@ -3,26 +3,22 @@
   "knobs": {
     "effort.shift": {
       "type": "int", "min": -1, "max": 1, "default": 0, "status": "wired",
-      "reader": "scripts/model_route.py (task-class routes)",
       "effect": "Moves a task-class route's effort one step along the effort ladder, never below the task class's policy minimum and only to an effort every configured model takes.",
       "trade_off": "-1 saves reasoning tokens where a route sits above its minimum; +1 buys depth at roughly proportional token cost.",
       "floor": {"crucial": 0}
     },
     "lanes.silence_seconds": {
       "type": "int", "min": 1, "max": 3600, "default": 300, "status": "wired",
-      "reader": "skills/orchestrate/scripts/provider_exec.py",
       "effect": "Re-check a silent provider after this many seconds and retain liveness, event and worktree observations; never kill it for silence.",
       "trade_off": "Lower records silence sooner at the cost of more process and worktree observations."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
-      "reader": "skills/orchestrate/scripts/batch_run.py",
       "effect": "Upper bound on lanes one batch runs at once; a lower requested concurrency still stands.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
     },
     "context.ceiling_tokens": {
       "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "wired",
-      "reader": "skills/orchestrate/scripts/dispatch_run.py",
       "effect": "Auto-compaction ceiling for a dispatch that names none; null keeps the catalogue's context.ceiling_tokens.",
       "trade_off": "Lower compacts sooner, so each turn re-reads fewer tokens, at more risk that a long lane loses detail."
     },
@@ -47,6 +43,12 @@
       "effect": "After a repair, re-review only the repair delta, or the whole change again.",
       "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
     },
+    "review.polish": {
+      "project": "strengthen", "type": "enum", "values": ["auto", "always", "off"], "default": "auto", "status": "wired",
+      "reader": "skills/implement/SKILL.md",
+      "effect": "auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never.",
+      "trade_off": "Polish costs one writer lane per qualifying change for a simpler diff and shorter review."
+    },
     "repair.max_cycles": {
       "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
       "reader": "skills/deliver/references/contract.md (2/4/5/5, fixed)",
@@ -61,7 +63,6 @@
     },
     "routing.pool_mode": {
       "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "wired",
-      "reader": "scripts/model_route_pools.py pick",
       "effect": "top always takes the highest-weight available model; rotate spreads picks by weight across the pool.",
       "trade_off": "rotate spreads quota and families across models at some cost in consistency between lanes."
     },
@@ -79,7 +80,6 @@
     },
     "quota.pace_tolerance": {
       "type": "int", "min": 0, "max": 20, "default": 4, "status": "advisory",
-      "reader": "scripts/provider_quota.py PACE_TOLERANCE",
       "effect": "Percentage points either side of even use before a quota window reads as ahead of pace or reserve.",
       "trade_off": "Lower flags pacing pressure earlier (fewer limit hits, more rerouting); higher tolerates bursts."
     }
@@ -97,6 +97,7 @@
         "council.junior_size": 2,
         "routing.pool_mode": "rotate",
         "writing.final_polish": "off",
+        "review.polish": "off",
         "context.summary_tokens": 1000
       }
     },
@@ -107,6 +108,7 @@
         "review.extra_reviewers": 1,
         "review.cross_family": "require",
         "review.rereview_scope": "full",
+        "review.polish": "always",
         "council.junior_size": 4
       },
       "task_classes": {

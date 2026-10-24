@@ -47,7 +47,6 @@ provenant-cli = { path = "crates/cli" }
 # deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = []
 ignored = [
-  "provenant-fabric-mcp",
   "provenant-routing",
   "provenant-telemetry",
 ]
@@ -81,6 +80,10 @@ tempfile = { workspace = true }
 provenant-quota = { workspace = true }
 jiff = { workspace = true }
 rusqlite = { workspace = true }
+provenant-run = { workspace = true }
+provenant-fabric-mcp = { workspace = true }
+provenant-fabric-runtime = { workspace = true }
+provenant-fabric-store = { workspace = true }
 provenant-workflow = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-cli = { workspace = true }

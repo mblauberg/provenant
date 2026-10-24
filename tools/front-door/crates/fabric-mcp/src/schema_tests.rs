@@ -605,6 +605,7 @@ fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
         "fabric_landing",
         "fabric_submit",
         "fabric_run",
+        "fabric_graph",
         "fabric_output",
         "fabric_hosts",
     ];

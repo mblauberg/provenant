@@ -4,7 +4,9 @@ Use `provenant fabric identity --json` to verify the selected project and inbox.
 Acquire with `provenant fabric landing acquire --reference refs/heads/main
 --expected OID --candidate OID --lease-seconds 300 --operation-id ID`.
 Keep the returned `proof` private. Renew, verify and release use `--reference`,
-`--id`, `--generation` and the 32-digit hex `--token`. Renew and release also
+`--id` and `--generation`. Supply the private 32-digit hex token through
+`PROVENANT_LANDING_TOKEN`, including for push and reconciliation; it never enters
+the command arguments. Renew and release also
 require a unique `--operation-id`; retries reuse that ID and identical input.
 
 Observe another generation with `provenant fabric landing wait --reference

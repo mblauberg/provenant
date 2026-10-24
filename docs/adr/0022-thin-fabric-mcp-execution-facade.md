@@ -16,19 +16,13 @@ runtime ownership.
 
 ## Decision
 
-Fabric MCP exposes exactly two execution tools:
-
-- `fabric_dispatch` starts one ordinary configured-provider task; and
-- `fabric_batch` starts a fixed batch of 1–64 tasks with concurrency capped at
-  eight.
-
-Both create a run directory automatically and delegate unchanged to
-`dispatch_run.py` or `batch_run.py`. The routing surface is `adapter`, `alias`
-and `mode`, with `worktree` when the mode is `worktree_write`; the schemas are
-strict, so an assurance selector is a typed input error rather than a silently
-ignored one. The default route is the current provider seat, the `senior`
-alias, the `worker` role and `read_only` access. Same-family and mixed-family
-ordinary work are allowed; independence remains a separate assurance claim.
+Fabric MCP exposes `fabric_submit` for one or more ordinary configured-provider
+tasks and `fabric_graph` for checkpointed graph workflows. The typed catalogue
+and current request contracts live in the [Rust Fabric design](../specs/rust-port/design/fabric.md#cli-and-mcp-surfaces).
+Submission uses `op: submission`, a `tasks` list, `concurrency` and an
+`operation_id`. Route preferences are carried per task. Writers declare
+`access: worktree_write` and a verified registered `worktree`; read-only tasks
+use `access: read_only`. The run owner enforces access before provider launch.
 
 Responses contain compact status, actual route when known and absolute artifact
 paths. Prompts, results and diagnostics remain in the existing run files. A
@@ -50,67 +44,33 @@ including cheap batches, while the orchestration scripts remain the sole owners
 of route resolution, provider processes, attempts and batch evidence. The
 façade adds no maintenance service or parallel lifecycle state.
 
-## Amendment: named sessions
+## Continuation and batches
 
-**Accepted 2026-09-30** (issue [#726](https://github.com/mblauberg/provenant/issues/726)).
-
-Cross-agent continuation needs one project-shared mapping from a name to a
-provider session, and the existing Fabric SQLite store is already the
-project-shared state. It gains one `sessions` table holding only the alias: a
-case-sensitive name per project, the actual adapter, the provider-native session
-ID, the run, task, attempt and result path of the last clean turn, and the
-latest turn's run, attempt, status and launching process ID. It holds no
-prompts, results, transcripts or provider processes.
-
-A turn is an ordinary `fabric_dispatch`: a fresh dispatch for a new name, the
-existing `resume` path for a known one, or `handoff` when the caller passes
-`fresh: true`, each continuing from the alias's last clean attempt. The
-dispatch and run owners keep sole ownership of processes, attempts,
-cancellation and result files. Only a clean turn (`ok` or `input_required`)
-moves the alias, to the attempt that ended the owner invocation. One turn per
-name is active; a concurrent caller gets `session_busy`. A turn records its run
-before the owner starts, and launches nothing if it cannot. Busy follows the
-run's lifecycle: the turn is active while its launching process lives, then
-while its run's task is open or the run's owner lives. The run status records
-the launcher and the owner it started, so readers close an attempt whose
-launcher died before starting an owner, and keep open one whose owner lives
-without an owner record. This is reconciled whenever the name is read; there is no lease timer, heartbeat,
-queue, expiry or cleanup daemon. A provider without native continuation, or one
-that no longer has the session, reports `continuation_unsupported` rather than
-falling back to a new session.
-`fabric_session` inspects, lists and forgets names; forgetting deletes only the
-alias once no turn is active.
-
-## Amendment: dispatch batches
-
-**Accepted 2026-10-21.**
-
-The dedicated `fabric_batch` MCP registration and its `FABRIC_LEGACY_TOOLS`
-opt-in are retired. Callers use `fabric_dispatch` with `tasks[]` for finite
-batches; the existing batch owner still executes those tasks.
+Continuation targets an explicit attempt through `fabric_run` with `op: resume`,
+`operation_id`, `prompt` and `expected_generation`. Named sessions are retired.
+Finite batches use `fabric_submit` with `op: submission` and `tasks`.
 
 ## Amendment: plan graphs
 
 **Accepted 2026-10-22** (graph runner spec, [PR
 #1099](https://github.com/mblauberg/provenant/pull/1099); slice 1).
 
-The execution tools are now `fabric_dispatch` and `fabric_graph`.
-`fabric_graph` (`action: run|status|cancel|resume`) takes one validated JSON
-plan graph whose nodes are ordinary dispatches, and returns at once with a
-digest; `status` waits for at most 55 seconds and restarts an owner that died.
-The CLI equivalent is `provenant graph`.
+`fabric_graph` selects `op: run|status|cancel|resume`. Run and resume take a
+project-local JSON document path. Status and cancel take its `id`. The CLI uses
+`provenant fabric graph run|status|cancel|resume`. Calls advance bounded work
+under a checkpoint lock and return typed graph state. They do not start a daemon.
 
-Fabric gains a scheduler only in this bounded form: one detached owner process
-per running graph, started by the call and ending with the graph. It holds no
-authority of its own and calls no model. Each node is a `fabric_dispatch` made
-with the creating seat's identity, so the workspace boundaries, capability
-rules and own-seat guard apply unchanged, and `dispatch_run.py` remains the
-sole owner of provider processes, attempts and results. The graph state lives
-in four tables in the existing Fabric store; a node's receipt references its
-dispatch receipt by run and task id and copies no provider output. There is
-still no daemon: a dead owner is detected on read and restarted by `resume`,
-and recovery adopts the lanes the registry still shows.
-`provenant graph resume ID --force` audits the caller and replaces stale owner identity under a process lock, retaining lane and gate fences until recovery proves them stopped.
+Each node declares `access: read_only|worktree_write`; writers name an absolute
+worktree which the execution owner must verify and confine before launch.
+Auth refusals, usage limits and adapter unavailability may advance routes before
+provider launch. After launch, only read-only nodes may fall back. Writer
+failures preserve the worktree for the chair. Unknown launch evidence is treated
+as launched. Each attempt uses the configured graph timeout.
+
+Cancel persists an admission fence and asks the run owner to stop accepted
+attempts. Resume checks the document digest and observes the same attempt keys.
+Run mutations remain unavailable until the dispatch/control owner is bound;
+status and the admission fence remain usable through every MCP harness.
 
 Two mechanisms are new. A writer node's linked worktree is reserved for the
 graph in the store and by a file in its Git directory, which `dispatch_run.py`

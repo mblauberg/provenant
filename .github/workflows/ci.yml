@@ -134,8 +134,7 @@ jobs:
         run: cargo shear
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
-  # time. Share the Rust path filter and exercise the front door's release build.
-
+  # time. Exercise the front door's release build.
   rust-macos-release:
     name: Rust macOS release smoke
     runs-on: macos-15
@@ -205,6 +204,9 @@ jobs:
         run: git ls-files | typos --file-list - --force-exclude
       - name: Check workflows and their shell blocks
         run: actionlint
+      - name: Check shell scripts
+        run: |
+          { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names

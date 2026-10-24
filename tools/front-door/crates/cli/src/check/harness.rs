@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    io::Read,
     os::unix::ffi::OsStringExt,
     path::{Component, Path, PathBuf},
 };
@@ -38,7 +39,10 @@ fn read_harness_file(
     }
 }
 
-pub(super) fn inspect(git: &GitContext<'_>) -> Result<Scan, CheckError> {
+pub(super) fn inspect(
+    git: &GitContext<'_>,
+    installed_skill_roots: &[PathBuf],
+) -> Result<Scan, CheckError> {
     let index = git.read(GitRead::IndexEntries { paths: Vec::new() })?;
     let mut scan = Scan::default();
     scan.note("tracked-index", &index);
@@ -82,6 +86,7 @@ pub(super) fn inspect(git: &GitContext<'_>) -> Result<Scan, CheckError> {
         files.insert(path.clone(), text);
     }
     let mut anchor_cache = BTreeMap::new();
+    let package_versions = package_versions(git, &mut scan)?;
     let skills: BTreeSet<_> = files
         .keys()
         .filter(|path| path.file_name().is_some_and(|name| name == "SKILL.md"))
@@ -90,6 +95,9 @@ pub(super) fn inspect(git: &GitContext<'_>) -> Result<Scan, CheckError> {
     for (path, text) in &files {
         if path.file_name().is_some_and(|name| name == "SKILL.md") {
             skill(&mut scan, path, text)?;
+            if path.starts_with("skills") {
+                check_verified_against(&mut scan, path, text, &package_versions)?;
+            }
         } else if path.ends_with("agents/openai.yaml") {
             sidecar(&mut scan, path, text, &paths, git)?;
         } else if issue_form(path) {
@@ -109,7 +117,185 @@ pub(super) fn inspect(git: &GitContext<'_>) -> Result<Scan, CheckError> {
             )?;
         }
     }
+    for (label, text) in installed_skill_files(installed_skill_roots)? {
+        scan.note(label.to_string_lossy().into_owned(), text.as_bytes());
+        check_verified_against(&mut scan, &label, &text, &package_versions)?;
+    }
     Ok(scan)
+}
+
+type Version = (u64, u64);
+
+fn package_versions(
+    git: &GitContext<'_>,
+    scan: &mut Scan,
+) -> Result<BTreeMap<String, Version>, CheckError> {
+    let mut versions = BTreeMap::new();
+    if let WorkingFile::Bytes(bytes) =
+        read_file(git.repo.root_dir(), Path::new("package.json"), FILE_LIMIT)?
+    {
+        scan.note("package.json", &bytes);
+        if let Ok(package) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            for section in ["dependencies", "devDependencies"] {
+                if let Some(dependencies) =
+                    package.get(section).and_then(serde_json::Value::as_object)
+                {
+                    for (name, value) in dependencies {
+                        if let Some(version) = value.as_str().and_then(version_prefix) {
+                            versions.insert(name.clone(), version);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let WorkingFile::Bytes(bytes) =
+        read_file(git.repo.root_dir(), Path::new("Cargo.toml"), FILE_LIMIT)?
+    {
+        scan.note("Cargo.toml", &bytes);
+        if let Ok(text) = std::str::from_utf8(&bytes)
+            && let Ok(document) = text.parse::<toml_edit::DocumentMut>()
+        {
+            for table in [
+                document.get("dependencies"),
+                document.get("dev-dependencies"),
+                document
+                    .get("workspace")
+                    .and_then(|v| v.get("dependencies")),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(toml_edit::Item::as_table)
+            {
+                for (name, item) in table.iter() {
+                    let declared = item
+                        .as_str()
+                        .or_else(|| item.get("version").and_then(toml_edit::Item::as_str));
+                    if let Some(version) = declared.and_then(version_prefix) {
+                        versions.insert(name.to_owned(), version);
+                    }
+                }
+            }
+        }
+    }
+    Ok(versions)
+}
+
+fn version_prefix(value: &str) -> Option<Version> {
+    let value = value
+        .trim()
+        .trim_start_matches(">=")
+        .trim_start_matches(['^', '~']);
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn check_verified_against(
+    scan: &mut Scan,
+    path: &Path,
+    text: &str,
+    package_versions: &BTreeMap<String, Version>,
+) -> Result<(), CheckError> {
+    let Ok(frontmatter) = yaml::parse_frontmatter(text) else {
+        return Ok(());
+    };
+    let Some(fields) = map(&frontmatter) else {
+        return Ok(());
+    };
+    let Some(pin) = fields.get("verified-against") else {
+        return Ok(());
+    };
+    let Some(pins) = string(Some(pin)) else {
+        return Ok(());
+    };
+    for entry in pins.split(',').map(str::trim) {
+        let Some((package, pinned)) = entry.rsplit_once('@') else {
+            continue;
+        };
+        let Some(pinned) = version_prefix(pinned) else {
+            continue;
+        };
+        let Some(current) = package_versions.get(package.trim()) else {
+            continue;
+        };
+        if *current > pinned {
+            scan.finding(
+                "skill_verified_against",
+                path,
+                pin.span.line,
+                &format!(
+                    "{} is pinned to {}.{} but the project declares {}.{}",
+                    package.trim(),
+                    pinned.0,
+                    pinned.1,
+                    current.0,
+                    current.1
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn installed_skill_files(roots: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, CheckError> {
+    use provenant_supervisor::fs::{FileKind, LocalFs, SafeFs};
+    let mut result = Vec::new();
+    let mut total = 0u64;
+    for (index, root_path) in roots.iter().enumerate() {
+        let resolved = provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, root_path)
+            .map_err(|_| CheckError::Evidence("skill root resolution failed"))?;
+        let root = match LocalFs.open_anchor(&resolved) {
+            Ok(root) => root,
+            Err(provenant_supervisor::fs::FsError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut names = root.entries()?.collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        for name in names {
+            if root.metadata_at(&name, false)?.kind != FileKind::Directory {
+                continue;
+            }
+            let skill_dir = root.open_directory(&name, false)?;
+            match skill_dir.metadata_at(std::ffi::OsStr::new("SKILL.md"), false) {
+                Ok(metadata)
+                    if metadata.kind == FileKind::Regular && metadata.size <= FILE_LIMIT => {}
+                Ok(_) => continue,
+                Err(provenant_supervisor::fs::FsError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let mut file = skill_dir.open_read(std::ffi::OsStr::new("SKILL.md"))?;
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(FILE_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| CheckError::Evidence("skill read failed"))?;
+            if bytes.len() as u64 > FILE_LIMIT {
+                return Err(CheckError::Evidence("skill file byte bound"));
+            }
+            total = total.saturating_add(bytes.len() as u64);
+            if total > TOTAL_LIMIT || result.len() >= 10_000 {
+                return Err(CheckError::Evidence("installed skill scan bound"));
+            }
+            let text =
+                String::from_utf8(bytes).map_err(|_| CheckError::Evidence("skill is not UTF-8"))?;
+            let label = PathBuf::from("installed-skills")
+                .join(index.to_string())
+                .join(name)
+                .join("SKILL.md");
+            result.push((label, text));
+        }
+    }
+    Ok(result)
 }
 fn issue_form(path: &Path) -> bool {
     let name = path
@@ -204,13 +390,13 @@ fn skill(scan: &mut Scan, path: &Path, text: &str) -> Result<(), CheckError> {
     if string(fields.get("name")) != expected
         || fields
             .keys()
-            .any(|key| !matches!(key.as_str(), "name" | "description"))
+            .any(|key| !matches!(key.as_str(), "name" | "description" | "verified-against"))
     {
         scan.finding(
             "skill_frontmatter",
             path,
             2,
-            "frontmatter needs its directory name and description only",
+            "frontmatter needs its directory name, description and optional verified-against",
         )?;
     }
     if string(fields.get("description")).is_none_or(|s| s.chars().count() > 1024) {
@@ -954,6 +1140,36 @@ mod tests {
             line,
             message: message.into(),
         }
+    }
+
+    #[test]
+    fn verified_against_reports_a_package_that_moved_past_the_pin() {
+        let path = Path::new("skills/example/SKILL.md");
+        let fixture =
+            "---\nname: example\ndescription: Example skill\nverified-against: example@1.4\n---\n";
+        let versions = BTreeMap::from([("example".to_owned(), (1, 5))]);
+        let mut scan = Scan::default();
+        check_verified_against(&mut scan, path, fixture, &versions).unwrap();
+        assert_eq!(
+            scan.findings,
+            vec![finding(
+                path,
+                "skill_verified_against",
+                4,
+                "example is pinned to 1.4 but the project declares 1.5",
+            )]
+        );
+    }
+
+    #[test]
+    fn verified_against_accepts_a_package_at_the_pinned_major_minor() {
+        let path = Path::new("skills/example/SKILL.md");
+        let fixture =
+            "---\nname: example\ndescription: Example skill\nverified-against: example@1.4\n---\n";
+        let versions = BTreeMap::from([("example".to_owned(), (1, 4))]);
+        let mut scan = Scan::default();
+        check_verified_against(&mut scan, path, fixture, &versions).unwrap();
+        assert!(scan.findings.is_empty());
     }
 
     fn route_case(

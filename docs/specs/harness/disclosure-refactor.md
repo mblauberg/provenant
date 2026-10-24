@@ -59,7 +59,7 @@ Static final-tree requirements:
 
 Per-PR checks:
 
-- `provenant check harness`, `scripts/static-security-check.py`,
+- `provenant check harness`,
   `provenant check release`, `git diff --check`, and the change's focused tests
   pass.
 - Isolated installer fixtures cover Claude and Codex clean install, upgrade of

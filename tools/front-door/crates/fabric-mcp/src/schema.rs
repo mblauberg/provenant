@@ -141,7 +141,7 @@ fn build_catalogue() -> Vec<Value> {
             "fabric_submit",
             "Submit one batch to the run service.",
             json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(65_536),"inputs?":artifacts,"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency":page.clone()}
+                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(65_536),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(4096)),"inputs?":artifacts,"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency":page.clone()}
             }),
         ),
         (
@@ -152,6 +152,14 @@ fn build_catalogue() -> Vec<Value> {
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_ms":wait},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
                 "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(65_536),"expected_generation":count.clone()}
+            }),
+        ),
+        (
+            "fabric_graph",
+            "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
+            json!({
+                "run":{"document":text(4096)},"status":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},
+                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},"resume":{"document":text(4096)}
             }),
         ),
         (

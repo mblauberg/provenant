@@ -213,7 +213,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `workflow …` | Workflow's own clap subtree, mounted unchanged | workflow requests | As for `fabric …`. |
 | `check config` | `check config [--limit N] [--cursor TOKEN]` | config validation | All checks: limit 1–100, default 50. |
 | `check install` | `check install [--source ABS] [--limit N] [--cursor TOKEN]` | config `check_install` | `--source` is a staged release, as for `install`, not a source checkout; one spelling, one meaning. |
-| `check harness` | `check harness [--limit N] [--cursor TOKEN]` | cli `HarnessCheck` over a verified project | Tracked inputs only. |
+| `check harness` | `check harness [--limit N] [--cursor TOKEN]` | cli `HarnessCheck` over a verified project | Tracked inputs plus installed skill roots resolved from existing harness targets. |
 | `check release` | `check release [--base OID --head OID] [--limit N] [--cursor TOKEN]` | cli `ReleaseCheck { range: Option<(GitOid, GitOid)> }` | Both range flags or neither. |
 | `check writing` | `check writing PATHS… [--rules general\|academic\|legal] [--limit N] [--cursor TOKEN]` | workflow writing matcher | 1–256 paths; rules default general. Workflow's `--rules` replaces `--profile`, which collided with config's `profile`. |
 | `hook claude …` | `hook claude pre-tool-use \| pre-compact \| compact` | `HookSpec` handler | No flags; `--json` refused before stdin. |
@@ -384,8 +384,13 @@ unreadable required evidence is error/3.
 
 `check harness` inspects a verified project: external `SKILL.md` frontmatter,
 OpenAI sidecars/local assets, JSON skill-route fixtures, Markdown links/anchors
-and GitHub issue forms. Records supplies R6's external YAML subset reader.
-Traverse tracked inputs deterministically and refuse symlink escapes.
+and GitHub issue forms. A skill may record comma-separated
+`verified-against: package@major.minor` pins; the check compares these with
+project `package.json` dependencies/devDependencies and Cargo.toml dependency
+tables, reporting a finding when the declared major.minor moves past the pin.
+It scans tracked project skills and installed skill roots resolved from the
+existing harness targets. Records supplies R6's external YAML subset reader.
+Traverse project inputs deterministically and refuse symlink escapes.
 Shell/remaining JS/Python syntax checks and runners stay in CI.
 
 `check release [--base OID --head OID]` scans tracked files/raw HEAD for legal
