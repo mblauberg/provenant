@@ -107,6 +107,9 @@ pub enum WriterDeliveryState {
     Delivered {
         pull_request: Option<String>,
     },
+    /// Delivery was requested but the lane head equals the head at launch, so
+    /// nothing was pushed. The lane is not failed; the chair sees no commit.
+    NoNewCommits,
     /// The writer succeeded, but host delivery needs chair pickup. No retry.
     Failed {
         stage: WriterDeliveryStage,

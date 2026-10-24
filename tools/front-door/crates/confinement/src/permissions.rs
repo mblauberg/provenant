@@ -656,11 +656,18 @@ fn validate_writer_cache(
     Ok(())
 }
 
+/// A pathspec `git commit` holds its temporary index as
+/// `next-index-<pid>.lock` and unlinks it; the pid is not known in advance.
+const NEXT_INDEX_SAMPLE: &str = "next-index-0.lock";
+
 struct WorktreeWriteGrants {
     worktree: PathGrant,
     private_git_dir: PathGrant,
     common_git_dir: PathGrant,
     index: [PathGrant; 2],
+    /// Sample member of the pathspec-commit temporary index family
+    /// (`next-index-<digits>.lock`) in the private git directory.
+    next_index: PathGrant,
     head: [PathGrant; 7],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
@@ -685,6 +692,7 @@ impl WorktreeWriteGrants {
             private_git_dir: subtree(private.to_owned()),
             common_git_dir: subtree(common.to_owned()),
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
+            next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
             // `git commit` writes its message buffer and clears AUTO_MERGE here.
             head: [
                 "HEAD",
@@ -711,6 +719,7 @@ impl WorktreeWriteGrants {
         std::iter::once(&self.worktree)
             .chain([&self.private_git_dir, &self.common_git_dir])
             .chain(self.index.iter())
+            .chain(std::iter::once(&self.next_index))
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
@@ -718,7 +727,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v3\0");
+        digest.update(b"provenant-worktree-git-grants-v4\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1901,6 +1910,11 @@ fn push_worktree_rule(
     {
         push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
     }
+    // Anchored to the private git directory: one path component, digits only.
+    let private = sbpl_regex_path(&grants.private_git_dir.path)?;
+    source.push_str(&format!(
+        "(allow file-write* (regex #\"^{private}/next-index-[0-9]+\\.lock$\"))\n"
+    ));
     let path = sbpl_path(&grants.objects.path)?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{path}\") (require-not (subpath \"{path}/info\"))))\n"
@@ -2358,6 +2372,25 @@ fn push_rule(
     };
     source.push_str(&format!("({effect} {operation} ({filter} \"{path}\"))\n"));
     Ok(())
+}
+
+/// Escapes a path for a raw SBPL `#"..."` regex literal.
+#[cfg(target_os = "macos")]
+fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
+    let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => return Err(PermissionError::InvalidPath),
+            value if value.is_control() => return Err(PermissionError::InvalidPath),
+            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            value => escaped.push(value),
+        }
+    }
+    Ok(escaped)
 }
 
 #[cfg(target_os = "macos")]
@@ -2957,6 +2990,12 @@ mod tests {
         // `git commit` needs its message buffer, only in the private directory.
         assert!(source.contains(&format!("\"{}\"", private.join("COMMIT_EDITMSG").display())));
         assert!(!source.contains(&format!("\"{}\"", common.join("COMMIT_EDITMSG").display())));
+        // Pathspec commits write `next-index-<pid>.lock`, only in the private directory.
+        let private_pattern = sbpl_regex_path(&private)?;
+        assert!(source.contains(&format!(
+            "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
+        )));
+        assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
         for relative in [
             "config",
             "config.lock",

@@ -29,6 +29,8 @@ pub struct HostDeliveryContext {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BoundDelivery {
+    /// Lane head when delivery was prepared, before the writer ran.
+    base_head: GitOid,
     push_url: String,
     lane_branch: String,
     pull_request_repo: Option<String>,
@@ -175,7 +177,14 @@ impl HostDeliveryContext {
         } else {
             url.to_owned()
         };
+        let base = self.command(
+            &writer.worktree,
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            stage,
+        )?;
         self.bound = Some(BoundDelivery {
+            base_head: GitOid::parse(&base).map_err(|_| RunError::Delivery(stage))?,
             push_url,
             lane_branch: branch,
             pull_request_repo: request
@@ -637,14 +646,22 @@ pub(crate) fn deliver_once(
             &crate::db::bytes(&receipt)?,
             crate::RECORD_LIMIT,
         )?;
-        receipt.state = match receipt
+        let unchanged = receipt
             .head
-            .ok_or(RunError::Delivery(Stage::Head))
-            .and_then(|head| host.push(writer, request, head))
-        {
-            Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
-            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
-            Err(error) => return Err(error),
+            .zip(host.bound.as_ref())
+            .is_some_and(|(head, bound)| head == bound.base_head);
+        receipt.state = if unchanged {
+            WriterDeliveryState::NoNewCommits
+        } else {
+            match receipt
+                .head
+                .ok_or(RunError::Delivery(Stage::Head))
+                .and_then(|head| host.push(writer, request, head))
+            {
+                Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
+                Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
+                Err(error) => return Err(error),
+            }
         };
     }
     crate::artifacts::seal(
