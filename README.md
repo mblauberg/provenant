@@ -28,9 +28,10 @@ reviewable path from a writer lane back to a remote branch.
 
 ## Features
 
-- **Confined provider lanes.** The Rust adapters cover Claude Code, Codex,
-  Agy, Cursor, and OpenCode. Lanes run with read-only or worktree-write access
-  plans, and provider output and terminal state are recorded.
+- **Confined provider lanes.** Claude Code and Codex lanes run with read-only
+  or worktree-write access plans, and provider output and terminal state are
+  recorded. Agy, Cursor, and OpenCode adapters are catalogued but stay
+  execution-disabled until a live confinement capture proves each mode.
 - **Fabric messaging and dispatch.** The CLI and Fabric MCP surface provide
   messages, tasks, agent identity, host links, and local or peer-host dispatch.
 - **Weighted, paced routes.** Named pools select among eligible models by
@@ -105,12 +106,13 @@ installation. Build the optional menu bar app from its
 
 ## Quick start
 
-With Rust 1.99.1 installed, build from the repository root and inspect the
-available commands and routes:
+With Rust 1.99.1 installed, build from `tools/front-door`, where the pinned
+toolchain file lives, and inspect the available commands and routes:
 
 ```sh
-BIN="${CARGO_TARGET_DIR:-$PWD/tools/front-door/target}/release/provenant"
-cargo build --release --locked --bin provenant --manifest-path tools/front-door/Cargo.toml
+cd tools/front-door
+BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/provenant"
+cargo build --release --locked --bin provenant
 "$BIN" help
 "$BIN" route list
 "$BIN" route resolve --route junior
