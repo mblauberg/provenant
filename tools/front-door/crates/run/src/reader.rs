@@ -61,28 +61,14 @@ impl Iterator for Attempts<'_> {
         Some(fact)
     }
 }
-/// Reviewer attribution from the stored observed route: the owning actor and
-/// the model family the route reports, or `Unknown` without an observed route.
+/// Reviewer attribution: the owning actor and the provider family the
+/// observed route reports, or `Unknown` without an observed provider.
 fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Option<ReviewerFact> {
     let actor_id = owner?;
-    let route = observed.filter(|r| r.provider.is_some() || r.model.is_some());
-    let family = route.map(|r| {
-        let model = r.model.as_deref().unwrap_or_default().to_ascii_lowercase();
-        let model = model.rsplit('/').next().unwrap_or_default();
-        let known = if model.starts_with("claude") {
-            Some("anthropic")
-        } else if model.starts_with("gpt") || model.starts_with("o1") || model.starts_with("o3") {
-            Some("openai")
-        } else if model.starts_with("gemini") {
-            Some("google")
-        } else {
-            None
-        };
-        known
-            .map(str::to_owned)
-            .or_else(|| r.provider.as_ref().map(|p| p.to_ascii_lowercase()))
-            .unwrap_or_default()
-    });
+    let family = observed
+        .and_then(|r| r.provider.as_deref())
+        .filter(|p| !p.is_empty())
+        .map(str::to_ascii_lowercase);
     Some(ReviewerFact {
         provenance: if family.is_some() {
             ReviewerProvenance::Observed
@@ -90,8 +76,8 @@ fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Opti
             ReviewerProvenance::Unknown
         },
         actor_id,
-        family: family.filter(|f| !f.is_empty()),
-        model: route.and_then(|r| r.model.clone()),
+        family,
+        model: observed.and_then(|r| r.model.clone()),
         outcome: None,
     })
 }
