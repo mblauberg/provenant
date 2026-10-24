@@ -151,11 +151,14 @@ fn nested_tool_arguments_apply_the_mcp_wait_cap() {
 fn typed_tool_calls_cannot_bypass_the_mcp_wait_cap() {
     let factory = FakeFactory::new(Arc::new(Gate::default()));
     let mut service = factory.open().unwrap();
-    let input = ToolCall::Events(EventsInput::Read {
-        after: None,
-        limit: 1,
-        wait_ms: Some(crate::MAX_WAIT_MS + 1),
-    });
+    let input = ToolCall::Events(
+        EventsInput::Read {
+            after: None,
+            limit: 1,
+            wait_ms: Some(crate::MAX_WAIT_MS + 1),
+        },
+        None,
+    );
     // Cancellation ensures an accidentally accepted observation cannot wait.
     // The input still must fail transport validation before owner execution.
     let cancel = CancelToken::new();

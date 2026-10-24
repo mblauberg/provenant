@@ -144,3 +144,34 @@ fn graph_control_operations_are_strict_and_cancel_is_a_mutation() {
     }
     assert!(ToolCall::parse("fabric_graph", json!({"op":"status","id":"../escape"})).is_err());
 }
+
+#[test]
+fn coordination_mutations_accept_only_valid_top_level_operation_ids() {
+    let call = ToolCall::parse(
+        "fabric_mail",
+        json!({"op":"mark_read","through":0,"operation_id":"retry-safe-1"}),
+    )
+    .unwrap();
+    assert!(call.is_mutation());
+    assert!(
+        ToolCall::parse(
+            "fabric_mail",
+            json!({"op":"mark_read","through":0,"operation_id":"bad id"}),
+        )
+        .is_err()
+    );
+    assert!(
+        ToolCall::parse(
+            "fabric_mail",
+            json!({"op":"read","limit":1,"operation_id":"retry-safe-1"}),
+        )
+        .is_err()
+    );
+    assert!(
+        ToolCall::parse(
+            "fabric_graph",
+            json!({"op":"cancel","id":"g-test","operation_id":"retry-safe-1"}),
+        )
+        .is_err()
+    );
+}
