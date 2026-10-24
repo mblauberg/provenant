@@ -108,6 +108,8 @@ run_dir_finalize = "run_dir_finalize"
 "visualizes" = "visualizes"
 
 [type.json.extend-identifiers]
+# Anthropic usage response field.
+"utilization" = "utilization"
 "_merge_catalog" = "_merge_catalog"
 "_neutralize_failed_stream" = "_neutralize_failed_stream"
 "catalog" = "catalog"
@@ -138,6 +140,9 @@ run_dir_finalize = "run_dir_finalize"
 "catalyze" = "catalyze"
 
 [type.rust.extend-identifiers]
+# HTTP header and Anthropic usage response field.
+"Authorization" = "Authorization"
+"utilization" = "utilization"
 "Catalog" = "Catalog"
 "CatalogError" = "CatalogError"
 "Materialize" = "Materialize"
