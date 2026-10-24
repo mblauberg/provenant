@@ -9,8 +9,9 @@ Permission compilation consumes typed provider specifications and enforcement
 observations constructed by the providers owner. Git write grants derive from a
 held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
 `WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
-single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Its hash binds
-canonical worktree and common Git paths plus held directory identities, so
+single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Codex writer
+preparation sets `CARGO_TARGET_DIR` to its `target/` and `CARGO_HOME` to its
+`cargo-home/`; these children stay within the grant. Its hash binds canonical worktree and common Git paths plus held directory identities, so
 same-named and recreated worktrees do not share a lane cache. Host builds use
 separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under

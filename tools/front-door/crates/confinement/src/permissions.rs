@@ -311,6 +311,11 @@ pub struct WorktreeWriteAuthority {
 }
 
 impl WorktreeWriteAuthority {
+    /// Exact lane-only cache already bound into this writer authority.
+    pub fn cargo_cache(&self) -> &PathGrant {
+        &self.cargo_cache
+    }
+
     pub fn for_worktree(
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,

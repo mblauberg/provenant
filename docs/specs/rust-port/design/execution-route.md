@@ -325,21 +325,29 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL`, plus `CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` for read-only work; read-only `PATH=~/.cargo/bin:/usr/bin:/bin`, writer `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL`, plus `CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR`; `PATH=~/.cargo/bin:/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
 | Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only, plus `CLAUDE_CONFIG_DIR` when an account is selected; the access token is read and bound to that selected identity by the host. No shell tool, no keychain access, no exec beyond the CLI. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
 
-Read-only Codex recipes grant read and exec of `~/.cargo/bin` and
+Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
 `~/.rustup/toolchains`, plus read of `~/.rustup/settings.toml` and
-`~/.cargo/registry`. Setup creates a private `CARGO_HOME` inside the attempt's
-`tmp/`, linking only its `registry` to the existing cache. `CARGO_TARGET_DIR`
-and executable test output stay inside that private temporary directory.
+`~/.cargo/registry`. Read-only setup creates a private `CARGO_HOME` inside the
+attempt's `tmp/`, linking only its `registry` to the existing cache.
+Read-only `CARGO_TARGET_DIR` and executable test output stay inside that private
+temporary directory.
 `RUSTUP_HOME` selects the existing toolchains. No read or write of
 `~/.cargo/credentials*`, no whole-Cargo-home grant, and no toolchain writes are
 added. These recipes require the named toolchain/cache directories to exist;
 missing required anchors refuse prelaunch.
+
+Writer `CARGO_TARGET_DIR` and `CARGO_HOME` select `target/` and `cargo-home/`
+inside the exact cache bound by `WorktreeWriteAuthority`. The host prepares
+the cache under writer custody before anchoring; Cargo creates its children
+after launch. Writer Cargo state does not link into the user's registry or
+credentials. Build output may execute within the granted cache, and host
+Cargo/rustup configuration and toolchains remain immutable.
 
 OpenCode's discovery recipe grants literal directory reads of `.agents`,
 `.claude` and `.codex` along cwd ancestry. These reads never grant their child
@@ -448,7 +456,12 @@ adapters refuse before returning grants; the recording feature exercises the
 prepared OpenCode recipe without enabling it. Agy's private-home test also
 proves controls are neither seeded nor copied back. These are policy tests,
 not new live smoke rows; Agy/Cursor activation and the outstanding #927 live
-rows remain unverified. Kiro is retired.
+rows remain unverified. The production Codex writer path passes the narrowed
+provider profile to confinement compilation. A CLI-dispatch integration fixture
+probes the host config/hook/extension/npm write denials and provider-state
+symlink denial through that path; this is a fake-provider confinement test,
+not a new live provider smoke row. #927 remains open for the live rows.
+Kiro is retired.
 
 Claude has a writer-shell candidate under the recorder only. It keeps the
 host-read `CLAUDE_CODE_OAUTH_TOKEN` in memory and puts `CLAUDE_CONFIG_DIR`
@@ -479,11 +492,21 @@ pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
 both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
 any shell activation; no old file-edit capture enables Bash. The pro quota
 and account gate applies before running this recorder, including retries;
-never use the anese identity. The Rust writer launcher must also consume
-confinement's host-prepared directories and per-worktree cargo cache described
-in [supervisor](supervisor.md). Shared Git config and packed refs stay
+never use the anese identity. The Rust writer launcher consumes confinement's
+host-prepared directories and per-worktree cargo cache described in
+[supervisor](supervisor.md). Shared Git config and packed refs stay
 read-only under that design; #1255's host fetch/upstream handoff still needs
-runtime composition and its conformance test.
+runtime composition and its conformance test. The remaining handoff belongs
+with #1246's host writer delivery owner: `TaskRequest` currently carries no
+selected delivery remote, push refspec, credential authority or push receipt.
+Generic terminal settlement also handles cancelled and recovered attempts;
+a successful provider exit does not establish that a branch was pushed.
+It must not infer delivery from provider prose or run an unconditional fetch
+and write common config. The host delivery contract must bind the remote and
+`HEAD:<branch>` push, fetch before dispatch, then fetch and verify that remote
+branch against the final head after exit before setting and verifying upstream.
+#1255 remains open until that composition and fetch/commit/push/upstream
+conformance row land; this does not reassign authority to the sandbox.
 
 Each capture manifest records source provenance, CLI version/platform, redacted
 argv, fresh/resume and access mode, exit and redaction rules. It must prove the
