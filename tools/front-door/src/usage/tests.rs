@@ -32,6 +32,24 @@ fn append_rotates_and_never_waits_for_a_busy_writer_or_follows_log_links() -> Re
     assert!(start.elapsed() < std::time::Duration::from_millis(100));
     assert_eq!(std::fs::read(&log)?, before);
     drop(lock);
+    // A previous interrupted/short append must not swallow the next event.
+    std::fs::write(&log, b"{\"kind\":\"cli.verb\"")?;
+    record_cli(&roots, "root", 0, 1);
+    let stats = Stats {
+        usage: true,
+        since: None,
+        until: None,
+        detail: false,
+    };
+    assert_eq!(
+        report(&roots, &stats)?
+            .units
+            .iter()
+            .find(|u| u.unit == "root")
+            .ok_or("root")?
+            .calls,
+        1
+    );
     std::fs::OpenOptions::new()
         .write(true)
         .open(&log)?
@@ -73,6 +91,13 @@ fn report_filters_time_reads_both_files_and_ignores_partial_lines() -> Result {
         until: Some("2026-02-03T00:00:00Z".parse()?),
         detail: false,
     };
+    let directory = Directory::open_anchor(dir)?;
+    let writer = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
+    assert!(
+        report(&roots, &stats).is_err(),
+        "stats must not race a rotating writer"
+    );
+    drop(writer);
     let data = report(&roots, &stats)?;
     assert_eq!(
         data.units

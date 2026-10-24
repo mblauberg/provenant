@@ -4,7 +4,12 @@ use provenant_core::Roots;
 use provenant_records::{CommandResult, Outcome};
 use provenant_supervisor::fs::{Directory, FsError, LockMode};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, ffi::OsStr, io::Write, path::Path};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
 pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
 const CAP: u64 = 5_000_000;
@@ -66,11 +71,24 @@ fn append(roots: &Roots, event: Event) -> Option<()> {
         .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
         .ok()?;
     let mut file = directory.open_append(OsStr::new(LOG)).ok()?;
-    if file.metadata().ok()?.size.saturating_add(line.len() as u64) > CAP {
+    let mut size = file.metadata().ok()?.size;
+    if size.saturating_add(line.len() as u64).saturating_add(1) > CAP {
         directory
             .replace(OsStr::new(LOG), &directory, OsStr::new(BACKUP))
             .ok()?;
         file = directory.open_append(OsStr::new(LOG)).ok()?;
+        size = 0;
+    }
+    if size > 0 {
+        // Isolate a torn previous append so it cannot swallow this record.
+        file.seek(SeekFrom::End(-1)).ok()?;
+        let mut tail = [0];
+        if file.read(&mut tail).ok()? != 1 {
+            return None;
+        }
+        if tail[0] != b'\n' && file.write(b"\n").ok()? != 1 {
+            return None;
+        }
     }
     // O_APPEND and a single small write keep complete records together.
     (file.write(&line).ok()? == line.len()).then_some(())
@@ -148,6 +166,8 @@ fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Er
         Err(error) => return Err(error.into()),
     };
     if let Some(directory) = directory {
+        // Keep rotation from replacing either file during a report. Never wait.
+        let _lock = directory.try_lock(OsStr::new(LOCK), LockMode::Shared)?;
         for name in [BACKUP, LOG] {
             let mut file = match directory.open_read(OsStr::new(name)) {
                 Ok(file) => file,

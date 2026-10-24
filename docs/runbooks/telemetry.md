@@ -23,7 +23,9 @@ not enable OTel prompt or tool logging.
 
 Writes are best effort: one nonblocking lock attempt, one small `O_APPEND`
 write, no sync or background collector. A busy lock or I/O failure drops the
-counter without changing the command result. Before a write would exceed
+counter without changing the command result. A torn tail is separated before
+the next record. Stats holds a shared nonblocking lock while reading both logs
+and reports an error if a writer is busy. Before a write would exceed
 5 MB, the current log replaces `.1`. Only two logs are retained, so a 30-day
 query can cover less than 30 days on a busy host. The report skips malformed
 or incomplete lines and creates no config, provider or run-store state.

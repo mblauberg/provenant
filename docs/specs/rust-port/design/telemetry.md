@@ -66,6 +66,9 @@ single nonblocking lock attempt. Each line is at most 512 bytes. The writer
 rotates before the next line would exceed 5,000,000 bytes, replacing the single
 `usage.jsonl.1` backup, and performs no sync, polling or background collection.
 I/O errors and lock contention discard the event without affecting the call.
+The next append separates an incomplete tail so a short write cannot swallow
+a later complete event. A shared nonblocking report lock prevents rotation
+from changing either log during a read; a busy writer refuses the report.
 Local filesystem operations add small overhead, without a hard latency
 promise on a stalled filesystem.
 
