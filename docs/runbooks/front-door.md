@@ -53,7 +53,13 @@ PROVENANT="$RELEASE/bin/provenant"
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+"$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$ACCOUNT_DIR"
+"$PROVENANT" --state-dir "$STATE" quota tick
 ```
+
+Repeat the account registration for each account, using a unique label and
+`--adapter codex` for Codex accounts. Dispatch needs registered accounts; then
+run `quota tick` to initialize quota state.
 
 Review every planned change and unresolved entry before applying it; a failed
 preview prevents writes. Hooks default off. `--hooks on` registers hooks for

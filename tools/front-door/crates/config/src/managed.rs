@@ -61,7 +61,9 @@ pub enum InstallError {
     Config(#[from] crate::ConfigError),
     #[error("invalid harness configuration: {0}")]
     InvalidConfig(&'static str),
-    #[error("symlinked or non-regular harness config refused: {0}")]
+    #[error(
+        "symlinked or non-regular harness config refused: {0}; replace the link with a regular copy, then rerun install"
+    )]
     ConfigFile(PathBuf),
     #[error("preview output failed")]
     Preview(#[source] std::io::Error),
@@ -676,9 +678,9 @@ fn validate_removal(
                 value: Value::Link(actual),
                 ..
             }),
-        ) => crate::legacy::git_hook_links(checkout)?
-            .iter()
-            .any(|link| path == directory.join(&link.name) && actual == &link.target),
+        ) => crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
+            path == directory.join(&link.name) && same_link_target(actual, &link.target)
+        }),
         _ => false,
     };
     if path.starts_with(targets.roots.state.as_path())
@@ -711,6 +713,19 @@ pub(crate) fn matches_owned(value: &Value, expected: &OwnedValue) -> bool {
     owned(value).is_ok_and(|v| &v == expected)
 }
 
+pub(crate) fn same_link_target(actual: &Path, expected: &Path) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (
+        provenant_supervisor::fs::canonicalize(actual),
+        provenant_supervisor::fs::canonicalize(expected),
+    ) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
 pub fn plan_install(
     release: Release,
     targets: Targets,
@@ -737,7 +752,9 @@ pub fn plan_install(
             targets.hooks
                 && snapshots.harness.authorised.contains(path)
                 && crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
-                    link.retained && path == &directory.join(&link.name) && actual == &link.target
+                    link.retained
+                        && path == &directory.join(&link.name)
+                        && same_link_target(actual, &link.target)
                 })
         } else {
             false
@@ -799,7 +816,19 @@ pub fn plan_install(
                     && !was_owned
                     && matches!(current.value, Value::File { .. })
                 {
-                    if let Value::Link(include) = &want.value {
+                    let shared_agents = targets.home.join(".agents/AGENTS.md");
+                    let shared_agents_text = shared_agents.to_string_lossy();
+                    let shared_agents_bytes = shared_agents_text.as_bytes();
+                    let already_includes_shared = desired.contains_key(&shared_agents)
+                        && matches!(
+                            &current.value,
+                            Value::File { bytes, .. }
+                                if bytes.windows(b"~/.agents/AGENTS.md".len())
+                                    .any(|part| part == b"~/.agents/AGENTS.md")
+                                    || bytes.windows(shared_agents_bytes.len())
+                                        .any(|part| part == shared_agents_bytes)
+                        );
+                    if !already_includes_shared && let Value::Link(include) = &want.value {
                         manual_includes.push(ManualInclude {
                             path: AbsolutePath::new(path)?,
                             include: AbsolutePath::new(include)?,
