@@ -36,10 +36,6 @@ pub fn validate_availability(
             .account_key
             .as_deref()
             .is_some_and(|s| !crate::request::identifier(s))
-        || record
-            .last_preflight_error
-            .as_ref()
-            .is_some_and(|s| s.len() > 512)
     {
         return Err(RoutingError::Availability);
     }

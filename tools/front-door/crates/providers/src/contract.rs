@@ -31,6 +31,17 @@ pub struct PreflightInput {
     pub observed_unix_seconds: i64,
 }
 
+/// Redacted cache projection; raw provider diagnostics are never persisted here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightFailure {
+    Disabled,
+    MissingExecutable,
+    AuthRequired,
+    UnsupportedVersion,
+    MalformedProtocol,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AvailabilityRecord {
@@ -42,7 +53,7 @@ pub struct AvailabilityRecord {
     pub catalogue_revision: String,
     pub account_key: Option<String>,
     pub observed_models: Vec<String>,
-    pub last_preflight_error: Option<String>,
+    pub last_preflight_error: Option<PreflightFailure>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,
 }

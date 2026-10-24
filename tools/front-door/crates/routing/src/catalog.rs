@@ -51,22 +51,41 @@ pub struct ModelEntry {
     pub evidence_ref: String,
     pub family: Option<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
+/// change family/effort rows while retaining an existing revision.
+#[derive(Debug, Clone, Serialize)]
 pub struct Catalogue {
-    pub schema_version: u64,
-    pub revision: String,
-    pub models: Vec<ModelEntry>,
+    pub(crate) schema_version: u64,
+    pub(crate) revision: String,
+    pub(crate) models: Vec<ModelEntry>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogueAsset {
+    schema_version: u64,
+    revision: String,
+    models: Vec<ModelEntry>,
 }
 impl Catalogue {
     pub fn bundled() -> Result<Self, RoutingError> {
-        let value: Self = toml_edit::de::from_str(include_str!(concat!(
+        let asset: CatalogueAsset = toml_edit::de::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/catalogue.toml"
         )))
         .map_err(|_| RoutingError::Catalogue)?;
+        let value = Self {
+            schema_version: asset.schema_version,
+            revision: asset.revision,
+            models: asset.models,
+        };
         value.validate()?;
         Ok(value)
+    }
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+    pub fn models(&self) -> &[ModelEntry] {
+        &self.models
     }
     pub fn validate(&self) -> Result<(), RoutingError> {
         let mut seen = BTreeSet::new();

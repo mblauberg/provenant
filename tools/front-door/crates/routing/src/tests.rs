@@ -322,6 +322,30 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         evidence_catalogue_revision: &catalogue.revision,
         catalogue: &families,
     })?;
+    let forged_rows = [FamilyEntry {
+        adapter: "claude".into(),
+        model: route.model.clone(),
+        family: "fabricated-family".into(),
+    }];
+    let forged = Claude.validate_provenance(&RouteProvenance {
+        route: &route,
+        outcome: &outcome,
+        evidence_ref: "recording",
+        evidence_catalogue_revision: &catalogue.revision,
+        catalogue: &forged_rows,
+    })?;
+    assert_eq!(
+        FamilyFact::from_verified(
+            ModelId::parse("claude/claude-haiku-4-5-20251001")?,
+            &forged,
+            80,
+            120,
+            &catalogue
+        )?
+        .record()
+        .family,
+        None
+    );
     let fact = FamilyFact::from_verified(
         ModelId::parse("claude/claude-haiku-4-5-20251001")?,
         &lineage,
@@ -565,6 +589,15 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
         reason(&resolve(&request("codex/not-observed")?, &context)?),
         Some(&RouteExclusionReason::UnverifiedModel)
     );
+    let mut error_record = availability();
+    error_record.last_preflight_error = Some(provenant_providers::PreflightFailure::AuthRequired);
+    let error_records = [error_record];
+    context.availability = &error_records;
+    assert_eq!(
+        reason(&resolve(&query, &context)?),
+        Some(&RouteExclusionReason::AuthRequired)
+    );
+    context.availability = &records;
     let stale = [quota(
         "codex/test",
         "opaque-account",

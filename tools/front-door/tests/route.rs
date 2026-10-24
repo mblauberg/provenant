@@ -99,6 +99,19 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
             .len(),
         3
     );
+    let project = rig.project.to_str().ok_or("fixture project")?;
+    call(
+        &rig,
+        &[
+            "route",
+            "resolve",
+            "--model",
+            "codex/exact",
+            "--project",
+            project,
+        ],
+        0,
+    )?;
     assert!(!rig.state.exists());
     Ok(())
 }
@@ -131,6 +144,11 @@ fn named_routes_and_cached_availability_are_read_only_and_fail_closed() -> Resul
         "opaque-account"
     );
     assert_eq!(fs::read(cache.join("codex.json"))?, bytes);
+    let mut diagnostic = record.clone();
+    diagnostic["last_preflight_error"] = "secret-bearing-provider-diagnostic".into();
+    fs::write(cache.join("codex.json"), serde_json::to_vec(&diagnostic)?)?;
+    let rejected = call(&rig, &["route", "list"], 2)?;
+    assert!(!serde_json::to_string(&rejected)?.contains("secret-bearing-provider-diagnostic"));
     fs::write(
         cache.join("codex.json"),
         "{\"schema_version\":1,\"schema_version\":1}",

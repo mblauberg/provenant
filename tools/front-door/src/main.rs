@@ -187,7 +187,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Route(command) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;
-                let project = std::env::current_dir()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
                 roots::roots(globals, &assets, &project)
             })();
             match resolved {

@@ -126,8 +126,15 @@ fn availability_reason(
     {
         return Some(RouteExclusionReason::StaleAvailability);
     }
-    if record.last_preflight_error.is_some() {
-        return Some(RouteExclusionReason::MissingExecutable);
+    if let Some(error) = record.last_preflight_error {
+        use provenant_providers::PreflightFailure;
+        return Some(match error {
+            PreflightFailure::MissingExecutable => RouteExclusionReason::MissingExecutable,
+            PreflightFailure::AuthRequired => RouteExclusionReason::AuthRequired,
+            PreflightFailure::Disabled
+            | PreflightFailure::UnsupportedVersion
+            | PreflightFailure::MalformedProtocol => RouteExclusionReason::Disabled,
+        });
     }
     if record.account_key.is_none() {
         return Some(RouteExclusionReason::UnknownAccount);
