@@ -57,7 +57,7 @@ packages `provenant-<name>` under `tools/front-door/crates/<name>/`. The
 binary is the only executable. Share versions and features through
 `[workspace.dependencies]` and commit one `Cargo.lock`. A design doc may
 change a crate's responsibility or edges. The change lands in this table,
-which `tests/test_rust_port_layering.py` reads, in the same PR.
+with the same PR. The legacy Python layering test is retired.
 
 | Crate | Owns | Allowed internal dependencies |
 |---|---|---|
@@ -179,8 +179,7 @@ Repo-file fixtures use
 canonicalised temporary paths, because `/var` links to `/private/var`.
 
 Locally run `cargo fmt`, `cargo clippy` and the tests of the crates you
-touched. CI runs the workspace on Linux and a release build on macOS, plus
-whatever Python and TS tests still have a subject. Main may be red for the
+touched. CI runs the workspace on Linux and a release build on macOS, plus the harness asset and generic checks. Main may be red for the
 old Python and TS paths during the rewrite; the Rust workspace must stay
 green. Live provider runs need the user's authority.
 

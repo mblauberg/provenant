@@ -1,5 +1,9 @@
 # ADR 0019: Installed file-class ownership by product, instance, or seeded template
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../specs/rust-port/design/README.md) for owners.
+
 **Status:** Accepted 2026-07-30 (user, issue #530); amended 2026-07-31 (user,
 issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
 [ADR 0004](0004-per-domain-truth-owners.md)

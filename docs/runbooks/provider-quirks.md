@@ -1,7 +1,7 @@
 # Provider CLI quirks
 
 Durable behaviours of the external CLIs behind Fabric lanes. Model ids, efforts
-and flags change often: discover them at runtime (`scripts/model-route routes`,
+and flags change often: discover them at runtime (`provenant route list`,
 `fabric_adapters`, `agy models`) and never trust a written slug. Mechanics live
 in `skills/orchestrate`; this page records the traps.
 
@@ -37,7 +37,7 @@ in `skills/orchestrate`; this page records the traps.
   the usage for a minor latency gain, and no urgency unlocks it. Keep it off by
   default and pin the safe value explicitly, since the tier can otherwise be
   inherited from user config. The Codex adapter already pins
-  `-c service_tier="default"` (`skills/orchestrate/scripts/adapters/codex.py`);
+  `-c service_tier="default"` (the Rust providers owner);
   no `config/` file sets a tier. Find a new adapter's fast tier before its
   first dispatch.
 

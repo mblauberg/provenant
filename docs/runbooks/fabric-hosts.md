@@ -258,7 +258,7 @@ reason. The operation stays bound locally on retry.
 
 The reader's prompt names its actual checkout, working directory and frozen
 HEAD SHA before the original brief. Use those paths and HEAD when the brief
-names paths or refs that exist only on the dispatching host. Targeted pytest
+names paths or refs that exist only on the dispatching host. Targeted Rust tests
 runs keep temporary files under the lane's writable `TMPDIR`; a Git discovery
 boundary prevents scratch source fixtures from inheriting `.agent-run` ignore
 rules and being classified as generated files.
@@ -447,12 +447,13 @@ operation's directory there once it is fetched and no retry is pending.
 
 ## Verify targeted changes
 
-Run the focused checks from the product checkout, selecting the touched
-classes or methods, one test process at a time. Heavy suites run in GitHub Actions:
+Run focused Rust checks serially from `tools/front-door`:
 
 ```sh
-PYTHONPATH=scripts python3 -m unittest tests.test_fabric_hosts.<TouchedClassOrMethod>
+cargo test -p provenant-fabric-runtime
+cargo test -p provenant-fabric-mcp
 ```
 
-The TS loopback/MCP tests were retired with the runtime. Rust integration
-coverage belongs to the Fabric runtime and MCP build steps.
+Run only the crates touched by the change. Full workspace suites run in
+GitHub Actions. The Python host owner, its tests and TS loopback tests are
+retired; Rust boundary tests own current federation and MCP behaviour.

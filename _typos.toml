@@ -396,14 +396,6 @@ run_dir_finalize = "run_dir_finalize"
 [type.toml.extend-identifiers]
 "licence" = "licence"
 
-[type.ts.extend-identifiers]
-"caf" = "caf"
-"initialize" = "initialize"
-"initialized" = "initialized"
-"initializedBeforeEof" = "initializedBeforeEof"
-"tail_linez" = "tail_linez"
-"uncatalogued" = "uncatalogued"
-
 [type.yaml.extend-identifiers]
 "Unparseable" = "Unparseable"
 "distill" = "distill"
@@ -412,85 +404,6 @@ run_dir_finalize = "run_dir_finalize"
 "mis" = "mis"
 "pre_materialize_patches" = "pre_materialize_patches"
 "unparseable" = "unparseable"
-
-[type.fixture-1]
-extend-glob = ["execution-lifecycle.test.ts"]
-[type.fixture-1.extend-identifiers]
-"Principl" = "Principl"
-"uncatalogued" = "uncatalogued"
-
-[type.fixture-2]
-extend-glob = ["surface.test.ts"]
-[type.fixture-2.extend-identifiers]
-"promtp" = "promtp"
-"tail_linez" = "tail_linez"
-
-[type.fixture-3]
-extend-glob = ["test_dispatch_run.py"]
-[type.fixture-3.extend-identifiers]
-"EXAMPLEabcde" = "EXAMPLEabcde"
-"FINALIZE" = "FINALIZE"
-"catalog_date" = "catalog_date"
-"finalize" = "finalize"
-"finalized" = "finalized"
-"run_dir_finalize" = "run_dir_finalize"
-"test_finalize_phase_includes_receipt_publication" = "test_finalize_phase_includes_receipt_publication"
-"unrecognized" = "unrecognized"
-
-[type.fixture-4]
-extend-glob = ["test_frontend_live_server_security.py"]
-[type.fixture-4.extend-identifiers]
-"Unauthorized" = "Unauthorized"
-"carbonize" = "carbonize"
-"carbonize_required" = "carbonize_required"
-"erorr" = "erorr"
-"test_carbonized_accept_can_finish_through_the_live_server" = "test_carbonized_accept_can_finish_through_the_live_server"
-"test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent_state" = "test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent_state"
-"test_delayed_checkpoint_cannot_regress_a_carbonize_required_session" = "test_delayed_checkpoint_cannot_regress_a_carbonize_required_session"
-"test_offline_completion_rejects_a_malformed_carbonize_journal" = "test_offline_completion_rejects_a_malformed_carbonize_journal"
-"test_retried_browser_event_is_acknowledged_without_requeueing" = "test_retried_browser_event_is_acknowledged_without_requeueing"
-"test_session_store_normalization_redacts_token_defensively" = "test_session_store_normalization_redacts_token_defensively"
-
-[type.fixture-5]
-extend-glob = ["test_model_route.py"]
-[type.fixture-5.extend-identifiers]
-"CATALOG" = "CATALOG"
-"CATALOG_PATH" = "CATALOG_PATH"
-"PRODUCT_CATALOG" = "PRODUCT_CATALOG"
-"PRODUCT_CATALOG_PATH" = "PRODUCT_CATALOG_PATH"
-"_write_catalog" = "_write_catalog"
-"catalog" = "catalog"
-"catalog_account_default" = "catalog_account_default"
-"catalog_date" = "catalog_date"
-"catalog_mod" = "catalog_mod"
-"catalog_model" = "catalog_model"
-"catalog_path" = "catalog_path"
-"family_affinty" = "family_affinty"
-"load_catalog" = "load_catalog"
-"model_route_catalog" = "model_route_catalog"
-"optimize" = "optimize"
-"product_catalog" = "product_catalog"
-"test_catalog_and_compatibility_mismatch_fails_closed" = "test_catalog_and_compatibility_mismatch_fails_closed"
-"test_openai_catalog_declares_effort_policy_only" = "test_openai_catalog_declares_effort_policy_only"
-"test_python_floor_rejects_wrong_version_under_optimization" = "test_python_floor_rejects_wrong_version_under_optimization"
-"unrecognized" = "unrecognized"
-"use_catalog" = "use_catalog"
-"write_account_default_catalog" = "write_account_default_catalog"
-
-[type.fixture-6]
-extend-glob = ["test_provider_exec.py"]
-[type.fixture-6.extend-identifiers]
-"alow" = "alow"
-"load_catalog" = "load_catalog"
-"ser" = "ser"
-"test_model_families_load_catalog_without_snapshot" = "test_model_families_load_catalog_without_snapshot"
-"unauthorized" = "unauthorized"
-"vlaid" = "vlaid"
-
-[type.fixture-8]
-extend-glob = ["legacy_json.rs"]
-[type.fixture-8.extend-identifiers]
-"tru" = "tru"
 
 [type.port-graph]
 extend-glob = ["graph.json"]

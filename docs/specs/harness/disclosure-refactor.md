@@ -1,5 +1,9 @@
 # Spec: harness progressive disclosure
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Canonical decision: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
 owns current Fabric wording. Git owns the refactor's decision and migration
 history; `.agent-run/` artifacts are not normative dependencies.

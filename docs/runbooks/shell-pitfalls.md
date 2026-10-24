@@ -68,7 +68,8 @@ clean when the command in fact never ran, or ran on the wrong input.
 - **Wait on a background PID with `kill -0`, never `pgrep -f`.** The pattern
   matches the waiting shell's own command line, so the wait never ends.
   Stopping a background task can kill its whole process group, including a
-  sibling you meant to keep; stop explicit PIDs with `scripts/reap.py`.
+  sibling you meant to keep; cancel owned runs with `provenant cancel` and an
+  explicit target and operation ID.
 - **A wildcard git pathspec matches across slashes.** `apps/*/src/**` matches
   the whole path, not one segment; use `:(glob)apps/*/src/**` for glob
   semantics.

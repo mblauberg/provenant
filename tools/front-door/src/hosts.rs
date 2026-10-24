@@ -76,9 +76,8 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
     let mut service = "Claude Code-credentials".to_owned();
     if config != home.join(".claude") {
         use std::os::unix::ffi::OsStrExt;
-        let hash = CanonicalV1::file_digest(config.as_os_str().as_bytes()).to_string();
         service.push('-');
-        service.push_str(&hash[..8]);
+        service.push_str(&keychain_suffix(config.as_os_str().as_bytes()));
     }
     let argv = [
         "/usr/bin/security".into(),
@@ -235,5 +234,21 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+/// Claude Code names a non-default identity's keychain item after the first
+/// eight hex digits of the SHA-256 of its config directory path.
+fn keychain_suffix(config_dir: &[u8]) -> String {
+    let digest = CanonicalV1::file_digest(config_dir).to_string();
+    let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    hex[..8].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn keychain_suffix_is_the_hex_digest_prefix() {
+        assert_eq!(super::keychain_suffix(b"/home/u/.claude-work"), "9fa37e90");
     }
 }

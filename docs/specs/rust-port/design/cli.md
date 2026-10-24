@@ -315,6 +315,26 @@ nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
+The same handler then applies the workflow guard rules (#1319) to the simple
+commands the shell-command lexer reports, so there is no second parser. Rule
+ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
+`-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
+`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`git checkout` of a branch or revision, when the directory is a repository
+whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
+(`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+omitting an id disables that rule and an unknown id is a schema error. Unreadable
+config keeps every rule on. Input the lexer cannot parse is denied by the
+process-control check above, not by these rules. Codex and OpenCode have no
+recorded `PreToolUse` registration, so only Claude carries the rules; their
+lanes rely on the sandbox and the pre-push hook.
+
+`worktree create` records the primary checkout's `HEAD` before `git worktree
+add` and refuses with `PrimaryMoved` (refused outcome) if it differs afterwards
+(#1331), so a lane cannot silently move or detach the primary. Dispatch needs
+no change; it only sees the refusal.
+
 `PreCompact` reads validated cwd/session identity and emits advisory findings,
 always 0. `SessionStart` reads that session's already-published checkpoint from
 the new root and emits at most 8 KiB context, otherwise nothing, always 0.
@@ -702,3 +722,47 @@ renewed. Keychain failure stays indeterminate. No token or raw
 account/status output is persisted or printed. Every state carries
 `token_validity = "unverified"`; local status cannot prove a token is accepted
 by the provider or that quota and subscription information were refreshed.
+
+## Final legacy cut (Lane F)
+
+The cut-over chair authorises deletion of the entire Python orchestrator before
+parallel run/dispatch replacement lands. Rust run/supervisor/confinement owns
+custody and publication; no Python bridge or differential oracle survives.
+The historical inventories above describe the source baseline, not files to
+invoke. Current command grammar lives in `crates/cli/src`.
+
+Decisions taken for the chair:
+
+- Remove Node workspace bootstrap, package manifests/lock, test tooling and CI
+  because no Node/TypeScript workspace remains. Remove the Python-only CI jobs,
+  their shards, path filters and cached-tree markers. Every surviving Rust,
+  harness asset and generic job runs on each tested tree; `ci-status` requires
+  every one to succeed.
+- Retire the old JSON record schemas and synthetic fixtures with their Python
+  judge. Typed Rust records and owner boundary tests define current contracts.
+- Delete both Git shell adapters. The merged CLI hook lane supplies runnable
+  `provenant hook git pre-push` and Claude hook handlers with fixtures. Rust
+  install owns registrations. Merged pruning uses explicit `provenant worktree
+  remove --merged --integration OID --since OID`; the post-merge shell adapter
+  and Python cleanup engine are retired.
+- Delete `lease.py`: the run-directory driver lease is explicitly retired by
+  execution-run. Rust custody is separate from `provenant fabric landing`.
+  Delete `fabric_policy.py` with its Python differential test; the Rust
+  fabric-runtime policy owner retains direct behaviour tests.
+- Keep the three state/config Python helpers and the delivery/shared Python
+  files assigned to lanes D/E. Their deletion is outside this lane's scope.
+  [Remaining Python inventory](../remaining-python.md) lists every file and
+  its owner. No TypeScript or JavaScript implementation remains.
+
+Route attribution for this cut: `codex/gpt-6.1-sol@medium` via Fabric.
+The author does not infer any other model identity. Chair review and green
+exact-head CI remain merge gates; this lane does not merge.
+
+Merge dependency: lane E must replace the delivery validator that imports
+`scripts/git_evidence.py` and the deleted orchestrator helpers. These are
+explicitly authorised parallel deletions, not an assertion that the retained
+Python delivery implementation remains runnable. No shim is added.
+
+The final main merge includes PR #1401's runnable Rust hooks and canonicalised
+Git selection. Earlier review findings about unavailable hook handlers and
+Homebrew symlink pinning are resolved by that owner, not waived by this cut.

@@ -68,7 +68,7 @@ struct QuotaReport {
             creditBurnPerHour = nil
             observedAt = row.ageSeconds.map { Date(timeIntervalSince1970: generatedAt.timeIntervalSince1970 - Double($0)) }
             let mappedWindows = (row.snapshot?.windows ?? []).map { item in
-                let paceState = rowStatus == "exhausted" ? "exhausted" : rowStatus == "credit_only" ? "credit_only" : "on_pace"
+                let paceState = ["exhausted", "credit_only"].contains(rowStatus) ? "exhausted" : "on_pace"
                 return Window(name: item.pool, label: Fmt.human(item.pool), usedPercent: Double(item.usedBasisPoints) / 100,
                               windowMinutes: nil, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
                               limitAmount: nil, currency: nil, advisory: false, pool: item.pool, poolLabel: nil,
@@ -102,7 +102,7 @@ struct QuotaReport {
         let pace: Pace
         var title: String { label ?? Fmt.human(name) }
         var fullTitle: String { poolLabel.map { "\($0) · \(title)" } ?? title }
-        var setsState: Bool { advisory != true && !(limitAmount != nil && (windowMinutes ?? 0) == 0) }
+        var setsState: Bool { advisory != true && resetAt != nil }
         func isExpired(_ now: Date) -> Bool { resetAt.map { $0 <= now } ?? false }
     }
     struct Pace { let state: String; let runsOutAt: Date?; let summary: String? }
@@ -125,7 +125,7 @@ struct QuotaReport {
         case "unknown": "Unknown"
         case "auth_required": "Authentication required"
         case "unsupported": "Unsupported"
-        case "credit_only": "Drawing on credits"
+        case "credit_only": "Exhausted, drawing on credits"
         default: Fmt.human(status)
         }
     }
@@ -422,7 +422,7 @@ enum Fmt {
         let binding = account.binding(now: now)
         if account.isDrawing(now: now) {
             let line = drawing(binding, now: now)
-            return Row(lead: line, spoken: [line])
+            return Row(lead: account.statusTitle + " · " + line, spoken: ["exhausted, drawing on credits", line])
         }
         if let binding, binding.pace.state == "exhausted" {
             let when = back(binding.resetAt, now: now)

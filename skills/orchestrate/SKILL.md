@@ -30,16 +30,16 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Partition writers into separate registered worktrees, and name each writer lane's write scope (files or directories) before fan-out. Lanes with overlapping write scopes run serially, and dependent lanes merge in dependency order. The chair owns authority, decisions, user communication and the final synthesis. A worker's report is a claim: verify commits, counts and tests against the live tree and transcript.
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
-- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `scripts/model-route routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `provenant route list` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
-  - Before fan-out, run `scripts/model-route routes`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
+  - Before fan-out, run `provenant route list`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
   - Set route or model on every spawn, including native subagents; name Claude members directly (haiku junior, sonnet senior, opus principal) because Agent accepts no tier aliases. Brief native subagents with paths; end each when its deliverable lands.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait N` in the background, or one status wait. Never sleep or poll loops.
-  - Wait with `provenant lanes --wait N` or `scripts/provenant-pr checks --wait` as a background command; never a bare sleep or a manual polling loop.
+  - Wait with `provenant lanes --wait N` or `gh pr checks --watch` as a background command; never a bare sleep or a manual polling loop.
   - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. Cache lifetimes vary by provider (Anthropic's default is five minutes; others differ), so keep waits short and let receipts record cache reads.
   - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
   - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.
@@ -50,21 +50,11 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Before landing, acquire a work claim if none is live for this session, verify
   it, and acquire `provenant fabric landing acquire` with the integration
   reference, expected remote OID, candidate OID and operation ID. See the
-  [landing lease runbook](../../docs/runbooks/landing-lease.md). Before a lane merge or cherry-pick, run
-  `python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" --cwd <lane-worktree>`
-  and consume the SHA it prints, rather than resolving the mutable lane branch
-  again. It refuses any commit since the primary HEAD that changes `.agents/`
-  without an [audited chair release](../../docs/specs/fabric-v2.md) of the
-  reviewed tip; `scripts/worktree verify-claim` runs the same gate. Use
-  `fabric landing-push <session-id> <generation> <branch> --label <seat>`
-  for the final push; it checks the holder, generation and remote SHA, then runs
-  the gate from the leased remote SHA before pushing the pinned head. The label must match the MCP lease holder; a matching
-  `PROVENANT_AGENT_LABEL` export selects the inbox. Renew an expiring lease
-  and release it after an aborted landing, using its generation/token proof
-  and an operation ID. To observe another chair's lease, use
-  `provenant fabric landing wait --reference REF --generation N --wait SECONDS`.
-  A project whose landing tool takes and releases the lease itself says so in
-  its project skill; the chair then leaves the lease to that tool.
+  [landing lease runbook](../../docs/runbooks/landing-lease.md). Verify pinned
+  candidate and integration OIDs through Rust confinement before merging. Do
+  not infer a protected-tip release from an advisory claim. Renew or release
+  the landing lease using its generation/token proof and an operation ID.
+  A project whose landing tool owns the lease leaves it to that tool.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 
