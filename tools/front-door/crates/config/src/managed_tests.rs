@@ -2281,6 +2281,41 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
 }
 
 #[test]
+fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::CLAUDE_HOOKS.to_vec();
+    let settings = f.home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        b"{ // fixture comment\n\"z\":{\"first\":1,\"second\":2,},\"hooks\":{},}",
+    )
+    .unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let text = fs::read_to_string(settings).unwrap();
+    assert!(text.find("\"z\"").unwrap() < text.find("\"hooks\"").unwrap());
+    assert!(
+        text.contains("\n  \"z\": {\n    \"first\": 1,\n    \"second\": 2\n  },\n  \"hooks\": {"),
+        "{text}"
+    );
+    assert!(!text.contains("\"hooks\":[{"));
+    assert!(!text.contains("fixture comment"));
+    assert!(!text.contains(",\n}"));
+    let _: serde_json::Value = serde_json::from_str(&text).unwrap();
+}
+
+#[test]
 fn only_manifest_matched_utility_hooks_refuse_and_check_reports_findings() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
