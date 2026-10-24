@@ -14,9 +14,7 @@ an operator command or wire-format reference. Current Rust commands are
 `provenant fabric peer` entrypoint. Dispatch is `provenant dispatch`, with
 `--host` for placement; observation and controls use top-level `lanes`,
 `output`, `cancel`, `resume` and `reconcile`. There is no `fabric dispatch`
-command. The binary edge in `tools/front-door/src/main.rs` currently returns
-`unavailable` for those run commands, so their grammar is not evidence of
-working dispatch or recovery. Configuration is in the state directory's `config.toml` under
+command. Configuration is in the state directory's `config.toml` under
 `domains.fabric`; the retired `hosts.json` and `id@host` conventions below
 must not be used as current instructions.
 

@@ -78,10 +78,7 @@ the retired `{protocol_version, verb, params}` envelope.
 ## Dispatch and recovery
 
 The CLI grammar reserves `provenant dispatch` for one prompt or a batch
-manifest; `--host` names explicit placement. In this checkout,
-`tools/front-door/src/main.rs` still returns `unavailable` for `dispatch`,
-`lanes`, `output`, `cancel`, `resume` and `reconcile`. These are parsed
-interfaces, not an executable run workflow yet. `provenant help dispatch`
+manifest; `--host` names explicit placement. `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and
 `reconcile`. Targets follow the
