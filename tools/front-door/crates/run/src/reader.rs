@@ -318,6 +318,16 @@ impl RunStore {
                 (bytes, artifact.complete, artifact.digest)
             }
         };
+        // Scan the whole bounded artifact before paging: slicing first can
+        // expose a token fragment whose marker is on the previous page.
+        let (bytes, digest) = if matches!(part, ArtifactPart::Prompt) {
+            (bytes, digest)
+        } else {
+            let safe = provenant_confinement::redact::known_shapes(&bytes)
+                .map_err(|_| RunError::Validation("output redaction failed"))?;
+            let digest = provenant_records::CanonicalV1::file_digest(&safe);
+            (safe, digest)
+        };
         if range.offset > bytes.len() as u64 {
             return Err(RunError::Validation("offset past EOF"));
         }
@@ -353,6 +363,18 @@ impl RunStore {
             encoding,
             digest,
         })
+    }
+    /// Translate an attempt cursor only within this verified project.
+    pub fn attempt_sequence(&self, id: AttemptId, call: &Request<'_>) -> Result<u64> {
+        self.record(id, call)?;
+        let sequence: i64 = call.retry(|| {
+            Ok(self.db.query_row(
+                "SELECT sequence FROM attempts WHERE id=?1 AND project=?2",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })?;
+        u64::try_from(sequence).map_err(|_| RunError::Validation("attempt sequence"))
     }
     pub fn lanes(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
         if !(1..=100).contains(&query.limit) || query.targets.len() > 100 {

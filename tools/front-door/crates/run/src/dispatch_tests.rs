@@ -7,7 +7,7 @@ use provenant_records::CanonicalV1;
 use provenant_supervisor::{
     custody::ExitObservation, exec::Termination, fs::Directory, sys::resources::MemorySample,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 struct Host {
@@ -30,14 +30,16 @@ struct Fake {
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
+    prompt: RefCell<String>,
 }
 impl Providers for Fake {
     fn prepare(
         &self,
         _: &TaskRequest,
-        _: &str,
+        prompt: &str,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.prompt.replace(prompt.into());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err("fixture adapter is disabled".into());
@@ -161,6 +163,16 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(
         matches!(&started[..], [Started::Refused { reason, .. }] if reason.contains("disabled"))
     );
+    let prompt = fake.prompt.borrow();
+    let path = store.context.state_root.as_path().join(format!(
+        "runs/{}/attempts/{}",
+        run.run_id, run.attempts[0].attempt_id
+    ));
+    assert!(prompt.contains(&path.join("result.md").display().to_string()));
+    assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
+    assert!(prompt.contains("only durable outputs"));
+    assert!(prompt.contains("deleted"));
+    assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempts[0].attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,

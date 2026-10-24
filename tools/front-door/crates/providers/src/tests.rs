@@ -1175,3 +1175,41 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
     );
 }
+
+#[test]
+fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
+    // Synthetic protocol regression from #1216, not an activation recording.
+    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
+    for wrapped in [false, true] {
+        for string_body in [false, true] {
+            let body =
+                serde_json::json!({"error":{"type":"FreeUsageLimitError","message":message}});
+            let body = if string_body {
+                serde_json::Value::String(body.to_string())
+            } else {
+                body
+            };
+            let event =
+                serde_json::json!({"type":"provider.quota","status":429,"response":{"body":body}});
+            let event = if wrapped {
+                serde_json::json!({"type":"error","error":event})
+            } else {
+                event
+            };
+            let (events, outcome) = replay(
+                &opencode::OpenCode,
+                &(event.to_string() + "\n"),
+                ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )?;
+            assert_eq!(outcome.status(), OutcomeStatus::Refused);
+            assert!(events.contains(&ProviderEvent::QuotaLimited {
+                message: message.into(),
+                pool: Some("opencode-free".into())
+            }));
+        }
+    }
+    Ok(())
+}

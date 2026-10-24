@@ -95,7 +95,10 @@ impl Admission<'_> {
             .filter(|r| {
                 r.account.adapter == route.adapter
                     && r.account.account_key == *key
-                    && r.model == route.model
+                    && (r.model == route.model
+                        || (route.adapter == "opencode"
+                            && r.pool.as_deref() == Some("opencode-free")
+                            && self.pools.iter().any(|pool| pool == "opencode-free")))
             })
         {
             let expires = refusal.resets_unix_seconds.unwrap_or(
@@ -237,6 +240,41 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn opencode_free_refusal_cools_the_identity_pool_across_models() {
+        let mut route = route();
+        route.adapter = "opencode".into();
+        route.model = "opencode/second-free".into();
+        let refusal = Refusal {
+            account: AccountScope {
+                adapter: "opencode".into(),
+                account_key: "opaque".into(),
+                label: "free".into(),
+            },
+            model: "opencode/first-free".into(),
+            pool: Some("opencode-free".into()),
+            observed_unix_seconds: 900,
+            resets_unix_seconds: None,
+        };
+        for (key, pools, blocked) in [
+            ("opaque", vec!["opencode-free".into()], true),
+            ("other", vec!["opencode-free".into()], false),
+            ("opaque", vec![], false),
+        ] {
+            route.account_key = Some(key.into());
+            assert_eq!(
+                Admission {
+                    now_unix_seconds: 1000,
+                    records: &[],
+                    refusals: std::slice::from_ref(&refusal),
+                    pools: &pools
+                }
+                .admit(&route, &"free-limit".parse().unwrap())
+                .is_err(),
+                blocked
+            );
+        }
     }
     #[test]
     fn failed_probe_preserves_recent_exhaustion() {

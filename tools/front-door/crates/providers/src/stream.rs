@@ -5,8 +5,15 @@ pub enum ProviderEvent {
     Text(String),
     Session(String),
     Model(String),
-    Usage { input: u64, output: u64 },
+    Usage {
+        input: u64,
+        output: u64,
+    },
     Refusal,
+    QuotaLimited {
+        message: String,
+        pool: Option<String>,
+    },
     AuthRequired,
     Error,
     TransientError,
@@ -178,7 +185,7 @@ impl StreamState {
                 }
                 ProviderEvent::Error => self.error = true,
                 ProviderEvent::TransientError => self.transient_error = true,
-                ProviderEvent::Refusal => self.refusal = true,
+                ProviderEvent::Refusal | ProviderEvent::QuotaLimited { .. } => self.refusal = true,
                 ProviderEvent::AuthRequired => self.auth_required = true,
                 _ => {}
             }

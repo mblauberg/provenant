@@ -698,3 +698,47 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let raw = format!("prefix {secret} suffix");
+    let mut publication = publication();
+    publication.result = &raw;
+    store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+    let output = store.read_output(
+        id,
+        ArtifactPart::Result,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    assert_eq!(output.bytes, b"prefix [REDACTED] suffix");
+    assert_eq!(output.digest, CanonicalV1::file_digest(&output.bytes));
+    let fragment = store.read_output(
+        id,
+        ArtifactPart::Result,
+        ByteRange {
+            offset: 9,
+            max_bytes: 4,
+        },
+        &context,
+        &call,
+    )?;
+    assert_eq!(fragment.bytes, b"EDAC");
+    assert_eq!(
+        store.record(id, &call)?.result.unwrap().digest,
+        CanonicalV1::file_digest(raw.as_bytes())
+    );
+    Ok(())
+}
