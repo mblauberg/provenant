@@ -367,7 +367,7 @@ impl HostDeliveryContext {
         options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
         options.stderr = StreamPolicy::Discard;
         let output = executor
-            .run(options)
+            .execute(options)
             .map_err(|_| RunError::Delivery(stage))?;
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)

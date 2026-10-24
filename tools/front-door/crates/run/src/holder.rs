@@ -225,9 +225,6 @@ impl RunStore {
         let record = self.record(id, call)?;
         if exit.scope != Self::scope(&record)
             || recovery.is_some_and(|recovery| recovery.scope() != exit.scope)
-            || exit.unresolved_cleanup
-            || !exit.terminal_observed
-            || exit.publication != custody::PublicationState::Durable
         {
             return Err(RunError::Validation("terminal custody scope mismatch"));
         }
@@ -404,6 +401,9 @@ impl RunStore {
             && decoded.outcome == Outcome::Succeeded
             && !cancelled
             && exit.stop_reason.is_none()
+            && exit.terminal_observed
+            && !exit.unresolved_cleanup
+            && exit.publication == custody::PublicationState::Durable
             && let Completion::Live {
                 delivery: Some(host),
                 ..

@@ -33,7 +33,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
                 .collect();
             let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
             options.env = Some(&environment);
-            let output = executor.run(options)?;
+            let output = executor.execute(options)?;
             assert_eq!(
                 output.termination,
                 Termination::Exit(0),
