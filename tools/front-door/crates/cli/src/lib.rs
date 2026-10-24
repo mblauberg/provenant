@@ -144,13 +144,14 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     let mut text = error.to_string();
     if argv.iter().any(|arg| arg == "fabric") {
         // Clap may echo a secret as an unexpected positional, an invalid value,
-        // a suggestion or a conflict. Scrub token-shaped argv values in every
-        // error kind before either renderer receives the diagnostic.
+        // a suggestion or a conflict. Scrub every run of 32 or more hex digits
+        // in argv, including runs embedded in a longer value, in every error
+        // kind before either renderer receives the diagnostic.
         for arg in argv {
             if let Some(arg) = arg.to_str() {
-                for value in arg.split('=') {
-                    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        text = text.replace(value, "[redacted]");
+                for run in arg.split(|c: char| !c.is_ascii_hexdigit()) {
+                    if run.len() >= 32 {
+                        text = text.replace(run, "[redacted]");
                     }
                 }
             }

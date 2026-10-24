@@ -740,54 +740,43 @@ pub fn run(
 ) -> u8 {
     let command = cmd.path();
     let read_only = cmd.read_only();
-    let mut result = if matches!(cmd, Fabric::Mcp) {
-        let mut result = CommandResult::new(&command, Outcome::Unavailable, Value::Null);
-        result.error = Some(CommandError {
-            code: "OWNER_UNAVAILABLE".into(),
-            message: "fabric owner is unavailable in this build".into(),
-            cause: None,
-            repair: None,
-        });
-        result
-    } else {
-        match execute(cmd, roots.clone(), home, cwd) {
-            Ok((data, timeout)) => CommandResult::new(
-                &command,
-                if timeout {
-                    Outcome::Timeout
-                } else {
-                    Outcome::Ok
-                },
-                data,
-            ),
-            Err(error) => {
-                let (status, code) = match &error {
-                    EdgeError::Coordination(error) => (
-                        match error.code() {
-                            "invalid_input" | "not_found" => Outcome::Invalid,
-                            "stale_fence" | "conflict" => Outcome::Refused,
-                            "timeout" => Outcome::Timeout,
-                            "cancelled" => Outcome::Cancelled,
-                            _ => Outcome::Error,
-                        },
-                        error.code(),
-                    ),
-                    EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
-                        (Outcome::Invalid, "invalid_input")
-                    }
-                    EdgeError::Config(_) => (Outcome::Invalid, "config"),
-                    EdgeError::HomeUnavailable => (Outcome::Error, "home_unavailable"),
-                    _ => (Outcome::Error, "io"),
-                };
-                let mut result = CommandResult::new(&command, status, Value::Null);
-                result.error = Some(CommandError {
-                    code: code.into(),
-                    message: error.to_string(),
-                    cause: None,
-                    repair: None,
-                });
-                result
-            }
+    let mut result = match execute(cmd, roots.clone(), home, cwd) {
+        Ok((data, timeout)) => CommandResult::new(
+            &command,
+            if timeout {
+                Outcome::Timeout
+            } else {
+                Outcome::Ok
+            },
+            data,
+        ),
+        Err(error) => {
+            let (status, code) = match &error {
+                EdgeError::Coordination(error) => (
+                    match error.code() {
+                        "invalid_input" | "not_found" => Outcome::Invalid,
+                        "stale_fence" | "conflict" => Outcome::Refused,
+                        "timeout" => Outcome::Timeout,
+                        "cancelled" => Outcome::Cancelled,
+                        _ => Outcome::Error,
+                    },
+                    error.code(),
+                ),
+                EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
+                    (Outcome::Invalid, "invalid_input")
+                }
+                EdgeError::Config(_) => (Outcome::Invalid, "config"),
+                EdgeError::HomeUnavailable => (Outcome::Error, "home_unavailable"),
+                _ => (Outcome::Error, "io"),
+            };
+            let mut result = CommandResult::new(&command, status, Value::Null);
+            result.error = Some(CommandError {
+                code: code.into(),
+                message: error.to_string(),
+                cause: None,
+                repair: None,
+            });
+            result
         }
     };
     let human = if result.error.is_none() {

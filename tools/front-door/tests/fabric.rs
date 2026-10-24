@@ -493,6 +493,37 @@ fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
 }
 
 #[test]
+fn embedded_and_uppercase_fence_tokens_never_reach_either_error_renderer() -> Result {
+    let rig = TestRig::new()?;
+    let lower = "0123456789abcdef0123456789abcdef";
+    let upper = lower.to_ascii_uppercase();
+    for (stray, secret) in [
+        (format!("x{lower}y"), lower),
+        (format!("{lower}0"), lower),
+        (upper.clone(), upper.as_str()),
+        (format!("--tokn={lower}"), lower),
+    ] {
+        let args = [
+            "fabric",
+            "claim",
+            "verify",
+            "00000000000000000000000000000001",
+            stray.as_str(),
+            "--generation",
+            "1",
+        ];
+        let value = call(&rig, &args, 2)?;
+        assert!(!serde_json::to_string(&value)?.contains(secret), "{stray}");
+        let human = rig.command(&args)?;
+        assert_eq!(code(&human), 2);
+        assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
+        assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
+    }
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
 fn empty_environment_label_falls_through_to_config() -> Result {
     let mut rig = TestRig::new()?;
     call(&rig, &["fabric", "identity"], 0)?;
