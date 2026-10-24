@@ -31,8 +31,8 @@ final class LaneTests: XCTestCase {
             row("8", "running", queued: "2026-10-25T09:00:00.000000Z", output: "2026-10-25T09:59:30.000000Z"),
         ])).lanes
         let shown = LaneBoard.attention(decoded, now: now)
-        XCTAssertEqual(shown.map(\.lane.attemptID), ["att3", "att2", "att4"])
-        XCTAssertEqual(shown.map(\.kind), [.inputRequired, .failed, .stalled])
+        XCTAssertEqual(shown.map(\.lane.attemptID), ["att3", "att2", "att4", "att1"])
+        XCTAssertEqual(shown.map(\.kind), [.inputRequired, .failed, .stalled, .stalled])
         XCTAssertEqual(shown[0].lane.route, "model-3")
     }
 
