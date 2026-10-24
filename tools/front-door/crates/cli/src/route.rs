@@ -112,7 +112,10 @@ fn cached(roots: &Roots) -> Result<Vec<AvailabilityRecord>, EdgeError> {
     }
     Ok(records)
 }
-fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
+fn with_context<T>(
+    roots: &Roots,
+    action: impl FnOnce(&RoutingContext<'_>) -> Result<T, EdgeError>,
+) -> Result<T, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)?
         .domains
         .routing;
@@ -120,7 +123,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
     let availability = cached(roots)?;
     let timestamp = jiff::Timestamp::now();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
-    let context = RoutingContext {
+    action(&RoutingContext {
         catalogue: &catalogue,
         config: &config,
         registry: REGISTRY,
@@ -129,17 +132,31 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
         access: &[],
         now,
         host: "local-preview",
-    };
-    Ok(match command {
-        Route::List(query) => Data::List(provenant_routing::list(
-            &provenant_routing::RouteListQuery {
-                adapter: query.adapter.clone(),
-            },
-            &context,
-        )?),
-        Route::Resolve(query) => {
-            Data::Resolved(provenant_routing::resolve(&query.to_domain()?, &context)?)
-        }
+    })
+}
+/// Resolve one dispatch route against the same context as `route resolve`.
+pub(crate) fn resolve(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+) -> Result<provenant_records::ResolvedRoute, String> {
+    with_context(roots, |context| {
+        Ok(provenant_routing::resolve(request, context)?)
+    })
+    .map_err(|error| error.to_string())
+}
+fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
+    with_context(roots, |context| {
+        Ok(match command {
+            Route::List(query) => Data::List(provenant_routing::list(
+                &provenant_routing::RouteListQuery {
+                    adapter: query.adapter.clone(),
+                },
+                context,
+            )?),
+            Route::Resolve(query) => {
+                Data::Resolved(provenant_routing::resolve(&query.to_domain()?, context)?)
+            }
+        })
     })
 }
 pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {

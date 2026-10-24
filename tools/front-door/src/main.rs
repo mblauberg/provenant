@@ -81,37 +81,74 @@ fn fail(
     });
     emit(&result, globals, "", false)
 }
-fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Globals) -> u8 {
-    let error = provenant_cli::CliError::OwnerUnavailable { owner };
-    fail(
-        command,
-        Outcome::Unavailable,
-        "OWNER_UNAVAILABLE",
-        &error.to_string(),
-        globals,
-    )
+/// Resolve Run's composition paths, then emit the owner's reply.
+fn run_edge(
+    leaf: &str,
+    globals: &provenant_cli::Globals,
+    action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
+) -> u8 {
+    let resolved = (|| -> Result<_, roots::RootError> {
+        let assets = roots::product_root()?;
+        let project = roots::selected_project(globals.project.as_deref(), false)?;
+        let roots = roots::roots(globals, &assets, &project)?;
+        Ok((roots, roots::home()?, assets, project))
+    })();
+    match resolved {
+        Ok((roots, home, assets, cwd)) => {
+            let reply = action(&provenant_cli::run::Edge {
+                roots: &roots,
+                home: &home,
+                assets: &assets,
+                cwd: &cwd,
+            });
+            emit(&reply.result, globals, &reply.human, false)
+        }
+        Err(error) => {
+            let status = match error {
+                roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
+                _ => Outcome::Error,
+            };
+            fail(leaf, status, "ROOT", &error.to_string(), globals)
+        }
+    }
 }
-fn show_config(globals: &provenant_cli::Globals) -> u8 {
+fn show_config(task_class: Option<&str>, globals: &provenant_cli::Globals) -> u8 {
+    config_command("config show", None, task_class, globals)
+}
+/// Apply an optional knob edit, then print the effective config read back.
+fn config_command(
+    command: &str,
+    edit: Option<provenant_config::KnobEdit>,
+    task_class: Option<&str>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let assets = roots::product_root()?;
         let project = roots::selected_project(globals.project.as_deref(), false)?;
         let roots = roots::roots(globals, &assets, &project)?;
-        Ok(provenant_config::config_show(
+        if let Some(edit) = edit {
+            provenant_config::edit_config(&roots, &provenant_supervisor::fs::LocalFs, edit)?;
+        }
+        let mut config = provenant_config::config_show(
             &roots,
             &provenant_supervisor::fs::LocalFs,
             &provenant_cli::domains::SECTIONS,
-        )?)
+        )?;
+        if let Some(class) = task_class {
+            config.apply_task_class(class)?;
+        }
+        Ok(config)
     })();
     match result {
         Ok(config) => match serde_json::to_string_pretty(&config) {
             Ok(text) => emit(
-                &CommandResult::new("config show", Outcome::Ok, config),
+                &CommandResult::new(command, Outcome::Ok, config),
                 globals,
                 &format!("{text}\n"),
                 true,
             ),
             Err(_) => fail(
-                "config show",
+                command,
                 Outcome::Error,
                 "ENCODE",
                 "cannot encode config",
@@ -127,7 +164,7 @@ fn show_config(globals: &provenant_cli::Globals) -> u8 {
                 | None => Outcome::Error,
                 Some(_) => Outcome::Invalid,
             };
-            fail("config show", status, "CONFIG", &error.to_string(), globals)
+            fail(command, status, "CONFIG", &error.to_string(), globals)
         }
     }
 }
@@ -194,7 +231,16 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 .iter()
                 .map(|fd| std::ffi::OsString::from(fd.to_string()))
                 .collect();
-            match provenant_supervisor::supervise(&descriptors, Default::default()) {
+            let registry = provenant_cli::run::Registry { roots: None };
+            let holder = provenant_run::RunHolder {
+                providers: &registry,
+                resources: &provenant_run::SystemResources,
+            };
+            let hooks = provenant_supervisor::GuardianHooks {
+                holder: Some(&holder),
+                ..Default::default()
+            };
+            match provenant_supervisor::supervise(&descriptors, hooks) {
                 Ok(()) => 0,
                 Err(error) => fail(
                     "internal supervise",
@@ -212,7 +258,28 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
-        Command::Config(provenant_cli::Config::Show) => show_config(globals),
+        Command::Config(provenant_cli::Config::Show { task_class }) => {
+            show_config(task_class.as_deref(), globals)
+        }
+        Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
+            "config set",
+            Some(if name == "profile" {
+                provenant_config::KnobEdit::Profile(&value)
+            } else {
+                provenant_config::KnobEdit::Set {
+                    name: &name,
+                    value: &value,
+                }
+            }),
+            None,
+            globals,
+        ),
+        Command::Config(provenant_cli::Config::Unset { name }) => config_command(
+            "config unset",
+            Some(provenant_config::KnobEdit::Unset(&name)),
+            None,
+            globals,
+        ),
         Command::Fabric(provenant_cli::Fabric::Mcp { client }) => fabric::mcp(client, globals),
         Command::Fabric(provenant_cli::Fabric::Peer) => fabric::peer(globals),
         Command::Fabric(provenant_cli::Fabric::Host(_)) => fabric::hosts(globals),
@@ -264,17 +331,31 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ),
             }
         }
-        Command::Dispatch(_) => unavailable("dispatch", "run", globals),
-        Command::Lanes(_) => unavailable("lanes", "run", globals),
-        Command::Output(_) => unavailable("output", "run", globals),
-        Command::Cancel(_) => unavailable("cancel", "run", globals),
-        Command::Resume(_) => unavailable("resume", "run", globals),
-        Command::Reconcile(_) => unavailable("reconcile", "run", globals),
-        Command::Telemetry(provenant_cli::Telemetry::Stats(stats)) => {
-            if stats.usage {
-                usage::run(&stats, globals)
+        Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::dispatch(*cmd, edge)
+        }),
+        Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::lanes(cmd, edge)
+        }),
+        Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::output(cmd, edge)
+        }),
+        Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::cancel(cmd, edge)
+        }),
+        Command::Resume(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::resume(cmd, edge)
+        }),
+        Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::reconcile(cmd, edge)
+        }),
+        Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
+            if cmd.usage {
+                usage::run(&cmd, globals)
             } else {
-                unavailable("telemetry stats", "telemetry", globals)
+                run_edge(&inv.leaf, globals, |edge| {
+                    provenant_cli::run::stats(cmd, edge)
+                })
             }
         }
         Command::Quota(cmd) => {

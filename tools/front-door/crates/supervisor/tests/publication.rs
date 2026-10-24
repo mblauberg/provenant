@@ -20,7 +20,7 @@ fn budget(clock: &SystemClock) -> Result<WaitBudget> {
     use provenant_core::Clock;
     Ok(WaitBudget::cli(clock.mono_now(), 5)?)
 }
-fn start(root: &Path, name: &str, scenario: &str) -> Result<(WriterLease, CustodyHandle)> {
+fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, CustodyHandle)> {
     let writer_path = root.join(format!("{name}-writer"));
     let attempt_path = root.join(format!("{name}-attempt"));
     std::fs::create_dir(&writer_path)?;
@@ -51,11 +51,12 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(WriterLease, Custod
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        holder_context: Vec::new(),
     };
     let handle = launch(
         OwnedLaunch {
             command,
-            writer: &mut writer,
+            lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
             clock: &clock,

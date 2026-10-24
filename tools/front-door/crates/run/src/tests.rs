@@ -11,7 +11,9 @@ use provenant_supervisor::{
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-fn context(base: &Path) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
+pub(super) fn context(
+    base: &Path,
+) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
     let base = std::fs::canonicalize(base)?;
     std::fs::create_dir_all(base.join("home"))?;
     std::fs::create_dir_all(base.join("checkout"))?;
@@ -24,20 +26,20 @@ fn context(base: &Path) -> std::result::Result<ExecutionContext, Box<dyn std::er
         read_prompts: true,
     })
 }
-fn clock() -> TestClock {
+pub(super) fn clock() -> TestClock {
     TestClock::new(
         WallTime::from_micros(100).unwrap(),
         MonoTime::from_micros(0),
     )
 }
-fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
+pub(super) fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
     Request {
         clock,
         budget: WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
         cancel,
     }
 }
-fn input() -> PreparedRun {
+pub(super) fn input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
         run_id: RunId::from_bytes([4; 16]),
@@ -68,7 +70,7 @@ fn input() -> PreparedRun {
         }],
     }
 }
-fn route() -> RouteRecord {
+pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),
         model: Some("fixture/model".into()),
@@ -92,7 +94,7 @@ fn publication() -> TerminalPublication<'static> {
         usage: UsageRecord::default(),
     }
 }
-fn exit() -> ExitObservation {
+pub(super) fn exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
@@ -119,7 +121,7 @@ fn exit() -> ExitObservation {
 }
 #[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -128,6 +130,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let input = input();
     let id = input.attempts[0].attempt_id;
     let run = store.create(&input, &call)?;
+    assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
     assert_eq!(run.closure, Closure::Open);
     assert!(matches!(
@@ -164,6 +167,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         Err(RunError::Validation(_))
     ));
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    assert_eq!(admission_count(&store)?, 0);
     assert_eq!(record.provider_launched, Some(true));
     assert_eq!(
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
@@ -215,7 +219,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
             .collect::<Result<Vec<_>>>()?,
         vec![fact]
     );
-    let events = store.events(0, 64, &call)?;
+    let events = store.events(0, 64, None, &call)?;
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].revision, record.revision);
     let mut replacement = publication();
@@ -253,7 +257,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
 }
 #[test]
 fn oversize_is_refused_before_publication_or_read() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -311,7 +315,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
 #[test]
 fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResult {
     use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -354,7 +358,8 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
     Ok(())
 }
 pub(crate) fn crash_at(phase: &str) {
-    if std::env::var("PROVENANT_RUN_TEST_CRASH").as_deref() == Ok(phase) {
+    let wanted = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
+    if wanted.strip_prefix("withdraw-").unwrap_or(&wanted) == phase {
         std::process::exit(73);
     }
 }
@@ -370,6 +375,19 @@ fn publication_crash_worker() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
+    assert_eq!(admission_count(&store)?, 1);
+    let crash = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
+    if crash.starts_with("withdraw-") {
+        store.withdraw(
+            input.attempts[0].attempt_id,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "cancelled before the crash",
+            WallTime::from_micros(150)?,
+            &call,
+        )?;
+        return Err("crash phase was not reached".into());
+    }
     seal_exit_fixture(&store, &input)?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
@@ -383,8 +401,15 @@ fn publication_crash_worker() -> TestResult {
 #[test]
 fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResult {
     let executor = SystemExecutor::new(1)?;
-    for phase in ["reserved", "sealed", "transaction", "committed"] {
-        let temp = tempfile::tempdir_in("/tmp")?;
+    for phase in [
+        "reserved",
+        "result",
+        "sealed",
+        "transaction",
+        "committed",
+        "withdraw-sealed",
+    ] {
+        let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let argv: Vec<OsString> = vec![
             std::env::current_exe()?.into_os_string(),
@@ -444,10 +469,50 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             assert!(store.attempt(id, &call).is_ok());
         }
-        store.create(&input, &call)?;
+        // A replay mints fresh IDs; it must land on the reserved ones.
+        let mut replay = self::input();
+        replay.run_id = RunId::from_bytes([9; 16]);
+        replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+        assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
         seal_exit_fixture(&store, &input)?;
-        store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
-        assert_eq!(store.events(0, 64, &call)?.len(), 2);
+        if matches!(phase, "sealed" | "transaction") {
+            assert_eq!(admission_count(&store)?, 1);
+            let mut recomputed = publication();
+            recomputed.result = "different text after restart";
+            assert!(matches!(
+                store.publish_terminal(id, 1, &recomputed, &exit(), &call),
+                Err(RunError::TerminalRecoveryRequired)
+            ));
+            store.recover_terminal(id, &exit(), &call)?;
+            assert_eq!(admission_count(&store)?, 0);
+        } else if phase == "withdraw-sealed" {
+            // The retry renders a new time and reason; the sealed intent wins.
+            let record = store
+                .withdraw(
+                    id,
+                    AttemptState::Queued,
+                    Outcome::Cancelled,
+                    "retried",
+                    WallTime::from_micros(900)?,
+                    &call,
+                )?
+                .ok_or("withdrawal was already terminal")?;
+            let sealed = WallTime::from_micros(150)?;
+            assert!(matches!(
+                record.state,
+                AttemptState::Terminal { finished_at, .. } if finished_at == sealed
+            ));
+            assert_eq!(admission_count(&store)?, 0);
+        } else if phase == "result" {
+            assert_eq!(admission_count(&store)?, 1);
+            let mut recomputed = publication();
+            recomputed.result = "different text after restart";
+            store.recover_result_only(id, &recomputed, &exit(), &call)?;
+            assert_eq!(admission_count(&store)?, 0);
+        } else {
+            store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+        }
+        assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
         assert!(
             store
                 .read_output(
@@ -460,6 +525,98 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 .complete
         );
     }
+    Ok(())
+}
+
+#[test]
+fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    super::artifacts::seal(
+        &store.attempt_dir(input.run_id, id, false)?,
+        "result.md",
+        publication().result.as_bytes(),
+        RESULT_LIMIT,
+    )?;
+    let mut recomputed = publication();
+    recomputed.result = "different text after restart";
+    assert!(matches!(
+        store.publish_terminal(id, 1, &recomputed, &exit(), &call),
+        Err(RunError::ArtifactMismatch)
+    ));
+    store.recover_result_only(id, &recomputed, &exit(), &call)?;
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(
+        store
+            .read_output(
+                id,
+                ArtifactPart::Result,
+                ByteRange::default(),
+                &context,
+                &call
+            )?
+            .bytes,
+        publication().result.as_bytes()
+    );
+    Ok(())
+}
+
+#[test]
+fn full_database_retains_admission_and_recovers_original_terminal_intent() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    assert_eq!(admission_count(&store)?, 1);
+    seal_exit_fixture(&store, &input)?;
+    let pages: i64 = store
+        .db
+        .pragma_query_value(None, "page_count", |row| row.get(0))?;
+    store.db.pragma_update(None, "max_page_count", pages)?;
+    let mut publication = publication();
+    publication.reason = Some("x".repeat(128 * 1024));
+    assert!(matches!(
+        store.publish_terminal(id, 1, &publication, &exit(), &call),
+        Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::DiskFull
+    ));
+    assert_eq!(admission_count(&store)?, 1);
+    assert!(matches!(
+        store.attempt(id, &call),
+        Err(RunError::Nonterminal)
+    ));
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 1);
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Open);
+    store.db.pragma_update(None, "max_page_count", 10000)?;
+    store.recover_terminal(id, &exit(), &call)?;
+    assert_eq!(admission_count(&store)?, 0);
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(
+        store
+            .read_output(
+                id,
+                ArtifactPart::Result,
+                ByteRange::default(),
+                &context,
+                &call
+            )?
+            .bytes,
+        publication.result.as_bytes()
+    );
     Ok(())
 }
 
@@ -490,9 +647,15 @@ fn seal_observation(
     Ok(())
 }
 
+fn admission_count(store: &RunStore) -> std::result::Result<i64, rusqlite::Error> {
+    store
+        .db
+        .query_row("SELECT COUNT(*) FROM admission", [], |row| row.get(0))
+}
+
 #[test]
 fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -512,5 +675,26 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     let record = store.publish_terminal(id, 1, &publication, &observation, &call)?;
     assert_eq!(record.provider_launched, Some(false));
     assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
+    Ok(())
+}
+
+#[test]
+fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 1 left it.
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("DROP TABLE cancellations; PRAGMA user_version=1;")?;
+    let store = RunStore::open(&context, &call)?;
+    let op = OperationId::parse("stop")?;
+    store.bind_cancel(&op, "attempt", &call)?;
+    assert!(matches!(
+        store.bind_cancel(&op, "other", &call),
+        Err(RunError::OperationConflict)
+    ));
     Ok(())
 }

@@ -1,7 +1,7 @@
 # Boundary-mutation fixtures for skill-craft (Epic #124, Workstream A).
 #
-# This file is NOT validated by tests/test_skill_eval_fixtures.py, so it may
-# keep structure the strict trigger_cases.json contract forbids: extra case
+# This supplementary file uses richer structure than the strict
+# trigger_cases.json contract: extra case
 # keys, `branch`/`note`/`prior_branch` fields, and the tool-call-trace
 # assertions below.
 #
@@ -116,7 +116,7 @@ cases:
 # Richer branch/composition routing cases, migrated out of the strictly
 # schema-validated evals/trigger_cases.json (Codex review, Epic #124): these
 # sc-* ids carried `branch`, `note` and `prior_branch` fields that violate
-# that file's exact-key contract (tests/test_skill_eval_fixtures.py). They
+# that file's exact-key contract. They
 # are retained here, unconstrained, as supplementary routing/branch-selection
 # evidence, not as the canonical positive/negative/boundary set (see
 # trigger_cases.json q700-q708 for that).

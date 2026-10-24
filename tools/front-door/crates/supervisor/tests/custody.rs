@@ -129,7 +129,7 @@ fn start(
     scenario: &str,
     extra: &[OsString],
     plan: CapturePlan,
-) -> Result<(WriterLease, CustodyHandle)> {
+) -> Result<(CustodyLease, CustodyHandle)> {
     let writer = root.join(format!("{name}-writer"));
     let attempt = root.join(format!("{name}-attempt"));
     std::fs::create_dir(&writer)?;
@@ -160,11 +160,12 @@ fn start(
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        holder_context: Vec::new(),
     };
     let handle = launch(
         OwnedLaunch {
             command,
-            writer: &mut writer,
+            lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
             clock: &clock,
@@ -306,7 +307,7 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
         )?)?;
         assert_eq!(
             record["settlement_evidence"],
-            "darwin_census_and_writer_lease"
+            "darwin_census_and_custody_lease"
         );
     }
     assert_eq!(exit.stdout.bytes, 14);
@@ -458,12 +459,13 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        holder_context: Vec::new(),
     };
     cancel.cancel();
     let failure = launch(
         OwnedLaunch {
             command,
-            writer: &mut writer,
+            lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
             clock: &clock,
@@ -520,11 +522,12 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![b'p'; 256 * 1024],
+        holder_context: Vec::new(),
     };
     let handle = launch(
         OwnedLaunch {
             command,
-            writer: &mut writer,
+            lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
             clock: &clock,

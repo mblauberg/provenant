@@ -48,4 +48,4 @@ operation. The clean/reap engines, retention plans and Node dependency cloning
 are retired. Guardian settlement owns classified scratch cleanup; retained
 history stays on disk.
 
-Never share `CARGO_TARGET_DIR` across worktrees: cargo omits the worktree path from crate identity, so builds cross-contaminate and report false errors or passes.
+Never share `CARGO_TARGET_DIR` across worktrees; use a separate target directory for each worktree.

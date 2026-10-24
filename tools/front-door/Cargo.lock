@@ -453,6 +453,7 @@ dependencies = [
  "provenant-routing",
  "provenant-run",
  "provenant-supervisor",
+ "provenant-telemetry",
  "provenant-workflow",
  "regex",
  "serde",
