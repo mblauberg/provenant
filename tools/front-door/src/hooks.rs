@@ -106,8 +106,8 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
         return deny("hook input rejected: bounded-input error (invalid Bash command)");
     };
-    if provenant_confinement::shell_command::check(&tool.command).is_err() {
-        return deny(provenant_confinement::shell_command::DENY_REASON);
+    if let Err(refusal) = provenant_confinement::shell_command::check(&tool.command) {
+        return deny(refusal.0.message());
     }
     let cwd = event
         .cwd
