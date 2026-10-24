@@ -8,7 +8,7 @@ use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{Directory, entropy_128};
+use provenant_supervisor::fs::{Directory, FileKind, PublishMode, entropy_128};
 use run::RouteRecord;
 use std::path::{Path, PathBuf};
 
@@ -798,18 +798,51 @@ fn apply_setup(
             }
             SetupStep::WriteFile { path, bytes } => {
                 let (parent, name) = setup_parent(&roots[..1], path, false)?;
-                let mut file = parent.create_new(name).map_err(|error| error.to_string())?;
-                use std::io::Write;
-                file.write_all(bytes).map_err(|error| error.to_string())?;
-                file.sync().map_err(|error| error.to_string())?;
-                parent.sync().map_err(|error| error.to_string())?;
+                let matches = match parent.metadata_at(name, false) {
+                    Ok(metadata) if metadata.kind == FileKind::Regular => {
+                        let mut file = parent.open_read(name).map_err(|error| error.to_string())?;
+                        match file.read_bounded(bytes.len() as u64) {
+                            Ok(existing) if existing == *bytes => {
+                                file.sync().map_err(|error| error.to_string())?;
+                                parent.sync().map_err(|error| error.to_string())?;
+                                true
+                            }
+                            Ok(_) | Err(provenant_supervisor::fs::FsError::TooLarge { .. }) => {
+                                false
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                    Ok(_) => false,
+                    Err(error) if error.is_not_found() => false,
+                    Err(error) => return Err(error.to_string()),
+                };
+                if !matches {
+                    parent
+                        .atomic_write(name, ".provider-setup.", bytes, PublishMode::Replace)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             SetupStep::Symlink { link, target } => {
                 let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
-                parent
-                    .symlink(target, name)
-                    .map_err(|error| error.to_string())?;
-                parent.sync().map_err(|error| error.to_string())?;
+                let matches = match parent.metadata_at(name, false) {
+                    Ok(metadata) if metadata.kind == FileKind::Symlink => {
+                        let matches =
+                            parent.read_link(name).map_err(|error| error.to_string())? == *target;
+                        if matches {
+                            parent.sync().map_err(|error| error.to_string())?;
+                        }
+                        matches
+                    }
+                    Ok(_) => false,
+                    Err(error) if error.is_not_found() => false,
+                    Err(error) => return Err(error.to_string()),
+                };
+                if !matches {
+                    parent
+                        .replace_link(name, target)
+                        .map_err(|error| error.to_string())?;
+                }
             }
         }
     }
@@ -998,6 +1031,44 @@ mod tests {
                 assert!(apply_setup(&[step], &roots, None).is_err());
             }
             assert!(!outside.join("x").exists());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&base)?;
+        result
+    }
+
+    #[test]
+    fn provider_setup_recovers_after_interrupted_preparation_idempotently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base =
+            std::env::temp_dir().join(format!("provenant-setup-recovery-{}", std::process::id()));
+        std::fs::create_dir(&base)?;
+        let base = canonical(&base)?;
+        let (scratch, state) = (base.join("tmp"), base.join("state"));
+        for path in [&scratch, &state] {
+            std::fs::create_dir(path)?;
+        }
+        let roots = [scratch.as_path(), state.as_path()];
+        let file = scratch.join("settings.json");
+        let setup = |contents: &[u8]| {
+            apply_setup(
+                &[SetupStep::WriteFile {
+                    path: file.clone(),
+                    bytes: contents.to_vec(),
+                }],
+                &roots,
+                None,
+            )
+        };
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            setup(b"first")?;
+            // A crash after setup but before the launch claim leaves these
+            // entries in place for the next preparation of the same attempt.
+            setup(b"first")?;
+            assert_eq!(std::fs::read(&file)?, b"first");
+
+            setup(b"second")?;
+            assert_eq!(std::fs::read(&file)?, b"second");
             Ok(())
         })();
         std::fs::remove_dir_all(&base)?;
