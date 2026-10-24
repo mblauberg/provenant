@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::io::{self, Write};
 use std::path::Path;
+#[cfg(any(test, feature = "fixture"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -58,7 +59,9 @@ pub enum QueueLoss {
 pub trait NonblockingSink: Send + Sync {
     fn try_send(&self, bytes: &[u8]) -> Result<(), QueueLoss>;
 }
+#[cfg(any(test, feature = "fixture"))]
 pub struct TeeQueue(SyncSender<Vec<u8>>);
+#[cfg(any(test, feature = "fixture"))]
 impl NonblockingSink for TeeQueue {
     fn try_send(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
         if bytes.len() > FRAME_LIMIT {
@@ -72,6 +75,7 @@ impl NonblockingSink for TeeQueue {
             })
     }
 }
+#[cfg(any(test, feature = "fixture"))]
 pub fn tee_queue(frames: usize) -> Result<(TeeQueue, Receiver<Vec<u8>>), ExecError> {
     if frames == 0 || frames > 1024 {
         return Err(ExecError::InvalidLimit);

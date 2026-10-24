@@ -3,6 +3,10 @@
 //! No function here signals a process. Any proof returned below is an
 //! ephemeral observation that a registered process currently holds a lock
 //! description; it does not create a process-control capability.
+//!
+//! Darwin's public libproc API does not report which process owns a `flock`,
+//! so nested custody checks return `Unknown` there. Darwin can also report an
+//! exited zombie as absent; `ProcessFact::zombie` does not cover every zombie.
 use crate::census::{
     Census, CensusError, ObservationIssue, OwnerRegistration, ProcessFact, ProcessIdentity,
     ProcessObservation, ProcessObserver,
@@ -15,8 +19,6 @@ use thiserror::Error;
 #[derive(Debug)]
 pub(crate) struct HeldCustodyProof {
     owner: ProcessIdentity,
-    _device: u64,
-    _inode: u64,
 }
 
 impl HeldCustodyProof {
@@ -97,8 +99,6 @@ pub(crate) fn prove_nested_custody(
     }
     Ok(HeldCustodyProof {
         owner: identity.clone(),
-        _device: metadata.dev(),
-        _inode: metadata.ino(),
     })
 }
 
@@ -308,8 +308,20 @@ impl ProcessObserver for NativeProcessObserver {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn system_boot_identity() -> Result<String, CensusError> {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(boot) = BOOT.get() {
+        return Ok(boot.clone());
+    }
+    let boot = read_system_boot_identity()?;
+    // Boot identity cannot change during this process's lifetime. Do not cache
+    // transient read failures; concurrent successful readers have the same key.
+    let _ = BOOT.set(boot.clone());
+    Ok(boot)
+}
+
+#[cfg(target_os = "linux")]
+fn read_system_boot_identity() -> Result<String, CensusError> {
     const MAX_BOOT_BYTES: usize = 250;
     let value = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(CensusError::BootIdentity)?;
@@ -321,7 +333,7 @@ fn system_boot_identity() -> Result<String, CensusError> {
 }
 
 #[cfg(target_os = "macos")]
-fn system_boot_identity() -> Result<String, CensusError> {
+fn read_system_boot_identity() -> Result<String, CensusError> {
     use std::os::raw::c_char;
 
     const BOOT_UUID_NAME: &[u8] = b"kern.bootsessionuuid\0";
@@ -357,7 +369,7 @@ fn system_boot_identity() -> Result<String, CensusError> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn system_boot_identity() -> Result<String, CensusError> {
+fn read_system_boot_identity() -> Result<String, CensusError> {
     Err(CensusError::Unsupported)
 }
 
@@ -652,46 +664,86 @@ fn ticks_to_micros(ticks: u64, ticks_per_second: u64) -> Option<u64> {
 #[cfg(target_os = "macos")]
 fn darwin_process_ids(max_entries: usize) -> Result<(Vec<i32>, bool), CensusError> {
     use std::mem::size_of;
-    // SAFETY: null buffer and zero size asks libproc for the current count;
-    // it writes no memory and retains no pointer.
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count < 0 {
-        return Err(CensusError::ProcessList(io::Error::last_os_error()));
+    darwin_process_ids_with(max_entries, |buffer| {
+        let result = match buffer {
+            None => {
+                // SAFETY: null buffer and zero size asks libproc for the current
+                // count; it writes no memory and retains no pointer.
+                unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }
+            }
+            Some(pids) => {
+                let bytes = pids
+                    .len()
+                    .checked_mul(size_of::<i32>())
+                    .and_then(|bytes| i32::try_from(bytes).ok())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "process list buffer too large")
+                    })?;
+                // SAFETY: the helper provides the checked writable slice whose
+                // byte length is passed below. libproc retains no pointer.
+                unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) }
+            }
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            usize::try_from(result).map_err(|_| io::Error::other("negative process count"))
+        }
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_process_ids_with(
+    max_entries: usize,
+    mut list: impl FnMut(Option<&mut [i32]>) -> io::Result<usize>,
+) -> Result<(Vec<i32>, bool), CensusError> {
+    const MAX_ATTEMPTS: usize = 3;
+    if max_entries == 0 || max_entries > crate::census::MAX_CENSUS_ENTRIES {
+        return Err(CensusError::InvalidBound);
     }
+    let max_capacity = max_entries
+        .checked_add(1)
+        .ok_or(CensusError::InvalidBound)?;
+    let mut count = list(None).map_err(CensusError::ProcessList)?;
     if count == 0 {
         return Err(CensusError::ProcessList(io::Error::other(
             "empty process list",
         )));
     }
-    let capacity = usize::try_from(count)
-        .ok()
-        .and_then(|count| count.checked_add(1))
-        .map(|capacity| capacity.min(max_entries.saturating_add(1)))
-        .ok_or(CensusError::InvalidBound)?;
-    let bytes = capacity
-        .checked_mul(size_of::<i32>())
-        .and_then(|bytes| i32::try_from(bytes).ok())
-        .ok_or(CensusError::InvalidBound)?;
-    let mut pids = vec![0_i32; capacity];
-    // SAFETY: the vector owns the checked writable capacity for i32 PIDs.
-    // libproc retains no pointer and the returned count is bounded below.
-    let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-    if written < 0 {
-        return Err(CensusError::ProcessList(io::Error::last_os_error()));
+    let mut grow_to = 0_usize;
+    for attempt in 0..MAX_ATTEMPTS {
+        let count_capacity = count
+            .checked_mul(2)
+            .and_then(|capacity| capacity.checked_add(64))
+            .unwrap_or(max_capacity);
+        let capacity = count_capacity.max(grow_to).min(max_capacity);
+        let mut pids = vec![0_i32; capacity];
+        let written = list(Some(&mut pids)).map_err(CensusError::ProcessList)?;
+        if written == 0 {
+            return Err(CensusError::ProcessList(io::Error::other(
+                "empty process list",
+            )));
+        }
+        if written > pids.len() {
+            return Err(CensusError::InvalidRecord);
+        }
+        let filled = written == pids.len();
+        if filled && attempt + 1 < MAX_ATTEMPTS {
+            count = list(None).map_err(CensusError::ProcessList)?;
+            if count == 0 {
+                return Err(CensusError::ProcessList(io::Error::other(
+                    "empty process list",
+                )));
+            }
+            grow_to = capacity.saturating_mul(2).max(capacity.saturating_add(1));
+            continue;
+        }
+        let truncated = filled || written > max_entries;
+        pids.truncate(written);
+        pids.retain(|pid| *pid > 0);
+        return Ok((pids, truncated));
     }
-    let written = usize::try_from(written).map_err(|_| CensusError::InvalidRecord)?;
-    if written == 0 {
-        return Err(CensusError::ProcessList(io::Error::other(
-            "empty process list",
-        )));
-    }
-    if written > pids.len() {
-        return Err(CensusError::InvalidRecord);
-    }
-    let truncated = written >= pids.len() || written > max_entries;
-    pids.truncate(written.min(pids.len()));
-    pids.retain(|pid| *pid > 0);
-    Ok((pids, truncated))
+    Err(CensusError::InvalidRecord)
 }
 
 #[cfg(target_os = "macos")]
@@ -1055,6 +1107,41 @@ pub fn current_process() -> crate::census::ProcessObservation {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn darwin_pid_listing_retries_when_a_process_arrives_after_the_count() {
+        let mut count_calls = 0_usize;
+        let mut buffer_calls = 0_usize;
+        let result = darwin_process_ids_with(256, |buffer| match buffer {
+            None => {
+                count_calls += 1;
+                Ok(if count_calls == 1 { 4 } else { 72 })
+            }
+            Some(buffer) => {
+                buffer_calls += 1;
+                let written = if buffer_calls == 1 { buffer.len() } else { 73 };
+                for (slot, pid) in buffer.iter_mut().take(written).zip(1_i32..) {
+                    *slot = pid;
+                }
+                Ok(written)
+            }
+        });
+        let (pids, truncated) = match result {
+            Ok(result) => result,
+            Err(error) => panic!("injected process listing failed: {error}"),
+        };
+        assert_eq!(pids.len(), 73);
+        assert!(!truncated);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn darwin_nested_owner_lock_observation_is_unknown() {
+        assert!(matches!(
+            darwin_owner_holds_lock(1, 1, 1),
+            Err(CustodyProofError::Unknown)
+        ));
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

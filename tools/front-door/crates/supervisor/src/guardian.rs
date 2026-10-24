@@ -1,4 +1,8 @@
 //! Dedicated same-binary guardian. Run composes provider decoding at this edge.
+mod cleanup;
+#[cfg(test)]
+use cleanup::{darwin_census_clear, try_writer_lease};
+
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::custody::*;
 use crate::exec::Termination;
@@ -355,6 +359,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         tracked: std::collections::BTreeSet::new(),
         history: std::collections::BTreeSet::new(),
         history_complete: true,
+        last_tracking: None,
         protected_commands: message.protected_commands,
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -409,6 +414,7 @@ struct Driver<'a> {
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
     history_complete: bool,
+    last_tracking: Option<Vec<u8>>,
     protected_commands: Vec<String>,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
@@ -469,30 +475,7 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
-        let spawn_result = match argv.first() {
-            Some(executable) => match snapshot_executable(executable.as_os_str()) {
-                Ok(snapshot) if snapshot == self.executable_snapshot => {
-                    crate::sys::provider::ProviderGroup::spawn(
-                        argv,
-                        env,
-                        cwd,
-                        !input.is_empty(),
-                        plan.stdout.piped(),
-                        plan.stderr.piped(),
-                        self.writer.as_ref().ok_or(CustodyError::Fenced)?,
-                    )
-                }
-                Ok(_) => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "provider executable snapshot changed",
-                )),
-                Err(error) => Err(error),
-            },
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "provider executable path is missing",
-            )),
-        };
+        let spawn_result = self.spawn_provider(argv, env, cwd, input, plan);
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(error) => {
@@ -504,24 +487,13 @@ impl Driver<'_> {
             }
         };
         self.reservation.launch_state = LaunchState::Spawned;
-        if let ProcessObservation::Present(fact) = self.observer.observe(child.id()) {
-            self.reservation.provider = Some(fact.identity);
-            self.reservation.launch_state = LaunchState::Spawned;
-            if write_record(
-                &self.writer_dir,
-                "reservation.json",
-                &self.reservation,
-                PublishMode::Replace,
-            )
-            .and_then(require_durable)
-            .is_err()
-            {
-                warn(
-                    &mut warnings,
-                    &mut omitted_warnings,
-                    "provider identity publication failed",
-                );
-            }
+        self.reservation.provider = child.identity().cloned();
+        if !self.persist_reservation() {
+            warn(
+                &mut warnings,
+                &mut omitted_warnings,
+                "provider identity publication failed",
+            );
         }
         state = machine::step(state, Event::Started, Tick::at(0)).0;
         let out_events = Events::default();
@@ -558,7 +530,10 @@ impl Driver<'_> {
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
+        let mut last_checkpoint = None;
         let mut last_observation_ms = 0;
+        let mut last_cpu_observation_ms = 0;
+        let mut last_cancel_ms = None;
         let mut signal_pending = false;
         let mut last_stdout_bytes = 0_u64;
         let mut last_stderr_bytes = 0_u64;
@@ -569,6 +544,7 @@ impl Driver<'_> {
         let mut census_warning_active = false;
         let cleanup_complete;
         let mut drain_deadline = None;
+        let mut cleanup_pending = false;
         loop {
             let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             // WNOWAIT always runs before cancellation, signals or deadlines.
@@ -595,8 +571,9 @@ impl Driver<'_> {
             }
             last_stdout_bytes = stdout_bytes;
             last_stderr_bytes = stderr_bytes;
-            let cpu_sample_due = now.saturating_sub(last_observation_ms) >= 100;
+            let cpu_sample_due = now.saturating_sub(last_cpu_observation_ms) >= 100;
             let cpu_progress = if cpu_sample_due {
+                last_cpu_observation_ms = now;
                 provider_cpu_micros = self.provider_cpu_micros();
                 let progressed = provider_cpu_micros
                     .zip(previous_cpu_micros)
@@ -637,9 +614,9 @@ impl Driver<'_> {
                     }
                 }
             }
-            // Decoder facts are held in a bounded local queue, not a worker that
-            // can outlive capture. Reading the flags is added below after capture.
-            let request =
+            let cancel_due = last_cancel_ms.is_none_or(|last| now.saturating_sub(last) >= 100);
+            let request = if cancel_due {
+                last_cancel_ms = Some(now);
                 match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
                     Ok(request)
                         if request.scope == self.reservation.scope
@@ -666,7 +643,10 @@ impl Driver<'_> {
                         );
                         None
                     }
-                };
+                }
+            } else {
+                None
+            };
             let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
                 Ok(event) => event.supervisor_signal,
                 Err(_) => {
@@ -724,6 +704,7 @@ impl Driver<'_> {
             for effect in effects {
                 match effect {
                     Effect::CloseStdin => child.stdin = None,
+                    Effect::BeginCleanup(_) => cleanup_pending = true,
                     Effect::DeliverStop(reason) if exit.is_none() => {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
@@ -781,7 +762,7 @@ impl Driver<'_> {
                 }
                 killed = true;
             }
-            if let Some(status) = exit {
+            if cleanup_pending && exit.is_some() {
                 let pipes_done = child.stdout.is_none() && child.stderr.is_none();
                 if pipes_done || drain_deadline.is_some_and(|deadline| now >= deadline) {
                     if !pipes_done {
@@ -809,11 +790,12 @@ impl Driver<'_> {
                             false
                         }
                     };
-                    let _ = status;
                     break;
                 }
             }
-            if now.saturating_sub(last_observation_ms) >= 100 {
+            // Keep safety history at 100 ms; slowing census can miss a short
+            // lived parent before an escaped descendant changes session/group.
+            if cpu_sample_due {
                 if self.refresh_census(&mut child).is_none() {
                     if !census_warning_active {
                         warn(
@@ -826,6 +808,16 @@ impl Driver<'_> {
                 } else {
                     census_warning_active = false;
                 }
+                if !self.persist_tracking() {
+                    push_warning(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "descendant journal publication failed",
+                    );
+                }
+            }
+            // Process checkpoint durability is independent of census cadence.
+            if now.saturating_sub(last_observation_ms) >= 1_000 {
                 #[derive(Serialize)]
                 struct Observed<'a> {
                     schema_version: u64,
@@ -842,7 +834,6 @@ impl Driver<'_> {
                     last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
-                self.persist_tracking();
                 let observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -861,18 +852,22 @@ impl Driver<'_> {
                 let system_publisher = SystemExitPublisher;
                 let checkpoint =
                     serde_json::to_vec(&observed).map_err(|_| CustodyError::InvalidRecord)?;
-                if self
-                    .exit_publisher
-                    .unwrap_or(&system_publisher)
-                    .checkpoint(&self.attempt, &checkpoint)
-                    .and_then(require_durable)
-                    .is_err()
-                {
-                    warn(
-                        &mut warnings,
-                        &mut omitted_warnings,
-                        "process observation publication failed",
-                    );
+                if last_checkpoint.as_ref() != Some(&checkpoint) {
+                    if self
+                        .exit_publisher
+                        .unwrap_or(&system_publisher)
+                        .checkpoint(&self.attempt, &checkpoint)
+                        .and_then(require_durable)
+                        .is_err()
+                    {
+                        warn(
+                            &mut warnings,
+                            &mut omitted_warnings,
+                            "process observation publication failed",
+                        );
+                    } else {
+                        last_checkpoint = Some(checkpoint);
+                    }
                 }
                 last_observation_ms = now;
             }
@@ -881,6 +876,18 @@ impl Driver<'_> {
                 Ok(event) => signal_pending |= event.supervisor_signal,
                 Err(_) => warn(&mut warnings, &mut omitted_warnings, "guardian wait failed"),
             }
+        }
+        let mut settled =
+            Tick::at(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        settled.cleanup = Some(if cleanup_complete {
+            machine::CleanupObservation::Complete
+        } else {
+            machine::CleanupObservation::Unresolved
+        });
+        let (next, effects) = machine::step(state, Event::Silence, settled);
+        state = next;
+        if !effects.contains(&Effect::PublishExit) {
+            return Err(CustodyError::InvalidRecord);
         }
         out.finish();
         err.finish();
@@ -932,6 +939,8 @@ impl Driver<'_> {
             // The exit must agree with a durable reservation. A visible
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
+            // Intentionally unbounded: dropping custody before durable proof
+            // would admit a second writer. Signals cannot waive this invariant.
             while !self.persist_reservation() {
                 let _ = self.reactor.wait(&[], Duration::from_millis(25));
             }
@@ -958,7 +967,7 @@ impl Driver<'_> {
             warnings: warnings.clone(),
             omitted_warnings,
         };
-        self.publish_until_durable(&record)?;
+        self.publish_until_durable(&record, &mut state)?;
         if cleanup_complete {
             self.release(&record);
         }
@@ -978,9 +987,42 @@ impl Driver<'_> {
         }
         Ok(())
     }
-    /// Hand the durable exit to the holder and clear the fence only after its
-    /// release attestations verify. Failures keep the fence for `reconcile`;
-    /// they never alter the published exit or become a stop reason.
+    fn spawn_provider(
+        &self,
+        argv: &[OsString],
+        env: &[(OsString, OsString)],
+        cwd: &Path,
+        input: &[u8],
+        plan: CapturePlan,
+    ) -> io::Result<crate::sys::provider::ProviderGroup> {
+        match argv.first() {
+            Some(executable) => match snapshot_executable(executable.as_os_str()) {
+                Ok(snapshot) if snapshot == self.executable_snapshot => {
+                    crate::sys::provider::ProviderGroup::spawn(
+                        argv,
+                        env,
+                        cwd,
+                        !input.is_empty(),
+                        plan,
+                        self.writer
+                            .as_ref()
+                            .ok_or_else(|| io::Error::other("writer custody missing"))?,
+                        &self.reservation.boot,
+                    )
+                }
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "provider executable snapshot changed",
+                )),
+                Err(error) => Err(error),
+            },
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "provider executable path is missing",
+            )),
+        }
+    }
+    /// Publish a launch refusal while retaining the scoped custody proof.
     fn never_spawned(&mut self, warning: &str) -> Result<()> {
         self.reservation.launch_state = LaunchState::NeverSpawned;
         self.reservation.unresolved_cleanup = false;
@@ -993,31 +1035,14 @@ impl Driver<'_> {
             &self.reservation,
             PublishMode::Replace,
         )?)?;
-        let record = ProcessExit {
-            schema_version: 1,
-            scope: self.reservation.scope,
-            termination: None,
-            never_spawned: true,
-            stop_reason: None,
-            delivered_signals: vec![],
-            reaped: vec![],
-            omitted_reaped: 0,
-            spared: vec![],
-            omitted_spared: 0,
-            failed_deliveries: vec![],
-            omitted_failed_deliveries: 0,
-            terminal_observed: false,
-            unresolved_cleanup: false,
-            settlement_evidence: SettlementEvidence::NeverSpawned,
-            stdout: CaptureTotals::default(),
-            stderr: CaptureTotals::default(),
-            warnings: vec![warning.into()],
-            omitted_warnings: 0,
-        };
-        self.publish_until_durable(&record)?;
+        let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
+        self.publish_until_durable(&record, &mut State::never_spawned())?;
         self.release(&record);
         Ok(())
     }
+    /// Hand the durable exit to the holder and clear the fence only after its
+    /// release attestations verify. Failures keep the fence for recovery;
+    /// they never alter the published exit or become a stop reason.
     fn release(&mut self, record: &ProcessExit) {
         let Some(holder) = self.holder else {
             return;
@@ -1072,347 +1097,9 @@ impl Driver<'_> {
         }
         self.writer = Some(recovery.lease);
     }
-    fn persist_tracking(&mut self) {
-        self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
-        self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;
-        let _ = write_record(
-            &self.writer_dir,
-            "reservation.json",
-            &self.reservation,
-            PublishMode::Replace,
-        )
-        .and_then(require_durable);
-    }
-    fn persist_reservation(&mut self) -> bool {
-        let Ok(bytes) = serde_json::to_vec(&self.reservation) else {
-            return false;
-        };
-        let system_publisher = SystemExitPublisher;
-        self.exit_publisher
-            .unwrap_or(&system_publisher)
-            .commit_reservation(&self.writer_dir, &bytes)
-            .and_then(require_durable)
-            .is_ok()
-    }
-
-    fn record_delivery(
-        &mut self,
-        identity: Option<ProcessIdentity>,
-        reason: machine::StopReason,
-        signal: i32,
-        outcome: DeliveryOutcome,
-    ) {
-        let signal = i64::from(signal);
-        match outcome {
-            DeliveryOutcome::Delivered => {
-                if !self.delivered_signals.contains(&signal) {
-                    self.delivered_signals.push(signal);
-                }
-            }
-            DeliveryOutcome::Failed(failure) => {
-                let prior_provider_delivery = identity.as_ref()
-                    == self.reservation.provider.as_ref()
-                    && failure == DeliveryFailure::NoSuchProcess
-                    && self.delivered_signals.contains(&signal);
-                if prior_provider_delivery {
-                    return;
-                }
-                if self.failed_deliveries.len() < 16 {
-                    self.failed_deliveries.push(FailedSignalDelivery {
-                        identity,
-                        reason,
-                        signal,
-                        failure,
-                    });
-                } else {
-                    self.omitted_failed_deliveries =
-                        self.omitted_failed_deliveries.saturating_add(1);
-                }
-            }
-        }
-    }
-
-    fn provider_cpu_micros(&self) -> Option<u64> {
-        let expected = self.reservation.provider.as_ref()?;
-        match self.observer.observe(expected.pid) {
-            ProcessObservation::Present(fact) if fact.identity == *expected => fact.cpu_micros,
-            ProcessObservation::Present(_)
-            | ProcessObservation::Absent
-            | ProcessObservation::Unknown(_) => None,
-        }
-    }
-
-    fn refresh_census(
-        &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
-    ) -> Option<crate::census::Census> {
-        let mut census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
-            Ok(census) => census,
-            Err(_) => {
-                self.descendant_stop_allowed = false;
-                self.reservation.census_incomplete = true;
-                return None;
-            }
-        };
-        let Some(root) = self.reservation.provider.as_ref() else {
-            self.descendant_stop_allowed = false;
-            self.reservation.census_incomplete = true;
-            return None;
-        };
-        let mut known_pids = std::collections::BTreeSet::from([root.pid, child.id()]);
-        known_pids.extend(self.tracked.iter().map(|identity| identity.pid));
-        known_pids.extend(self.history.iter().map(|identity| identity.pid));
-        known_pids.extend(self.protected.iter().map(|identity| identity.pid));
-        known_pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
-        known_pids.extend(
-            self.reservation
-                .descendants
-                .iter()
-                .map(|identity| identity.pid),
-        );
-        let mut attempted = 0_usize;
-        for pid in known_pids {
-            if !matches!(census.process(pid), crate::census::ProcessLookup::Unknown) {
-                continue;
-            }
-            if attempted >= crate::census::MAX_CENSUS_ENTRIES {
-                census.mark_truncated();
-                break;
-            }
-            attempted = attempted.saturating_add(1);
-            let observation = self.observer.observe(pid);
-            if census
-                .observe_known(pid, &self.reservation.boot, observation)
-                .is_err()
-            {
-                census.mark_truncated();
-            }
-        }
-        self.history
-            .retain(|identity| identity_still_possible(&census, identity));
-        child.record_census(&census);
-        self.spared.refresh(&census);
-        let mut registry_unknown = self.registry.is_none();
-        if let Some(registry) = self.registry {
-            match registry.registered_children() {
-                Ok(children) if children.len() <= 4096 => {
-                    for registered in children {
-                        let identity = registered.registration.identity();
-                        match crate::sys::census::prove_nested_custody(
-                            self.observer,
-                            &registered.registration,
-                            registered.custody.handoff_file(),
-                        ) {
-                            Ok(proof) => {
-                                if self
-                                    .spared
-                                    .spare_registered_owner(
-                                        &census,
-                                        root,
-                                        &registered.registration,
-                                        &proof,
-                                    )
-                                    .is_err()
-                                {
-                                    registry_unknown = true;
-                                    self.protected.insert(identity.clone());
-                                }
-                            }
-                            Err(_) => {
-                                registry_unknown = true;
-                                self.protected.insert(identity.clone());
-                            }
-                        }
-                    }
-                }
-                _ => registry_unknown = true,
-            }
-        }
-        for fact in census.facts() {
-            if fact.identity.pid == child.id() {
-                continue;
-            }
-            if census.ancestry(&fact.identity, root) == crate::census::Ancestry::Yes
-                || fact.parent_pid == child.id()
-                || fact.identity.group_id == child.id()
-                || self.history.iter().any(|ancestor| {
-                    census.ancestry(&fact.identity, ancestor) == crate::census::Ancestry::Yes
-                })
-            {
-                self.tracked.insert(fact.identity.clone());
-                if self.history.len() < crate::census::MAX_CENSUS_ENTRIES {
-                    self.history.insert(fact.identity.clone());
-                } else if !self.history.contains(&fact.identity) {
-                    self.history_complete = false;
-                }
-            }
-            if fact
-                .command
-                .as_ref()
-                .is_some_and(|name| self.protected_commands.contains(name))
-                && (self.tracked.contains(&fact.identity) || fact.identity.group_id == child.id())
-            {
-                self.protected.insert(fact.identity.clone());
-            }
-        }
-        self.tracked
-            .retain(|identity| identity_still_possible(&census, identity));
-        self.protected
-            .retain(|identity| identity_still_possible(&census, identity));
-        self.descendant_stop_allowed = !registry_unknown;
-        self.reservation.census_incomplete = !census.is_complete();
-        Some(census)
-    }
-    #[cfg(target_os = "macos")]
-    fn darwin_quiescent(
-        &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
-        first: &crate::census::Census,
-    ) -> Result<bool> {
-        let Some(provider) = self.reservation.provider.clone() else {
-            return Ok(false);
-        };
-        if !self.history_complete
-            || !darwin_census_clear(first, &provider, &self.guardian, &self.history)
-        {
-            return Ok(false);
-        }
-        // Darwin lacks Linux's subreaper child list. Consume the dead direct
-        // provider only here, retaining attempt custody and the persistent fence.
-        let _ = child.cleanup(true)?;
-        if !child.quiescent_children()? {
-            return Ok(false);
-        }
-        crate::sys::wait_pause(Duration::from_millis(20));
-        let Some(second) = self.refresh_census(child) else {
-            return Ok(false);
-        };
-        if !self.history_complete
-            || !darwin_census_clear(&second, &provider, &self.guardian, &self.history)
-        {
-            return Ok(false);
-        }
-        // Close, never LOCK_UN: descendants share this open file description.
-        // A fresh nonblocking flock succeeds only after every inheritor closes.
-        drop(self.writer.take());
-        match try_writer_lease(&self.writer_dir, self.writer_identity) {
-            Ok(lease) => {
-                self.writer = Some(lease);
-                self.settlement_evidence = SettlementEvidence::DarwinCensusAndCustodyLease;
-                Ok(true)
-            }
-            Err(_) => Ok(false),
-        }
-    }
-
-    fn cleanup(
-        &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
-        plan: CapturePlan,
-        warnings: &mut Vec<String>,
-        omitted: &mut u64,
-    ) -> Result<bool> {
-        let deadline = Instant::now()
-            + Duration::from_millis(
-                plan.root_flush_ms
-                    .saturating_add(plan.descendant_grace_ms)
-                    .saturating_add(100),
-            );
-        let began = Instant::now();
-        #[cfg(target_os = "macos")]
-        {
-            let _ = child.cleanup(true)?;
-        }
-        loop {
-            let Some(census) = self.refresh_census(child) else {
-                return Ok(false);
-            };
-            let mut spared: std::collections::BTreeSet<_> =
-                self.spared.spared_identities().cloned().collect();
-            spared.extend(self.protected.iter().cloned());
-            let reaped = if self.descendant_stop_allowed {
-                child.reap_adopted(&census, &spared)?
-            } else {
-                crate::sys::provider::AdoptedCleanup {
-                    reaped: vec![],
-                    unresolved: !self.tracked.is_empty(),
-                }
-            };
-            for identity in reaped.reaped {
-                self.tracked.remove(&identity);
-                if self.reaped.len() < 16 {
-                    self.reaped.push(identity);
-                } else {
-                    self.omitted_reaped = self.omitted_reaped.saturating_add(1);
-                }
-            }
-            let outstanding =
-                self.tracked
-                    .iter()
-                    .any(|identity| match census.process(identity.pid) {
-                        crate::census::ProcessLookup::Absent => false,
-                        crate::census::ProcessLookup::Present(fact) => {
-                            fact.identity == *identity && !fact.zombie
-                        }
-                        crate::census::ProcessLookup::Unknown => true,
-                    });
-            let census_clear = census.is_complete() && !reaped.unresolved && !outstanding;
-            #[cfg(target_os = "linux")]
-            let complete = census_clear && child.quiescent_children().unwrap_or(false);
-            #[cfg(target_os = "macos")]
-            let complete = census_clear && self.darwin_quiescent(child, &census)?;
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            let complete = false;
-            if complete {
-                #[cfg(target_os = "linux")]
-                {
-                    self.settlement_evidence = SettlementEvidence::LinuxKernelChildren;
-                }
-                let _ = child.cleanup(true)?;
-                self.persist_tracking();
-                return Ok(true);
-            }
-            // Root exit does not authorise an arbitrary PID. Only the pinned
-            // provider and kernel-confirmed adopted children are targets.
-            let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
-            let reason = machine::StopReason::PostTerminalCleanup;
-            let signal = if escalation {
-                libc::SIGKILL
-            } else {
-                libc::SIGTERM
-            };
-            let outcome = stop_delivery_outcome(child.stop(escalation));
-            self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
-            if outcome != DeliveryOutcome::Delivered {
-                push_warning(warnings, omitted, "post-terminal provider signal failed");
-            }
-            #[cfg(target_os = "linux")]
-            if self.descendant_stop_allowed {
-                match child.stop_adopted(escalation, &census, &spared) {
-                    Ok(deliveries) => {
-                        for delivery in deliveries {
-                            self.record_delivery(
-                                Some(delivery.identity),
-                                reason,
-                                signal,
-                                delivery.outcome,
-                            );
-                        }
-                    }
-                    Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
-                }
-            }
-            self.persist_tracking();
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            let _ = self.reactor.wait(
-                &[],
-                Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)),
-            );
-        }
-    }
-    fn publish_until_durable(&mut self, record: &ProcessExit) -> Result<()> {
+    /// Retry without a time limit: custody survives ENOSPC and signals until
+    /// the immutable exit is durable. process.json exposes publication_pending.
+    fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<()> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
             return Err(CustodyError::InvalidRecord);
@@ -1430,9 +1117,32 @@ impl Driver<'_> {
             } else {
                 exit_publisher.publish(&self.attempt, &bytes)
             };
+            let mut tick = Tick::at(0);
+            tick.publication = Some(match &result {
+                Ok(Publication::Durable) => machine::PublicationOutcome::Durable,
+                Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => {
+                    machine::PublicationOutcome::VisibleDurabilityUnconfirmed(
+                        machine::PublicationFailure::IoError(libc::EIO),
+                    )
+                }
+                Err(error) => machine::PublicationOutcome::Pending(
+                    match filesystem_error(error).and_then(crate::fs::FsError::raw_os_error) {
+                        Some(libc::ENOSPC) => machine::PublicationFailure::NoSpace,
+                        Some(code) => machine::PublicationFailure::IoError(code),
+                        None => machine::PublicationFailure::IoError(libc::EIO),
+                    },
+                ),
+            });
+            let (next, effects) = machine::step(state.clone(), Event::Silence, tick);
+            *state = next;
+            if state.phase() == Phase::Published {
+                return Ok(());
+            }
+            if effects.contains(&Effect::RetryPublishedDirectorySync) {
+                visible = true;
+            }
             match result {
-                Ok(Publication::Durable) => return Ok(()),
-                Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => visible = true,
+                Ok(_) => {}
                 Err(error)
                     if filesystem_error(&error).is_some_and(crate::fs::FsError::is_exists) =>
                 {
@@ -1533,61 +1243,6 @@ fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn try_writer_lease(
-    directory: &Directory,
-    expected: crate::fs::Metadata,
-) -> Result<crate::fs::LockGuard> {
-    let lease = directory.try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)?;
-    let actual = crate::fs::Metadata::from_std(lease.handoff_file().metadata()?);
-    if !expected.same_identity(&actual) {
-        return Err(CustodyError::InvalidRecord);
-    }
-    Ok(lease)
-}
-
-fn identity_still_possible(census: &crate::census::Census, identity: &ProcessIdentity) -> bool {
-    match census.process(identity.pid) {
-        crate::census::ProcessLookup::Absent => false,
-        crate::census::ProcessLookup::Present(fact) => fact.identity == *identity,
-        crate::census::ProcessLookup::Unknown => true,
-    }
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn darwin_census_clear(
-    census: &crate::census::Census,
-    provider: &ProcessIdentity,
-    guardian: &ProcessIdentity,
-    history: &std::collections::BTreeSet<ProcessIdentity>,
-) -> bool {
-    if !census.is_complete()
-        || identity_still_possible(census, provider)
-        || history
-            .iter()
-            .any(|identity| identity_still_possible(census, identity))
-    {
-        return false;
-    }
-    census.facts().all(|fact| {
-        // The guardian itself necessarily remains in the provider's session.
-        if fact.identity == *guardian {
-            return true;
-        }
-        if fact.identity == *provider
-            || fact.identity.group_id == provider.group_id
-            || fact.identity.session_id == provider.session_id
-            || history.contains(&fact.identity)
-        {
-            return false;
-        }
-        // Parent edges are useful only between current, start-stamped identities.
-        !history.iter().any(|ancestor| {
-            census.ancestry(&fact.identity, ancestor) != crate::census::Ancestry::No
-        })
-    })
-}
-
 fn valid_resolved_route(route: &str) -> bool {
     !route.is_empty() && route.len() <= 512 && !route.bytes().any(|byte| byte.is_ascii_control())
 }
@@ -1642,116 +1297,4 @@ fn stream_policy(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::census::{Census, ProcessFact};
-    use std::collections::BTreeSet;
-
-    fn identity(pid: i64, start: u64, group: i64, session: i64) -> ProcessIdentity {
-        ProcessIdentity {
-            boot: "darwin:test".into(),
-            pid,
-            native_start: start,
-            group_id: group,
-            session_id: session,
-        }
-    }
-    fn fact(identity: ProcessIdentity, parent_pid: i64) -> ProcessFact {
-        ProcessFact {
-            identity,
-            parent_pid,
-            zombie: false,
-            cpu_micros: None,
-            command: None,
-        }
-    }
-    fn census(facts: Vec<ProcessFact>, complete: bool) -> Census {
-        let absent: Vec<_> = [20, 30]
-            .into_iter()
-            .filter(|pid| !facts.iter().any(|fact| fact.identity.pid == *pid))
-            .collect();
-        Census::from_observations(facts, [], absent, complete, false, 100).unwrap()
-    }
-    #[test]
-    fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
-        for unlink in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let directory = Directory::open_anchor(root.path()).unwrap();
-            let lease = directory
-                .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
-                .unwrap();
-            let inherited = lease.handoff_file().try_clone().unwrap();
-            let expected = crate::fs::Metadata::from_std(inherited.metadata().unwrap());
-            if unlink {
-                std::fs::remove_file(root.path().join("writer.lock")).unwrap();
-            } else {
-                std::fs::rename(root.path().join("writer.lock"), root.path().join("held")).unwrap();
-            }
-            drop(lease);
-            assert!(try_writer_lease(&directory, expected).is_err());
-            drop(inherited);
-        }
-        let root = tempfile::tempdir().unwrap();
-        let directory = Directory::open_anchor(root.path()).unwrap();
-        let lease = directory
-            .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
-            .unwrap();
-        let expected = crate::fs::Metadata::from_std(lease.handoff_file().metadata().unwrap());
-        assert!(try_writer_lease(&directory, expected).is_err());
-        drop(lease);
-        assert!(try_writer_lease(&directory, expected).is_ok());
-    }
-
-    #[test]
-    fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes() {
-        let guardian = identity(10, 1, 10, 10);
-        let provider = identity(20, 2, 20, 10);
-        let escaped = identity(30, 3, 30, 30);
-        let history = BTreeSet::from([escaped.clone()]);
-        let clear = vec![fact(guardian.clone(), 1)];
-        assert!(darwin_census_clear(
-            &census(clear.clone(), true),
-            &provider,
-            &guardian,
-            &history
-        ));
-        assert!(!darwin_census_clear(
-            &census(clear.clone(), false),
-            &provider,
-            &guardian,
-            &history
-        ));
-        for survivor in [
-            provider.clone(),
-            identity(21, 4, 20, 99),
-            identity(22, 4, 99, 10),
-            escaped.clone(),
-        ] {
-            let mut facts = clear.clone();
-            facts.push(fact(survivor, 1));
-            assert!(!darwin_census_clear(
-                &census(facts, true),
-                &provider,
-                &guardian,
-                &history
-            ));
-        }
-        // Complete enumeration alone does not prove a known PID's absence.
-        let unknown_history = BTreeSet::from([identity(40, 3, 40, 40)]);
-        assert!(!darwin_census_clear(
-            &census(clear.clone(), true),
-            &provider,
-            &guardian,
-            &unknown_history
-        ));
-        // Reused PID with a different start stamp is not the recorded daemon.
-        let mut facts = clear;
-        facts.push(fact(identity(30, 40, 30, 30), 1));
-        assert!(darwin_census_clear(
-            &census(facts, true),
-            &provider,
-            &guardian,
-            &history
-        ));
-    }
-}
+mod tests;
