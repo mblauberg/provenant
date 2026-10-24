@@ -16,9 +16,10 @@ audit branch first for read-only assessment of anything that already exists;
    trigger, authority, artifact and gate.
 3. Choose one kebab-case capability name and create `SKILL.md`. Place portable
    user-global skills under the configured user skills directory, repo-local
-   skills under `.agents/skills`, and this harness's owners under `skills/`. Its frontmatter
-   permits only `name` and `description`; provider sidecars are outputs, never
-   authority grants.
+   skills under `.agents/skills`, and this harness's owners under `skills/`.
+   Frontmatter permits `name`, `description` and optional `verified-against`.
+   Pin entries are comma-separated `<package>@<major>.<minor>` values checked
+   against the project manifest; provider sidecars are outputs, never grants.
 4. Match freedom to risk: principles for judgement, templates for repeatable
    structure, and tested scripts for fragile work. Put repeated logic in
    `scripts/`, stable depth in narrowly named `references/`, and reusable

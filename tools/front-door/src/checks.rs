@@ -250,9 +250,35 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &page,
             )?)
         }),
-        Inspectable::Harness(page) => git_page(&project, |git| {
-            provenant_cli::check::harness_page(git, ("harness", selector), &page)
-        }),
+        Inspectable::Harness(page) => {
+            let harnesses = [
+                provenant_records::Harness::Claude,
+                provenant_records::Harness::Codex,
+                provenant_records::Harness::Cursor,
+                provenant_records::Harness::Agy,
+                provenant_records::Harness::Opencode,
+            ];
+            let mut targets = provenant_cli::install::configured_targets(
+                roots.clone(),
+                &home,
+                &harnesses,
+                &LocalFs,
+                std::env::var_os("CLAUDE_CONFIG_DIR")
+                    .as_deref()
+                    .map(Path::new),
+                std::env::var_os("CODEX_HOME").as_deref().map(Path::new),
+                None,
+            )?;
+            targets.resolve_destinations(&LocalFs)?;
+            let skill_roots: Vec<_> = targets
+                .harnesses
+                .into_iter()
+                .map(|target| target.skills_dir)
+                .collect();
+            git_page(&project, |git| {
+                provenant_cli::check::harness_page(git, &skill_roots, ("harness", selector), &page)
+            })
+        }
         Inspectable::Release { base, head, page } => {
             let range = base.zip(head);
             git_page(&project, |git| {
