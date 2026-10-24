@@ -173,7 +173,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   custody.lock                 # supervisor-owned run custody
   children/{journal.lock,<ChildId>.json} # supervisor child-custody evidence
   attempts/<AttemptId>/         # task association/ordinal live in the run store
-    prompt.txt                 # run-owned immutable exact provider prompt
+    prompt.txt                 # run-owned immutable submitted prompt
     result.md                  # run-owned sealed result, including failure
     custody.lock               # supervisor-owned attempt custody
     launch.json                # supervisor-owned redacted launch summary
@@ -815,7 +815,8 @@ scheduler daemon. Within that, the lane decided:
   admit, record and launch identically. Output fetch accepts only the
   attempt's bound result digest and returns the whole result, paging the
   64 KiB reader, or refuses with `output_too_large`. Remote runs forward to the owning host. Run
-  listing stays `owner_unavailable`. A graph route refused before launch
+  listing pages the local project through `fabric_run` with an attempt cursor;
+  remote-host list cursors stay `owner_unavailable`. A graph route refused before launch
   (`rejected`, never launched) maps to `adapter_unavailable`, so the graph
   tries the next route.
 - **Provider launch specs.** Lane P's `LaunchSpec` (#1411) is consumed behind
@@ -830,3 +831,35 @@ step 5. These are owner acceptance conditions,
 not permission to ship an unresolved custody path. The chair arranges the
 cross-family council and accepts the design; the lane opens a PR and does not
 merge or arm auto-merge.
+
+### Run follow-ups (#1321, #1216, #1288)
+
+The provider prompt starts with an attempt-specific output notice: the absolute
+`result.md`, `process-exit.json`, `stdout.log` and `stderr.log` paths are the only
+durable lane outputs. The lane returns its report and evidence in its final
+answer; the harness writes those files. `prompt.txt` and its request digest
+retain the submitted prompt, before this deterministic harness envelope.
+Scratch is disposable; this change adds no retention. The Rust settlement
+policy above wins over the historical issue's Python `tmp/` pruning rules:
+classified staging is deleted, unknown files remain outside that classification.
+
+OpenCode quota events use the provider's message as the terminal reason,
+filtering known secret shapes and bounding the reason to a UTF-8-safe 8 KiB
+excerpt before persistence,
+with the existing typed `quota_limited` outcome rather than the retired
+`usage_limited` string. `FreeUsageLimitError` identifies the `opencode-free`
+allowance pool. Admission refuses another model only when its supplied pool
+binding and account identity match; no model-name suffix implies identity.
+The holder's existing terminal transaction supplies the single finish time and
+outcome to both its record and attempt fact. Shared refusal persistence and
+pool bindings are still not composed into the production launch/admission edge,
+so this does not yet implement the end-to-end cooldown in #1216. A free-tier
+repair hint is also deferred until the terminal record carries the proven pool;
+a generic quota refusal must not assert free-tier exhaustion.
+
+The holder still has no verified writer-worktree capability, and production
+writers remain refused. Wiring `check_writer_terminal` into that missing writer
+path (#1288) must land with writer launch/custody composition. Inferring a writer
+from the process cwd would not establish that authority. Post-launch route
+fallback also remains deferred: it needs a new attempt with retry-budget and
+publication ordering, rather than replaying an exited process in place.

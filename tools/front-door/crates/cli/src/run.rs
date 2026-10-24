@@ -247,6 +247,24 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
+        if let Some(ProviderEvent::QuotaLimited { message, .. }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+        {
+            decoded.outcome = run::Outcome::QuotaLimited;
+            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| {
+                    "provider quota exhausted (message redaction unavailable)".into()
+                });
+            let mut end = reason.len().min(8192);
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason.truncate(end);
+            decoded.reason = Some(reason);
+        }
         decoded
     }
 }
@@ -309,6 +327,22 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
         store: run::RunStore::open(&context, call)?,
         context,
     })
+}
+fn open_read_only(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
+    let (roots, project_id, actor_id) =
+        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
+            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
+    let context = run::ExecutionContext {
+        state_root: roots.state,
+        project_id,
+        actor_id,
+        read_prompts: true,
+    };
+    let store = run::RunStore::open_read_only(&context, call)?;
+    Ok((context, store))
 }
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
@@ -984,7 +1018,12 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let (context, store) = open_read_only(edge, &call)?;
+            let Some(store) = store else {
+                let (data, human) = render_lanes(&[], None, edge);
+                return Ok((data, human, false));
+            };
+            let session = Session { store, context };
             if let Some(seconds) = command.wait {
                 return wait_lanes(&session, &command.id, command.condition, seconds, edge);
             }
@@ -1011,7 +1050,13 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        "NOT_FOUND",
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
     let target = command.attempt.0;
     let id = target
         .attempt
@@ -1365,23 +1410,27 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
         until: instant(command.until)?,
-        project: Some(session.context.project_id),
+        project: Some(context.project_id),
         detail: command.detail,
     };
-    let facts = session
-        .store
-        .attempts(
-            run::AttemptFilter {
-                run_id: None,
-                task_id: None,
-            },
-            &call,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    let facts = store
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: None,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
     let cost = report.totals.cost.complete.as_ref().map_or_else(
@@ -1435,4 +1484,69 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         }
     }
     Ok((session.context.project_id, lanes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_run::Providers;
+    use provenant_supervisor::custody::{
+        CaptureTotals, PublicationState, Scope, SettlementEvidence,
+    };
+    #[test]
+    fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: RunId::from_bytes([1; 16]),
+                attempt: AttemptId::from_bytes([2; 16]),
+                generation: 1,
+            },
+            termination: Some(provenant_supervisor::exec::Termination::Exit(1)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        };
+        let route = run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/a-free".into()),
+            ..Default::default()
+        };
+        for (message, expected) in [
+            (
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+            ),
+            (
+                "Free allowance exhausted for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "Free allowance exhausted for [REDACTED]",
+            ),
+        ] {
+            let event = json!({"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":message}}}});
+            let decoded =
+                Registry { roots: None }.decode(&route, event.to_string().as_bytes(), &exit);
+            assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+            assert_eq!(decoded.reason.as_deref(), Some(expected));
+        }
+        let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
+        let decoded = Registry { roots: None }.decode(&route, event.to_string().as_bytes(), &exit);
+        assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        let reason = decoded.reason.unwrap();
+        assert!(
+            reason.len() <= 8192,
+            "reason must leave room in the terminal record"
+        );
+        assert!(reason.ends_with('☀'));
+    }
 }

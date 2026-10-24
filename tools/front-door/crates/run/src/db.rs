@@ -66,6 +66,51 @@ pub struct RunStore {
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// Opens an existing, initialised store without creating or changing files.
+    /// A missing store or schema is an empty read; unsupported versions fail.
+    pub fn open_read_only(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+    ) -> Result<Option<Self>> {
+        request.retry(|| Ok(()))?;
+        let mut root = Directory::root(true)?;
+        for component in context.state_root.as_path().components() {
+            if let Component::Normal(name) = component {
+                let opened = match root.open_directory(name) {
+                    Ok(opened) => opened,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                };
+                root = opened;
+            }
+        }
+        private(&root)?;
+        let root = root.into_anchor()?;
+        match root.metadata_at(OsStr::new("run.sqlite3"), false) {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        companions(&root)?;
+        let db = Connection::open_with_flags(
+            context.state_root.as_path().join("run.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::ZERO)?;
+        if request.retry(|| version(&db))? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            db,
+            root,
+            context: context.clone(),
+            policy: Default::default(),
+            _owner: PhantomData,
+        }))
+    }
+
     pub fn open(context: &ExecutionContext, request: &Request<'_>) -> Result<Self> {
         request.retry(|| Ok(()))?;
         let mut root = Directory::root(true)?;

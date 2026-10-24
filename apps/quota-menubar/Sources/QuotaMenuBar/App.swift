@@ -216,13 +216,13 @@ struct AccountRow: View {
 
     var body: some View {
         let usable = account.rank(now) == 0, drawing = account.isDrawing(now: now)
-        let aged = !account.requiresAuth && (account.status == "stale" || account.observedAt.map { now.timeIntervalSince($0) > 1800 } ?? false)
+        let aged = !account.requiresAuth && (account.status == .stale || account.observedAt.map { now.timeIntervalSince($0) > 1800 } ?? false)
         let row = Fmt.row(account, now: now, alert: alert)
         let spent = usable ? account.spentPools(now: now).map { Fmt.spent($0, now: now) } : []
         // The binding pool takes the outer ring; its use is the figure on the right.
         let bound = account.binding(now: now)?.pool, rings = account.poolRings(now: now, alert: alert)
         let spoken = [account.title] + row.spoken + spent
-            + [aged ? account.status == "stale" ? "stale" : account.observedAt.map { "observed \(Fmt.ago($0, now: now))" } : nil].compactMap { $0 }
+            + [aged ? account.status == .stale ? "stale" : account.observedAt.map { "observed \(Fmt.ago($0, now: now))" } : nil].compactMap { $0 }
         VStack(alignment: .leading, spacing: 0) {
             MenuRow(action: { withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { expanded.toggle() } }) {
                 HStack(spacing: 8) {
@@ -298,7 +298,7 @@ struct WindowList: View {
                     account.note,
                     account.requiresAuth ? "authentication required" : nil,
                     account.observedAt.map { "observed \(Fmt.ago($0, now: now))" },
-                    account.status == "stale" ? (account.error != nil ? "last fetch failed" : "window reset since reading") : nil].compactMap { $0 }
+                    account.status == .stale ? (account.error != nil ? "last fetch failed" : "window reset since reading") : nil].compactMap { $0 }
         let burn = account.isDrawing(now: now) ? account.creditBurnPerHour : nil
         // Present only when the account has some.
         let credit = account.creditBalance.map { ["Credit balance: \($0)"] } ?? []
