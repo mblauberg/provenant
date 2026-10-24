@@ -91,7 +91,7 @@ impl Context {
         private_dir(roots.state.as_path(), &utility_home)?;
         let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
             || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
-        let git = crate::git::git_binary().ok_or(EdgeError::Invalid)?;
+        let git = crate::git::git_binary().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),
             canonical(&git)?,

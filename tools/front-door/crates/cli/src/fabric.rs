@@ -435,6 +435,8 @@ pub enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
+    #[error("Git executable is unavailable")]
+    GitUnavailable,
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)

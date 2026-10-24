@@ -1,5 +1,5 @@
 //! Fabric process composition: MCP, fixed peer ingress and host observations.
-mod context;
+use provenant_cli::fabric::Context;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
     stdio,
@@ -46,7 +46,7 @@ pub enum EdgeError {
 }
 
 struct Factory {
-    context: context::Context,
+    context: Context,
     clock: SystemClock,
     backoff: ThreadWait,
     executor: SystemExecutor,
@@ -350,7 +350,7 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
         let home = crate::roots::home()?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         if let Some(client) = client {
             context.config.client_label = serde_json::to_value(client)?
                 .as_str()
@@ -394,7 +394,7 @@ fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::err
     let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
     let roots = crate::roots::roots(globals, &assets, &cwd)?;
     let home = crate::roots::home()?;
-    let context = context::Context::open(roots, &home, &cwd)?;
+    let context = Context::open(roots, &home, &cwd)?;
     Ok(Factory {
         context,
         clock: SystemClock::new(),
@@ -459,7 +459,7 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
         };
         let assets = crate::roots::product_root()?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -716,7 +716,7 @@ fn landing_error_code(error: &(dyn std::error::Error + 'static)) -> &'static str
 
 #[allow(clippy::too_many_arguments)]
 fn landing_local(
-    context: &context::Context,
+    context: &Context,
     executor: &SystemExecutor,
     proof: LandingProof,
     operation_id: &provenant_core::OperationId,
