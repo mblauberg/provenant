@@ -64,6 +64,7 @@ fn limits() -> Limits {
         result_bytes: 16,
         lease_seconds: 2,
         peer_seconds: 30,
+        graph_timeout_ms: 14_400_000,
         bundle_bytes: 67_108_864,
     }
 }
@@ -110,4 +111,21 @@ fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations()
         limit_response(observation, &limits, false, false),
         Err(ServiceError::ResultTooLarge)
     ));
+}
+
+#[test]
+fn graph_control_operations_are_strict_and_cancel_is_a_mutation() {
+    for (op, arguments) in [
+        ("run", json!({"op":"run","document":"graph.json"})),
+        ("resume", json!({"op":"resume","document":"graph.json"})),
+        ("status", json!({"op":"status","id":"g-test"})),
+        ("cancel", json!({"op":"cancel","id":"g-test"})),
+    ] {
+        let call = ToolCall::parse("fabric_graph", arguments.clone()).expect(op);
+        assert_eq!(call.is_mutation(), op != "status");
+        let mut unknown = arguments;
+        unknown["extra"] = json!(true);
+        assert!(ToolCall::parse("fabric_graph", unknown).is_err());
+    }
+    assert!(ToolCall::parse("fabric_graph", json!({"op":"status","id":"../escape"})).is_err());
 }

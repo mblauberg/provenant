@@ -147,6 +147,14 @@ impl F3Facade for BoundFacade<'_> {
         }
         .run(input, budget, cancel)
     }
+    fn graph(
+        &mut self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        self.factory.graph(input, budget, cancel)
+    }
     fn output(
         &mut self,
         input: OutputInput,
@@ -441,36 +449,26 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
             allow_remote: false,
         };
         let result = match &request.action {
-            PeerAction::Run { input } => match owner.run(input.clone(), budget, &cancel) {
-                Ok(v) => PeerResult::Run(Box::new(v)),
-                Err(e) => PeerResult::Error {
-                    code: e.code().into(),
-                    operation_id: request.operation(),
-                },
-            },
-            PeerAction::Submit { input } => match owner.submit(input.clone(), budget, &cancel) {
-                Ok(v) => PeerResult::Submitted(v),
-                Err(e) => PeerResult::Error {
-                    code: e.code().into(),
-                    operation_id: request.operation(),
-                },
-            },
-            PeerAction::Output { input } => match owner.output(input.clone(), budget, &cancel) {
-                Ok(v) => PeerResult::Output(v),
-                Err(e) => PeerResult::Error {
-                    code: e.code().into(),
-                    operation_id: None,
-                },
-            },
-            PeerAction::RunEvents { after, limit } => {
-                match owner.events(*after, *limit, budget, &cancel) {
-                    Ok(v) => PeerResult::RunEvents(v),
-                    Err(e) => PeerResult::Error {
-                        code: e.code().into(),
-                        operation_id: None,
-                    },
-                }
-            }
+            PeerAction::Run { input } => peer_result(
+                owner.run(input.clone(), budget, &cancel),
+                request.operation(),
+                |value| PeerResult::Run(Box::new(value)),
+            ),
+            PeerAction::Submit { input } => peer_result(
+                owner.submit(input.clone(), budget, &cancel),
+                request.operation(),
+                PeerResult::Submitted,
+            ),
+            PeerAction::Output { input } => peer_result(
+                owner.output(input.clone(), budget, &cancel),
+                None,
+                PeerResult::Output,
+            ),
+            PeerAction::RunEvents { after, limit } => peer_result(
+                owner.events(*after, *limit, budget, &cancel),
+                None,
+                PeerResult::RunEvents,
+            ),
             PeerAction::Health => PeerResult::Health(HostHealth {
                 host: context.identity.host,
                 available: true,
@@ -664,9 +662,9 @@ fn landing_local(
 }
 pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::Globals) -> u8 {
     use provenant_cli::fabric::Landing;
-    let (proof, operation, reconcile) = match input {
-        Landing::Push { fence, operation } => (fence.proof(), operation, false),
-        Landing::Reconcile { fence, operation } => (fence.proof(), operation, true),
+    let (fence, operation, reconcile) = match input {
+        Landing::Push { fence, operation } => (fence, operation, false),
+        Landing::Reconcile { fence, operation } => (fence, operation, true),
         _ => return 2,
     };
     let recovery_id = operation.operation_id.clone();
@@ -677,6 +675,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
     };
     let result =
         (|| -> Result<provenant_fabric_store::PushOperation, Box<dyn std::error::Error>> {
+            let proof = fence.proof()?;
             let factory = factory(globals)?;
             let ctx = &factory.context;
             let cancel = CancelToken::new();
@@ -753,11 +752,34 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 false,
             )
         }
-        Err(error) if matches!(error.downcast_ref::<PeerError>(),Some(PeerError::Unknown{..})) || matches!(error.downcast_ref::<provenant_fabric_runtime::git_transport::GitTransportError>(),Some(provenant_fabric_runtime::git_transport::GitTransportError::PushUnknown{..}|provenant_fabric_runtime::git_transport::GitTransportError::PushUnresolved{..}))=>{
-            let mut result=provenant_records::CommandResult::new(command,provenant_records::Outcome::Error,serde_json::json!({"operation_id":recovery_id,"state":"unknown"}));
-            result.error=Some(provenant_records::CommandError{code:"launch_unknown".into(),message:"push outcome requires remote reconciliation".into(),cause:None,repair:Some("repeat fabric landing reconcile with the same fence and operation id".into())});
-            crate::emit(&result,globals,"push outcome requires remote reconciliation",false)
-        },
+        Err(error)
+            if matches!(
+                error.downcast_ref::<PeerError>(),
+                Some(PeerError::Unknown { .. })
+            ) || error
+                .downcast_ref::<provenant_fabric_runtime::git_transport::GitTransportError>()
+                .is_some_and(|error| error.is_unknown()) =>
+        {
+            let mut result = provenant_records::CommandResult::new(
+                command,
+                provenant_records::Outcome::Error,
+                serde_json::json!({"operation_id":recovery_id,"state":"unknown"}),
+            );
+            result.error = Some(provenant_records::CommandError {
+                code: "launch_unknown".into(),
+                message: "push outcome requires remote reconciliation".into(),
+                cause: None,
+                repair: Some(
+                    "repeat fabric landing reconcile with the same fence and operation id".into(),
+                ),
+            });
+            crate::emit(
+                &result,
+                globals,
+                "push outcome requires remote reconciliation",
+                false,
+            )
+        }
         Err(error) => crate::fail(
             command,
             provenant_records::Outcome::Refused,
@@ -771,6 +793,19 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
 struct BinaryRunOwner<'a> {
     factory: &'a Factory,
     allow_remote: bool,
+}
+fn peer_result<T>(
+    result: Result<T, FacadeError>,
+    operation_id: Option<provenant_core::OperationId>,
+    wrap: impl FnOnce(T) -> PeerResult,
+) -> PeerResult {
+    match result {
+        Ok(value) => wrap(value),
+        Err(error) => PeerResult::Error {
+            code: error.code().into(),
+            operation_id,
+        },
+    }
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
@@ -1050,19 +1085,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         key: &provenant_fabric_runtime::graph::AttemptKey,
         prompt: &str,
         route: &provenant_fabric_runtime::graph::GraphRoute,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        worktree: Option<&str>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
-        let digest =
-            provenant_records::CanonicalV1::record_digest("graph-attempt-operation", 1, key)
-                .map_err(|_| FacadeError::InvalidInput)?;
-        let operation_id = provenant_core::OperationId::parse(&format!(
-            "graph-{}",
-            provenant_core::hex(digest.as_bytes())
-        ))
-        .map_err(|_| FacadeError::InvalidInput)?;
+        let operation_id = graph_operation("graph-attempt-operation", key)?;
         let input = SubmitInput::Submission {
             operation_id,
             tasks: vec![SubmittedTask {
+                access,
+                worktree: worktree.map(str::to_owned),
                 prompt: prompt.into(),
                 inputs: vec![],
                 route: RoutePreference {
@@ -1072,7 +1104,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     task_class: None,
                     effort: route.effort.clone(),
                 },
-                timeout_ms: 14_400_000,
+                timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
                 delivery_id: None,
             }],
             concurrency: 1,
@@ -1096,6 +1128,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => Ok(AttemptObservation::Terminal {
+                launched: attempt.provider_launched.unwrap_or(true),
                 attempt_ref: reference,
                 outcome: match outcome {
                     Outcome::Succeeded => AttemptOutcome::Succeeded,
@@ -1112,69 +1145,173 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
-pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globals) -> u8 {
-    use provenant_cli::fabric::Graph;
-    use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphJournal};
-    let command = match input {
-        Graph::Tick { .. } => "fabric graph tick",
-        Graph::Status { .. } => "fabric graph status",
-    };
-    let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let factory = factory(globals)?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        match input {
-            Graph::Tick { document } => {
+impl Factory {
+    fn graph(
+        &self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        use provenant_fabric_runtime::coordination::input::ValidateInput;
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphDocument, GraphJournal, GraphRun, GraphStatus,
+        };
+        input
+            .validate_input(provenant_core::WaitTransport::Cli)
+            .map_err(|_| FacadeError::InvalidInput)?;
+        let resume = matches!(&input, GraphInput::Resume { .. });
+        let document = match &input {
+            GraphInput::Run { document } | GraphInput::Resume { document } => {
                 let path = if document.is_absolute() {
-                    document
+                    document.clone()
                 } else {
-                    factory.cwd.join(document)
+                    self.cwd.join(document)
                 };
-                let path = provenant_supervisor::fs::canonicalize(&path)?;
-                if !path.starts_with(&factory.cwd) {
-                    return Err(FacadeError::ConfinementRefused.into());
+                let path =
+                    provenant_supervisor::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
+                if !path.starts_with(&self.cwd) {
+                    return Err(FacadeError::ConfinementRefused);
                 }
-                let bytes = provenant_supervisor::fs::FileHandle::open_source(&path)?
-                    .read_bounded(1_048_576)?;
+                let bytes = provenant_supervisor::fs::FileHandle::open_source(&path)
+                    .and_then(|mut file| file.read_bounded(1_048_576))
+                    .map_err(|_| FacadeError::Io)?;
                 let document: GraphDocument = provenant_records::decode_v1(
                     bytes.as_slice(),
                     provenant_records::Limits::CONFIG,
-                )?;
-                let mut journal = FileJournal::open(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
-                    &document.graph_id,
-                    &provenant_supervisor::fs::LocalFs,
-                    budget,
-                    &cancel,
-                    &factory.clock,
-                )?;
-                let result = provenant_fabric_runtime::graph::advance(
-                    &document,
-                    &mut BoundGraphOwner {
-                        factory: &factory,
-                        budget,
-                        cancel: &cancel,
-                    },
-                    &mut journal,
-                )?;
-                Ok(serde_json::to_value(result)?)
+                )
+                .map_err(|_| FacadeError::InvalidInput)?;
+                for node in &document.nodes {
+                    if node.prompt.len() as u64 > self.context.config.limits.body_bytes {
+                        return Err(FacadeError::InvalidInput);
+                    }
+                }
+                Some(document)
             }
-            Graph::Status { id } => {
-                let mut journal = FileJournal::open(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
-                    &id,
-                    &provenant_supervisor::fs::LocalFs,
-                    budget,
-                    &cancel,
-                    &factory.clock,
-                )?;
-                Ok(serde_json::to_value(
-                    journal.load(&id)?.ok_or(FacadeError::NotFound)?,
-                )?)
+            _ => None,
+        };
+        let id = match &input {
+            GraphInput::Status { id } | GraphInput::Cancel { id } => id.as_str(),
+            _ => document
+                .as_ref()
+                .ok_or(FacadeError::InvalidInput)?
+                .graph_id
+                .as_str(),
+        };
+        let mut journal = FileJournal::open(
+            &self.context.roots.state,
+            self.context.identity.project,
+            id,
+            &provenant_supervisor::fs::LocalFs,
+            budget,
+            cancel,
+            &self.clock,
+        )
+        .map_err(|_| FacadeError::Io)?;
+        if let Some(document) = document {
+            let mut owner = BoundGraphOwner {
+                factory: self,
+                budget,
+                cancel,
+            };
+            let run = if resume {
+                provenant_fabric_runtime::graph::resume(&document, &mut owner, &mut journal)
+            } else {
+                provenant_fabric_runtime::graph::advance(&document, &mut owner, &mut journal)
+            };
+            return run.map_err(|error| match error {
+                provenant_fabric_runtime::graph::GraphError::Run(error) => error,
+                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
+                    FacadeError::InvalidInput
+                }
+                provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
+                _ => FacadeError::StateCorrupt,
+            });
+        }
+        let mut checkpoint = journal
+            .load(id)
+            .map_err(|_| FacadeError::StateCorrupt)?
+            .ok_or(FacadeError::NotFound)?;
+        if matches!(input, GraphInput::Cancel { .. }) {
+            // Persist the admission fence before asking the run owner to stop live attempts.
+            checkpoint.cancelled = true;
+            journal.save(&checkpoint).map_err(|_| FacadeError::Io)?;
+            let mut owner = BinaryRunOwner {
+                factory: self,
+                allow_remote: true,
+            };
+            for node in &checkpoint.nodes {
+                for attempt in &node.attempts {
+                    if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
+                        continue;
+                    }
+                    let reference = match attempt.attempt_ref.as_deref() {
+                        Some(reference) => reference,
+                        None => {
+                            return Err(FacadeError::LaunchUnknown {
+                                operation_id: graph_operation(
+                                    "graph-attempt-operation",
+                                    &attempt.key,
+                                )?,
+                            });
+                        }
+                    };
+                    let (host, attempt_id) =
+                        reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                    let operation_id = graph_operation("graph-cancel", &attempt.key)?;
+                    owner.run(
+                        RunInput::Cancel {
+                            target: AttemptTarget {
+                                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                                attempt: attempt_id
+                                    .parse()
+                                    .map_err(|_| FacadeError::StateCorrupt)?,
+                            },
+                            operation_id,
+                        },
+                        budget,
+                        cancel,
+                    )?;
+                }
             }
         }
+        let status = if checkpoint.cancelled {
+            GraphStatus::Cancelled
+        } else if checkpoint.nodes.iter().any(|node| {
+            matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Pending
+                    | provenant_fabric_runtime::graph::NodeState::Running
+            )
+        }) {
+            GraphStatus::Pending
+        } else {
+            GraphStatus::Complete
+        };
+        Ok(GraphRun { status, checkpoint })
+    }
+}
+fn graph_operation(
+    domain: &str,
+    key: &provenant_fabric_runtime::graph::AttemptKey,
+) -> Result<provenant_core::OperationId, FacadeError> {
+    let digest = provenant_records::CanonicalV1::record_digest(domain, 1, key)
+        .map_err(|_| FacadeError::InvalidInput)?;
+    provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
+        .map_err(|_| FacadeError::InvalidInput)
+}
+pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globals) -> u8 {
+    use provenant_cli::fabric::Graph;
+    let (command, input) = match input {
+        Graph::Run { document } => ("fabric graph run", GraphInput::Run { document }),
+        Graph::Status { id } => ("fabric graph status", GraphInput::Status { id }),
+        Graph::Cancel { id } => ("fabric graph cancel", GraphInput::Cancel { id }),
+        Graph::Resume { document } => ("fabric graph resume", GraphInput::Resume { document }),
+    };
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let factory = factory(globals)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        Ok(factory.graph(input, budget, &cancel)?)
     })();
     match result {
         Ok(data) => {

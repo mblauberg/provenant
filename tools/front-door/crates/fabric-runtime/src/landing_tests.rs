@@ -311,6 +311,59 @@ fn lost_push_reply_keeps_successor_fenced_until_remote_reconciliation() {
 }
 
 #[test]
+fn failed_remote_observation_leaves_unknown_push_phase_untouched() {
+    let setup = repositories();
+    let executor = LostReplyExecutor::new();
+    let transport = GitTransport::discover(&executor, None).unwrap();
+    let project = ProjectId::from_bytes([31; 16]);
+    let request = setup.fixture.request();
+    assert!(matches!(
+        transport.push_landing(
+            &setup.store,
+            &setup.guard,
+            &setup.fence,
+            &setup.writer,
+            &setup.operation,
+            &request,
+            &setup.fixture.cancel,
+        ),
+        Err(GitTransportError::PushUnknown { .. })
+    ));
+    let before = setup
+        .store
+        .push_operation(project, &setup.operation, &request)
+        .unwrap();
+    assert_eq!(before.phase, PushPhase::Unknown);
+
+    fs::rename(
+        &setup.origin,
+        setup.fixture.temp.path().join("origin-unavailable.git"),
+    )
+    .unwrap();
+    assert!(matches!(
+        transport.reconcile_landing(
+            &setup.store,
+            &setup.guard,
+            &setup.fence,
+            project,
+            &setup.operation,
+            &request,
+            &setup.writer,
+            &setup.fixture.cancel,
+        ),
+        Err(GitTransportError::GitCommand {
+            command: "remote OID observation"
+        })
+    ));
+    let after = setup
+        .store
+        .push_operation(project, &setup.operation, &request)
+        .unwrap();
+    assert_eq!(after.phase, before.phase);
+    assert_eq!(after.observed_remote, before.observed_remote);
+}
+
+#[test]
 fn local_url_rewrite_is_refused_before_it_can_push_to_another_repository() {
     let setup = repositories();
     let seed_executor = SystemExecutor::new(2).unwrap();
@@ -357,6 +410,30 @@ fn local_url_rewrite_is_refused_before_it_can_push_to_another_repository() {
 #[test]
 fn ssh_url_host_cannot_be_interpreted_as_an_ssh_option() {
     assert!(validate_remote_url("ssh://user@-oProxyCommand=sh/repo.git").is_err());
+    assert!(validate_remote_url("ssh://git@example.test:2222/org/repo.git").is_ok());
+    assert!(validate_remote_url("ssh://example.test:2222/org/repo.git").is_ok());
+    assert!(validate_remote_url("ssh://[2001:db8::1]:2222/org/repo.git").is_ok());
+    for remote in [
+        "ssh://example.test:/org/repo.git",
+        "ssh://example.test:abc/org/repo.git",
+        "ssh://example.test:0/org/repo.git",
+        "ssh://example.test:65536/org/repo.git",
+    ] {
+        assert!(validate_remote_url(remote).is_err(), "{remote}");
+    }
+}
+
+#[test]
+fn unknown_transport_errors_include_unresolved_pushes() {
+    let operation = OperationId::parse("landing-error-classification").unwrap();
+    assert!(
+        GitTransportError::PushUnknown {
+            operation: operation.clone(),
+        }
+        .is_unknown()
+    );
+    assert!(GitTransportError::PushUnresolved { operation }.is_unknown());
+    assert!(!GitTransportError::InvalidRemote.is_unknown());
 }
 
 #[test]

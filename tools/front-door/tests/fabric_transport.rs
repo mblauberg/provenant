@@ -69,7 +69,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
         "2025-11-25"
     );
     let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
-    assert_eq!(list.as_array().ok_or("tools")?.len(), 10);
+    assert_eq!(list.as_array().ok_or("tools")?.len(), 11);
     let identity =
         &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["client"], "codex");
@@ -173,18 +173,18 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 }
 
 #[test]
-fn graph_tick_persists_start_before_reporting_missing_dispatch() -> Result {
+fn graph_run_persists_start_before_reporting_missing_dispatch() -> Result {
     let rig = TestRig::new()?;
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","routes":[{"adapter":"fixture","model":"one"},{"adapter":"fixture","model":"two"}]}]}),
+            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"},{"adapter":"fixture","model":"two"}]}]}),
         )?,
     )?;
     let tick = rig.command(&[
         "fabric",
         "graph",
-        "tick",
+        "run",
         "--document",
         "graph.json",
         "--json",
@@ -199,15 +199,82 @@ fn graph_tick_persists_start_before_reporting_missing_dispatch() -> Result {
     );
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
     assert_eq!(
-        status["data"]["nodes"][0]["attempts"]
+        status["data"]["checkpoint"]["nodes"][0]["attempts"]
             .as_array()
             .ok_or("attempts")?
             .len(),
         1
     );
     assert_eq!(
-        status["data"]["nodes"][0]["attempts"][0]["state"],
+        status["data"]["checkpoint"]["nodes"][0]["attempts"][0]["state"],
         "starting"
+    );
+    // Every harness reaches the same graph checkpoint and admission fence.
+    let frames = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":"cancel","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"cancel","id":"edge"}}}),
+        ],
+    )?;
+    let cancelled = &frames
+        .iter()
+        .find(|frame| frame["id"] == "cancel")
+        .ok_or("cancel reply")?["result"];
+    // A starting attempt without a reference cannot be claimed as stopped.
+    assert_eq!(cancelled["structuredContent"]["code"], "launch_unknown");
+    assert!(
+        cancelled["structuredContent"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("graph-"))
+    );
+    for (op, arguments, expected_status) in [
+        ("status", json!({"op":"status","id":"edge"}), "cancelled"),
+        (
+            "run",
+            json!({"op":"run","document":"graph.json"}),
+            "cancelled",
+        ),
+    ] {
+        let frames = mcp(
+            &rig,
+            &[
+                json!({"jsonrpc":"2.0","id":op,"method":"tools/call","params":{"name":"fabric_graph","arguments":arguments}}),
+            ],
+        )?;
+        let result = &frames
+            .iter()
+            .find(|frame| frame["id"] == op)
+            .ok_or("graph reply")?["result"];
+        assert_ne!(result["isError"], true, "{result}");
+        assert_eq!(result["structuredContent"]["status"], expected_status);
+        assert_eq!(
+            result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"]
+                .as_array()
+                .ok_or("attempts")?
+                .len(),
+            1
+        );
+    }
+    let frames = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":"resume","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"resume","document":"graph.json"}}}),
+        ],
+    )?;
+    let resumed = &frames
+        .iter()
+        .find(|frame| frame["id"] == "resume")
+        .ok_or("resume reply")?["result"];
+    assert_eq!(resumed["structuredContent"]["code"], "owner_unavailable");
+    let status = rig.command(&["fabric", "graph", "status", "edge", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["checkpoint"]["cancelled"], false);
+    assert_eq!(
+        status["data"]["checkpoint"]["nodes"][0]["attempts"]
+            .as_array()
+            .ok_or("attempts")?
+            .len(),
+        1
     );
     rig.assert_legacy_unchanged()
 }

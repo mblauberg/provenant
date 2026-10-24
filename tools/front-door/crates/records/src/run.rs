@@ -248,6 +248,9 @@ pub struct AttemptRecord {
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
+    /// Custody evidence. None in older records must never authorise a writer retry.
+    #[serde(default)]
+    pub provider_launched: Option<bool>,
     pub provider_ms: Option<u64>,
     pub admission_deadline: Option<WallTime>,
     pub runtime_deadline: Option<WallTime>,

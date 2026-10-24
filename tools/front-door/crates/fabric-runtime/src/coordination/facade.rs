@@ -36,6 +36,10 @@ pub struct RoutePreference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(default)]
+    pub access: crate::graph::AccessMode,
+    #[serde(default)]
+    pub worktree: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub inputs: Vec<ArtifactRef>,
@@ -58,6 +62,15 @@ bounded_input! {
             tasks: Vec<SubmittedTask>,
             concurrency: u16,
         },
+    }
+}
+
+bounded_input! {
+    pub enum GraphInput as WireGraphInput {
+        Run { document: std::path::PathBuf },
+        Status { id: String },
+        Cancel { id: String },
+        Resume { document: std::path::PathBuf },
     }
 }
 
@@ -226,6 +239,14 @@ pub trait F3Facade {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Self::Run, FacadeError>;
+    fn graph(
+        &mut self,
+        _input: GraphInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<crate::graph::GraphRun, FacadeError> {
+        Err(FacadeError::OwnerUnavailable)
+    }
     fn output(
         &mut self,
         input: OutputInput,

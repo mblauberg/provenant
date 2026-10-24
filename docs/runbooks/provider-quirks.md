@@ -2,7 +2,7 @@
 
 Durable behaviours of the external CLIs behind Fabric lanes. Model ids, efforts
 and flags change often: discover them at runtime (`provenant route list`,
-`fabric_adapters`, `agy models`) and never trust a written slug. Mechanics live
+`provenant route list`, `agy models`) and never trust a written slug. Mechanics live
 in `skills/orchestrate`; this page records the traps.
 
 ## Any provider

@@ -76,6 +76,12 @@ pub enum GitTransportError {
     Execution(#[from] ExecError),
 }
 
+impl GitTransportError {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::PushUnknown { .. } | Self::PushUnresolved { .. })
+    }
+}
+
 type Result<T> = std::result::Result<T, GitTransportError>;
 
 /// A private, durable directory for bundles. Files remain for explicit
@@ -547,10 +553,7 @@ impl<'a> GitTransport<'a> {
         }
         let remote = value.request.remote.clone();
         validate_remote_url(&remote)?;
-        let observed = self
-            .remote_oid(repository, &remote, &value.request.reference, cancel)
-            .ok()
-            .flatten();
+        let observed = self.remote_oid(repository, &remote, &value.request.reference, cancel)?;
         Ok(store.change_push(
             guard,
             fence,
@@ -1133,16 +1136,37 @@ fn validate_remote_url(remote: &str) -> Result<()> {
     }
     if let Some(rest) = remote.strip_prefix("ssh://") {
         let authority = rest.split('/').next().unwrap_or_default();
-        let host = authority
+        let host_port = authority
             .rsplit_once('@')
-            .map_or(authority, |(user, host)| {
-                if user.is_empty() || user.contains(':') {
-                    ""
-                } else {
-                    host
-                }
-            });
-        if host.is_empty() || host.starts_with('-') || host.contains('@') || host.contains(':') {
+            .map_or(Some(authority), |(user, host_port)| {
+                (!user.is_empty() && !user.contains(':')).then_some(host_port)
+            })
+            .ok_or(GitTransportError::InvalidRemote)?;
+        let valid_port = |port: &str| {
+            !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port > 0)
+        };
+        let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+            let (host, suffix) = bracketed
+                .split_once(']')
+                .ok_or(GitTransportError::InvalidRemote)?;
+            if host.is_empty()
+                || host.contains('[')
+                || suffix.contains(']')
+                || (!suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(valid_port))
+            {
+                return Err(GitTransportError::InvalidRemote);
+            }
+            host
+        } else {
+            match host_port.split_once(':') {
+                Some((host, port)) if !host.contains(':') && valid_port(port) => host,
+                Some(_) => return Err(GitTransportError::InvalidRemote),
+                None => host_port,
+            }
+        };
+        if host.is_empty() || host.starts_with('-') || host.contains('@') {
             return Err(GitTransportError::InvalidRemote);
         }
         return Ok(());

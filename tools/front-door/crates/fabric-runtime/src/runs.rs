@@ -86,7 +86,10 @@ pub struct RunCapabilities {
 /// The narrow execution boundary implemented by front-door composition.
 ///
 /// Implementations scope every lookup and mutation to the authenticated
-/// project and actor. Mutations use the supplied operation id for idempotency;
+/// project and actor. Before launching a submitted task, the owner must enforce
+/// its access mode and bind a writer to its verified registered worktree, or
+/// refuse the submission. Declaring read-only access never grants write access.
+/// Mutations use the supplied operation id for idempotency;
 /// an uncertain launch returns `FacadeError::LaunchUnknown` with that id and
 /// is reconciled by a receipt lookup, never by blindly retrying launch.
 ///

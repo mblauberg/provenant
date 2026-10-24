@@ -50,6 +50,9 @@ pub struct GraphRoute {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
+    pub access: AccessMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     pub id: String,
     pub prompt: String,
     #[serde(default)]
@@ -60,9 +63,21 @@ pub struct GraphNode {
     pub routes: Option<Vec<GraphRoute>>,
 }
 
+/// Fallback after provider launch is safe only for a confined read-only node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    #[default]
+    ReadOnly,
+    WorktreeWrite,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphCheckpoint {
+    /// Durable admission fence. Resume observes the same attempt keys.
+    #[serde(default)]
+    pub cancelled: bool,
     pub schema_version: u64,
     pub graph_id: String,
     /// Digest of the validated, normalised plan, including prompt bytes.
@@ -74,6 +89,8 @@ pub struct GraphCheckpoint {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    /// Retain the writer checkout for chair inspection after a failed launch.
+    pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
     /// One durable row per route actually tried, in route order.
@@ -83,6 +100,9 @@ pub struct NodeProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphAttempt {
+    /// Missing launch evidence is conservatively treated as launched.
+    #[serde(default = "assume_launched")]
+    pub launched: bool,
     pub key: AttemptKey,
     pub route: GraphRoute,
     pub state: AttemptState,
@@ -130,12 +150,16 @@ pub enum AttemptOutcome {
     AdapterUnavailable,
 }
 
+fn assume_launched() -> bool {
+    true
+}
+
 impl AttemptOutcome {
-    fn allows_route_fallback(self) -> bool {
+    fn allows_route_fallback(self, access: AccessMode, launched: bool) -> bool {
         matches!(
             self,
             Self::AuthRequired | Self::UsageLimited | Self::AdapterUnavailable
-        )
+        ) && (!launched || access == AccessMode::ReadOnly)
     }
 }
 
@@ -149,6 +173,7 @@ pub enum AttemptObservation {
     Terminal {
         attempt_ref: Option<String>,
         outcome: AttemptOutcome,
+        launched: bool,
     },
 }
 
@@ -157,6 +182,7 @@ pub enum AttemptObservation {
 pub enum GraphStatus {
     Pending,
     Complete,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -176,6 +202,8 @@ pub trait AttemptOwner {
         key: &AttemptKey,
         prompt: &str,
         route: &GraphRoute,
+        access: AccessMode,
+        worktree: Option<&str>,
     ) -> Result<AttemptObservation, Self::Error>;
 }
 
@@ -374,6 +402,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    access: AccessMode,
+    worktree: Option<String>,
     id: String,
     prompt: String,
     depends_on: Vec<String>,
@@ -388,6 +418,24 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(document, owner, journal, false)
+}
+
+/// Explicitly reopen graph admission without changing any attempt identity.
+pub fn resume<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(document, owner, journal, true)
+}
+
+fn advance_inner<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    resume: bool,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let (plan, positions) = validate_plan(document).map_err(GraphError::Invalid)?;
     let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
         .map_err(GraphError::Canonical)?
@@ -401,6 +449,7 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
         None => {
             let checkpoint = GraphCheckpoint {
                 schema_version: 1,
+                cancelled: false,
                 graph_id: plan.graph_id.clone(),
                 plan_digest,
                 nodes: plan
@@ -408,6 +457,7 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .map(|node| NodeProgress {
                         id: node.id.clone(),
+                        worktree: node.worktree.clone(),
                         state: NodeState::Pending,
                         attempts: Vec::new(),
                     })
@@ -417,6 +467,17 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
     };
+
+    if checkpoint.cancelled {
+        if !resume {
+            return Ok(GraphRun {
+                status: GraphStatus::Cancelled,
+                checkpoint,
+            });
+        }
+        checkpoint.cancelled = false;
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
 
     for node_index in 0..plan.nodes.len() {
         if matches!(
@@ -461,9 +522,9 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
                     usize::from(last.key.route_index)
                 }
                 Some(last)
-                    if last
-                        .outcome
-                        .is_some_and(AttemptOutcome::allows_route_fallback) =>
+                    if last.outcome.is_some_and(|outcome| {
+                        outcome.allows_route_fallback(node.access, last.launched)
+                    }) =>
                 {
                     progress.attempts.len()
                 }
@@ -492,13 +553,20 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
                     state: AttemptState::Starting,
                     attempt_ref: None,
                     outcome: None,
+                    launched: true,
                 });
                 checkpoint.nodes[node_index].state = NodeState::Running;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
 
             let observation = owner
-                .observe_or_start(&key, &node.prompt, &route)
+                .observe_or_start(
+                    &key,
+                    &node.prompt,
+                    &route,
+                    node.access,
+                    node.worktree.as_deref(),
+                )
                 .map_err(GraphError::Run)?;
             let should_continue = {
                 let progress = &mut checkpoint.nodes[node_index];
@@ -522,7 +590,9 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
                     AttemptObservation::Terminal {
                         attempt_ref,
                         outcome,
+                        launched,
                     } => {
+                        attempt.launched = launched;
                         attempt.state = AttemptState::Terminal;
                         attempt.attempt_ref = attempt_ref;
                         attempt.outcome = Some(outcome);
@@ -534,7 +604,9 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
                             AttemptOutcome::AuthRequired
                             | AttemptOutcome::UsageLimited
                             | AttemptOutcome::AdapterUnavailable => {
-                                if route_index + 1 == node.routes.len() {
+                                if !outcome.allows_route_fallback(node.access, launched)
+                                    || route_index + 1 == node.routes.len()
+                                {
                                     progress.state = NodeState::Failed;
                                     false
                                 } else {
@@ -569,6 +641,29 @@ pub fn advance<R: AttemptOwner, J: GraphJournal>(
     Ok(GraphRun { status, checkpoint })
 }
 
+pub(crate) fn validate_access(
+    access: AccessMode,
+    worktree: Option<&str>,
+) -> Result<(), &'static str> {
+    if access == AccessMode::WorktreeWrite
+        && worktree.is_none_or(|path| {
+            path.is_empty()
+                || path.len() > 4096
+                || path.contains('\0')
+                || !std::path::Path::new(path).is_absolute()
+                || std::path::Path::new(path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+        })
+    {
+        return Err("writer worktree");
+    }
+    if access == AccessMode::ReadOnly && worktree.is_some() {
+        return Err("read-only worktree");
+    }
+    Ok(())
+}
+
 fn validate_plan(
     document: &GraphDocument,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
@@ -593,6 +688,7 @@ fn validate_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        validate_access(node.access, node.worktree.as_deref())?;
         if node.prompt.is_empty() || node.prompt.len() > MAX_NODE_PROMPT_BYTES {
             return Err("prompt size");
         }
@@ -631,6 +727,8 @@ fn validate_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            access: node.access,
+            worktree: node.worktree.clone(),
             id: node.id.clone(),
             prompt: node.prompt.clone(),
             depends_on,
@@ -683,7 +781,7 @@ fn validate_plan(
     ))
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
@@ -717,7 +815,10 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         return Err(GraphError::BadCheckpoint);
     }
     for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
-        if progress.id != node.id || progress.attempts.len() > node.routes.len() {
+        if progress.id != node.id
+            || progress.worktree != node.worktree
+            || progress.attempts.len() > node.routes.len()
+        {
             return Err(GraphError::BadCheckpoint);
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
@@ -728,9 +829,9 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (attempt.state == AttemptState::Terminal) != attempt.outcome.is_some()
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
-                        || !attempt
-                            .outcome
-                            .is_some_and(AttemptOutcome::allows_route_fallback)))
+                        || !attempt.outcome.is_some_and(|outcome| {
+                            outcome.allows_route_fallback(node.access, attempt.launched)
+                        })))
             {
                 return Err(GraphError::BadCheckpoint);
             }
@@ -741,10 +842,9 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
-                    attempt
-                        .outcome
-                        .is_some_and(AttemptOutcome::allows_route_fallback)
-                        && progress.attempts.len() < node.routes.len()
+                    attempt.outcome.is_some_and(|outcome| {
+                        outcome.allows_route_fallback(node.access, attempt.launched)
+                    }) && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
             },
@@ -756,8 +856,9 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 attempt.state == AttemptState::Terminal
                     && match attempt.outcome {
                         Some(AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure) => true,
-                        Some(outcome) if outcome.allows_route_fallback() => {
-                            progress.attempts.len() == node.routes.len()
+                        Some(outcome) if outcome != AttemptOutcome::Succeeded => {
+                            !outcome.allows_route_fallback(node.access, attempt.launched)
+                                || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,
                     }
@@ -811,6 +912,7 @@ mod tests {
     struct FakeOwner {
         observations: VecDeque<AttemptObservation>,
         calls: Vec<(AttemptKey, GraphRoute)>,
+        permissions: Vec<(AccessMode, Option<String>)>,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -821,8 +923,11 @@ mod tests {
             key: &AttemptKey,
             _prompt: &str,
             route: &GraphRoute,
+            access: AccessMode,
+            worktree: Option<&str>,
         ) -> Result<AttemptObservation, Self::Error> {
             self.calls.push((key.clone(), route.clone()));
+            self.permissions.push((access, worktree.map(str::to_owned)));
             self.observations.pop_front().ok_or(NoObservation)
         }
     }
@@ -838,6 +943,8 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            access: AccessMode::ReadOnly,
+            worktree: None,
             id: id.to_owned(),
             prompt: format!("work for {id}"),
             depends_on: Vec::new(),
@@ -858,6 +965,7 @@ mod tests {
         AttemptObservation::Terminal {
             attempt_ref: None,
             outcome,
+            launched: true,
         }
     }
 
@@ -870,6 +978,8 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            access: AccessMode::ReadOnly,
+            worktree: None,
             id: "node".to_owned(),
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
@@ -913,7 +1023,7 @@ mod tests {
     #[test]
     fn single_route_form_remains_valid() {
         let document: GraphDocument = serde_json::from_str(
-            r#"{"schema_version":1,"graph_id":"g-test","nodes":[{"id":"one","prompt":"work for one","route":{"adapter":"only","alias":"only-alias","effort":"high"}}]}"#,
+            r#"{"schema_version":1,"graph_id":"g-test","nodes":[{"id":"one","prompt":"work for one","access":"read_only","route":{"adapter":"only","alias":"only-alias","effort":"high"}}]}"#,
         )
         .expect("legacy single-route document parses");
         let mut owner = FakeOwner {
@@ -937,6 +1047,8 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                access: AccessMode::ReadOnly,
+                worktree: None,
                 id: "node".to_owned(),
                 prompt: "do the work".to_owned(),
                 depends_on: Vec::new(),
@@ -964,8 +1076,188 @@ mod tests {
     }
 
     #[test]
+    fn writer_limit_after_launch_never_tries_a_second_route() {
+        let mut writer = node("writer", route("first"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some("/private/tmp/writer".into());
+        writer.route = None;
+        writer.routes = Some(vec![route("first"), route("second")]);
+        let document = graph(vec![writer]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::UsageLimited),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), 1, "a launched writer cannot be retried");
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    }
+
+    fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, expected: bool) {
+        let mut task = node("node", route("first"));
+        task.access = access;
+        task.worktree = (access == AccessMode::WorktreeWrite).then(|| "/private/tmp/writer".into());
+        task.route = None;
+        task.routes = Some(vec![route("first"), route("second")]);
+        let document = graph(vec![task]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                AttemptObservation::Terminal {
+                    attempt_ref: Some("host/attempt".into()),
+                    outcome,
+                    launched,
+                },
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), if expected { 2 } else { 1 });
+        assert!(
+            owner
+                .permissions
+                .iter()
+                .all(|(mode, worktree)| *mode == access
+                    && worktree.as_deref()
+                        == (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"))
+        );
+
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            if expected {
+                NodeState::Succeeded
+            } else {
+                NodeState::Failed
+            }
+        );
+        assert_eq!(
+            run.checkpoint.nodes[0].worktree.as_deref(),
+            (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer")
+        );
+        // Reopening the checkpoint must make the same safety decision.
+        assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
+    }
+
+    #[test]
+    fn writer_preflight_admission_refusal_can_fall_back() {
+        check_fallback(
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::UsageLimited,
+            true,
+        );
+    }
+
+    #[test]
+    fn writer_auth_refusal_before_launch_can_fall_back() {
+        check_fallback(
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::AuthRequired,
+            true,
+        );
+    }
+
+    #[test]
+    fn writer_unavailable_adapter_before_launch_can_fall_back() {
+        check_fallback(
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::AdapterUnavailable,
+            true,
+        );
+    }
+
+    #[test]
+    fn reader_limits_after_launch_can_fall_back() {
+        check_fallback(
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::UsageLimited,
+            true,
+        );
+    }
+
+    #[test]
+    fn reader_auth_and_adapter_failures_after_launch_can_fall_back() {
+        for outcome in [
+            AttemptOutcome::AuthRequired,
+            AttemptOutcome::AdapterUnavailable,
+        ] {
+            check_fallback(AccessMode::ReadOnly, true, outcome, true);
+        }
+    }
+
+    #[test]
+    fn writer_auth_and_adapter_failures_after_launch_do_not_fall_back() {
+        for outcome in [
+            AttemptOutcome::AuthRequired,
+            AttemptOutcome::AdapterUnavailable,
+        ] {
+            check_fallback(AccessMode::WorktreeWrite, true, outcome, false);
+        }
+    }
+
+    #[test]
+    fn missing_checkpoint_launch_evidence_cannot_authorise_writer_fallback() {
+        let mut task = node("writer", route("first"));
+        task.access = AccessMode::WorktreeWrite;
+        task.worktree = Some("/private/tmp/writer".into());
+        task.route = None;
+        task.routes = Some(vec![route("first"), route("second")]);
+        let document = graph(vec![task]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::UsageLimited)]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut value = serde_json::to_value(&run.checkpoint).unwrap();
+        value["nodes"][0]["attempts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("launched");
+        journal.0 = Some(serde_json::from_value(value).unwrap());
+        assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
+        assert_eq!(owner.calls.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
+        let document = graph(vec![node("node", route("route"))]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                AttemptObservation::Pending {
+                    attempt_ref: Some("host/attempt".into()),
+                },
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let pending = advance(&document, &mut owner, &mut journal).unwrap();
+        journal.0.as_mut().unwrap().cancelled = true;
+        let stopped = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(stopped.status, GraphStatus::Cancelled);
+        assert_eq!(owner.calls.len(), 1);
+        let completed = resume(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(completed.status, GraphStatus::Complete);
+        assert_eq!(owner.calls[0].0, owner.calls[1].0);
+        assert_eq!(
+            pending.checkpoint.nodes[0].attempts[0].key,
+            completed.checkpoint.nodes[0].attempts[0].key
+        );
+    }
+
+    #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            access: AccessMode::ReadOnly,
+            worktree: None,
             id: "node".to_owned(),
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
@@ -1029,6 +1321,8 @@ mod file_tests {
             _: &AttemptKey,
             _: &str,
             _: &GraphRoute,
+            access: AccessMode,
+            worktree: Option<&str>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(AttemptObservation::Pending {
                 attempt_ref: Some("fixture-attempt".into()),
@@ -1050,7 +1344,7 @@ mod file_tests {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-        let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"reopen","nodes":[{"id":"one","prompt":"test","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+        let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"reopen","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
         let checkpoint = {
             let mut journal =
                 FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)

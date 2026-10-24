@@ -25,6 +25,7 @@ pub enum ToolCall {
     Run(RunInput),
     Output(OutputInput),
     Hosts(HostsInput),
+    Graph(GraphInput),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -133,6 +134,9 @@ impl ToolCall {
                         | LandingInput::Renew { .. }
                         | LandingInput::Release { .. }
                 )
+                | Self::Graph(
+                    GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
+                )
                 | Self::Submit(_)
                 | Self::Run(RunInput::Cancel { .. } | RunInput::Resume { .. })
         )
@@ -173,6 +177,7 @@ impl ToolCall {
             "fabric_run" => parse!(RunInput, Run),
             "fabric_output" => parse!(OutputInput, Output),
             "fabric_hosts" => parse!(HostsInput, Hosts),
+            "fabric_graph" => parse!(GraphInput, Graph),
             _ => Err(InvalidInput::UnknownTool),
         }
     }
@@ -197,6 +202,7 @@ impl ToolCall {
             Self::Run(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
             Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Graph(input) => input.validate_input(WaitTransport::Mcp),
         }
         .map_err(ServiceError::Invalid)?;
         if let Some(limits) = &service.limits {
@@ -315,6 +321,7 @@ impl ToolCall {
             Self::Run(input) => call!(facade, run, input, "fabric_run"),
             Self::Output(input) => call!(facade, output, input, "fabric_output"),
             Self::Hosts(input) => call!(facade, hosts, input, "fabric_hosts"),
+            Self::Graph(input) => call!(facade, graph, input, "fabric_graph"),
         };
         service.limit_response(result, mutation, output)
     }

@@ -111,7 +111,7 @@ requires caller edits in the same replacement lane, not an alias layer.
 | Local/remote fetch | Keep | Explicit verified copy of an allowlisted run artefact set | No whole-directory copy |
 | Single dispatch and batch | Merge | One submission containing a task list; run owns submission and admission limits | Scalar dispatch form removed |
 | Routing pools, councils, rotation and fallbacks in TS | Merge | `routing` resolves typed selections once; Fabric forwards the result | No Fabric-specific precedence |
-| Provider catalogue and cooldown reset | Cut from Fabric | `provenant route list --adapter <id>` replaces live-ID discovery; routing/quota own administration | `fabric_adapters` removed |
+| Provider catalogue and cooldown reset | Cut from Fabric | `provenant route list --adapter <id>` replaces live-ID discovery; routing/quota own administration | `provenant route list` removed |
 | Dispatch route and authority validation | Merge | `run`, `routing` and `confinement` own it; Fabric validates envelope and project only | Strict typed inputs |
 | Native-seat provider bans | Cut | No family inferred from a seat; shared run policy controls permitted dispatch | Same-provider dispatch possible |
 | Named sessions | Cut | Only 2 sessions / 13 events ever recorded; native continuation stays in `resume` | Remove session table/tool/flags and F4 |
@@ -195,7 +195,7 @@ persists its starting key before reporting that missing dispatch binding; graph
 status can read the checkpoint. Aliases retain the facade's named-role
 preference rather than fabricating an explicit model.
 
-CLI `fabric host list`, hidden `fabric peer`, `fabric graph tick/status`, and
+CLI `fabric host list`, hidden `fabric peer`, `fabric graph run/status/cancel/resume`, and
 `fabric landing push/reconcile` bind in `src/`. CLI and MCP event reads lazily
 pull bounded run-event pages into the home store. `unknown_hosts` reports
 coverage gaps and `run_events_pending` reports another available page. Polling
@@ -430,23 +430,42 @@ no scalar/list union. A single task is a one-item list. Resume is a separate
 `ResumeRequest { target: AttemptRef, prompt, expected_generation }`; it cannot
 change route, account or authority.
 
-Expose 10 tools instead of today's 20. Each tool's tagged input enum rejects
+Expose 11 tools instead of today's 20. Each tool's tagged input enum rejects
 unknown fields; generate its checked JSON schema from an explicit shared field
 catalogue without another schema crate. Snapshot/schema tests bind the catalogue
 to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion.
 
-| Tool | Typed operations | Replaces |
-|---|---|---|
-| `fabric_identity` | inspect | whoami |
-| `fabric_mail` | send, read, mark-read | send, inbox, acknowledge |
-| `fabric_task` | create, list, claim, update, finish, release | task |
-| `fabric_events` | read, note | events, note, activity |
-| `fabric_claim` | acquire, renew, verify, release, list | work_claim |
-| `fabric_landing` | acquire, renew, verify, release, wait | landing_lease; no push tool |
-| `fabric_submit` | submission | dispatch, including batch |
-| `fabric_run` | list, status, wait, cancel, resume | runs, status, cancel |
-| `fabric_output` | read, fetch | output, fetch |
-| `fabric_hosts` | list | hosts |
+All inputs use `op` to select one typed operation.
+
+| Tool | Operations |
+|---|---|
+| `fabric_identity` | inspect |
+| `fabric_mail` | send, read, mark_read |
+| `fabric_task` | create, list, claim, update, finish, release |
+| `fabric_events` | read, note |
+| `fabric_claim` | acquire, renew, verify, release, list |
+| `fabric_landing` | acquire, renew, verify, release, wait |
+| `fabric_submit` | submission |
+| `fabric_run` | list, status, wait, cancel, resume |
+| `fabric_graph` | run, status, cancel, resume |
+| `fabric_output` | read, fetch |
+| `fabric_hosts` | list |
+
+For `fabric_graph`, `run` and `resume` take a project-local graph document path;
+`status` and `cancel` take its `id`. The document declares each node's `access`
+as `read_only` or `worktree_write`; a writer also names its absolute `worktree`.
+The run owner must enforce those permissions before launching a provider.
+A graph attempt may use its next route after an auth refusal, usage limit or
+unavailable adapter when no provider launched. After launch, only read-only
+nodes may fall back. A failed writer retains its worktree in the checkpoint for
+the chair. Missing launch evidence counts as launched. Graph attempts use
+`limits.graph_timeout_ms` from the Fabric configuration.
+
+Cancellation persists the admission fence before asking the run owner to cancel
+accepted attempts. An unavailable owner returns its typed error; the fence still
+prevents new graph work. Resume checks the same document digest and reuses each
+attempt key. Until the dispatch/control owner is bound, execution returns
+`owner_unavailable`; graph status and the admission fence remain available.
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
 exact route if known, and next cursor/artefact references. Do not repeat result
@@ -454,7 +473,8 @@ tails in every status call. Output bytes are UTF-8 text when valid; otherwise an
 explicit byte-array encoding, never lossy text. Fetch copies only run-exported
 regular files, refuses symlinks/traversal and enforces total byte/file caps. It
 verifies a manifest digest before atomic publication below `fetch/<host>/<run>/`.
-No tool accepts an arbitrary source or destination filesystem path.
+Output tools accept no arbitrary source or destination filesystem path. Graph
+document paths resolve within the authenticated working directory.
 
 CLI `lanes --wait` uses `WaitCondition { Any, All }`: Any returns on a
 terminal target; All returns when all selected targets are terminal; either
@@ -1026,9 +1046,8 @@ elapsed time. Installation and merging follow the repository workflow.
 
 Caller closure is part of F9/F10: edit skills and hook helpers to the new APIs,
 replace front-door help/routes, installer registrations, CI npm/gate invocations,
-MCP runbook and Fabric/hosts docs. Replace the `fabric_adapters` live-model
-callers with the routing-owned `provenant route list --adapter <id>`
-command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
+MCP runbook and Fabric/hosts docs. Live-model callers use the routing-owned
+`provenant route list --adapter <id>` command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
 `tests/test_runtime_architecture.py`, `tests/test_stale.py`, schema/layering tests,
 `tests/conftest.py` and mixed dispatch/provider/host identity tests lose only
 Fabric assertions whose callers disappear; their other owners retain them.

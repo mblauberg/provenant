@@ -41,12 +41,19 @@ pub enum Host {
 }
 #[derive(Debug, Subcommand)]
 pub enum Graph {
-    Tick {
+    Run {
         #[arg(long)]
         document: PathBuf,
     },
     Status {
         id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Resume {
+        #[arg(long)]
+        document: PathBuf,
     },
 }
 
@@ -311,17 +318,22 @@ pub struct LandingFence {
     reference: String,
     #[arg(long)]
     id: ClaimId,
-    #[command(flatten)]
-    fence: Fence,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    generation: u64,
 }
 impl LandingFence {
-    pub fn proof(self) -> LandingProof {
-        LandingProof {
+    /// The fence secret never enters argv or clap's diagnostics.
+    pub fn proof(self) -> Result<LandingProof, EdgeError> {
+        let token = std::env::var("PROVENANT_LANDING_TOKEN")
+            .ok()
+            .and_then(|value| value.parse::<Token>().ok())
+            .ok_or(EdgeError::Invalid)?;
+        Ok(LandingProof {
             reference: self.reference,
             id: self.id,
-            generation: self.fence.generation,
-            token: self.fence.token.0,
-        }
+            generation: self.generation,
+            token: token.0,
+        })
     }
 }
 #[derive(Debug, Subcommand)]
@@ -421,7 +433,9 @@ impl Fabric {
             Self::Identity => return "fabric identity".into(),
             Self::Host(_) => return "fabric host list".into(),
             Self::Peer => return "fabric peer".into(),
-            Self::Graph(Graph::Tick { .. }) => return "fabric graph tick".into(),
+            Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
+            Self::Graph(Graph::Cancel { .. }) => return "fabric graph cancel".into(),
+            Self::Graph(Graph::Resume { .. }) => return "fabric graph resume".into(),
             Self::Graph(Graph::Status { .. }) => return "fabric graph status".into(),
             Self::Mail(v) => (
                 "mail",
@@ -737,21 +751,21 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Landing(LandingInput::Renew {
-                proof: fence.proof(),
+                proof: fence.proof()?,
                 lease_ms: ctx.lease(lease)?,
             }),
             operation,
         )?,
         Fabric::Landing(Landing::Verify(fence)) => json(service.landing(
             LandingInput::Verify {
-                proof: fence.proof(),
+                proof: fence.proof()?,
             },
             budget,
             &cancel,
         )?)?,
         Fabric::Landing(Landing::Release { fence, operation }) => mutate(
             Mutation::Landing(LandingInput::Release {
-                proof: fence.proof(),
+                proof: fence.proof()?,
             }),
             operation,
         )?,
