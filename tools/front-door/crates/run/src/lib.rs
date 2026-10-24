@@ -1,9 +1,18 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+mod admission;
 mod artifacts;
 mod db;
+mod holder;
+mod launch;
 mod reader;
 mod store;
+
+pub use admission::{
+    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
+};
+pub use holder::{HolderContext, RootSeed, RunHolder};
+pub use launch::{Decoded, PreparedLaunch, Providers, Started};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
@@ -37,6 +46,8 @@ pub enum RunError {
     TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
+    #[error("host queue is full")]
+    Capacity,
     #[error("run store is contended or its call budget expired")]
     Contention,
     #[error("run-store call was cancelled")]
@@ -58,5 +69,7 @@ pub enum RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 
+#[cfg(test)]
+mod dispatch_tests;
 #[cfg(test)]
 mod tests;

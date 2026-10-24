@@ -195,6 +195,8 @@ impl RunStore {
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
                 return Ok(());
             }
+            let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
+            if queued + input.request.tasks.len() as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
             tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
             for task in &input.request.tasks {
@@ -207,6 +209,7 @@ impl RunStore {
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,1,1,0,?5)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
+                self.queue_ticket(tx, &attempt, input.request.concurrency)?;
             }
             Ok(())
         })?;
@@ -270,22 +273,90 @@ impl RunStore {
         if exit.scope.run != old.run_id
             || exit.scope.attempt != id
             || exit.scope.generation != old.generation
-            || !exit.terminal_observed
             || exit.unresolved_cleanup
         {
             return Err(RunError::Validation(
                 "exit/cleanup evidence is unresolved or out of scope",
             ));
         }
+        if publication.outcome == Outcome::Succeeded
+            && (outcome_exit != Some(0) || exit.never_spawned)
+        {
+            return Err(RunError::Validation("success lacks verified provider exit"));
+        }
+        self.commit_terminal(
+            old,
+            expected_revision,
+            publication,
+            Some(durable_exit),
+            outcome_exit,
+            call,
+        )
+    }
+    /// Refuse an attempt that never reached supervisor custody, such as one
+    /// whose provider command could not be prepared. Its record carries no
+    /// exit evidence, no start time and an empty sealed result.
+    pub fn refuse(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        finished_at: WallTime,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let old = self.record(id, call)?;
+        let dir = self.run_dir(old.run_id, false)?;
+        let _writer = dir.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        let old = self.record(id, call)?;
+        if let AttemptState::Terminal { .. } = old.state {
+            return Ok(old);
+        }
+        if old.state != AttemptState::Queued {
+            return Err(RunError::Conflict);
+        }
+        let revision = old.revision;
+        let publication = TerminalPublication {
+            outcome: Outcome::Rejected,
+            finished_at,
+            started_at: None,
+            provider_ms: None,
+            reason: Some(reason.chars().take(256).collect()),
+            result: "",
+            complete: true,
+            redacted: false,
+            resolved_route: None,
+            applied_route: None,
+            observed_route: None,
+            usage: UsageRecord::default(),
+        };
+        self.attempt_dir(old.run_id, id, true)?;
+        self.commit_terminal(old, revision, &publication, None, None, call)
+    }
+    /// Seal terminal intent and result, then commit the attempt, run summary,
+    /// operation state, released admission and event together. The caller
+    /// holds the run's publication lock.
+    fn commit_terminal(
+        &self,
+        old: AttemptRecord,
+        expected_revision: u64,
+        publication: &TerminalPublication<'_>,
+        durable_exit: Option<ArtifactRecord>,
+        outcome_exit: Option<i64>,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let id = old.attempt_id;
         if publication.result.len() as u64 > RESULT_LIMIT {
             return Err(RunError::TooLarge {
                 limit: RESULT_LIMIT,
             });
         }
         if publication.outcome == Outcome::Succeeded
-            && (outcome_exit != Some(0)
-                || exit.never_spawned
-                || !publication.complete
+            && (!publication.complete
                 || publication.result.is_empty()
                 || !super::reader::verified_route(
                     publication.resolved_route.as_ref(),
@@ -294,7 +365,7 @@ impl RunStore {
                 ))
         {
             return Err(RunError::Validation(
-                "success lacks complete result or verified provider exit/identity",
+                "success lacks complete result or verified provider identity",
             ));
         }
         let mut next = old.clone();
@@ -319,7 +390,7 @@ impl RunStore {
             reason: publication.reason.clone(),
         };
         next.publication_error = None;
-        next.exit_evidence = Some(durable_exit);
+        next.exit_evidence = durable_exit;
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
                 return Ok(old);
@@ -484,7 +555,7 @@ fn sealed_exit(
     if stored.scope != exit.scope
         || stored.termination != exit.termination
         || stored.never_spawned != exit.never_spawned
-        || !stored.terminal_observed
+        || stored.terminal_observed != exit.terminal_observed
         || stored.unresolved_cleanup
         || stored.settlement_evidence != exit.settlement_evidence
     {

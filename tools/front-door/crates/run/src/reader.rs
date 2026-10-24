@@ -359,15 +359,19 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             .result
             .as_ref()
             .ok_or(RunError::Validation("terminal result missing"))?;
-        let evidence = r
-            .exit_evidence
-            .as_ref()
-            .ok_or(RunError::Validation("terminal exit evidence missing"))?;
-        if evidence.path != artifact_path(r.attempt_id, "process-exit.json")?
-            || evidence.bytes > RECORD_LIMIT
-            || !evidence.complete
-        {
-            return Err(RunError::Validation("terminal exit artifact"));
+        // Only a refusal before supervisor custody lacks exit evidence.
+        match &r.exit_evidence {
+            Some(evidence)
+                if evidence.path != artifact_path(r.attempt_id, "process-exit.json")?
+                    || evidence.bytes > RECORD_LIMIT
+                    || !evidence.complete =>
+            {
+                return Err(RunError::Validation("terminal exit artifact"));
+            }
+            Some(_) => {}
+            None if outcome == Outcome::Rejected && r.started_at.is_none() && r.generation == 0 => {
+            }
+            None => return Err(RunError::Validation("terminal exit evidence missing")),
         }
         if finished_at < r.queued_at
             || r.started_at

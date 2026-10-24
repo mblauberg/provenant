@@ -1035,7 +1035,12 @@ impl Driver<'_> {
                 .open_verified_directory(OsStr::new("quarantine"))
                 .map_err(CustodyError::from)
                 .and_then(|quarantine| {
-                    verify_release(self.reservation.scope, &self.attempt, &self.attempt, &quarantine)
+                    verify_release(
+                        self.reservation.scope,
+                        &self.attempt,
+                        &self.attempt,
+                        &quarantine,
+                    )
                 });
             if verified.is_ok() {
                 let _ = clear_reservation(&self.writer_dir, self.reservation.scope);

@@ -11,7 +11,9 @@ use provenant_supervisor::{
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-fn context(base: &Path) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
+pub(super) fn context(
+    base: &Path,
+) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
     let base = std::fs::canonicalize(base)?;
     std::fs::create_dir_all(base.join("home"))?;
     std::fs::create_dir_all(base.join("checkout"))?;
@@ -24,20 +26,20 @@ fn context(base: &Path) -> std::result::Result<ExecutionContext, Box<dyn std::er
         read_prompts: true,
     })
 }
-fn clock() -> TestClock {
+pub(super) fn clock() -> TestClock {
     TestClock::new(
         WallTime::from_micros(100).unwrap(),
         MonoTime::from_micros(0),
     )
 }
-fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
+pub(super) fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
     Request {
         clock,
         budget: WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
         cancel,
     }
 }
-fn input() -> PreparedRun {
+pub(super) fn input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
         run_id: RunId::from_bytes([4; 16]),
@@ -68,7 +70,7 @@ fn input() -> PreparedRun {
         }],
     }
 }
-fn route() -> RouteRecord {
+pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),
         model: Some("fixture/model".into()),
@@ -92,7 +94,7 @@ fn publication() -> TerminalPublication<'static> {
         usage: UsageRecord::default(),
     }
 }
-fn exit() -> ExitObservation {
+pub(super) fn exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
@@ -128,7 +130,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let input = input();
     let id = input.attempts[0].attempt_id;
     let run = store.create(&input, &call)?;
-    insert_admission_fixture(&store, &input)?;
+    assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
     assert_eq!(run.closure, Closure::Open);
     assert!(matches!(
@@ -362,7 +364,7 @@ fn publication_crash_worker() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    insert_admission_fixture(&store, &input)?;
+    assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
@@ -520,7 +522,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
     let input = input();
     let id = input.attempts[0].attempt_id;
     store.create(&input, &call)?;
-    insert_admission_fixture(&store, &input)?;
+    assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
     let pages: i64 = store
         .db
@@ -577,34 +579,6 @@ fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
         &serde_json::to_vec(&value)?,
         RECORD_LIMIT,
     )?;
-    Ok(())
-}
-
-fn insert_admission_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
-    let ticket = AdmissionTicket {
-        schema_version: 1,
-        operation_id: input.operation_id.clone(),
-        attempt_id: input.attempts[0].attempt_id,
-        project_id: store.context.project_id,
-        sequence: 1,
-        generation: 0,
-        holder: Some(store.context.actor_id),
-        active: true,
-        memory_floor_bytes: 1,
-        disk_floor_bytes: 500 * 1024 * 1024,
-        startup_spacing_ms: 20000,
-        quota_permit: None,
-        admission_deadline: WallTime::from_micros(1000000)?,
-    };
-    store.db.execute(
-        "INSERT OR IGNORE INTO admission VALUES (?1,?2,1,?3)",
-        rusqlite::params![
-            ticket.attempt_id.to_string(),
-            ticket.project_id.to_string(),
-            crate::db::bytes(&ticket)?
-        ],
-    )?;
-    assert_eq!(admission_count(store)?, 1);
     Ok(())
 }
 

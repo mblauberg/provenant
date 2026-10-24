@@ -1149,14 +1149,14 @@ struct ReleaseReceipt {
     terminal_digest: provenant_records::FileDigest,
     quarantine_digest: provenant_records::FileDigest,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementArtifact {
     schema_version: u64,
     scope: Scope,
     kind: SettlementKind,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SettlementKind {
     CanonicalTerminal,
@@ -1207,8 +1207,8 @@ pub(crate) fn verify_release(
     ] {
         let mut file = directory.open_read(OsStr::new(name))?;
         let bytes = file.read_bounded(RECORD_LIMIT)?;
-        let artifact: SettlementArtifact = decode_v1(bytes.as_slice(), Limits::CONFIG)
-            .map_err(|_| CustodyError::InvalidRecord)?;
+        let artifact: SettlementArtifact =
+            decode_v1(bytes.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
         if artifact.schema_version != 1
             || artifact.scope != scope
             || expected_terminal != matches!(artifact.kind, SettlementKind::CanonicalTerminal)
@@ -1224,6 +1224,52 @@ pub(crate) fn verify_release(
     Ok(())
 }
 /// Clear a verified, proven-absent fence while the writer lease is held.
+/// Publish Run's release attestations for one committed terminal attempt:
+/// `terminal-commit.json`, `quarantine/manifest.json`, then `release.json`
+/// naming both digests. Repeating it with the same scope is idempotent;
+/// conflicting bytes are never replaced.
+pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
+    fn seal(dir: &Directory, name: &str, bytes: &[u8]) -> Result<()> {
+        match dir.atomic_write(OsStr::new(name), ".release-", bytes, PublishMode::NoReplace) {
+            Ok(publication) => require_durable(publication),
+            Err(error) if error.is_exists() => {
+                if dir.read_bounded(OsStr::new(name), RECORD_LIMIT)? != bytes {
+                    return Err(CustodyError::InvalidRecord);
+                }
+                Ok(dir.sync()?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {
+        serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)
+    }
+    let terminal = encode(&SettlementArtifact {
+        schema_version: 1,
+        scope,
+        kind: SettlementKind::CanonicalTerminal,
+    })?;
+    let manifest = encode(&SettlementArtifact {
+        schema_version: 1,
+        scope,
+        kind: SettlementKind::QuarantineManifest,
+    })?;
+    match attempt.mkdir(OsStr::new("quarantine"), 0o700) {
+        Ok(()) => attempt.sync()?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+    seal(attempt, "terminal-commit.json", &terminal)?;
+    seal(&quarantine, "manifest.json", &manifest)?;
+    let release = encode(&ReleaseReceipt {
+        schema_version: 1,
+        scope,
+        terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
+        quarantine_digest: provenant_records::CanonicalV1::file_digest(&manifest),
+    })?;
+    seal(attempt, "release.json", &release)
+}
 pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<()> {
     require_durable(write_record(
         directory,

@@ -19,8 +19,12 @@ CREATE TRIGGER immutable_terminal_update BEFORE UPDATE ON attempts WHEN OLD.term
 CREATE TRIGGER immutable_terminal_delete BEFORE DELETE ON attempts WHEN OLD.terminal=1
  BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
 CREATE TABLE admission (
- attempt TEXT PRIMARY KEY REFERENCES attempts(id), project TEXT NOT NULL,
+ attempt TEXT PRIMARY KEY REFERENCES attempts(id), project TEXT NOT NULL, run TEXT NOT NULL,
  active INTEGER NOT NULL CHECK(active IN (0,1)), record BLOB NOT NULL CHECK(length(record)<=1048576)
+) STRICT;
+CREATE INDEX admission_counts ON admission(active,project,run);
+CREATE TABLE spacing (
+ id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,

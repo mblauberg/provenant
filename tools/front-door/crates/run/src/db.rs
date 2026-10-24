@@ -62,6 +62,7 @@ pub struct RunStore {
     pub(crate) db: Connection,
     pub(crate) root: Directory,
     pub(crate) context: ExecutionContext,
+    pub(crate) policy: crate::admission::AdmissionPolicy,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -119,6 +120,7 @@ impl RunStore {
             db,
             root,
             context: context.clone(),
+            policy: Default::default(),
             _owner: PhantomData,
         };
         store.write(request, |tx| {
