@@ -153,7 +153,12 @@ pub struct GuardianHooks<'a> {
 /// attempt directory before returning. Supervisor then verifies those exact
 /// scoped bytes and clears the fence; any failure leaves the fence for
 /// recovery. Supervisor never interprets the context or the terminal outcome.
+///
+/// `admit` runs first, after custody is accepted and before the provider
+/// spawns, so a queued attempt waits for host admission inside its own
+/// guardian. An error publishes a never-spawned exit and still calls `terminal`.
 pub trait Holder {
+    fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     fn terminal(&self, context: &[u8], attempt: &Directory, exit: &ExitObservation) -> Result<()>;
 }
 /// Final reservation and immutable exit publication share one storage seam.
@@ -449,6 +454,11 @@ impl Driver<'_> {
                 *omitted = omitted.saturating_add(1);
             }
         };
+        if let Some(holder) = self.holder
+            && holder.admit(&self.holder_context, &self.attempt).is_err()
+        {
+            return self.never_spawned("admission refused");
+        }
         let started = Instant::now();
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
@@ -480,48 +490,11 @@ impl Driver<'_> {
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(error) => {
-                self.reservation.launch_state = LaunchState::NeverSpawned;
-                self.reservation.unresolved_cleanup = false;
-                self.reservation.census_incomplete = false;
-                self.reservation.descendants.clear();
-                self.reservation.omitted_descendants = 0;
-                require_durable(write_record(
-                    &self.writer_dir,
-                    "reservation.json",
-                    &self.reservation,
-                    PublishMode::Replace,
-                )?)?;
-                let record = ProcessExit {
-                    schema_version: 1,
-                    scope: self.reservation.scope,
-                    termination: None,
-                    never_spawned: true,
-                    stop_reason: None,
-                    delivered_signals: vec![],
-                    reaped: vec![],
-                    omitted_reaped: 0,
-                    spared: vec![],
-                    omitted_spared: 0,
-                    failed_deliveries: vec![],
-                    omitted_failed_deliveries: 0,
-                    terminal_observed: false,
-                    unresolved_cleanup: false,
-                    settlement_evidence: SettlementEvidence::NeverSpawned,
-                    stdout: CaptureTotals::default(),
-                    stderr: CaptureTotals::default(),
-                    warnings: vec![
-                        if error.kind() == io::ErrorKind::InvalidData {
-                            "provider executable snapshot changed"
-                        } else {
-                            "provider spawn failed"
-                        }
-                        .into(),
-                    ],
-                    omitted_warnings: 0,
-                };
-                self.publish_until_durable(&record)?;
-                self.release(&record);
-                return Ok(());
+                return self.never_spawned(if error.kind() == io::ErrorKind::InvalidData {
+                    "provider executable snapshot changed"
+                } else {
+                    "provider spawn failed"
+                });
             }
         };
         self.reservation.launch_state = LaunchState::Spawned;
@@ -1000,6 +973,43 @@ impl Driver<'_> {
     /// Hand the durable exit to the holder and clear the fence only after its
     /// release attestations verify. Failures keep the fence for `reconcile`;
     /// they never alter the published exit or become a stop reason.
+    fn never_spawned(&mut self, warning: &str) -> Result<()> {
+        self.reservation.launch_state = LaunchState::NeverSpawned;
+        self.reservation.unresolved_cleanup = false;
+        self.reservation.census_incomplete = false;
+        self.reservation.descendants.clear();
+        self.reservation.omitted_descendants = 0;
+        require_durable(write_record(
+            &self.writer_dir,
+            "reservation.json",
+            &self.reservation,
+            PublishMode::Replace,
+        )?)?;
+        let record = ProcessExit {
+            schema_version: 1,
+            scope: self.reservation.scope,
+            termination: None,
+            never_spawned: true,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            failed_deliveries: vec![],
+            omitted_failed_deliveries: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+            warnings: vec![warning.into()],
+            omitted_warnings: 0,
+        };
+        self.publish_until_durable(&record)?;
+        self.release(&record);
+        Ok(())
+    }
     fn release(&mut self, record: &ProcessExit) {
         let Some(holder) = self.holder else {
             return;
