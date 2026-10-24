@@ -15,14 +15,6 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Decode canonical lowercase hexadecimal, refusing odd lengths and other digits.
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
-    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return None;
-    }
-    pairs.iter().map(decode_hex_byte).collect()
-}
-
-pub(crate) fn decode_hex_byte(pair: &[u8; 2]) -> Option<u8> {
     fn nibble(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
@@ -30,5 +22,12 @@ pub(crate) fn decode_hex_byte(pair: &[u8; 2]) -> Option<u8> {
             _ => None,
         }
     }
-    Some(nibble(pair[0])? * 16 + nibble(pair[1])?)
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|[high, low]| Some(nibble(*high)? * 16 + nibble(*low)?))
+        .collect()
 }

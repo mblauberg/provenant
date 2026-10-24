@@ -26,9 +26,6 @@ impl RelativePath {
     pub fn as_path(&self) -> &Path {
         &self.0
     }
-    pub fn into_path_buf(self) -> PathBuf {
-        self.0
-    }
 }
 impl AsRef<Path> for RelativePath {
     fn as_ref(&self) -> &Path {

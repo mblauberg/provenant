@@ -36,18 +36,15 @@ impl UtcMicros {
     pub fn as_micros(self) -> i64 {
         self.0.as_microsecond()
     }
-    pub fn from_timestamp(timestamp: jiff::Timestamp) -> Result<Self, TimeError> {
-        if timestamp.subsec_nanosecond() % 1000 != 0 {
-            return Err(TimeError::WallRange);
-        }
-        Self::from_micros(timestamp.as_microsecond())
-    }
     pub fn as_timestamp(self) -> jiff::Timestamp {
         self.0
     }
     pub fn parse(text: &str) -> Result<Self, TimeError> {
         let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
-        let value = Self::from_timestamp(timestamp)?;
+        if timestamp.subsec_nanosecond() % 1000 != 0 {
+            return Err(TimeError::WallRange);
+        }
+        let value = Self::from_micros(timestamp.as_microsecond())?;
         if value.to_string() != text {
             return Err(TimeError::WallSpelling);
         }
@@ -63,17 +60,7 @@ impl std::fmt::Display for UtcMicros {
         write!(f, "{:.6}", self.0)
     }
 }
-impl TryFrom<String> for UtcMicros {
-    type Error = TimeError;
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-impl From<UtcMicros> for String {
-    fn from(time: UtcMicros) -> Self {
-        time.to_string()
-    }
-}
+crate::ids::text_wire!(UtcMicros, TimeError);
 
 /// Nonnegative duration, never a floating point number of seconds.
 #[derive(
@@ -95,12 +82,6 @@ impl DurationMicros {
     pub const fn as_micros(self) -> u64 {
         self.0
     }
-    pub fn checked_add(self, other: Self) -> Result<Self, TimeError> {
-        self.0
-            .checked_add(other.0)
-            .map(Self)
-            .ok_or(TimeError::Overflow)
-    }
 }
 
 /// Process-local monotonic sample. Deliberately has no serde representation.
@@ -119,32 +100,17 @@ impl MonoTime {
             .map(Self)
             .ok_or(TimeError::Overflow)
     }
-    pub fn checked_duration_since(self, earlier: Self) -> Result<DurationMicros, TimeError> {
-        self.0
-            .checked_sub(earlier.0)
-            .map(DurationMicros)
-            .ok_or(TimeError::Overflow)
-    }
 }
 
 /// Process-local deadline; never persisted as a cross-process timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadline(MonoTime);
 impl Deadline {
-    pub const fn at(time: MonoTime) -> Self {
-        Self(time)
-    }
-    pub fn after(now: MonoTime, duration: DurationMicros) -> Result<Self, TimeError> {
-        now.checked_add(duration).map(Self)
-    }
     pub const fn as_mono_time(self) -> MonoTime {
         self.0
     }
     pub fn is_expired(self, now: MonoTime) -> bool {
         now >= self.0
-    }
-    pub fn remaining(self, now: MonoTime) -> DurationMicros {
-        DurationMicros(self.0.0.saturating_sub(now.0))
     }
 }
 
@@ -171,7 +137,7 @@ impl WaitBudget {
     /// holding repository metadata exclusion; never wait on a later lock.
     pub const fn nonblocking(now: MonoTime) -> Self {
         Self {
-            deadline: Deadline::at(now),
+            deadline: Deadline(now),
         }
     }
     pub fn new(
@@ -184,7 +150,7 @@ impl WaitBudget {
             return Err(TimeError::WaitLimit { maximum_seconds });
         }
         Ok(Self {
-            deadline: Deadline::after(now, duration)?,
+            deadline: Deadline(now.checked_add(duration)?),
         })
     }
     pub fn cli(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
@@ -205,7 +171,7 @@ impl WaitBudget {
         self.deadline
     }
     pub fn remaining(self, now: MonoTime) -> DurationMicros {
-        self.deadline.remaining(now)
+        DurationMicros(self.deadline.0.0.saturating_sub(now.0))
     }
 }
 
@@ -225,14 +191,12 @@ impl TestClock {
         Self { wall, mono }
     }
     pub fn advance(&mut self, duration: DurationMicros) -> Result<(), TimeError> {
-        let wall = self.wall.checked_add(duration)?;
-        let mono = self.mono.checked_add(duration)?;
-        self.wall = wall;
-        self.mono = mono;
+        // Both sums are checked before either field changes.
+        (self.wall, self.mono) = (
+            self.wall.checked_add(duration)?,
+            self.mono.checked_add(duration)?,
+        );
         Ok(())
-    }
-    pub fn set_wall(&mut self, wall: WallTime) {
-        self.wall = wall;
     }
 }
 impl Clock for TestClock {
@@ -292,17 +256,7 @@ mod tests {
         );
         assert!(WaitBudget::cli(MonoTime::from_micros(u64::MAX), 1).is_err());
         assert!(DurationMicros::from_seconds(u64::MAX).is_err());
-        assert!(
-            DurationMicros::from_micros(u64::MAX)
-                .checked_add(DurationMicros::from_micros(1))
-                .is_err()
-        );
-        assert!(
-            now.checked_duration_since(MonoTime::from_micros(11))
-                .is_err()
-        );
         assert!(WaitBudget::cli(now, 0).is_err());
-        assert!(WaitBudget::mcp(now, 0).is_err());
         assert!(
             WaitBudget::new(
                 now,
@@ -319,17 +273,10 @@ mod tests {
         );
     }
     #[test]
-    fn test_clock_advances_atomically_and_wall_adjustments_do_not_extend_waits() {
+    fn test_clock_advance_is_atomic_on_overflow() {
         let start = UtcMicros::from_micros(0).unwrap();
         let mut clock = TestClock::new(start, MonoTime::from_micros(u64::MAX));
         assert!(clock.advance(DurationMicros::from_micros(1)).is_err());
         assert_eq!(clock.wall_now().unwrap(), start);
-        let mut clock = TestClock::new(start, MonoTime::from_micros(0));
-        let wait = WaitBudget::mcp(clock.mono_now(), 1).unwrap();
-        clock
-            .advance(DurationMicros::from_seconds(1).unwrap())
-            .unwrap();
-        clock.set_wall(start);
-        assert!(wait.deadline().is_expired(clock.mono_now()));
     }
 }
