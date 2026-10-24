@@ -99,7 +99,19 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
             .len(),
         3
     );
-    let project = rig.project.to_str().ok_or("fixture project")?;
+    let selected = rig.root.join("selected-project");
+    fs::create_dir_all(&selected)?;
+    let project = selected.to_str().ok_or("fixture project")?;
+    let initialized = rig.execute(
+        std::path::Path::new("/usr/bin/git"),
+        &["init", "-q", project],
+        None,
+    )?;
+    assert_eq!(code(&initialized), 0);
+    assert_ne!(
+        fs::canonicalize(&selected)?,
+        fs::canonicalize(&rig.project)?
+    );
     call(
         &rig,
         &[
