@@ -120,7 +120,10 @@ output. Clipped rows remain unseen. Federated cursors are host-qualified.
 Route inputs are exactly one `--model ADAPTER/ID` or `--route NAME`, plus
 optional `--effort VALUE`; providers detect accounts, routing filters eligibility
 and disclosure. There is no `--account` flag (0 of 1116 dispatches
-supplied one); each attempt records its resolved account label. Confidentiality is
+supplied one); each attempt records its resolved account label. A dispatch
+manifest or Fabric task may supply `account` as an override of routing
+resolution; it names a registered key, never a config path. Continuations keep
+that override, and lane rows expose the applied account. Confidentiality is
 always on. Workflow owns assurance
 inputs (intent, risk tier, reviewer and orchestrator family), rather than run
 flags. Drop `--context-ceiling`. No raw argv, unrestricted knobs, secret bypass

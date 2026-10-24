@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 mod contract;
 pub mod cursor;
+pub mod identity;
 mod lane;
 mod launch;
 pub use lane::LaneRuntime;

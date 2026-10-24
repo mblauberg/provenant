@@ -134,7 +134,8 @@ impl run::Providers for Registry<'_> {
             );
         }
         let roots = self.roots.ok_or("routing context is unavailable")?;
-        let resolved = crate::route::resolve(&route_request(task)?, roots)?;
+        let resolved =
+            crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
         let candidates = std::iter::once((resolved.adapter.as_str(), resolved.model.as_str()))
             .chain(
                 resolved
@@ -340,6 +341,7 @@ struct ManifestTask {
     #[serde(default)]
     fallback: Vec<String>,
     delivery_id: Option<DeliveryId>,
+    account: Option<String>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
@@ -476,6 +478,7 @@ pub struct Submitted {
     pub task_id: TaskId,
     pub prompt: String,
     pub route: run::RequestedRoute,
+    pub account: Option<String>,
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
@@ -532,6 +535,7 @@ pub fn submit(
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
             route: task.route,
+            account: task.account,
             fallback: fallback(&task.fallback)?,
             authority_digest: authority,
             provider_timeout_seconds: task.provider_timeout,
@@ -614,7 +618,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
         if manifest.schema_version != 1 || !(1..=64).contains(&manifest.tasks.len()) {
             return Err(Fail::new(
-                Status::Invalid,
+                Status::Refused,
                 "INVALID",
                 "manifest needs schema_version 1 and 1-64 tasks",
             ));
@@ -668,6 +672,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 )?,
                 fallback,
                 task.delivery_id,
+                task.account,
             ));
         }
     } else {
@@ -689,6 +694,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             )?,
             flag_route.3.clone(),
             command.delivery_id,
+            None,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -699,12 +705,13 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id)| Submitted {
+            |(task_id, prompt, route, fallback, delivery_id, account)| Submitted {
                 task_class: None,
                 task_id,
                 prompt,
                 route,
                 fallback,
+                account,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
             },
@@ -778,8 +785,7 @@ fn lane_dispatch_values(
                 "LANE_CONTEXT",
                 "lane depth environment value must be a non-negative integer",
             )
-        })?
-        .unwrap_or(0);
+        })?;
     let parent_attempt = parent_attempt
         .map(AttemptId::parse)
         .transpose()
@@ -790,6 +796,24 @@ fn lane_dispatch_values(
                 "parent attempt environment value is invalid",
             )
         })?;
+    let parent_depth = match (parent_depth, parent_attempt) {
+        (None, None) => 0,
+        (Some(depth), Some(_)) if depth >= 1 => depth,
+        (Some(_), Some(_)) => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "nested lane context requires a depth of at least 1",
+            ));
+        }
+        _ => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane depth and parent attempt must be supplied together",
+            ));
+        }
+    };
     let lane_depth = run::next_lane_depth(parent_depth, max_depth)?;
     Ok((lane_depth, parent_attempt))
 }
@@ -926,8 +950,13 @@ fn render_lanes(
                 .result
                 .as_ref()
                 .map(|_| artifact(edge, lane, "result.md"));
+            let account = lane
+                .applied_route
+                .as_ref()
+                .and_then(|r| r.account_label.as_deref())
+                .unwrap_or("unknown");
             human.push_str(&format!(
-                "{}/{}/{} {state} {route}{}\n",
+                "{}/{}/{} {state} {route} account={account}{}\n",
                 lane.run_id,
                 lane.task_id,
                 lane.attempt_id,
@@ -946,6 +975,7 @@ fn render_lanes(
                 "reason": reason,
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
+                "account": account,
                 "observed_route": lane.observed_route,
                 "queued_at": lane.queued_at,
                 "started_at": lane.started_at,
@@ -1473,7 +1503,27 @@ mod lane_depth_tests {
     fn shared_submit_context_assigns_root_depth_and_parent() {
         let parent = AttemptId::from_bytes([8; 16]);
         let parent_text = parent.to_string();
-        let result = lane_dispatch_values(None, Some(&parent_text), 2);
-        assert!(matches!(result, Ok((1, Some(found))) if found == parent));
+        let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2);
+        assert!(matches!(result, Ok((2, Some(found))) if found == parent));
+    }
+
+    #[test]
+    fn shared_submit_context_refuses_incomplete_or_zero_nested_context() {
+        let parent = AttemptId::from_bytes([9; 16]).to_string();
+        for (depth, parent_attempt) in [
+            (Some("1"), None),
+            (None, Some(parent.as_str())),
+            (Some("0"), Some(parent.as_str())),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 2)
+                .expect_err("incomplete or zero nested context must be refused");
+            assert_eq!(failure.status, Status::Refused);
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_without_parent() {
+        assert!(matches!(lane_dispatch_values(None, None, 2), Ok((1, None))));
     }
 }

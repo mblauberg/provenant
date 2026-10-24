@@ -138,9 +138,12 @@ fn with_context<T>(
 pub(crate) fn resolve(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
+    account: Option<&str>,
 ) -> Result<provenant_records::ResolvedRoute, String> {
     with_context(roots, |context| {
-        Ok(provenant_routing::resolve(request, context)?)
+        Ok(provenant_routing::resolve_for_account(
+            request, context, account,
+        )?)
     })
     .map_err(|error| error.to_string())
 }

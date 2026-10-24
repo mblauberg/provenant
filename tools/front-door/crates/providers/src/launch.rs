@@ -69,6 +69,8 @@ pub struct PrepareInput<'a> {
     /// The user's login name.
     pub user: &'a OsStr,
     /// Claude's login token, read by the host outside the sandbox.
+    /// Selected registered identity. Absent preserves the default login source.
+    pub account: Option<&'a crate::identity::RegisteredAccount>,
     pub token: Option<&'a crate::claude::OauthToken>,
     /// Working directory: the worktree for writers, a read root otherwise.
     pub cwd: &'a Path,
@@ -167,6 +169,11 @@ pub(crate) fn admit(
 ) -> Result<(Access, Session), ProviderError> {
     if input.route.adapter != adapter {
         return Err(ProviderError::IdentityMismatch);
+    }
+    if let Some(account) = input.account {
+        account.validate_route(input.route)?;
+    } else if matches!(adapter, "claude" | "codex") && input.route.account_key.is_some() {
+        return Err(ProviderError::UnknownIdentity);
     }
     if let Some(continuation) = input.continuation {
         continuation.validate(input.route, input.grant_digest)?;

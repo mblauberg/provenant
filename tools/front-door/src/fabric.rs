@@ -1111,6 +1111,7 @@ impl RunOwner for BinaryRunOwner<'_> {
                 task_class: route.task_class.clone(),
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
+                account: task.account,
                 route: requested(model.as_deref(), name, route.effort.clone())
                     .map_err(fail_error)?,
                 fallback: Vec::new(),
@@ -1452,6 +1453,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let input = SubmitInput::Submission {
             operation_id,
             tasks: vec![SubmittedTask {
+                account: None,
                 access,
                 worktree: worktree.map(str::to_owned),
                 prompt: prompt.into(),

@@ -200,7 +200,7 @@ impl RunStore {
             operation_id: input.operation_id.clone(),
             request_digest: digest,
             task_ids: input.request.tasks.iter().map(|t| t.task_id).collect(),
-            parent: input.request.parent_attempt.or(input.request.parent),
+            parent: input.request.parent.or(input.request.parent_attempt),
             children: vec![],
             revision: 1,
             generation: 0,
@@ -580,6 +580,16 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     let mut attempts = std::collections::BTreeSet::new();
     let mut prompt_bytes = 0u64;
     for task in &input.request.tasks {
+        if task.account.as_ref().is_some_and(|s| {
+            s == "unknown"
+                || s.is_empty()
+                || s.len() > 64
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        }) {
+            return Err(RunError::Validation("account override"));
+        }
         if !tasks.insert(task.task_id) {
             return Err(RunError::Validation("duplicate task"));
         }
