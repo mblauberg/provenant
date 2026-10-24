@@ -307,7 +307,7 @@ with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
 is executable. This lets the compiler/linker load `libxcrun.dylib` and SDK
 resources without a read or write grant to Xcode apps or CLT's parent.
 Without CLT, this recipe promises no macOS Rust build support. Shell Git is
-host-selected and linked at `scratch/bin/git`; the exact selected executable
+host-selected and linked (Claude shell lanes: wrapped by a config-pinning script) at `scratch/bin/git`; the exact selected executable
 and non-system linked libraries remain immutable. The required macOS lane
 preparation regression checks Git and builds/runs a test crate through the
 compiled Claude writer profile using a cloned immutable toolchain and isolated

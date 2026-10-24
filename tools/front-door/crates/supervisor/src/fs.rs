@@ -941,6 +941,19 @@ impl FileHandle {
             .sync_all()
             .map_err(error("fsync file", &self.path))
     }
+    /// Give the owner execute permission through the open descriptor.
+    pub fn make_owner_executable(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = self
+            .file
+            .metadata()
+            .map_err(error("fstat file", &self.path))?
+            .permissions()
+            .mode();
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(mode | 0o700))
+            .map_err(error("fchmod file", &self.path))
+    }
     /// Read at most limit+1 bytes from the current offset, then refuse oversize.
     /// Metadata alone is never used to enforce the cap (files can grow).
     pub fn read_bounded(&mut self, limit: u64) -> Result<Vec<u8>> {

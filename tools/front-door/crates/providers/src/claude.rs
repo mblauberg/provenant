@@ -501,7 +501,9 @@ fn prepare(
         "/usr/bin:/bin".into()
     };
     let mut env = base_env(input, scratch, &path);
-    input.provenant.environment(scratch, &mut env, &mut setup)?;
+    input
+        .provenant
+        .environment(scratch, &mut env, &mut setup, shell)?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -534,6 +536,8 @@ fn prepare(
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ]);
         tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
+        // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
+        tool_exec_roots.push(subtree(scratch.join("bin")));
         crate::launch::rust_tools(
             input,
             access,

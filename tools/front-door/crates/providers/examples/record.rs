@@ -329,12 +329,13 @@ fn setup(steps: &[SetupStep]) -> Result<()> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => private_dir(path)?,
-            SetupStep::WriteFile { path, bytes } => {
+            SetupStep::WriteFile { path, bytes } | SetupStep::WriteExecutable { path, bytes } => {
                 use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                let executable = matches!(step, SetupStep::WriteExecutable { .. });
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .mode(0o600)
+                    .mode(if executable { 0o700 } else { 0o600 })
                     .open(path)?;
                 file.write_all(bytes)?;
                 file.sync_all()?;

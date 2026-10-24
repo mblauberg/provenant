@@ -94,7 +94,7 @@ fn prepare(
     let mut env = base_env(input, &plan.scratch.path, &path);
     input
         .provenant
-        .environment(&plan.scratch.path, &mut env, &mut setup)?;
+        .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
     crate::launch::rust_tools(
         input,
         access,

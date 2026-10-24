@@ -1441,10 +1441,17 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
         let selected_git = fs::canonicalize(crate::roots::git_binary().ok_or("host Git")?)?;
-        assert_eq!(
-            fs::read_link(confinement.plan.permissions().scratch.path.join("bin/git"))?,
-            selected_git
-        );
+        let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
+        if adapter == "claude" && writer {
+            // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps
+            // the selected Git and sets it itself.
+            let wrapper = fs::read_to_string(&scratch_git)?;
+            assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
+            assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));
+            assert!(!fs::symlink_metadata(&scratch_git)?.file_type().is_symlink());
+        } else {
+            assert_eq!(fs::read_link(&scratch_git)?, selected_git);
+        }
         assert!(
             launch
                 .environment
@@ -1912,6 +1919,7 @@ fn verify_lane_profile(
             "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
             "for f in credentials.toml credentials config.toml; do ",
             "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done; ",
+            "if GIT_CONFIG_GLOBAL=/nonexistent/gitconfig git config --global --list >/dev/null 2>&1; then :; else exit 14; fi; ",
             "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
             "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
             "git --version && git status --porcelain && ",

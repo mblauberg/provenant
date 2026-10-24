@@ -666,9 +666,17 @@ Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
 installation, so granting that shim alone does not make shell Git work.
 Host selection now prefers package-manager Git, then the real CLT executable
 at `/Library/Developer/CommandLineTools/usr/bin/git`, before the system
-fallback. Each Codex/Claude preparation creates `scratch/bin/git` pointing
-to the host-selected canonical executable and prepends that directory to
-`PATH`; `PROVENANT_GIT` pins MCP and hook Git independently. Existing exact
+fallback. Each Codex/Claude preparation creates `scratch/bin/git` for the
+host-selected canonical executable and prepends that directory to `PATH`;
+`PROVENANT_GIT` pins MCP and hook Git independently. For Claude shell lanes it
+is a host-written POSIX sh wrapper (mode 0700) that sets `GIT_CONFIG_GLOBAL=
+/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, then execs the selected Git, because
+Claude's `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` removes `GIT_CONFIG_GLOBAL` from
+Bash subprocesses and the sandbox denies `~/.gitconfig`, which aborts Git.
+`scratch/bin` is an executable subtree grant (a profile's exec roots are
+subtrees; an exact grant inside scratch would overlap the private scratch
+check); the lane could rewrite the wrapper but gains nothing a confined shell
+lacks. Other lanes keep the symlink. Existing exact
 executable/library read grants apply. No Xcode app directory is granted.
 The required macOS `lane_prepare_isolates_nested_state` case runs `git
 --version`, linked-worktree `git status --porcelain` and a real one-test
