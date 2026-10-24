@@ -136,7 +136,6 @@ impl LaneRuntime<'_> {
         profile.runtime_reads.extend([
             subtree(self.state.join("projects")),
             subtree(self.state.join("routing")),
-            exact(self.state.join("fabric")),
         ]);
         // The parent pre-creates anchors. Only shared SQLite and landing locks
         // are mutable; Run databases and custody are private to child_state.
