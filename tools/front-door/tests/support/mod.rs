@@ -71,7 +71,9 @@ pub struct TestRig {
 }
 impl TestRig {
     pub fn new() -> Result<Self> {
-        Self::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))
+        // Outside the checkout: a rig beneath it lets cargo in a confined lane
+        // probe find (and fail to read) the workspace manifest and config above.
+        Self::in_directory(Path::new("/tmp"))
     }
     pub fn in_directory(parent: &Path) -> Result<Self> {
         Self::with_object_format(parent, "sha1")
