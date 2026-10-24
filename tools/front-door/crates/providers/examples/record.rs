@@ -459,7 +459,7 @@ fn compile(
 fn launch(context: &Context<'_>, plan: &ConfinedPlan, spec: &LaunchSpec) -> Result<Run> {
     setup(&spec.setup)?;
     let compiled = compile(context, plan, &spec.profile)?;
-    let command = compiled.command(&spec.argv)?;
+    let command = compiled.command(&spec.argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
     let mut options = ExecOptions::new(&command, &spec.cwd, Duration::from_secs(300));
     options.env = Some(&spec.env);
     options.secret_input = spec.secret_input.as_ref();
@@ -1168,7 +1168,7 @@ fn main() -> Result<()> {
         observations: profile.observations.clone(),
     };
     let compiled = compile(&context, &plan, &probe_profile)?;
-    let prefix = compiled.command(&[])?;
+    let prefix = compiled.command(&[], &provenant_core::AttemptId::from_bytes([0; 16]))?;
     if args.skip_live {
         // Debugging aid: the probe profile, for ad hoc sandbox-exec checks.
         std::fs::write(

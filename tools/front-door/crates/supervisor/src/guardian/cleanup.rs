@@ -298,19 +298,8 @@ impl Driver<'_> {
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
-    /// The marker value every descendant of this attempt's provider inherits;
-    /// the guardian's identity makes it unique per attempt.
-    pub(super) fn attempt_mark(&self) -> OsString {
-        let guardian = &self.guardian;
-        format!(
-            "{}:{}:{}",
-            guardian.boot, guardian.pid, guardian.native_start
-        )
-        .into()
-    }
-
-    /// Live same-user processes outside the provider and any spared owner that
-    /// carry the attempt marker. They are added to `tracked`, so cleanup cannot
+    /// Live processes outside the provider and any spared owner that are still
+    /// inside this attempt's sandbox. They are added to `tracked`, so cleanup cannot
     /// settle while one lives, and returned for signalling.
     #[cfg(target_os = "macos")]
     fn marked_escapees(
@@ -319,8 +308,10 @@ impl Driver<'_> {
         provider_pid: i64,
         spared: &std::collections::BTreeSet<ProcessIdentity>,
     ) -> Vec<ProcessIdentity> {
-        let mut entry = format!("{}=", crate::sys::census::ATTEMPT_MARK).into_bytes();
-        entry.extend_from_slice(self.attempt_mark().as_bytes());
+        let Ok(name) = std::ffi::CString::new(self.reservation.scope.attempt.sandbox_lookup_name())
+        else {
+            return Vec::new();
+        };
         let marked: Vec<_> = census
             .facts()
             .filter(|fact| {
@@ -329,7 +320,7 @@ impl Driver<'_> {
                     && fact.identity != self.guardian
                     && !spared.contains(&fact.identity)
                     && i32::try_from(fact.identity.pid)
-                        .is_ok_and(|pid| crate::sys::census::darwin_carries_mark(pid, &entry))
+                        .is_ok_and(|pid| crate::sys::census::darwin_in_attempt_sandbox(pid, &name))
             })
             .map(|fact| fact.identity.clone())
             .collect();
@@ -424,8 +415,8 @@ impl Driver<'_> {
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
-            // A descendant that detached before the census saw it keeps the
-            // attempt marker; it is tracked here and ended below.
+            // A descendant that detached before the census saw it stays in the
+            // attempt's sandbox; it is tracked here and ended below.
             #[cfg(target_os = "macos")]
             let marked = self.marked_escapees(&census, child.id(), &spared);
             // Reaping sends no signal, so an adopted zombie is reaped even when

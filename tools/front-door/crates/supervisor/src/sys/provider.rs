@@ -917,8 +917,8 @@ impl ProviderGroup {
         Ok(deliveries)
     }
 
-    /// Signal exact identities the guardian found carrying the attempt marker
-    /// after they left the provider tree. Each identity is re-observed
+    /// Signal exact identities the guardian found still inside the attempt's
+    /// sandbox after they left the provider tree. Each identity is re-observed
     /// immediately before the signal, so a recycled PID is never targeted.
     #[cfg(target_os = "macos")]
     pub(crate) fn stop_marked(
@@ -945,7 +945,7 @@ impl ProviderGroup {
                 _ => continue,
             }
             // SAFETY: the identity (boot, PID, start stamp) was re-read just
-            // above and carries the attempt's unique environment marker. This
+            // above and is inside the attempt's own sandbox. This
             // targets that one process only, never a group or caller PID.
             let outcome = if unsafe { libc::kill(pid, signal) } == 0 {
                 self.last_adopted_signal.insert(identity.clone(), signal);

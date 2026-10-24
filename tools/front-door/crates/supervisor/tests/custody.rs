@@ -872,14 +872,17 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     Ok(())
 }
 #[cfg(target_os = "macos")]
-fn detached_descendant_is_found_by_the_attempt_marker_and_ended(root: &Path) -> Result<()> {
+fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
     let ready_path = root.join("mark-ready.sock");
     let ready_listener = UnixListener::bind(&ready_path)?;
     let (_writer, handle) = start(
         root,
         "mark",
         "s2-detach-provider",
-        &[ready_path.into_os_string()],
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+        ],
         CapturePlan {
             root_flush_ms: 30,
             descendant_grace_ms: 10,
@@ -890,8 +893,8 @@ fn detached_descendant_is_found_by_the_attempt_marker_and_ended(root: &Path) -> 
     byte(&mut stream, b'R')?;
     let descendant = process_identity(read_pid_line(&mut stream)?)?;
     assert_eq!(descendant.session_id, descendant.pid);
-    // The descendant ignores TERM and never entered the group; the marker is
-    // the only way cleanup can reach it. It must be gone before a clean settle.
+    // The descendant ignores TERM and left the group before any census; its
+    // inherited sandbox is the only way cleanup can reach it. It must be gone before a clean settle.
     let exit = exited(&handle)?;
     assert!(!exit.unresolved_cleanup, "{exit:?}");
     assert!(exit.unresolved_pids.is_empty(), "{exit:?}");
@@ -1610,8 +1613,8 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
-        "detached_descendant_is_found_by_the_attempt_marker_and_ended",
-        detached_descendant_is_found_by_the_attempt_marker_and_ended,
+        "detached_descendant_in_the_attempt_sandbox_is_found_and_ended",
+        detached_descendant_in_the_attempt_sandbox_is_found_and_ended,
     ),
     (
         "cancel_kills_the_whole_group_and_settles",

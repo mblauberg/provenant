@@ -1051,58 +1051,46 @@ fn darwin_start_stamp(pid: i32) -> Option<(u64, usize)> {
     Some((seconds.checked_mul(1_000_000)?.checked_add(micros)?, size))
 }
 
-/// Environment variable the guardian gives every provider launch. Descendants
-/// inherit it however they detach, so it identifies attempt membership after
-/// the parent edges that the census would follow are gone.
-pub(crate) const ATTEMPT_MARK: &str = "PROVENANT_ATTEMPT_MARK";
-
-/// Whether a same-user process's initial environment carries `entry`
-/// (`NAME=value`). Any failure, including another user's process or one that
-/// exited mid-read, reads as not marked: that pid is skipped, never fatal.
 #[cfg(target_os = "macos")]
-pub(crate) fn darwin_carries_mark(pid: i32, entry: &[u8]) -> bool {
-    const LIMIT: usize = 4 * 1024 * 1024;
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let mut size = 0;
-    // SAFETY: the three-element MIB is live; null output requests the size.
-    let status = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if status != 0 || size == 0 || size > LIMIT {
-        return false;
-    }
-    let mut buffer = vec![0_u8; size];
-    // SAFETY: buffer is initialised storage whose exact length is passed in
-    // size; sysctl writes at most that many bytes and borrows nothing after.
-    let status = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            buffer.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    status == 0 && size <= buffer.len() && environment_has(&buffer[..size], entry)
+unsafe extern "C" {
+    // Exported by libSystem (libsystem_sandbox). Variadic: the filter value
+    // follows `filter_type`, and is absent when `filter_type` is 0.
+    fn sandbox_check(
+        pid: libc::pid_t,
+        operation: *const libc::c_char,
+        filter_type: libc::c_int,
+        ...
+    ) -> libc::c_int;
 }
 
-/// KERN_PROCARGS2 holds an `argc` word, then NUL-separated executable path,
-/// padding, arguments and environment. The entry is unique to one attempt, so
-/// an exact field match anywhere after the word is enough.
-#[cfg(any(target_os = "macos", test))]
-fn environment_has(buffer: &[u8], entry: &[u8]) -> bool {
-    !entry.is_empty()
-        && buffer
-            .get(std::mem::size_of::<i32>()..)
-            .is_some_and(|rest| rest.split(|byte| *byte == 0).any(|field| field == entry))
+/// Whether a process is still inside the sandbox of the attempt that owns
+/// `lookup_name`: sandboxed at all, allowed to look that name up, yet denied an
+/// unrelated name. Only the attempt's own profile grants that one name while
+/// denying others; system daemons' sandboxes allow lookups broadly and fail the
+/// control. A seatbelt sandbox is inherited and cannot be dropped, so this
+/// survives reparenting and `setsid`. Unsandboxed processes, other sandboxes
+/// and any failed check read as not a member.
+#[cfg(target_os = "macos")]
+pub(crate) fn darwin_in_attempt_sandbox(pid: i32, lookup_name: &std::ffi::CStr) -> bool {
+    const SANDBOX_FILTER_GLOBAL_NAME: libc::c_int = 2;
+    const CONTROL_NAME: &std::ffi::CStr = c"dev.provenant.attempt.control";
+    let lookup = |name: &std::ffi::CStr| {
+        // SAFETY: both strings are live NUL-terminated C strings for the call,
+        // and the variadic argument is the single char pointer that filter type
+        // 2 (global name) expects. Nothing is retained.
+        unsafe {
+            sandbox_check(
+                pid,
+                c"mach-lookup".as_ptr(),
+                SANDBOX_FILTER_GLOBAL_NAME,
+                name.as_ptr(),
+            )
+        }
+    };
+    // SAFETY: a null operation with filter type 0 asks only whether the pid is
+    // sandboxed; sandbox_check reads no pointer and retains none.
+    let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) } == 1;
+    sandboxed && lookup(lookup_name) == 0 && lookup(CONTROL_NAME) == 1
 }
 
 #[cfg(target_os = "macos")]
@@ -1161,20 +1149,6 @@ pub fn current_process() -> crate::census::ProcessObservation {
 #[cfg(test)]
 mod native_tests {
     use super::*;
-
-    #[test]
-    fn attempt_mark_matches_only_an_exact_environment_field() {
-        let entry = b"PROVENANT_ATTEMPT_MARK=boot:7:9";
-        let mut buffer = 2_i32.to_ne_bytes().to_vec();
-        buffer.extend_from_slice(b"/bin/sh\0\0\0sh\0-c\0HOME=/x\0");
-        assert!(!environment_has(&buffer, entry));
-        buffer.extend_from_slice(b"PROVENANT_ATTEMPT_MARK=boot:7:90\0");
-        assert!(!environment_has(&buffer, entry));
-        buffer.extend_from_slice(entry);
-        buffer.push(0);
-        assert!(environment_has(&buffer, entry));
-        assert!(!environment_has(&buffer[..3], entry));
-    }
 
     #[test]
     fn darwin_pid_listing_retries_when_a_process_arrives_after_the_count() {

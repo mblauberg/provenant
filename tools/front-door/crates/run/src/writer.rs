@@ -185,7 +185,12 @@ pub struct LaunchConfinement {
     pub home: PathBuf,
 }
 impl LaunchConfinement {
-    pub(crate) fn command(&self, argv: &[OsString], cancel: &CancelToken) -> Result<Vec<OsString>> {
+    pub(crate) fn command(
+        &self,
+        argv: &[OsString],
+        attempt: &provenant_core::AttemptId,
+        cancel: &CancelToken,
+    ) -> Result<Vec<OsString>> {
         let executor = SystemExecutor::new(1).map_err(error)?;
         let backend = system_backend(&BackendContext {
             safe_fs: &LocalFs,
@@ -218,7 +223,7 @@ impl LaunchConfinement {
         self.plan
             .compile(backend.as_ref(), &self.profile, &anchors)
             .map_err(RunError::Confinement)?
-            .command(argv)
+            .command(argv, attempt)
             .map_err(RunError::Confinement)
     }
 }

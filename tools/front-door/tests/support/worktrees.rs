@@ -1966,7 +1966,7 @@ fn verify_lane_profile(
             "git --version && git status --porcelain && ",
             "cargo test --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\""
         )].map(OsString::from);
-        let command = compiled.command(&argv)?;
+        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
         options.env = Some(&launch.environment);
         let output = executor.execute(options)?;
@@ -1980,7 +1980,10 @@ fn verify_lane_profile(
     }
     // Start the configured MCP inside the compiled profile too: an
     // unconfined fake provider cannot detect ungranted startup writes.
-    let mcp_argv = compiled.command(&launch.argv)?;
+    let mcp_argv = compiled.command(
+        &launch.argv,
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+    )?;
     let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
     options.env = Some(&launch.environment);
     options.stdin = Some(frames);
@@ -2164,7 +2167,7 @@ fn verify_lane_profile(
     let mut argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(),
         "printf allowed > \"$1\" || exit 10; shift; for target in \"$@\"; do if printf changed > \"$target\"; then exit 20; fi; done".into(), "probe".into(), marker.as_os_str().to_owned()];
     argv.extend(denied.iter().map(|path| path.as_os_str().to_owned()));
-    argv = compiled.command(&argv)?;
+    argv = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
     let mut options = ExecOptions::new(&argv, &launch.cwd, Duration::from_secs(5));
     options.env = Some(&launch.environment);
     options.stderr = StreamPolicy::Capture { limit: 4096 };

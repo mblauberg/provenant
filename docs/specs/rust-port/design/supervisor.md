@@ -161,19 +161,22 @@ The Linux global census skips rows whose process group or session is 0 (host
 kernel tasks and container shims; never a descendant of the guardian's
 session); a direct observation of such a PID stays unknown.
 
-Every provider launch carries `PROVENANT_ATTEMPT_MARK`, a value unique to the
-attempt's guardian identity, which descendants inherit however they detach. On
-macOS, post-terminal cleanup reads each census row's initial environment
-(`KERN_PROCARGS2`; failures for a pid are skipped) and treats a live marked
-process outside the provider and any spared owner as an escapee even if no
-census ever sampled its parent edge. It joins the tracked set, so cleanup
-cannot settle while it lives, and receives TERM then KILL after the descendant
-grace, each time after re-observing its full identity. A survivor is published
-in `unresolved_pids`. A process that also strips the marker (an `env -i`
-re-exec) remains the residual: libproc cannot reconstruct that missing history.
-Linux does not read the marker. Census observations never grant
+Every confined provider launch's seatbelt profile also allows one Mach lookup
+name unique to the attempt, `dev.provenant.attempt.<attempt id>`, which no
+service answers. A seatbelt sandbox is inherited and cannot be dropped, so a
+descendant that detaches before any census samples its parent edge still
+carries it. On macOS, post-terminal cleanup treats a live process outside the
+provider and any spared owner as an escapee when `sandbox_check` reports it
+sandboxed, allowed to look that name up, and denied an unrelated control name
+(the control excludes system daemons whose sandboxes allow lookups broadly). It
+joins the tracked set, so cleanup cannot settle while it lives, and receives
+TERM then KILL after the descendant grace, each time after re-observing its
+full identity. A survivor is published in `unresolved_pids`. An unconfined
+launch is the residual: libproc cannot reconstruct that missing history. Every
+production launch is confined; Linux has no confinement backend and does not
+use the check. Census observations never grant
 arbitrary PID or process-group signal authority; only the unreaped provider,
-kernel-confirmed adopted children and marked escapees may receive signals. The one exception
+kernel-confirmed adopted children and attempt-sandbox escapees may receive signals. The one exception
 is the provider's own group: while the provider leader is unreaped (a live
 process or a `WNOWAIT` zombie, either of which reserves the PGID) the guardian
 sends TERM, then KILL after the descendant grace, to that group, which the

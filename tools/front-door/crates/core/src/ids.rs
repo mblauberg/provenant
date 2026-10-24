@@ -67,6 +67,15 @@ ids!(
     DeliveryId,
 );
 
+impl AttemptId {
+    /// Mach service name the attempt's seatbelt profile allows looking up.
+    /// Nothing serves it; the profile grant exists so that a process still
+    /// inside this attempt's sandbox can be recognised after it detaches.
+    pub fn sandbox_lookup_name(&self) -> String {
+        format!("dev.provenant.attempt.{self}")
+    }
+}
+
 /// Caller-selected idempotency key, as specified by execution-run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

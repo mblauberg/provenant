@@ -757,6 +757,12 @@ pub fn dispatch() -> io::Result<bool> {
         "s2-setsid-descendant" => {
             crate::sys::fixture_ignore_term()?;
             let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            // Connect first: the lane profile that follows denies other lookups
+            // and sockets, as the production profile does.
+            #[cfg(target_os = "macos")]
+            if let Ok(name) = fixture_path(&args, 4) {
+                crate::sys::fixture_enter_attempt_sandbox(&name.to_string_lossy())?;
+            }
             ready.write_all(b"R")?;
             ready.write_all(std::process::id().to_string().as_bytes())?;
             ready.write_all(b"\n")?;
@@ -781,19 +787,17 @@ pub fn dispatch() -> io::Result<bool> {
             descendant.detach();
         }
         "s2-detach-provider" => {
-            // Start a session-leading descendant that inherits the attempt
-            // marker, then exit at once so no census can follow the parent edge.
+            // Start a session-leading descendant in the attempt's sandbox, then
+            // exit at once so no census can follow the parent edge.
             let root = std::env::current_dir()?;
-            let mut env = environment(&root);
-            env.extend(
-                std::env::vars_os().filter(|(name, _)| name == crate::sys::census::ATTEMPT_MARK),
-            );
-            let argv = argv_with_args(
-                "s2-setsid-descendant",
-                &[fixture_path(&args, 3)?.into_os_string()],
-            )?;
-            ChildGuard::new(crate::sys::fixture_command(&argv, &env, &root, true)?.spawn()?)
-                .detach();
+            let extra = [
+                fixture_path(&args, 3)?.into_os_string(),
+                fixture_path(&args, 4)?.into_os_string(),
+            ];
+            ChildGuard::new(
+                command_with_args("s2-setsid-descendant", &extra, &root, true)?.spawn()?,
+            )
+            .detach();
         }
         "s2-registered-owner" => {
             let home = std::env::var_os("HOME")

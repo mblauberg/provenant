@@ -421,6 +421,30 @@ pub(crate) fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result
     }
 }
 
+/// Enter a sandbox that denies every Mach lookup except the attempt's own
+/// name, the shape of the production profile for this purpose. Irreversible.
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+pub(crate) fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()> {
+    unsafe extern "C" {
+        fn sandbox_init(
+            profile: *const libc::c_char,
+            flags: u64,
+            errorbuf: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+    }
+    let profile = std::ffi::CString::new(format!(
+        "(version 1)(allow default)(deny mach-lookup)(allow mach-lookup (global-name \"{lookup_name}\"))"
+    ))
+    .map_err(io::Error::other)?;
+    // SAFETY: profile is a live NUL-terminated string; flags 0 means the
+    // argument is SBPL source; a null error buffer is accepted and the call
+    // retains no pointer. It confines only this dedicated fixture process.
+    if unsafe { sandbox_init(profile.as_ptr(), 0, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::other("fixture sandbox refused"));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "fixture")]
 pub(crate) fn fixture_ignore_term() -> io::Result<()> {
     // SAFETY: the dedicated fixture changes only its own disposition; SIG_IGN
