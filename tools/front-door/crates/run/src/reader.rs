@@ -191,6 +191,9 @@ pub struct LaneTarget {
     pub task: Option<TaskId>,
     pub attempt: Option<AttemptId>,
 }
+/// Optional lane filters: the submitting actor, and terminal lanes already seen.
+const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
+const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
 #[derive(Clone, Debug)]
 pub struct LaneQuery {
     /// Exact selections include terminal lanes. Without them the page holds
@@ -202,6 +205,10 @@ pub struct LaneQuery {
     pub after: u64,
     /// Return highest sequence first; `after` then acts as an exclusive upper bound.
     pub newest_first: bool,
+    /// Without targets, restrict the page to runs this actor submitted.
+    pub owner: Option<ActorId>,
+    /// Drop terminal lanes whose last event is at or before this cursor.
+    pub unseen_after: Option<u64>,
 }
 #[derive(Debug)]
 pub struct LanePage {
@@ -431,26 +438,28 @@ impl RunStore {
         let project = self.context.project_id.to_string();
         let after = sql_int(query.after)?;
         let fetch = sql_int(query.limit + 1)?;
+        let owner = query.owner.map(|actor| actor.to_string());
+        let unseen = query.unseen_after.map(sql_int).transpose()?;
         let mut rows: Vec<(i64, String)> = call.retry(|| {
             let mut found = Vec::new();
             if query.targets.is_empty() {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0) ORDER BY sequence DESC LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0) ORDER BY sequence LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
                 };
-                let mut statement = self.db.prepare(sql)?;
-                let page = statement.query_map(params![project, after, query.all, fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let mut statement = self.db.prepare(&sql)?;
+                let page = statement.query_map(params![project, after, query.all, fetch, owner, unseen], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             for target in &query.targets {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence DESC LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
                 };
-                let mut statement = self.db.prepare(sql)?;
-                let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let mut statement = self.db.prepare(&sql)?;
+                let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch, unseen], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             Ok(found)
@@ -475,6 +484,56 @@ impl RunStore {
             })
             .collect::<Result<_>>()?;
         Ok(LanePage { lanes, next })
+    }
+    /// The seen cursor (an event sequence) for one actor's wait selection. A
+    /// selection never acknowledged starts at the log's end when `from_now`,
+    /// else at the beginning.
+    pub fn seen_cursor(&self, selection: &str, from_now: bool, call: &Request<'_>) -> Result<u64> {
+        let found: Option<i64> = call.retry(|| {
+            let stored = self
+                .db
+                .query_row(
+                    "SELECT sequence FROM cursors WHERE project=?1 AND actor=?2 AND selection=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        selection
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if stored.is_some() || !from_now {
+                return Ok(stored);
+            }
+            Ok(self.db.query_row(
+                "SELECT MAX(sequence) FROM events WHERE project=?1",
+                params![self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(found.map_or(0, |sequence| sequence as u64))
+    }
+    /// Latest event sequence of each attempt, for acknowledging displayed rows.
+    pub fn last_event_sequence(&self, id: AttemptId, call: &Request<'_>) -> Result<u64> {
+        let found: Option<i64> = call.retry(|| {
+            Ok(self.db.query_row(
+                "SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(found.map_or(0, |sequence| sequence as u64))
+    }
+    /// Acknowledge rows up to `sequence`; the cursor never moves back.
+    pub fn ack_seen(&self, selection: &str, sequence: u64, call: &Request<'_>) -> Result<()> {
+        let sequence = sql_int(sequence)?;
+        self.write(call, |tx| {
+            tx.execute(
+                "INSERT INTO cursors VALUES (?1,?2,?3,?4) ON CONFLICT(project,actor,selection) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
+                params![self.context.project_id.to_string(), self.context.actor_id.to_string(), selection, sequence],
+            )?;
+            Ok(())
+        })
     }
     pub fn events(
         &self,

@@ -1167,7 +1167,8 @@ fn report(
             let page = session
                 .store
                 .lanes(&lane_query(&[target], true, 100, 0), call)?;
-            let (data, human) = render_lanes(&page.lanes, None, edge);
+            let (data, human) =
+                render_lanes(&page.lanes, None, session.context.state_root.as_path());
             (data, human, false)
         }
     };
@@ -1194,10 +1195,14 @@ fn lane_query(targets: &[Target], all: bool, limit: u64, after: u64) -> run::Lan
         limit,
         after,
         newest_first: false,
+        owner: None,
+        unseen_after: None,
     }
 }
-fn artifact(edge: &Edge<'_>, record: &run::AttemptRecord, name: &str) -> PathBuf {
-    edge.roots.state.as_path().join(format!(
+/// Artifact paths live under the session's execution root, which a nested
+/// lane keeps apart from the global configuration root.
+fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> PathBuf {
+    root.join(format!(
         "runs/{}/attempts/{}/{name}",
         record.run_id, record.attempt_id
     ))
@@ -1214,11 +1219,7 @@ fn state_name(state: &run::AttemptState) -> String {
             .unwrap_or_default(),
     }
 }
-fn render_lanes(
-    lanes: &[run::AttemptRecord],
-    next: Option<u64>,
-    edge: &Edge<'_>,
-) -> (Value, String) {
+fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
         .iter()
@@ -1241,7 +1242,7 @@ fn render_lanes(
             let result = lane
                 .result
                 .as_ref()
-                .map(|_| artifact(edge, lane, "result.md"));
+                .map(|_| artifact(root, lane, "result.md"));
             let account = lane
                 .applied_route
                 .as_ref()
@@ -1309,18 +1310,21 @@ fn settled(state: &run::AttemptState) -> (bool, bool) {
     }
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
-/// the current nonterminal work; host caps bound it.
+/// this actor's nonterminal work; host caps bound it. With `seen`, terminal
+/// lanes at or before that event cursor are already acknowledged and dropped.
 fn select(
     session: &Session,
     targets: &[Target],
+    seen: Option<u64>,
     call: &run::Request<'_>,
 ) -> Result<Vec<AttemptId>, Fail> {
     let mut selected = Vec::new();
     let mut after = 0;
     loop {
-        let page = session
-            .store
-            .lanes(&lane_query(targets, !targets.is_empty(), 100, after), call)?;
+        let mut query = lane_query(targets, !targets.is_empty() || seen.is_some(), 100, after);
+        query.owner = targets.is_empty().then_some(session.context.actor_id);
+        query.unseen_after = seen;
+        let page = session.store.lanes(&query, call)?;
         selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
         match page.next {
             Some(next) if selected.len() < 1000 => after = next,
@@ -1335,8 +1339,31 @@ fn select(
         }
     }
 }
+/// The seen-cursor key for a wait selection.
+fn selection_key(targets: &[Target]) -> String {
+    let mut keys: Vec<String> = targets
+        .iter()
+        .map(|t| {
+            let part = |v: Option<String>| v.unwrap_or_else(|| "*".into());
+            format!(
+                "{}/{}/{}",
+                t.run,
+                part(t.task.map(|v| v.to_string())),
+                part(t.attempt.map(|v| v.to_string()))
+            )
+        })
+        .collect();
+    keys.sort();
+    if keys.is_empty() {
+        "default".into()
+    } else {
+        keys.join(",")
+    }
+}
 /// Snapshot the selection at entry and poll until the condition holds or the
-/// reader deadline expires. Expiry never stops a provider.
+/// reader deadline expires. Expiry never stops a provider. A default or `Any`
+/// wait skips terminal lanes the actor has already seen and acknowledges the
+/// ones it returns, so repeated waits neither miss nor replay a completion.
 fn wait_lanes(
     session: &Session,
     targets: &[Target],
@@ -1347,7 +1374,15 @@ fn wait_lanes(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let selected = select(session, targets, &request(&clock, &cancel)?)?;
+    // Explicit `All` waits report the whole named set, seen or not.
+    let selection =
+        (targets.is_empty() || matches!(condition, Condition::Any)).then(|| selection_key(targets));
+    let entry = request(&clock, &cancel)?;
+    let seen = selection
+        .as_deref()
+        .map(|key| session.store.seen_cursor(key, targets.is_empty(), &entry))
+        .transpose()?;
+    let selected = select(session, targets, seen, &entry)?;
     loop {
         let call = request(&clock, &cancel)?;
         let lanes = selected
@@ -1364,7 +1399,17 @@ fn wait_lanes(
             };
         let expired = Instant::now() >= deadline;
         if met || expired {
-            let (mut data, human) = render_lanes(&lanes, None, edge);
+            if let Some(key) = selection.as_deref().filter(|_| met) {
+                let mut latest = 0;
+                for lane in lanes.iter().filter(|l| settled(&l.state).0) {
+                    latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &call)?);
+                }
+                if latest > 0 {
+                    open(edge, &call)?.store.ack_seen(key, latest, &call)?;
+                }
+            }
+            let (mut data, human) =
+                render_lanes(&lanes, None, session.context.state_root.as_path());
             data["condition_met"] = json!(met);
             return Ok((data, human, !met));
         }
@@ -1383,7 +1428,8 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
             let call = request(&clock, &cancel)?;
             let (context, store) = open_read_only(edge, &call)?;
             let Some(store) = store else {
-                let (data, human) = render_lanes(&[], None, edge);
+                let root = execution_state(edge.roots, edge.home, edge.assets)?;
+                let (data, human) = render_lanes(&[], None, root.as_path());
                 return Ok((data, human, false));
             };
             let session = Session { store, context };
@@ -1443,7 +1489,7 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                 let page = session.store.lanes(&query, &call)?;
                 (page.lanes, page.next)
             };
-            let (data, human) = render_lanes(&lanes, next, edge);
+            let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
             Ok((data, human, false))
         })(),
     )
@@ -1513,6 +1559,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
+    align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     Ok((
         json!({
@@ -1532,6 +1579,23 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     ))
 }
 
+/// A clipped page that ends inside a UTF-8 character stops before it, so the
+/// next offset starts the character whole and paged text concatenates exactly.
+fn align_utf8_tail(chunk: &mut run::OutputChunk) {
+    if !chunk.clipped {
+        return;
+    }
+    let Err(error) = std::str::from_utf8(&chunk.bytes) else {
+        return;
+    };
+    let valid = error.valid_up_to();
+    if error.error_len().is_none() && valid > 0 {
+        chunk.next_offset -= (chunk.bytes.len() - valid) as u64;
+        chunk.bytes.truncate(valid);
+        chunk.encoding = "utf8";
+    }
+}
+
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
@@ -1545,7 +1609,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let session = open(edge, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [command.target];
-            let selected = select(&session, &targets, &call)?;
+            let selected = select(&session, &targets, None, &call)?;
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
@@ -1888,6 +1952,8 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
                 limit: 100,
                 after,
                 newest_first: false,
+                owner: None,
+                unseen_after: None,
             },
             &call,
         )?;
@@ -1984,6 +2050,25 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+    #[test]
+    fn paged_output_never_splits_a_character() {
+        let bytes = "a☀b".as_bytes();
+        let mut chunk = run::OutputChunk {
+            bytes: bytes[..3].to_vec(),
+            len: bytes.len() as u64,
+            offset: 0,
+            next_offset: 3,
+            eof: false,
+            clipped: true,
+            complete: true,
+            encoding: "utf8-fragment",
+            digest: provenant_records::CanonicalV1::file_digest(b""),
+        };
+        align_utf8_tail(&mut chunk);
+        assert_eq!(chunk.bytes, b"a");
+        assert_eq!(chunk.next_offset, 1);
+        assert_eq!(chunk.encoding, "utf8");
+    }
     #[test]
     fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         let exit = ExitObservation {

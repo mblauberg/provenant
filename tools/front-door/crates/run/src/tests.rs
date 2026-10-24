@@ -851,3 +851,48 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn lane_selection_is_owned_and_skips_seen_completions() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let query = |owner: Option<ActorId>, unseen_after: Option<u64>| LaneQuery {
+        targets: vec![],
+        all: unseen_after.is_some(),
+        limit: 100,
+        after: 0,
+        newest_first: false,
+        owner,
+        unseen_after,
+    };
+    let count = |q: &LaneQuery| store.lanes(q, &call).map(|p| p.lanes.len());
+    // Another actor's chair sees none of this actor's active work.
+    assert_eq!(count(&query(Some(context.actor_id), None))?, 1);
+    assert_eq!(count(&query(Some(ActorId::from_bytes([9; 16])), None))?, 0);
+    assert_eq!(count(&query(None, None))?, 1);
+    // A completed lane is selected until its event is acknowledged.
+    seal_exit_fixture(&store, &input)?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    let last = store.last_event_sequence(id, &call)?;
+    assert!(last > 0);
+    assert_eq!(count(&query(Some(context.actor_id), Some(0)))?, 1);
+    assert_eq!(
+        store.seen_cursor("default", true, &call)?,
+        last,
+        "a fresh cursor starts at the log end"
+    );
+    assert_eq!(store.seen_cursor("default", false, &call)?, 0);
+    store.ack_seen("default", last, &call)?;
+    store.ack_seen("default", 0, &call)?;
+    let seen = store.seen_cursor("default", true, &call)?;
+    assert_eq!(seen, last, "the cursor never moves back");
+    assert_eq!(count(&query(Some(context.actor_id), Some(seen)))?, 0);
+    Ok(())
+}
