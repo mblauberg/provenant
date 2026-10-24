@@ -1895,6 +1895,29 @@ fn claude_account_probe_carries_user_for_keychain_selection() {
 }
 
 #[test]
+fn claude_account_probe_names_the_missing_login() {
+    let script = KeychainScript {
+        items: Default::default(),
+        statuses: std::sync::Mutex::new(
+            vec![br#"{"loggedIn":false,"authMethod":"none"}"#.to_vec()].into(),
+        ),
+        calls: std::sync::Mutex::new(vec![]),
+    };
+    let error = crate::accounts::detect(
+        &script,
+        "claude",
+        Path::new("/opt/homebrew/bin/claude"),
+        Path::new("/home/u"),
+        OsStr::new("u"),
+        Path::new("/home/u/.claude-pro"),
+        Path::new("/scratch/empty"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, ProviderError::LoginRequired));
+    assert!(error.to_string().contains("unlock the login keychain"));
+}
+
+#[test]
 fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     let home = std::env::temp_dir().join(format!("provenant-rollout-{}", std::process::id()));
     let day = home.join("sessions/2026/10/24");
