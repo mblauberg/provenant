@@ -101,7 +101,29 @@ impl LaneRuntime<'_> {
         Ok(())
     }
 
-    pub(crate) fn environment(&self, env: &mut Vec<(OsString, OsString)>) {
+    pub(crate) fn environment(
+        &self,
+        scratch: &Path,
+        env: &mut Vec<(OsString, OsString)>,
+        setup: &mut Vec<SetupStep>,
+    ) -> Result<(), ProviderError> {
+        // A private name also pins ordinary shell `git`, independently of
+        // PATH's system shim and of the override executable's basename.
+        let bin = scratch.join("bin");
+        let (_, path) = env
+            .iter_mut()
+            .find(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        *path =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?;
+        setup.extend([
+            SetupStep::CreateDir(bin.clone()),
+            SetupStep::Symlink {
+                link: bin.join("git"),
+                target: self.git.to_owned(),
+            },
+        ]);
         env.extend([
             ("PROVENANT_ROOT".into(), self.assets.into()),
             ("PROVENANT_GIT".into(), self.git.into()),
@@ -112,6 +134,7 @@ impl LaneRuntime<'_> {
             ),
             (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
         ]);
+        Ok(())
     }
 
     /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.

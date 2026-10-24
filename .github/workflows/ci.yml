@@ -143,7 +143,7 @@ jobs:
         working-directory: tools/front-door
         run: |
           cargo test --locked -p provenant-providers --features recording --lib provider_recipes_cannot_write_user_configuration
-          cargo test --locked -p provenant-providers --features recording --lib claude_writer_shell_candidate_has_private_config_and_no_keychain_grant
+          cargo test --locked -p provenant-providers --features recording --lib claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools
           cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload test results
         if: always()

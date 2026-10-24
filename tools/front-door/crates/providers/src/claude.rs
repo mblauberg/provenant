@@ -408,9 +408,9 @@ fn refresh_account(
 
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
-/// unreadable. Recorded writer-shell activation additionally denies keychain
-/// services and the security executable, and uses a private config directory.
-/// Until that proof is accepted, writers retain file tools only.
+/// unreadable. Writers additionally deny keychain services and the security
+/// executable, use private configuration and ask Claude to scrub subprocess
+/// credentials. The shell_enabled knob retains the file-tools-only fallback.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -489,8 +489,13 @@ fn prepare(
     let scratch = &plan.scratch.path;
     let mut setup = input.provenant.claude(scratch, &mut argv)?;
 
-    let mut env = base_env(input, scratch, "/usr/bin:/bin");
-    input.provenant.environment(&mut env);
+    let path = if shell {
+        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
+    } else {
+        "/usr/bin:/bin".into()
+    };
+    let mut env = base_env(input, scratch, &path);
+    input.provenant.environment(scratch, &mut env, &mut setup)?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -515,6 +520,24 @@ fn prepare(
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
+    let mut runtime_reads = vec![subtree(package)];
+    let mut tool_exec_roots = Vec::new();
+    if shell {
+        env.extend([
+            ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
+    }
     let mut spec = LaunchSpec {
         argv,
         env,
@@ -526,18 +549,9 @@ fn prepare(
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
                 deny_keychain_access: shell,
-                tool_exec_roots: if shell {
-                    vec![
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        subtree("/usr/libexec"),
-                    ]
-                } else {
-                    Vec::new()
-                },
-                // Not `~/.claude.json`: it can hold MCP server secrets and the
-                // launch never needs it.
-                runtime_reads: vec![subtree(package)],
+                tool_exec_roots,
+                // Never the user's .claude.json, which can hold MCP secrets.
+                runtime_reads,
                 state_writes: if shell {
                     Vec::new()
                 } else {

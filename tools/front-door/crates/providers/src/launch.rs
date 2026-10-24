@@ -132,8 +132,8 @@ pub fn mode_enabled(adapter: &str, access: Access, session: Session) -> bool {
     })
 }
 
-/// Shell activation needs its own writer proof. The recorder alone can
-/// prepare the candidate before that evidence has been accepted.
+/// The explicit writer-shell policy knob is separate from live provider
+/// activation. Recording builds can prepare a disabled candidate for probes.
 pub(crate) fn shell_enabled(adapter: &str, access: Access, session: Session) -> bool {
     access == Access::WorktreeWrite
         && (cfg!(feature = "recording")
@@ -238,6 +238,74 @@ pub(crate) fn base_env(
         ("TMPDIR".into(), scratch.into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ]
+}
+
+/// Immutable Rust tools and writable build output use the same bounded
+/// recipe for every shell-capable writer. Host Cargo credentials are excluded.
+pub(crate) fn rust_tools(
+    input: &PrepareInput<'_>,
+    access: Access,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut Vec<(OsString, OsString)>,
+    setup: &mut Vec<SetupStep>,
+) {
+    let cargo = input.home.join(".cargo");
+    let rustup = input.home.join(".rustup");
+    let cache = match &input.confined.permissions().mode {
+        provenant_confinement::permissions::AccessMode::ReadOnly => {
+            &input.confined.permissions().scratch.path
+        }
+        provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
+            &authority.cargo_cache().path
+        }
+    };
+    let cargo_home = cache.join("cargo-home");
+    let target = cache.join("target");
+    // The host prepares the writer cache itself under custody. Cargo
+    // creates target/ and cargo-home/ after launch, so anchor the cache.
+    tool_exec_roots.push(subtree(if access == Access::ReadOnly {
+        &target
+    } else {
+        cache
+    }));
+    for directory in [cargo.join("bin"), rustup.join("toolchains")] {
+        runtime_reads.push(subtree(&directory));
+        tool_exec_roots.push(subtree(directory));
+    }
+    runtime_reads.extend([
+        subtree(cargo.join("registry")),
+        exact(rustup.join("settings.toml")),
+    ]);
+    env.extend([
+        ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
+        ("RUSTUP_HOME".into(), rustup.into_os_string()),
+        ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
+    ]);
+    // Rust's system linker also goes through xcrun. Select the real CLT
+    // installation when present, rather than opening the selected Xcode app.
+    #[cfg(target_os = "macos")]
+    {
+        let developer = Path::new("/Library/Developer/CommandLineTools");
+        if developer.is_dir() {
+            runtime_reads.push(subtree(developer));
+            tool_exec_roots.push(subtree(developer.join("usr/bin")));
+            env.extend([
+                ("DEVELOPER_DIR".into(), developer.into()),
+                ("SDKROOT".into(), developer.join("SDKs/MacOSX.sdk").into()),
+            ]);
+        }
+    }
+    if access == Access::ReadOnly {
+        setup.extend([
+            SetupStep::CreateDir(cargo_home.clone()),
+            SetupStep::CreateDir(target),
+            SetupStep::Symlink {
+                link: cargo_home.join("registry"),
+                target: cargo.join("registry"),
+            },
+        ]);
+    }
 }
 
 /// The CLI's own install directory: the parent of a `bin/` directory, or the

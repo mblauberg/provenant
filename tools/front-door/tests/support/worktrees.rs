@@ -1136,6 +1136,41 @@ fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> 
     rig.assert_legacy_unchanged()
 }
 
+#[cfg(target_os = "macos")]
+fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
+    // Build-time rustup identity locates tools only. The child HOME and all
+    // mutable state stay in the rig. APFS clones avoid a toolchain-size copy.
+    let rustup = option_env!("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("HOME").map(|home| PathBuf::from(home).join(".rustup")))
+        .ok_or("build-time Rust home")?;
+    let toolchain = option_env!("RUSTUP_TOOLCHAIN").ok_or("build-time Rust toolchain")?;
+    let source = rustup.join("toolchains").join(toolchain);
+    let target = home.join(".rustup/toolchains/fixture");
+    let output = rig.execute_os(
+        Path::new("/bin/cp"),
+        &[
+            "-cR".into(),
+            source.into_os_string(),
+            target.clone().into_os_string(),
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "toolchain clone: {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    for tool in ["cargo", "rustc"] {
+        std::os::unix::fs::symlink(
+            target.join("bin").join(tool),
+            home.join(".cargo/bin").join(tool),
+        )?;
+    }
+    Ok(())
+}
+
 fn lane_prepare_isolates_nested_state() -> Result {
     use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
@@ -1163,6 +1198,15 @@ fn lane_prepare_isolates_nested_state() -> Result {
         fs::create_dir_all(home.join(path))?;
     }
     fs::write(home.join(".rustup/settings.toml"), b"fixture settings")?;
+    fs::create_dir_all(home.join("Library/Keychains"))?;
+    fs::write(
+        home.join("Library/Keychains/login.keychain-db"),
+        b"synthetic credential",
+    )?;
+    // Clone immutable tools into the isolated home. No test reads host
+    // provider configuration, login state or Cargo credentials.
+    #[cfg(target_os = "macos")]
+    clone_rust_toolchain(&rig, &home)?;
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     fs::copy(std::env::current_exe()?, &executable)?;
@@ -1311,6 +1355,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
         let selected_git = fs::canonicalize(crate::roots::git_binary().ok_or("host Git")?)?;
+        assert_eq!(
+            fs::read_link(confinement.plan.permissions().scratch.path.join("bin/git"))?,
+            selected_git
+        );
         assert!(
             launch
                 .environment
@@ -1657,6 +1705,42 @@ fn verify_lane_profile(
     let compiled = confinement
         .plan
         .compile(backend.as_ref(), profile, &anchors)?;
+    let shell_writer = launch
+        .argv
+        .iter()
+        .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash");
+    // Native shell proof, separate from live provider/Bash/token-scrub proof.
+    if cfg!(target_os = "macos") && shell_writer {
+        let scratch = &confinement.plan.permissions().scratch.path;
+        let project = scratch.join("cargo-probe");
+        fs::create_dir_all(project.join("src"))?;
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = 'lane-probe'\nversion = '0.1.0'\nedition = '2024'\n",
+        )?;
+        fs::write(
+            project.join("src/lib.rs"),
+            "#[test] fn writer_can_test() { assert_eq!(2 + 2, 4); }\n",
+        )?;
+        let argv = ["/bin/sh", "-c", concat!(
+            "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
+            "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
+            "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
+            "git --version && git status --porcelain && ",
+            "cargo test --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\""
+        )].map(OsString::from);
+        let command = compiled.command(&argv)?;
+        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+        options.env = Some(&launch.environment);
+        let output = executor.execute(options)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "shell probe: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
+    }
     // Start the configured MCP inside the compiled profile too: an
     // unconfined fake provider cannot detect ungranted startup writes.
     let mcp_argv = compiled.command(&launch.argv)?;

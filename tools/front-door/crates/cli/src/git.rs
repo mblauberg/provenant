@@ -12,10 +12,13 @@ pub fn git_binary() -> Option<PathBuf> {
         &GIT_CANDIDATES.map(PathBuf::from),
     )
 }
-const GIT_CANDIDATES: [&str; 5] = [
+const GIT_CANDIDATES: [&str; 6] = [
     "/opt/homebrew/bin/git",
     "/usr/local/bin/git",
     "/opt/local/bin/git",
+    // The real CLT executable avoids /usr/bin/git's xcrun loader, which
+    // otherwise needs access to the active Xcode installation in a lane.
+    "/Library/Developer/CommandLineTools/usr/bin/git",
     "/usr/bin/git",
     "/bin/git",
 ];
