@@ -267,6 +267,66 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn read_only_open_works_without_directory_write_access_or_creating_files() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+
+    let state = context.state_root.as_path();
+    let entries_before = std::fs::read_dir(state)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<std::collections::BTreeSet<_>>>()?;
+    let database = state.join("run.sqlite3");
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o400))?;
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o500))?;
+
+    let store = RunStore::open_read_only(&context, &call)?.ok_or("initialised store missing")?;
+    assert_eq!(store.attempts(AttemptFilter::default(), &call)?.count(), 0);
+    drop(store);
+
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))?;
+    let entries_after = std::fs::read_dir(state)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<std::collections::BTreeSet<_>>>()?;
+    assert_eq!(entries_after, entries_before);
+    drop(writer);
+    Ok(())
+}
+
+#[test]
+fn read_only_open_treats_missing_store_and_schema_as_empty() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+
+    assert!(RunStore::open_read_only(&context, &call)?.is_none());
+    assert!(!context.state_root.as_path().exists());
+
+    std::fs::create_dir_all(context.state_root.as_path())?;
+    std::fs::set_permissions(
+        context.state_root.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let database = context.state_root.as_path().join("run.sqlite3");
+    std::fs::write(&database, [])?;
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))?;
+    assert!(RunStore::open_read_only(&context, &call)?.is_none());
+    assert_eq!(std::fs::read_dir(context.state_root.as_path())?.count(), 1);
+    Ok(())
+}
 #[test]
 fn oversize_is_refused_before_publication_or_read() -> TestResult {
     let temp = tempfile::tempdir()?;

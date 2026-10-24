@@ -310,6 +310,22 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
         context,
     })
 }
+fn open_read_only(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
+    let (roots, project_id, actor_id) =
+        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
+            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
+    let context = run::ExecutionContext {
+        state_root: roots.state,
+        project_id,
+        actor_id,
+        read_prompts: true,
+    };
+    let store = run::RunStore::open_read_only(&context, call)?;
+    Ok((context, store))
+}
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
         .wall_now()
@@ -984,7 +1000,12 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let (context, store) = open_read_only(edge, &call)?;
+            let Some(store) = store else {
+                let (data, human) = render_lanes(&[], None, edge);
+                return Ok((data, human, false));
+            };
+            let session = Session { store, context };
             if let Some(seconds) = command.wait {
                 return wait_lanes(&session, &command.id, command.condition, seconds, edge);
             }
@@ -1011,7 +1032,13 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        "NOT_FOUND",
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
     let target = command.attempt.0;
     let id = target
         .attempt
@@ -1365,23 +1392,27 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
         until: instant(command.until)?,
-        project: Some(session.context.project_id),
+        project: Some(context.project_id),
         detail: command.detail,
     };
-    let facts = session
-        .store
-        .attempts(
-            run::AttemptFilter {
-                run_id: None,
-                task_id: None,
-            },
-            &call,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    let facts = store
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: None,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
     let cost = report.totals.cost.complete.as_ref().map_or_else(
