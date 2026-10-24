@@ -24,6 +24,7 @@ use std::{
 
 mod children;
 mod provider;
+mod remote;
 pub use children::HostHolder;
 pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -753,8 +754,13 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     {
         return unsupported("network, capability or read-root access");
     }
-    if command.host.is_some() {
-        return unsupported("remote host dispatch");
+    if command.host.is_some() && matches!(access.mode, Mode::WorktreeWrite) {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "worktree-write dispatch to a peer host is not available in this build (#1457); \
+             use --mode read-only",
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -835,14 +841,16 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
             };
+            let effort = task.effort.or(flag_route.2.clone());
             tasks.push((
                 task_id,
                 prompt,
-                requested(
-                    model.as_deref(),
-                    route.as_deref(),
-                    task.effort.or(flag_route.2.clone()),
-                )?,
+                requested(model.as_deref(), route.as_deref(), effort.clone())?,
+                remote::RouteText {
+                    model,
+                    route,
+                    effort,
+                },
                 fallback,
                 task.delivery_id,
                 task.account,
@@ -866,6 +874,11 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 flag_route.1.as_deref(),
                 flag_route.2.clone(),
             )?,
+            remote::RouteText {
+                model: flag_route.0.clone(),
+                route: flag_route.1.clone(),
+                effort: flag_route.2.clone(),
+            },
             flag_route.3.clone(),
             command.delivery_id,
             None,
@@ -877,10 +890,43 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     } else {
         Some(1)
     };
+    if let Some(host) = &command.host {
+        let mut placed = Vec::new();
+        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver)) in
+            tasks.into_iter().enumerate()
+        {
+            // The peer derives task IDs from the operation and has no fallback field.
+            if task_id != derived_task(&command.operation_id, index)? {
+                return unsupported("an explicit task ID with --host");
+            }
+            if !fallback.is_empty() {
+                return unsupported("route fallback with --host");
+            }
+            placed.push(remote::Task {
+                prompt,
+                route,
+                account,
+                delivery_id,
+                deliver,
+            });
+        }
+        return remote::dispatch(
+            edge,
+            host,
+            remote::Batch {
+                operation_id: command.operation_id,
+                tasks: placed,
+                concurrency,
+                knobs: command.knobs,
+                provider_timeout: command.provider_timeout,
+            },
+            command.wait,
+        );
+    }
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id, account, deliver)| Submitted {
+            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver)| Submitted {
                 task_class: None,
                 task_id,
                 prompt,
@@ -1309,6 +1355,18 @@ fn settled(state: &run::AttemptState) -> (bool, bool) {
         _ => (false, false),
     }
 }
+/// Whether a lane selection satisfies a wait condition. Input required ends
+/// an all-lanes wait because it cannot progress unattended.
+fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
+    let states: Vec<(bool, bool)> = lanes.iter().map(|l| settled(&l.state)).collect();
+    states.is_empty()
+        || match condition {
+            Condition::Any => states.iter().any(|(done, _)| *done),
+            Condition::All => {
+                states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
+            }
+        }
+}
 /// Snapshot every attempt the targets name. Without targets, the selection is
 /// this actor's nonterminal work; host caps bound it. With `seen`, terminal
 /// lanes at or before that event cursor are already acknowledged and dropped.
@@ -1389,14 +1447,7 @@ fn wait_lanes(
             .iter()
             .map(|id| session.store.record(*id, &call))
             .collect::<Result<Vec<_>, _>>()?;
-        let states: Vec<(bool, bool)> = lanes.iter().map(|l| settled(&l.state)).collect();
-        let met = states.is_empty()
-            || match condition {
-                Condition::Any => states.iter().any(|(done, _)| *done),
-                Condition::All => {
-                    states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
-                }
-            };
+        let met = condition_met(&lanes, condition);
         let expired = Instant::now() >= deadline;
         if met || expired {
             if let Some(key) = selection.as_deref().filter(|_| met) {
@@ -1423,6 +1474,9 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
     reply_waited(
         "lanes",
         (|| {
+            if let Some(placed) = remote::lanes(&command, edge)? {
+                return Ok(placed);
+            }
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
@@ -1499,6 +1553,9 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
 fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    if let Some(placement) = remote::find(edge.roots, command.attempt.0.run)? {
+        return remote::output(&command, &placement, edge);
+    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -1599,6 +1656,11 @@ fn align_utf8_tail(chunk: &mut run::OutputChunk) {
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
+    match remote::find(edge.roots, command.target.run) {
+        Ok(Some(placement)) => return remote::cancel(&command, &placement, edge),
+        Ok(None) => {}
+        Err(fail) => return reply("cancel", Err(fail)),
+    }
     let mut status = Status::Ok;
     let mut out = reply(
         "cancel",

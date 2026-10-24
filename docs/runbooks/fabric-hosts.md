@@ -14,6 +14,7 @@ provenant help
 provenant fabric host list
 provenant hosts doctor
 provenant fabric peer
+provenant dispatch --host workshop --mode read-only --help
 ```
 
 `fabric host list` reads local and configured peer health. `hosts doctor`
@@ -21,9 +22,8 @@ probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
-the fixed SSH protocol entrypoint. Remote dispatch is not available in this
-build: `dispatch --host` refuses with `UNSUPPORTED`. The Rust CLI grammar lives
-in
+the fixed SSH protocol entrypoint. Read-only remote dispatch uses top-level
+`dispatch --host`; peer-host writers are refused. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -94,12 +94,26 @@ the retired `{protocol_version, verb, params}` envelope.
 ## Dispatch and recovery
 
 The CLI grammar uses `provenant dispatch` for one prompt or a batch
-manifest. The `--host` flag is reserved for explicit peer placement, but this
-build refuses it and the Fabric MCP `fabric_dispatch` tool has no host field,
-so every lane runs on the calling host. The peer protocol can already forward
-status, wait, output and cancel for an attempt owned by another host. Remote
-submission, a local record of remote runs and peer writer worktrees are still
-missing ([#1457](https://github.com/mblauberg/provenant/issues/1457)).
+manifest; `--host` names explicit placement on a configured peer, by label or
+host ID. The peer resolves the route, confines the lane and runs it in its own
+checkout of the same project, at the same path under its home directory, with
+its own provider sign-ins. The calling host keeps only a placement record under
+`fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
+the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
+keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
+takes the same placement as an optional `host` field.
+
+Only read-only placement is available. `--mode worktree-write` with `--host`
+refuses with `UNSUPPORTED`, because peer writer worktrees need a transport this
+build lacks ([#1457](https://github.com/mblauberg/provenant/issues/1457)).
+Other limits on a peer run:
+
+- explicit task IDs and route fallback are refused;
+- `output` reads the result and stderr only, without `--tail`;
+- `cancel` does not forward `--reason`; the peer records its own;
+- `lanes` without `--id` lists only lanes on the calling host, and mixing
+  local and peer runs in one call is refused.
+
 `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and

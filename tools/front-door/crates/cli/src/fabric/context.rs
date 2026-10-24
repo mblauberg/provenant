@@ -1,12 +1,17 @@
 use super::{EdgeError, Lease};
-use provenant_core::{CancelToken, Roots};
+use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
+    coordination::facade::FacadeError,
+    hosts::{
+        PeerAction, PeerError, PeerRequest, PeerResult, PeerTransport, ProjectLocator,
+        SshTransport, discover_ssh_executable,
+    },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
 use provenant_records::{AbsolutePath, CommandResult};
 use provenant_supervisor::{
-    exec::SystemExecutor,
+    exec::{Executor, SystemExecutor},
     fs::{Directory, LocalFs, PublishMode},
 };
 use serde::Serialize;
@@ -151,6 +156,82 @@ impl Context {
             return Err(EdgeError::Invalid);
         }
         Ok(())
+    }
+    /// Resolve a configured peer by its label or host ID.
+    pub fn peer_host(&self, name: &str) -> Option<HostId> {
+        if let Some(peer) = self.config.peers.get(name) {
+            return Some(peer.host);
+        }
+        let host = HostId::parse(name).ok()?;
+        self.config
+            .peers
+            .values()
+            .any(|peer| peer.host == host)
+            .then_some(host)
+    }
+    /// One bounded request to a configured peer's fixed `fabric peer` entrypoint.
+    pub fn peer(
+        &self,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResult, FacadeError> {
+        self.peer_with(&self.executor, clock, host, action, budget, cancel)
+    }
+    /// [`Context::peer`] through a caller-owned executor.
+    pub fn peer_with(
+        &self,
+        executor: &dyn Executor,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResult, FacadeError> {
+        let peer = self
+            .config
+            .peers
+            .values()
+            .find(|p| p.host == host)
+            .ok_or(FacadeError::HomeUnavailable)?;
+        let project = ProjectLocator::new(&self.identity, &self.home)
+            .map_err(|_| FacadeError::ConfinementRefused)?;
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: self.identity.host,
+            agent: self.identity.inbox.agent.clone(),
+            project,
+            action,
+        };
+        let executable = discover_ssh_executable(self.config.ssh_executable.as_deref())
+            .map_err(|_| FacadeError::HomeUnavailable)?;
+        let transport = SshTransport {
+            executor,
+            clock,
+            home: &self.home,
+            cwd: &self.cwd,
+            executable,
+            seconds: self.config.limits.peer_seconds,
+        };
+        match transport
+            .exchange(peer, &request, budget, cancel)
+            .map_err(|error| {
+                let operation_id = match &error {
+                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
+                    _ => None,
+                };
+                FacadeError::from_code(error.code(), operation_id)
+            })?
+            .result
+        {
+            PeerResult::Error { code, operation_id } => {
+                Err(FacadeError::from_code(&code, operation_id))
+            }
+            value => Ok(value),
+        }
     }
     pub fn lease(&self, lease: Lease) -> Result<u64, EdgeError> {
         if lease.lease_seconds > self.config.limits.lease_seconds {

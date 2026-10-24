@@ -68,6 +68,10 @@ bounded_input! {
             concurrency: Option<u16>,
             #[serde(default)]
             knobs: Vec<String>,
+            /// Explicit peer placement; read-only tasks only. Omitted when
+            /// absent, so a peer that predates the field still accepts it.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            host: Option<HostId>,
         },
     }
 }

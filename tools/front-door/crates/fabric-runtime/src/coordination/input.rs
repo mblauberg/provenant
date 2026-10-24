@@ -38,7 +38,7 @@ macro_rules! bounded_input {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         $vis enum $name {
-            $( $variant { $( $field: $field_type ),* } ),*
+            $( $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
         }
 
         #[derive(serde::Deserialize)]
@@ -484,6 +484,28 @@ mod tests {
     fn rejects<T: DeserializeOwned + std::fmt::Debug>(value: Value, path: &str) {
         let error = serde_json::from_value::<T>(value).unwrap_err().to_string();
         assert!(error.contains(path), "expected `{path}` in `{error}`");
+    }
+
+    #[test]
+    fn submission_omits_absent_host_for_older_peers() {
+        let input = json!({
+            "op":"submission",
+            "operation_id":"place",
+            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}]
+        });
+        let local: SubmitInput = serde_json::from_value(input).unwrap();
+        assert!(serde_json::to_value(&local).unwrap().get("host").is_none());
+        let placed: SubmitInput = serde_json::from_value(json!({
+            "op":"submission",
+            "operation_id":"place",
+            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}],
+            "host":"07070707070707070707070707070707"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&placed).unwrap()["host"],
+            "07070707070707070707070707070707"
+        );
     }
 
     #[test]

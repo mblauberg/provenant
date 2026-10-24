@@ -1053,3 +1053,302 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
     }
     rig.assert_legacy_unchanged()
 }
+
+/// A loopback peer: the fake SSH executable runs this build's real
+/// `fabric peer` against a second state directory, so the placement record
+/// and every forwarded call cross the actual peer protocol.
+fn loopback_peer(rig: &mut TestRig) -> Result<provenant_core::HostId> {
+    let identity = federated_identity(rig)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?.to_owned();
+    let peer_state = rig.root.join("peer-state");
+    std::fs::DirBuilder::new().mode(0o700).create(&peer_state)?;
+    std::fs::write(
+        peer_state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric.peers.laptop]\nhost='{local}'\ndestination='laptop'\n"
+        ),
+    )?;
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let peer_identity = rig.execute_os(
+        binary,
+        &[
+            "--state-dir".into(),
+            peer_state.clone().into(),
+            "fabric".into(),
+            "identity".into(),
+            "--json".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&peer_identity), 0);
+    let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
+    let peer =
+        provenant_core::HostId::parse(peer_identity["data"]["host"].as_str().ok_or("peer host")?)?;
+    assert_ne!(peer.to_string(), local);
+    let mut script = String::from("#!/bin/sh\n");
+    for (key, value) in &rig.env {
+        if key == "PROVENANT_STATE_DIR" {
+            continue;
+        }
+        script.push_str(&format!(
+            "export {}='{}'\n",
+            key.to_string_lossy(),
+            value.to_string_lossy()
+        ));
+    }
+    script.push_str(&format!(
+        "exec '{}' --state-dir '{}' fabric peer 2>>'{}'\n",
+        binary.display(),
+        peer_state.display(),
+        rig.root.join("peer-stderr").display()
+    ));
+    let ssh = rig.root.join("ssh");
+    std::fs::write(&ssh, script)?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+             [domains.fabric.peers.workshop]\nhost='{peer}'\ndestination='workshop'\n",
+            ssh.to_string_lossy(),
+        ),
+    )?;
+    Ok(peer)
+}
+
+fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
+    let output = rig.command(args)?;
+    let value = serde_json::from_slice(&output.stdout.bytes).map_err(|error| {
+        format!(
+            "{error}: {} {}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+    })?;
+    Ok((code(&output), value))
+}
+
+#[test]
+fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
+    let mut rig = TestRig::new()?;
+    // A provider the peer can launch: it answers the version probe, then
+    // writes a known stderr line. The production read-only profile anchors
+    // the host Rust runtime roots.
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        std::fs::create_dir_all(rig.home.join(path))?;
+    }
+    std::fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(
+        bin.join("codex"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.159.0'; exit 0; fi\n\
+         cat >/dev/null\necho 'peer stderr fixture' >&2\n",
+    )?;
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::write(
+        rig.root.join("codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let peer = loopback_peer(&mut rig)?;
+    let operation = "remote-dispatch-fixture";
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "reply OK")?;
+    let prompt = prompt.to_str().ok_or("prompt path")?.to_owned();
+    let dispatch = [
+        "dispatch",
+        "--host",
+        "workshop",
+        "--mode",
+        "read-only",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        operation,
+        "--prompt-file",
+        &prompt,
+        "--wait",
+        "30",
+        "--json",
+    ];
+    let (_, placed) = json_command(&rig, &dispatch)?;
+    assert_eq!(
+        placed["data"]["host"],
+        peer.to_string(),
+        "{placed} {}",
+        std::fs::read_to_string(rig.root.join("peer-stderr")).unwrap_or_default()
+    );
+    assert_eq!(placed["data"]["operation_id"], operation);
+    assert_eq!(placed["data"]["condition_met"], true, "{placed}");
+    let run = placed["data"]["run_id"]
+        .as_str()
+        .ok_or("run id")?
+        .to_owned();
+    let lane = &placed["data"]["lanes"][0];
+    let attempt = lane["attempt_id"].as_str().ok_or("attempt")?.to_owned();
+    assert_eq!(lane["host"], peer.to_string());
+    assert_eq!(lane["result_path"], Value::Null);
+    // The placement is the only local record; the run lives on the peer.
+    let placement: Value = serde_json::from_slice(&std::fs::read(
+        rig.state.join(format!("fabric/remote-runs/{run}.json")),
+    )?)?;
+    assert_eq!(placement["host"], peer.to_string());
+    assert_eq!(placement["attempts"][0]["attempt_id"], attempt);
+    // Replaying the same operation recovers the same receipt.
+    let (_, replayed) = json_command(&rig, &dispatch)?;
+    assert_eq!(replayed["data"]["run_id"], run.as_str(), "{replayed}");
+
+    let (status, lanes) = json_command(&rig, &["lanes", "--id", &run, "--json"])?;
+    assert_eq!(status, 0, "{lanes}");
+    assert_eq!(lanes["data"]["lanes"][0]["attempt_id"], attempt.as_str());
+    assert_eq!(lanes["data"]["lanes"][0]["state"], lane["state"]);
+    let (status, waited) = json_command(&rig, &["lanes", "--id", &run, "--wait", "5", "--json"])?;
+    assert_eq!(status, 0, "{waited}");
+    assert_eq!(waited["data"]["condition_met"], true);
+
+    let task = lane["task_id"].as_str().ok_or("task")?;
+    let target = format!("{run}/{task}/{attempt}");
+    let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, 0, "{stderr} {placed}");
+        assert_eq!(stderr["data"]["host"], peer.to_string());
+        assert_eq!(stderr["data"]["offset"], 0);
+        assert!(
+            stderr["data"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("peer stderr fixture")),
+            "{stderr}"
+        );
+    } else {
+        // Confined launch is macOS-only, so the peer rejects before any
+        // output exists; the read is still the peer's, not a local miss.
+        assert_eq!(lane["state"], "rejected", "{placed}");
+        assert_eq!(stderr["error"]["code"], "PEER", "{stderr}");
+    }
+    let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
+    assert_ne!(status, 0);
+    assert_eq!(tail["error"]["code"], "UNSUPPORTED", "{tail}");
+
+    let (status, cancelled) = json_command(
+        &rig,
+        &[
+            "cancel",
+            &run,
+            "--operation-id",
+            "remote-cancel-fixture",
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 0, "{cancelled}");
+    assert_eq!(
+        cancelled["data"]["receipts"][0]["attempt_id"],
+        attempt.as_str()
+    );
+    assert_eq!(cancelled["data"]["host"], peer.to_string());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    std::fs::write(rig.root.join("ssh"), "#!/bin/sh\nexit 97\n")?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "x")?;
+    let prompt = prompt.to_str().ok_or("prompt path")?;
+    let worktree = rig.project.to_str().ok_or("worktree path")?.to_owned();
+    let worktree = worktree.as_str();
+    let (status, writer) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "remote-writer",
+            "--prompt-file",
+            prompt,
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(writer["error"]["code"], "UNSUPPORTED", "{writer}");
+    assert!(
+        writer["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("#1457")),
+        "{writer}"
+    );
+    let (status, unknown) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "nowhere",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "remote-unknown",
+            "--prompt-file",
+            prompt,
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(unknown["error"]["code"], "UNKNOWN_HOST", "{unknown}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let task = json!({"prompt":"fixture","route":{"model":"codex/gpt-6-luna"},"timeout_ms":60000});
+    let mut writer = task.clone();
+    writer["access"] = "worktree_write".into();
+    writer["worktree"] = rig.project.to_string_lossy().into_owned().into();
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"mcp-peer","tasks":[task],"host":peer.to_string()}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"mcp-peer-writer","tasks":[writer],"host":peer.to_string()}}}),
+        ],
+    )?;
+    let placed = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
+    assert_ne!(placed["isError"], true, "{placed}");
+    let target = placed["structuredContent"]["targets"][0].clone();
+    assert_eq!(target["host"], peer.to_string(), "{placed}");
+    // The run lives only in the peer's store.
+    assert!(!rig.state.join("runs").exists());
+    assert!(rig.root.join("peer-state/runs").exists());
+    let writer = &replies.iter().find(|r| r["id"] == 2).ok_or("writer")?["result"];
+    assert_eq!(writer["isError"], true, "{writer}");
+    assert_eq!(writer["structuredContent"]["code"], "owner_unavailable");
+
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","target":target}}}),
+        ],
+    )?;
+    let status = &replies.iter().find(|r| r["id"] == 3).ok_or("status")?["result"];
+    assert_ne!(status["isError"], true, "{status}");
+    assert_eq!(
+        status["structuredContent"]["attempt"]["attempt_id"],
+        target["attempt"]
+    );
+    rig.assert_legacy_unchanged()
+}
