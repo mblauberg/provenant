@@ -34,12 +34,37 @@ impl Release {
         &self.source
     }
     pub fn read(source: &Path, target: &str, fs: &dyn SafeFs) -> Result<Self, InstallError> {
+        let anchor = directory(source, false, fs).map_err(|error| match error {
+            InstallError::Fs(error) if error.is_not_found() => {
+                InstallError::Tampered(source.join("release.json"))
+            }
+            other => other,
+        })?;
+        Self::read_held(source, target, anchor)
+    }
+    pub(crate) fn read_scoped(
+        source: &Path,
+        target: &str,
+        fs: &dyn SafeFs,
+        state_root: &Path,
+    ) -> Result<Self, InstallError> {
+        Self::read_held(
+            source,
+            target,
+            crate::managed::directory_scoped(source, state_root, false, fs)?,
+        )
+    }
+    fn read_held(
+        source: &Path,
+        target: &str,
+        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
+    ) -> Result<Self, InstallError> {
         normal_absolute(source)?;
         let manifest_path = source.join("release.json");
         let Some(crate::managed::Snapshot {
             value: crate::managed::Value::File { bytes, mode: 0o600 },
             ..
-        }) = snapshot(&manifest_path, fs)?
+        }) = crate::managed::snapshot_below(&manifest_path, source, anchor.as_ref())?
         else {
             return Err(InstallError::Tampered(manifest_path));
         };
@@ -49,12 +74,13 @@ impl Release {
             return Err(InstallError::Platform);
         }
         check_bounds(&manifest)?;
+        let actual = inventory_held(source, anchor.as_ref(), false)?;
         let mut files = BTreeMap::new();
         for item in &manifest.files {
             let relative = item.path.to_relative_path()?.as_path().to_path_buf();
             validate_name(&relative, item.mode)?;
             let path = source.join(&relative);
-            let current = snapshot(&path, fs)?;
+            let current = crate::managed::snapshot_below(&path, source, anchor.as_ref())?;
             let Some(crate::managed::Snapshot {
                 value: crate::managed::Value::File { bytes, mode },
                 ..
@@ -75,7 +101,6 @@ impl Release {
         if !files.contains_key(Path::new("bin/provenant")) {
             return Err(InstallError::Manifest("missing executable"));
         }
-        let actual = inventory(source, fs)?;
         let expected: Vec<_> = files.keys().cloned().collect();
         if actual != expected {
             return Err(InstallError::Manifest(
@@ -188,7 +213,8 @@ pub fn package_release(
     let mut release_files = Vec::new();
     for relative in names {
         let path = source.join(&relative);
-        let current = snapshot(&path, fs)?.ok_or_else(|| InstallError::Tampered(path.clone()))?;
+        let current = crate::managed::snapshot_scoped(&path, source, fs)?
+            .ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
         };
@@ -289,7 +315,7 @@ fn normalise_staged_modes(
 ) -> Result<(), InstallError> {
     for (relative, (expected_bytes, expected_mode)) in files {
         let path = source.join(relative);
-        let Some(current) = snapshot(&path, fs)? else {
+        let Some(current) = crate::managed::snapshot_scoped(&path, source, fs)? else {
             return Err(InstallError::Tampered(path));
         };
         let crate::managed::Value::File { bytes, mode } = current.value else {
@@ -309,7 +335,7 @@ fn normalise_staged_modes(
             .ok_or_else(|| InstallError::Path(path.clone()))?;
         let permissions = u32::try_from(*expected_mode)
             .map_err(|_| InstallError::Manifest("invalid release mode"))?;
-        let published = directory(parent, false, fs)?.atomic_write(
+        let published = crate::managed::directory_scoped(parent, source, false, fs)?.atomic_write(
             name,
             ".provenant-staging.",
             expected_bytes,
@@ -367,6 +393,13 @@ pub(crate) fn inventory_with_cleanup(
     fs: &dyn SafeFs,
     remove_staging: bool,
 ) -> Result<Vec<PathBuf>, InstallError> {
+    inventory_held(root, directory(root, false, fs)?.as_ref(), remove_staging)
+}
+pub(crate) fn inventory_held(
+    root: &Path,
+    anchor: &dyn provenant_supervisor::fs::SafeDir,
+    remove_staging: bool,
+) -> Result<Vec<PathBuf>, InstallError> {
     fn allowed_directory(path: &Path) -> bool {
         path == Path::new("bin")
             || [
@@ -385,7 +418,7 @@ pub(crate) fn inventory_with_cleanup(
         root: &Path,
         tail: &Path,
         depth: usize,
-        dir: Box<dyn provenant_supervisor::fs::SafeDir>,
+        dir: &dyn provenant_supervisor::fs::SafeDir,
         output: &mut Vec<PathBuf>,
         count: &mut usize,
         remove_staging: bool,
@@ -415,7 +448,7 @@ pub(crate) fn inventory_with_cleanup(
                     root,
                     &path,
                     depth + 1,
-                    dir.open_verified_directory(&name)?,
+                    dir.open_verified_directory(&name)?.as_ref(),
                     output,
                     count,
                     remove_staging,
@@ -432,7 +465,7 @@ pub(crate) fn inventory_with_cleanup(
         root,
         Path::new(""),
         0,
-        directory(root, false, fs)?,
+        anchor,
         &mut output,
         &mut 0,
         remove_staging,

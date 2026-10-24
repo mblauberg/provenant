@@ -418,7 +418,7 @@ pub(crate) fn snapshot_target(
             }
         }
     }
-    managed::snapshot(path, fs)
+    managed::snapshot_scoped(path, targets.roots.state.as_path(), fs)
 }
 fn rewrite_instruction_array(
     bytes: &[u8],
@@ -693,9 +693,9 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     let Some(Snapshot {
         value: Value::File { bytes, .. },
         ..
-    }) = managed::snapshot(&path, fs)?
+    }) = managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?
     else {
-        if managed::snapshot(&path, fs)?.is_some() {
+        if managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?.is_some() {
             return Err(InstallError::ConfigFile(path));
         }
         return Ok(());

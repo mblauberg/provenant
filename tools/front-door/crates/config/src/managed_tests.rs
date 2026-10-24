@@ -288,7 +288,14 @@ fn crash_after_any_publication_reapplies_without_a_receipt() {
     for action in plan.actions().iter().filter(|a| a.selector != "receipt") {
         let path = action.path.to_path_buf().unwrap();
         let desired = &plan.desired.get(&path).unwrap().value;
-        publish(&path, desired, false, &LocalFs).unwrap();
+        publish(
+            &path,
+            desired,
+            false,
+            &LocalFs,
+            f.targets.roots.state.as_path(),
+        )
+        .unwrap();
         let recovery = f.plan();
         assert!(!recovery.actions().iter().any(|a| a.path == action.path));
         assert!(!f.receipt().exists());
@@ -478,6 +485,8 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultMode {
+    StateMount,
+    SourceMount,
     ReceiptPublish,
     InterruptedReleasePublish,
     CancelAfterFirstPublication,
@@ -565,9 +574,18 @@ impl SafeDir for FaultDir {
         Ok(self.child(self.inner.open_directory(name, follow)?))
     }
     fn open_verified_directory(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeDir>> {
+        if (self.state.mode == FaultMode::StateMount && name == "install")
+            || (self.state.mode == FaultMode::SourceMount && name == "skills")
+        {
+            return Err(FsError::CrossDevice { path: name.into() });
+        }
         Ok(self.child(self.inner.open_verified_directory(name)?))
     }
     fn open_read(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
+        assert!(
+            !(self.state.mode == FaultMode::SourceMount && name == "SKILL.md"),
+            "asset read before source confinement"
+        );
         self.inner.open_read(name)
     }
     fn create_new(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
@@ -1242,7 +1260,14 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
         }
         let desired = &plan_b.desired.get(&path).unwrap().value;
         let replace = plan_b.before.entries.get(&path).unwrap().is_some();
-        publish(&path, desired, replace, &LocalFs).unwrap();
+        publish(
+            &path,
+            desired,
+            replace,
+            &LocalFs,
+            f.targets.roots.state.as_path(),
+        )
+        .unwrap();
     }
     let receipt_after_crash: InstallReceipt =
         provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
@@ -2323,4 +2348,48 @@ fn absolute_bootstrap_refuses_intermediate_state_and_release_symlinks() {
         assert!(!foreign.join("nested").exists());
         assert_eq!(fs::read(foreign.join("sentinel")).unwrap(), b"untouched");
     }
+}
+
+#[test]
+fn state_mount_descendant_refuses_before_lock_or_receipt_writes() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    fs::create_dir_all(f.targets.roots.state.as_path().join("install")).unwrap();
+    let fault = FaultFs::new(FaultMode::StateMount, None);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let error = install(
+        &plan,
+        &InstallContext {
+            fs: &fault,
+            ..context(&clock, &cancel)
+        },
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, InstallError::Fs(FsError::CrossDevice { path }) if path == Path::new("install"))
+    );
+    assert!(!f.receipt().exists());
+    assert!(
+        !f.targets
+            .roots
+            .state
+            .as_path()
+            .join("install/install.lock")
+            .exists()
+    );
+}
+
+#[test]
+fn source_mount_descendant_refuses_before_reading_manifest_assets() {
+    let f = Fixture::new();
+    f.release();
+    let fault = FaultFs::new(FaultMode::SourceMount, None);
+    let error = Release::read(&f.source, "fixture-target", &fault).unwrap_err();
+    assert!(
+        matches!(error, InstallError::Fs(FsError::CrossDevice { path }) if path == Path::new("skills"))
+    );
 }
