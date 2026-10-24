@@ -212,12 +212,13 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: |
-          cargo test --test worktrees --locked -- --exact lane_prepare_isolates_nested_state
+          lane_status=0
+          cargo test --test worktrees --locked -- --exact lane_prepare_isolates_nested_state || lane_status=$?
           reader_status=0
           cargo test --test worktrees --locked -- --exact read_only_dispatch_applies_bound_git_and_project_writes || reader_status=$?
           writer_status=0
           cargo test --test worktrees --locked -- --exact writer_dispatch_uses_lane_cache_and_narrow_provider_state || writer_status=$?
-          if [ "$reader_status" -ne 0 ] || [ "$writer_status" -ne 0 ]; then
+          if [ "$lane_status" -ne 0 ] || [ "$reader_status" -ne 0 ] || [ "$writer_status" -ne 0 ]; then
             exit 1
           fi
           cargo test --test worktrees --locked -- --exact writer_dispatch_edits_a_linked_worktree
