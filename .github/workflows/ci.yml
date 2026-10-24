@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Merge queue: the queue waits for `ci-status` on the temporary merge-group
-  # ref, so the workflow must run there or entries time out.
-  merge_group:
-    types: [checks_requested]
 
 # Least privilege: the workflow grants nothing by default; every job
 # declares exactly what it needs.
@@ -41,13 +37,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Select macOS checks from changed paths
         id: paths
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' || github.event.merge_group.base_ref == 'refs/heads/main' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
         run: |
           if [ "$IS_MAIN" = "true" ]; then
             echo "run_macos=true" >> "$GITHUB_OUTPUT"

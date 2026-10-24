@@ -636,6 +636,16 @@ fn output_schema_lists_only_supported_parts() {
         read["properties"]["part"]["enum"],
         json!(["stdout", "stderr"])
     );
+    for tool in catalogue() {
+        assert!(tool["outputSchema"].is_object() || tool["outputSchema"].is_array());
+    }
+    assert!(
+        output["outputSchema"]["oneOf"]
+            .as_array()
+            .expect("output variants")
+            .iter()
+            .any(|variant| variant["properties"]["kind"]["const"] == "chunk")
+    );
 }
 
 #[test]
