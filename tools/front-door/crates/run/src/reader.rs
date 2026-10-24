@@ -200,6 +200,8 @@ pub struct LaneQuery {
     pub limit: u64,
     /// Exclusive attempt-sequence cursor.
     pub after: u64,
+    /// Return highest sequence first; `after` then acts as an exclusive upper bound.
+    pub newest_first: bool,
 }
 #[derive(Debug)]
 pub struct LanePage {
@@ -266,11 +268,40 @@ impl RunStore {
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         call.retry(|| {
             let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
-            let record: AttemptRecord = decode(&raw)?;
+            let mut record: AttemptRecord = decode(&raw)?;
             if record.attempt_id != id || record.project_id != self.context.project_id || record.run_id.to_string() != run_id || record.task_id.to_string() != task_id || sql_int(record.attempt_number)? != number || sql_int(record.revision)? != revision || matches!(record.state, AttemptState::Terminal { .. }) != terminal { return Err(RunError::Validation("attempt index identity")); }
             let run = self.run_on(&self.db, record.run_id)?;
             if run.operation_id != record.operation_id || !run.task_ids.contains(&record.task_id) { return Err(RunError::Validation("attempt run association")); }
             validate_attempt(&record)?;
+            let checkpoint = match self.attempt_dir(record.run_id, id, false) {
+                Ok(directory) => {
+                    crate::artifacts::read_sealed(&directory, "process.json", RECORD_LIMIT)?
+                }
+                Err(RunError::Filesystem(error)) if error.is_not_found() => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(bytes) = checkpoint {
+                #[derive(serde::Deserialize)]
+                struct ProcessCheckpoint {
+                    schema_version: u64,
+                    scope: provenant_supervisor::custody::Scope,
+                    #[serde(default)]
+                    last_output_at: Option<WallTime>,
+                }
+                let observation: ProcessCheckpoint = serde_json::from_slice(&bytes)
+                    .map_err(|_| RunError::Validation("process observation"))?;
+                if observation.schema_version != 1
+                    || observation.scope
+                    != (provenant_supervisor::custody::Scope {
+                        run: record.run_id,
+                        attempt: record.attempt_id,
+                        generation: record.generation,
+                    })
+                {
+                    return Err(RunError::Validation("process observation scope"));
+                }
+                record.last_output_at = observation.last_output_at;
+            }
             Ok(record)
         })
     }
@@ -387,18 +418,32 @@ impl RunStore {
         let mut rows: Vec<(i64, String)> = call.retry(|| {
             let mut found = Vec::new();
             if query.targets.is_empty() {
-                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0) ORDER BY sequence LIMIT ?4")?;
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0) ORDER BY sequence DESC LIMIT ?4"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0) ORDER BY sequence LIMIT ?4"
+                };
+                let mut statement = self.db.prepare(sql)?;
                 let page = statement.query_map(params![project, after, query.all, fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             for target in &query.targets {
-                let mut statement = self.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence LIMIT ?6")?;
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence DESC LIMIT ?6"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5) ORDER BY sequence LIMIT ?6"
+                };
+                let mut statement = self.db.prepare(sql)?;
                 let page = statement.query_map(params![project, after, target.run.to_string(), target.task.map(|t| t.to_string()), target.attempt.map(|a| a.to_string()), fetch], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 for row in page { found.push(row?); }
             }
             Ok(found)
         })?;
-        rows.sort();
+        if query.newest_first {
+            rows.sort_by(|a, b| b.cmp(a));
+        } else {
+            rows.sort();
+        }
         rows.dedup();
         let more = rows.len() as u64 > query.limit;
         rows.truncate(query.limit as usize);

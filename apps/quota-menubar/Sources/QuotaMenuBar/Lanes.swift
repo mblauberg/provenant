@@ -3,7 +3,7 @@ import Foundation
 /// A lane (one attempt) as `provenant lanes --all --json` reports it, reduced to what the panel needs.
 struct Lane: Sendable, Equatable {
     let runID: String, attemptID: String, state: String, route: String
-    let queuedAt: Date?, startedAt: Date?, finishedAt: Date?
+    let queuedAt: Date?, startedAt: Date?, finishedAt: Date?, lastOutputAt: Date?
 }
 
 /// Why a lane is in the panel. The order is the panel's order.
@@ -39,10 +39,10 @@ enum LaneBoard {
         "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required",
         "model_unavailable", "permission_denied", "quarantined", "lost",
     ]
-    /// Nonterminal states a lane passes through quickly. The run store keeps no output-activity time, so a lane
-    /// held in one of them past `stallAfter` is the only silence the CLI lets the app see.
+    /// Nonterminal states a lane passes through quickly.
     static let transitional: Set<String> = ["queued", "starting", "settling"]
-    static let stallAfter: TimeInterval = 600, failureWindow: TimeInterval = 3600, inputWindow: TimeInterval = 86_400
+    static let stallAfter: TimeInterval = 600, silenceSeconds: TimeInterval = 600
+    static let failureWindow: TimeInterval = 3600, inputWindow: TimeInterval = 86_400
 
     /// Lanes that need attention, input first, then failures, then stalls; the newest first within each.
     static func attention(_ lanes: [Lane], now: Date) -> [AttentionLane] {
@@ -54,6 +54,9 @@ enum LaneBoard {
                 return AttentionLane(lane: lane, kind: .failed, since: at)
             }
             if transitional.contains(lane.state), let at = lane.startedAt ?? lane.queuedAt, now.timeIntervalSince(at) >= stallAfter {
+                return AttentionLane(lane: lane, kind: .stalled, since: at)
+            }
+            if lane.state == "running", let at = lane.lastOutputAt, now.timeIntervalSince(at) >= silenceSeconds {
                 return AttentionLane(lane: lane, kind: .stalled, since: at)
             }
             return nil
@@ -78,6 +81,7 @@ private struct LaneWire: Decodable {
     let runId: String, attemptId: String, state: String
     let appliedRoute: Route?
     let queuedAt: String?, startedAt: String?, finishedAt: String?
+    let lastOutputAt: String?
 }
 
 private struct LanePageWire: Decodable {
@@ -107,7 +111,8 @@ extension Lane {
         func date(_ text: String?) -> Date? { text.flatMap { fraction.date(from: $0) ?? whole.date(from: $0) } }
         let lanes = page.lanes.map {
             Lane(runID: $0.runId, attemptID: $0.attemptId, state: $0.state, route: $0.appliedRoute?.model ?? "unresolved",
-                 queuedAt: date($0.queuedAt), startedAt: date($0.startedAt), finishedAt: date($0.finishedAt))
+                 queuedAt: date($0.queuedAt), startedAt: date($0.startedAt), finishedAt: date($0.finishedAt),
+                 lastOutputAt: date($0.lastOutputAt))
         }
         return (lanes, page.nextCursor)
     }
@@ -120,7 +125,7 @@ extension CLI {
         guard let launcher = cached ?? resolve() else { return (nil, .failure(Failure(message: "provenant was not found"))) }
         var kept: [Lane] = [], cursor: String?
         for _ in 0..<20 {
-            let arguments = ["lanes", "--all", "--limit", "100", "--json"] + (cursor.map { ["--cursor", $0] } ?? [])
+            let arguments = ["lanes", "--all", "--since", "24h", "--limit", "100", "--json"] + (cursor.map { ["--cursor", $0] } ?? [])
             do {
                 let run = try exec(launcher.url, arguments, path: launcher.path, limit: 20)
                 guard run.status == 0, !run.timedOut, !run.signalled else {

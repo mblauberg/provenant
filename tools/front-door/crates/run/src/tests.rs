@@ -272,6 +272,38 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
+    let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+    artifacts::seal(
+        &directory,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "last_output_at": expected,
+            "publication_pending": false
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    assert_eq!(
+        store
+            .record(input.attempts[0].attempt_id, &call)?
+            .last_output_at,
+        Some(expected)
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_open_works_without_directory_write_access_or_creating_files() -> TestResult {
