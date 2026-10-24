@@ -238,8 +238,68 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
+fn landing_fence_reads_secret_from_environment_without_a_token_argument() -> Result {
+    let mut rig = TestRig::new()?;
+    let acquired = call(
+        &rig,
+        &[
+            "fabric",
+            "landing",
+            "acquire",
+            "--reference",
+            "refs/heads/main",
+            "--expected",
+            &"a".repeat(40),
+            "--candidate",
+            &"b".repeat(40),
+            "--operation-id",
+            "env-land",
+        ],
+        0,
+    )?;
+    let proof = &acquired["data"]["proof"];
+    let secret = token(proof)?;
+    rig.env
+        .push(("PROVENANT_LANDING_TOKEN".into(), secret.clone().into()));
+    call(
+        &rig,
+        &[
+            "fabric",
+            "landing",
+            "verify",
+            "--reference",
+            "refs/heads/main",
+            "--id",
+            proof["id"].as_str().ok_or("claim")?,
+            "--generation",
+            &proof["generation"].to_string(),
+        ],
+        0,
+    )?;
+    let rejected = call(
+        &rig,
+        &[
+            "fabric",
+            "landing",
+            "verify",
+            "--reference",
+            "refs/heads/main",
+            "--id",
+            proof["id"].as_str().ok_or("claim")?,
+            "--generation",
+            &proof["generation"].to_string(),
+            "--token",
+            &secret,
+        ],
+        2,
+    )?;
+    assert!(!serde_json::to_string(&rejected)?.contains(&secret));
+    Ok(())
+}
+
+#[test]
 fn landing_observation_never_acquires_and_release_is_replayable() -> Result {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
     let acquired = call(
         &rig,
         &[
@@ -261,6 +321,8 @@ fn landing_observation_never_acquires_and_release_is_replayable() -> Result {
     let id = proof["id"].as_str().ok_or("claim ID")?;
     let generation = proof["generation"].to_string();
     let token = token(proof)?;
+    rig.env
+        .push(("PROVENANT_LANDING_TOKEN".into(), token.into()));
     let released = [
         "fabric",
         "landing",
@@ -271,8 +333,6 @@ fn landing_observation_never_acquires_and_release_is_replayable() -> Result {
         id,
         "--generation",
         &generation,
-        "--token",
-        &token,
         "--operation-id",
         "release-1",
     ];

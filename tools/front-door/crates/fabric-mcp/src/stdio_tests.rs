@@ -809,6 +809,7 @@ impl FakeFactory {
             &CancelToken::new(),
         )
         .unwrap();
+        drop(_initialised);
         Self(state)
     }
 }
@@ -1146,4 +1147,16 @@ fn encode_line(value: &Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(value).unwrap();
     bytes.push(b'\n');
     bytes
+}
+
+#[test]
+fn configured_frame_limit_stops_at_one_byte_beyond_the_cap() {
+    let mut framer = Framer::with_limit(4);
+    assert_eq!(framer.remaining(), 5);
+    framer.push(b"12345").unwrap();
+    assert_eq!(framer.remaining(), 0);
+    assert!(matches!(framer.next_frame(), Err(Error::Oversize)));
+    let mut framer = Framer::with_limit(4);
+    framer.push(b"1234\n").unwrap();
+    assert_eq!(framer.next_frame().unwrap(), Some(b"1234".to_vec()));
 }

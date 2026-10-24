@@ -705,8 +705,8 @@ Each category row is itself a `DisclosureGroup`; there are no separate
  v ■ (puzzlepiece)  MCP tools                    4.8k   1.9%   9 of 57 loaded
       Sort [Largest | Name]                                   Show deferred [ ]
       (server.rack) fabric                     ≈ 2.9k   ▬▬▬▬▬▬▬▬▬▬▬▬░░░░   6 tools
-         fabric_dispatch                       ≈ 0.9k   ▬▬▬▬░░░░░░░░░░░░
-         fabric_status                         ≈ 0.4k   ▬▬░░░░░░░░░░░░░░
+         fabric_submit                       ≈ 0.9k   ▬▬▬▬░░░░░░░░░░░░
+         fabric_run                         ≈ 0.4k   ▬▬░░░░░░░░░░░░░░
          ...
       (server.rack) aws-mcp                    ≈ 1.9k   ▬▬▬▬▬▬▬▬░░░░░░░░   3 tools
 ```

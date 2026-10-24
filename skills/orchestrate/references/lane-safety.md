@@ -48,8 +48,9 @@ false report. Paste the first section into every lane and reviewer brief.
   verify uptake from the commits, report file or transcript.
 - A worktree without installed dependencies runs nothing, yet lanes report
   passes. Install and prove it with one test file before dispatch.
-- Read lane state from `fabric_status{detail:"full"}`, not ad-hoc `ps`. Record
-  the tip of each writer lane (one expected to deliver commits) on first sight:
+- Read lane state from `provenant lanes`; for run details use `fabric_run`'s
+  `status` operation with an explicit target. Record the tip of each writer lane
+  (one expected to deliver commits) on first sight:
   an unchanged tip with nothing ahead is `empty`, a failure even when the run
   says `ok`. Read-only reviewers and researchers commit nothing; judge them by
   their artifacts and evidence.
@@ -71,8 +72,8 @@ false report. Paste the first section into every lane and reviewer brief.
 
 - Reconnecting the Fabric MCP server cancels every lane it hosts. Commit
   writers' work or wait for idle first.
-- `fabric_cancel` with a batch task id cancels the whole batch; dispatch writers
-  as single-task runs. A cancel can reap a process another lane depends on.
+- Use `fabric_run`'s `cancel` operation with an explicit run or task target and
+  operation ID. A cancel can reap a process another lane depends on.
 - A lane must not start a nested Fabric dispatch; sandboxed Codex lanes reject
   it before placement because host state is outside their writable roots, so
   dispatch reviewers from the chair.

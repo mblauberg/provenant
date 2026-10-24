@@ -1,238 +1,532 @@
-//! Federation placement policy. Transport and group cancellation remain with supervisor.
+//! Fixed, bounded SSH peer protocol. No command strings or placement fallback.
+use crate::{
+    config::{FabricConfig, Peer},
+    coordination::*,
+    identity::{CrossHostProjectKey, Identity},
+};
+use provenant_core::{ActorId, CancelToken, Clock, HostId, OperationId, WaitBudget};
+use provenant_records::{CanonicalV1, Limits};
+use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use std::{
+    ffi::OsString,
+    path::{Component, Path},
+    time::Duration,
+};
 
-pub const HOST_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
-pub const HOST_STDERR_LIMIT: usize = 4096;
+pub const MAX_FRAME: usize = 1_048_576;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LaneRequest {
-    pub action: String,
-    pub cwd: String,
-    pub input: Map<String, Value>,
+#[derive(Debug, thiserror::Error)]
+pub enum PeerError {
+    #[error("peer protocol version or identity mismatch")]
+    Version,
+    #[error("peer project is outside the selected home")]
+    Project,
+    #[error("peer is unavailable")]
+    Unavailable,
+    #[error("peer mutation outcome is unknown for operation {operation_id}")]
+    Unknown { operation_id: OperationId },
+    #[error("peer request was cancelled")]
+    Cancelled,
+    #[error("invalid peer frame")]
+    Frame,
+    #[error("peer refused the operation: {code}")]
+    Refused { code: String },
 }
-
-/// Environment and config existence are explicit inputs, so no global mutable
-/// state or filesystem probing is needed to decide whether federation applies.
-pub fn needs_host_owner(local_only: bool, config_exists: bool, input: &Map<String, Value>) -> bool {
-    if local_only {
-        return false;
-    }
-    if config_exists || input.contains_key("host") {
-        return true;
-    }
-    ["id", "resume", "handoff", "session"]
-        .iter()
-        .filter_map(|k| input.get(*k))
-        .chain(
-            input
-                .get("ids")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten(),
-        )
-        .any(|v| v.as_str().is_some_and(|s| s.contains('@')))
-}
-
-pub fn needs_operation_id(action: &str, input: &Map<String, Value>) -> bool {
-    matches!(action, "dispatch" | "resume" | "handoff") && !input.contains_key("operation_id")
-}
-
-/// Apply the owner's local-placement rewrite, or retain the remote response.
-/// Input is mutated only after a local response, apart from the operation ID
-/// allocated by the caller before transport.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("non-object local host rewrites await the JavaScript-compatible response codec")]
-pub struct UnsupportedRewrite;
-
-pub fn apply_lane_response(
-    input: &mut Map<String, Value>,
-    result: Map<String, Value>,
-) -> Result<Option<Map<String, Value>>, UnsupportedRewrite> {
-    if result
-        .get("error")
-        .and_then(|e| e.get("code"))
-        .and_then(Value::as_str)
-        == Some("hosts_cancelled")
-    {
-        let mut refusal = json!({"status":"rejected", "error":"hosts_cancelled",
-            "fix":"Retry with the same --operation-id to resume or settle the interrupted transfer."}).as_object().cloned().unwrap_or_default();
-        if let Some(id) = input.get("operation_id") {
-            refusal.insert("operation_id".into(), id.clone());
+impl PeerError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Version => "peer_version",
+            Self::Project => "invalid_input",
+            Self::Unavailable => "home_unavailable",
+            Self::Unknown { .. } => "launch_unknown",
+            Self::Cancelled => "cancelled",
+            Self::Frame => "state_corrupt",
+            Self::Refused { code } => match code.as_str() {
+                "invalid_input" => "invalid_input",
+                "not_found" => "not_found",
+                "conflict" => "conflict",
+                "busy" => "busy",
+                "stale_fence" => "stale_fence",
+                "cancelled" => "cancelled",
+                "timeout" => "timeout",
+                "home_unavailable" => "home_unavailable",
+                _ => "peer_refused",
+            },
         }
-        return Ok(Some(refusal));
-    }
-    if result.get("local").is_some_and(truthy) {
-        if let Some(rewrite) = result.get("input").filter(|v| truthy(v)) {
-            let Value::Object(rewrite) = rewrite else {
-                return Err(UnsupportedRewrite);
-            };
-            *input = rewrite.clone();
-        } else {
-            input.remove("host");
-            input.remove("operation_id");
-        }
-        if let Some(fallback) = result.get("fallback").filter(|v| truthy(v)) {
-            input.insert("placement_fallback".into(), fallback.clone());
-        }
-        return Ok(None);
-    }
-    Ok(Some(result))
-}
-
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(v) => *v,
-        Value::String(v) => !v.is_empty(),
-        Value::Number(v) => v.as_f64() != Some(0.0),
-        _ => true,
     }
 }
 
-/// Keep bytes, decoding only once complete, so split UTF-8 characters survive.
-#[derive(Default)]
-pub struct StderrTail(Vec<u8>);
-impl StderrTail {
-    pub fn push(&mut self, chunk: &[u8]) {
-        if chunk.len() >= HOST_STDERR_LIMIT {
-            self.0.clear();
-            self.0
-                .extend_from_slice(&chunk[chunk.len() - HOST_STDERR_LIMIT..]);
-        } else {
-            let drop = (self.0.len() + chunk.len()).saturating_sub(HOST_STDERR_LIMIT);
-            self.0.drain(..drop);
-            self.0.extend_from_slice(chunk);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLocator {
+    pub key: CrossHostProjectKey,
+    pub common_dir: String,
+}
+impl ProjectLocator {
+    pub fn new(identity: &Identity, home: &Path) -> Result<Self, PeerError> {
+        let common = identity
+            .common_dir
+            .to_path_buf()
+            .map_err(|_| PeerError::Project)?;
+        let relative = common.strip_prefix(home).map_err(|_| PeerError::Project)?;
+        let common_dir = relative.to_str().ok_or(PeerError::Project)?.to_owned();
+        let locator = Self {
+            key: CrossHostProjectKey::from_home(home, &common).map_err(|_| PeerError::Project)?,
+            common_dir,
+        };
+        locator.resolve(home)?;
+        Ok(locator)
+    }
+    pub fn resolve(&self, home: &Path) -> Result<std::path::PathBuf, PeerError> {
+        let relative = Path::new(&self.common_dir);
+        if self.common_dir.len() > 4096
+            || relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(PeerError::Project);
+        }
+        let path = home.join(relative);
+        if CrossHostProjectKey::from_home(home, &path).map_err(|_| PeerError::Project)? != self.key
+        {
+            return Err(PeerError::Project);
+        }
+        Ok(path)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "domain",
+    content = "input",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum CoordinationInput {
+    Mail(MailInput),
+    Task(TaskInput),
+    Events(EventsInput),
+    Claim(ClaimInput),
+    Landing(LandingInput),
+}
+impl CoordinationInput {
+    pub fn mutation(&self) -> Option<Mutation> {
+        match self {
+            Self::Mail(MailInput::Read { .. })
+            | Self::Task(TaskInput::List { .. })
+            | Self::Events(EventsInput::Read { .. })
+            | Self::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
+            | Self::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => None,
+            Self::Mail(v) => Some(Mutation::Mail(v.clone())),
+            Self::Task(v) => Some(Mutation::Task(v.clone())),
+            Self::Events(v) => Some(Mutation::Events(v.clone())),
+            Self::Claim(v) => Some(Mutation::Claim(v.clone())),
+            Self::Landing(v) => Some(Mutation::Landing(v.clone())),
         }
     }
-    pub fn message(&self) -> String {
-        let detail = String::from_utf8_lossy(&self.0);
-        let detail = crate::pending::trim_ecmascript(&detail);
-        if detail.is_empty() {
-            "Host owner did not return a JSON result".into()
-        } else {
-            detail.into()
+    pub fn execute(
+        &self,
+        service: &CoordinationService<'_>,
+        operation: Option<OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<CoordinationResult, CoordinationError> {
+        if let Some(input) = self.mutation() {
+            let id = operation.ok_or(CoordinationError::InvalidInput(
+                "peer mutations require operation_id",
+            ))?;
+            return service.mutate(input, &id, budget, cancel).map(Into::into);
         }
+        if operation.is_some() {
+            return Err(CoordinationError::InvalidInput(
+                "operation_id on observation",
+            ));
+        }
+        match self {
+            Self::Mail(v) => service
+                .mail(v.clone(), budget, cancel)
+                .map(CoordinationResult::Mail),
+            Self::Task(v) => service
+                .task(v.clone(), budget, cancel)
+                .map(CoordinationResult::Task),
+            Self::Events(v) => service
+                .events(v.clone(), budget, cancel)
+                .map(CoordinationResult::Events),
+            Self::Claim(v) => service
+                .claim(v.clone(), budget, cancel)
+                .map(CoordinationResult::Claim),
+            Self::Landing(v) => service
+                .landing(v.clone(), budget, cancel)
+                .map(CoordinationResult::Landing),
+        }
+    }
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "domain",
+    content = "result",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum CoordinationResult {
+    Mail(MailResult),
+    Task(TaskResult),
+    Events(EventsResult),
+    Claim(ClaimResult),
+    Landing(LandingResult),
+}
+impl From<MutationResult> for CoordinationResult {
+    fn from(value: MutationResult) -> Self {
+        match value {
+            MutationResult::Mail(v) => Self::Mail(v),
+            MutationResult::Task(v) => Self::Task(v),
+            MutationResult::Events(v) => Self::Events(v),
+            MutationResult::Claim(v) => Self::Claim(v),
+            MutationResult::Landing(v) => Self::Landing(v),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PeerAction {
+    Health,
+    Run {
+        input: crate::coordination::facade::RunInput,
+    },
+    Submit {
+        input: crate::coordination::facade::SubmitInput,
+    },
+    Output {
+        input: crate::coordination::facade::OutputInput,
+    },
+    RunEvents {
+        after: u64,
+        limit: u16,
+    },
+    Receipt {
+        operation_id: OperationId,
+    },
+    LandingPush {
+        proof: LandingProof,
+        operation_id: OperationId,
+        reconcile: bool,
+    },
+    Coordination {
+        input: CoordinationInput,
+        operation_id: Option<OperationId>,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRequest {
+    pub version: u64,
+    pub target_host: HostId,
+    pub source_host: HostId,
+    pub agent: String,
+    pub project: ProjectLocator,
+    pub action: PeerAction,
+}
+impl PeerRequest {
+    pub fn operation(&self) -> Option<OperationId> {
+        match &self.action {
+            PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
+            PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
+            PeerAction::Submit {
+                input: facade::SubmitInput::Submission { operation_id, .. },
+            }
+            | PeerAction::Run {
+                input:
+                    facade::RunInput::Cancel { operation_id, .. }
+                    | facade::RunInput::Resume { operation_id, .. },
+            } => Some(operation_id.clone()),
+            _ => None,
+        }
+    }
+    pub fn digest(&self) -> Result<provenant_core::Digest, PeerError> {
+        CanonicalV1::record_digest("fabric-peer", 1, self).map_err(|_| PeerError::Frame)
+    }
+    pub fn actor(&self) -> Result<ActorId, PeerError> {
+        crate::identity::Address::new(self.source_host, &self.agent)
+            .map(|a| a.actor)
+            .map_err(|_| PeerError::Project)
+    }
+    pub fn validate(
+        &self,
+        local: HostId,
+        config: &FabricConfig,
+        home: &Path,
+    ) -> Result<(), PeerError> {
+        if self.version != 1 || self.target_host != local {
+            return Err(PeerError::Version);
+        }
+        if self.source_host != local
+            && !config
+                .peers
+                .values()
+                .any(|peer| peer.host == self.source_host)
+        {
+            return Err(PeerError::Project);
+        }
+        self.project.resolve(home)?;
+        self.actor()?;
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostHealth {
+    pub host: HostId,
+    pub available: bool,
+    /// Readiness requires the run owner; config presence alone proves nothing.
+    pub execution: Option<bool>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "result",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PeerResult {
+    Run(Box<crate::runs::RunResult>),
+    Submitted(crate::runs::SubmissionReceipt),
+    Output(crate::coordination::facade::OutputResult),
+    RunEvents(crate::runs::RunEventsPage),
+    Push(provenant_fabric_store::PushOperation),
+    Health(HostHealth),
+    Coordination(CoordinationResult),
+    Error {
+        code: String,
+        operation_id: Option<OperationId>,
+    },
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerResponse {
+    pub version: u64,
+    pub host: HostId,
+    pub project: CrossHostProjectKey,
+    pub result: PeerResult,
+}
+pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
+    provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
+}
+pub trait PeerTransport {
+    fn exchange(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResponse, PeerError>;
+}
+pub struct SshTransport<'a> {
+    pub executor: &'a dyn Executor,
+    pub clock: &'a dyn Clock,
+    pub home: &'a Path,
+    pub cwd: &'a Path,
+    /// Absolute, resolved system SSH executable, chosen by composition.
+    pub executable: &'a Path,
+    pub seconds: u64,
+}
+impl PeerTransport for SshTransport<'_> {
+    fn exchange(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<PeerResponse, PeerError> {
+        if cancel.is_cancelled() {
+            return Err(PeerError::Cancelled);
+        }
+        // Config validation is repeated at this public boundary before argv.
+        if peer.host != request.target_host
+            || peer.destination.is_empty()
+            || peer.destination.starts_with('-')
+            || !peer
+                .destination
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-@".contains(&b))
+            || !self.executable.is_absolute()
+        {
+            return Err(PeerError::Project);
+        }
+        let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
+        if input.len() >= MAX_FRAME {
+            return Err(PeerError::Frame);
+        }
+        input.push(b'\n');
+        let timeout = Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
+            .min(Duration::from_secs(self.seconds.min(30)));
+        if timeout.is_zero() {
+            return Err(PeerError::Unavailable);
+        }
+        let argv: Vec<OsString> = vec![
+            self.executable.into(),
+            "-T".into(),
+            "-oBatchMode=yes".into(),
+            "-oConnectTimeout=10".into(),
+            "--".into(),
+            peer.destination.clone().into(),
+            "provenant fabric peer".into(),
+        ];
+        let mut env = vec![
+            ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            ("HOME".into(), self.home.into()),
+            ("LANG".into(), "C".into()),
+        ];
+        if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
+            env.push(("SSH_AUTH_SOCK".into(), socket));
+        }
+        let mut options = ExecOptions::new(&argv, self.cwd, timeout);
+        options.env = Some(&env);
+        options.stdin = Some(&input);
+        options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };
+        options.stderr = StreamPolicy::Capture { limit: 4096 };
+        options.cancel = Some(cancel);
+        options.stop_on_output_limit = true;
+        let outcome = self.executor.execute(options).map_err(|_| {
+            request
+                .operation()
+                .map_or(PeerError::Unavailable, |operation_id| PeerError::Unknown {
+                    operation_id,
+                })
+        })?;
+        let uncertain = || {
+            request
+                .operation()
+                .map_or(PeerError::Unavailable, |operation_id| PeerError::Unknown {
+                    operation_id,
+                })
+        };
+        if outcome.termination != Termination::Exit(0)
+            || outcome.timed_out
+            || outcome.cancelled
+            || outcome.stdout.truncated
+            || outcome.stdout.read_failed
+            || outcome.drain_truncated
+        {
+            return Err(uncertain());
+        }
+        let response: PeerResponse =
+            provenant_records::decode(outcome.stdout.bytes.as_slice(), Limits::CONFIG)
+                .map_err(|_| uncertain())?;
+        if response.version != 1
+            || response.host != peer.host
+            || response.project != request.project.key
+        {
+            return Err(PeerError::Version);
+        }
+        Ok(response)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn object(v: Value) -> Map<String, Value> {
-        v.as_object().unwrap().clone()
+    use provenant_core::{MonoTime, TestClock, WallTime};
+    use provenant_supervisor::exec::{CapturedStream, ExecError, ExecOutcome};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Ssh {
+        request: Mutex<Option<PeerRequest>>,
+        lose_reply: bool,
+        calls: AtomicUsize,
     }
-    #[test]
-    fn federation_is_bypassed_only_without_configuration_or_selectors() {
-        assert!(!needs_host_owner(false, false, &Map::new()));
-        assert!(!needs_host_owner(
-            true,
-            true,
-            &object(json!({"host":"peer"}))
-        ));
-        for selector in [
-            json!({"host":null}),
-            json!({"ids":[1,"task@peer"]}),
-            json!({"resume":"run@peer"}),
-        ] {
-            assert!(needs_host_owner(false, false, &object(selector)));
-        }
-        assert!(needs_host_owner(false, true, &Map::new()));
-    }
-    #[test]
-    fn operation_id_is_allocated_only_for_new_transfer() {
-        for action in ["dispatch", "resume", "handoff"] {
-            assert!(needs_operation_id(action, &Map::new()));
-            assert!(!needs_operation_id(
-                action,
-                &object(json!({"operation_id":null}))
-            ));
-        }
-        assert!(!needs_operation_id("cancel", &Map::new()));
-    }
-    #[test]
-    fn local_response_replaces_input_and_preserves_fallback() {
-        let mut input = object(json!({"host":"peer","operation_id":"op","prompt":"before"}));
-        assert!(
-            apply_lane_response(
-                &mut input,
-                object(
-                    json!({"local":true,"input":{"prompt":"after"},"fallback":{"reason":"offline"}})
-                )
-            )
-            .unwrap()
-            .is_none()
-        );
-        assert_eq!(
-            input,
-            object(json!({"prompt":"after","placement_fallback":{"reason":"offline"}}))
-        );
-        input.insert("operation_id".into(), json!("op"));
-        assert!(
-            apply_lane_response(&mut input, object(json!({"local":true})))
-                .unwrap()
-                .is_none()
-        );
-        assert!(!input.contains_key("operation_id"));
-    }
-    #[test]
-    fn cancelled_response_retains_retry_identity_and_does_not_rewrite() {
-        let mut input = object(json!({"operation_id":"op"}));
-        let result = apply_lane_response(
-            &mut input,
-            object(json!({"error":{"code":"hosts_cancelled"}})),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(result["operation_id"], "op");
-        assert_eq!(result["error"], "hosts_cancelled");
-        assert_eq!(input["operation_id"], "op");
-    }
-    #[test]
-    fn diagnostics_are_a_bounded_byte_tail() {
-        let mut tail = StderrTail::default();
-        assert_eq!(tail.message(), "Host owner did not return a JSON result");
-        tail.push(&vec![b'x'; 5000]);
-        tail.push(b"\xc3");
-        tail.push(b"\xa9");
-        assert_eq!(tail.0.len(), 4096);
-        assert!(tail.message().ends_with("é"));
-    }
-}
-
-#[cfg(test)]
-mod incomplete_rewrite_tests {
-    use super::*;
-    #[test]
-    fn incomplete_non_object_rewrite_is_explicit_and_leaves_input_intact() {
-        for rewrite in [json!("abc"), json!([1, 2]), json!(1)] {
-            let mut input = Map::from_iter([("prompt".into(), json!("retained"))]);
-            let before = input.clone();
+    impl Executor for Ssh {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
-                apply_lane_response(
-                    &mut input,
-                    json!({"local":true,"input":rewrite})
-                        .as_object()
-                        .unwrap()
-                        .clone()
-                ),
-                Err(UnsupportedRewrite)
+                options.argv.last(),
+                Some(&OsString::from("provenant fabric peer"))
             );
-            assert_eq!(input, before);
+            assert!(options.argv.iter().any(|a| a == "-oBatchMode=yes"));
+            let request = decode_request(options.stdin.unwrap()).unwrap();
+            let response = PeerResponse {
+                version: 1,
+                host: request.target_host,
+                project: request.project.key.clone(),
+                result: PeerResult::Health(HostHealth {
+                    host: request.target_host,
+                    available: true,
+                    execution: None,
+                }),
+            };
+            *self.request.lock().unwrap() = Some(request);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(if self.lose_reply { 255 } else { 0 }),
+                stdout: CapturedStream {
+                    bytes: serde_json::to_vec(&response).unwrap(),
+                    ..Default::default()
+                },
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
         }
     }
-}
-
-#[cfg(test)]
-mod trim_tests {
-    use super::*;
     #[test]
-    fn stderr_trimming_matches_ecmascript_bom_and_non_whitespace() {
-        let mut tail = StderrTail::default();
-        tail.push("\u{feff}".as_bytes());
-        assert_eq!(tail.message(), "Host owner did not return a JSON result");
-        let mut tail = StderrTail::default();
-        tail.push("\u{0085}".as_bytes());
-        assert_eq!(tail.message(), "\u{0085}");
+    fn fixed_peer_transport_preserves_mutation_uncertainty_without_retry() {
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let local = HostId::from_bytes([1; 16]);
+        let host = HostId::from_bytes([2; 16]);
+        let operation = OperationId::parse("mail-once").unwrap();
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: local,
+            agent: "chair".into(),
+            project,
+            action: PeerAction::Coordination {
+                input: CoordinationInput::Events(EventsInput::Note {
+                    note: "hello".into(),
+                    dedup_key: None,
+                }),
+                operation_id: Some(operation.clone()),
+            },
+        };
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+        };
+        let ssh = Ssh {
+            request: Mutex::new(None),
+            lose_reply: true,
+            calls: AtomicUsize::new(0),
+        };
+        let transport = SshTransport {
+            executor: &ssh,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: Path::new("/usr/bin/ssh"),
+            seconds: 30,
+        };
+        assert!(
+            matches!(transport.exchange(&peer,&request,budget,&CancelToken::new()),Err(PeerError::Unknown{operation_id}) if operation_id==operation)
+        );
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ssh.request.lock().unwrap().as_ref().unwrap().operation(),
+            Some(operation)
+        );
+        assert!(request.project.resolve(Path::new("/home/b")).is_ok());
     }
 }

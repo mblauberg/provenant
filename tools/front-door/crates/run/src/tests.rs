@@ -164,6 +164,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         Err(RunError::Validation(_))
     ));
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    assert_eq!(record.provider_launched, Some(true));
     assert_eq!(
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
         record
@@ -463,7 +464,14 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
 }
 
 fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
-    let mut value = serde_json::to_value(exit())?;
+    seal_observation(store, input, &exit())
+}
+fn seal_observation(
+    store: &RunStore,
+    input: &PreparedRun,
+    observation: &ExitObservation,
+) -> TestResult {
+    let mut value = serde_json::to_value(observation)?;
     value
         .as_object_mut()
         .ok_or("exit fixture")?
@@ -479,5 +487,30 @@ fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
         &serde_json::to_vec(&value)?,
         RECORD_LIMIT,
     )?;
+    Ok(())
+}
+
+#[test]
+fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    let mut observation = exit();
+    observation.never_spawned = true;
+    observation.termination = None;
+    seal_observation(&store, &input, &observation)?;
+    let mut publication = publication();
+    publication.outcome = Outcome::QuotaLimited;
+    publication.started_at = None;
+    publication.provider_ms = None;
+    let record = store.publish_terminal(id, 1, &publication, &observation, &call)?;
+    assert_eq!(record.provider_launched, Some(false));
+    assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
     Ok(())
 }

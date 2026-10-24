@@ -8,20 +8,21 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
-2. Call `fabric_dispatch`; its tool schema documents the arguments. `model` takes `adapter/id[@effort]`; `route` takes only a [pool name](references/routing-and-tiers.md#route-pools), and an explicit id there is `route_invalid`. `fabric_adapters` with `models: <adapter>` lists live ids.
-3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
+2. Call `fabric_submit` with its `submission` operation; its tool schema documents the task list and typed route. Use `provenant route list --adapter <id>` to list live model ids.
+3. For a graph workflow, use `fabric_graph` with `op: run|status|cancel|resume`; pass the project-local graph document path to `run` and `resume`, and its `id` to `status` and `cancel`.
+4. For writers, pass `access: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
-   same branch-derived string. Before dispatch, [confirm the connection's
+   same branch-derived string. Before submission, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
    `provenant fabric claim acquire --issue KEY --operation-id ID` (or
    repeat `--path PATH` for a path set); keep its generation/token proof, renew
    it while work continues and release it when
-   finished. Do not dispatch against a conflicting live claim; dispatch does not
+   finished. Do not submit against a conflicting live claim; submission does not
    enforce claims.
-4. After dispatch, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
-5. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_status` and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
-6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`; pass one `session` name to continue a provider conversation across turns or agents.
-7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
+5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
+6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
+7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task. Named sessions are retired.
+8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
 ## Rules
 
@@ -30,7 +31,7 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Partition writers into separate registered worktrees, and name each writer lane's write scope (files or directories) before fan-out. Lanes with overlapping write scopes run serially, and dependent lanes merge in dependency order. The chair owns authority, decisions, user communication and the final synthesis. A worker's report is a claim: verify commits, counts and tests against the live tree and transcript.
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
-- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `provenant route list` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`) whenever you know what the work needs. Otherwise pass a tier, `route: "junior"`, `"senior"` or `"principal"`, or a craft pool, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. Old tier names (`bulk`, `scout`, `workhorse`, `strong`, `review`, `flagship`) are rejected with the new name. With several families available, run substantial and higher work as a [tiered council](references/tiered-council.md). `provenant route list` shows each pool with live availability and lists live adapter ids. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
   - Before fan-out, run `provenant route list`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
@@ -55,7 +56,7 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
   not infer a protected-tip release from an advisory claim. Renew or release
   the landing lease using its generation/token proof and an operation ID.
   A project whose landing tool owns the lease leaves it to that tool.
-- Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
+- Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_run`'s `status` operation; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 
 ## Adaptive loop

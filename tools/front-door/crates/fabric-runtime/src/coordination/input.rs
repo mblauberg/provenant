@@ -1,5 +1,5 @@
 use super::facade::{
-    HostsInput, IdentityInput, OutputInput, RoutePreference, RunInput, SubmitInput,
+    GraphInput, HostsInput, IdentityInput, OutputInput, RoutePreference, RunInput, SubmitInput,
 };
 use super::{
     ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, MessageRef, TaskInput, TaskRef,
@@ -357,6 +357,21 @@ impl ValidateInput for IdentityInput {
     }
 }
 
+impl ValidateInput for GraphInput {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
+        match self {
+            Self::Run { document } | Self::Resume { document } => path_text(document, "document"),
+            Self::Status { id } | Self::Cancel { id } => {
+                if crate::graph::valid_identifier(id) {
+                    Ok(())
+                } else {
+                    Err(field("id"))
+                }
+            }
+        }
+    }
+}
+
 impl ValidateInput for SubmitInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
@@ -381,6 +396,11 @@ impl ValidateInput for SubmitInput {
                             &format!("{path}.inputs[{input_index}].path.path"),
                         )?;
                     }
+                    optional_text(
+                        task.worktree.as_deref(),
+                        &format!("{path}.worktree"),
+                        MAX_ARTIFACT_PATH_BYTES,
+                    )?;
                     route(&task.route, &format!("{path}.route"))?;
                     if !(1_000..=14_400_000).contains(&task.timeout_ms) {
                         return Err(field(&format!("{path}.timeout_ms")));

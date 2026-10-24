@@ -107,14 +107,24 @@ impl Protocol {
         matches!(self.era, Some(Era::Modern))
     }
     pub fn receive(&mut self, bytes: &[u8]) -> Action {
-        let value: Value = match provenant_records::decode(
+        self.receive_with_limits(
             bytes,
             provenant_records::Limits {
                 max_bytes: MAX_FRAME as u64,
                 max_depth: 64,
                 max_members: 100_000,
             },
-        ) {
+        )
+    }
+    pub fn receive_with_limits(
+        &mut self,
+        bytes: &[u8],
+        mut limits: provenant_records::Limits,
+    ) -> Action {
+        limits.max_bytes = limits.max_bytes.min(MAX_FRAME as u64);
+        limits.max_depth = limits.max_depth.min(64);
+        limits.max_members = limits.max_members.min(100_000);
+        let value: Value = match provenant_records::decode(bytes, limits) {
             Ok(value) => value,
             Err(_) => {
                 return Action::Reply(uncorrelated_error(

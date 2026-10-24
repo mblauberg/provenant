@@ -1321,7 +1321,7 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
     drop(f.open());
     let db = rusqlite::Connection::open(f.path()).unwrap();
-    db.execute_batch("DROP TABLE coordination_operations; DROP TABLE operations; DROP TABLE claim_paths; DROP TABLE claims; DROP TABLE claim_counters; ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
+    db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE operations; DROP TABLE claim_paths; DROP TABLE claims; DROP TABLE claim_counters; ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
     drop(db);
     let store = f.open();
     assert_eq!(
