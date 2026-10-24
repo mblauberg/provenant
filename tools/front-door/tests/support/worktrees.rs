@@ -756,6 +756,7 @@ impl provenant_run::Providers for WriterProvider {
             &self.home,
             paths,
             &writer,
+            &self.project,
         )?;
         let profile = provenant_confinement::permissions::ProviderProfile {
             spec: provenant_confinement::permissions::ProviderProfileSpec {

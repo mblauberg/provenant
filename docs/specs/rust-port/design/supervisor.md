@@ -304,8 +304,9 @@ therefore remain host-owned. Git's files ref backend may probe
 `packed-refs.lock` while preparing a commit's ref update; the sandbox denial is
 harmless when the selected branch is updated through its granted loose ref,
 which is why the commit can succeed with that warning. Do not grant the common
-lock: that would let the writer enter the shared packed-ref update path. A
-writer `TaskRequest` may explicitly carry
+lock: that would let the writer enter the shared packed-ref update path. The
+common Git `info/exclude` file is an exact read-only grant for status and build
+fingerprinting. A writer `TaskRequest` may explicitly carry
 `deliver: {remote, branch, open_pr}`. Run binds the configured remote's single
 push URL and lane branch under writer custody, then fetches before provider
 launch. After a complete, identity-verified successful writer exit and terminal
