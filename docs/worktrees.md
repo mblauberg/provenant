@@ -24,8 +24,9 @@ provenant worktree remove fix-repo-example
 provenant worktree remove fix-repo-example --discard
 ```
 
-`remove NAME` deletes the clean worktree and then its branch when the branch
-is merged into the primary checkout's integration branch. An unmerged branch
+`remove NAME` deletes the clean worktree and then its branch when every commit
+on the branch is contained in the primary checkout's integration branch. This
+includes a branch still at the integration tip, which nothing is lost from. An unmerged branch
 is kept and reported as `not_merged`; `--discard` deletes it too and returns
 its head, which recovers it with `git branch NAME HEAD` while Git still holds
 the objects.

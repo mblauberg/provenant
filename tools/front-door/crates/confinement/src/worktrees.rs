@@ -1518,6 +1518,14 @@ struct PruneRange<'a> {
     tip: GitOid,
 }
 
+/// Which removal asked for the branch, which decides how contained branches
+/// are treated.
+#[derive(Clone, Copy, Debug)]
+enum Policy {
+    Sweep,
+    Named { discard: bool },
+}
+
 /// What becomes of a candidate branch. Decided before any worktree is touched,
 /// so an unmerged worktree is never removed by a merged sweep.
 #[derive(Clone, Copy, Debug)]
@@ -1532,7 +1540,7 @@ fn keep_disposition(
     branch: &GitRefName,
     tip: GitOid,
     range: PruneRange<'_>,
-    discard: bool,
+    policy: Policy,
     cancel: &CancelToken,
 ) -> Disposition {
     let PruneRange {
@@ -1542,14 +1550,27 @@ fn keep_disposition(
     if branch == integration {
         return Disposition::Keep(RetainReason::IntegrationRef);
     }
+    // A named removal deletes a branch whose commits are all contained in the
+    // integration branch. A sweep keeps those, since a fresh lane branch at
+    // the tip may be about to get work.
     if tip == integration_tip {
-        return Disposition::Keep(RetainReason::AtIntegrationTip);
+        return match policy {
+            Policy::Sweep => Disposition::Keep(RetainReason::AtIntegrationTip),
+            Policy::Named { .. } => Disposition::Merged,
+        };
     }
     match is_ancestor(context, tip, integration_tip, cancel) {
         Ok(true) => {}
-        Ok(false) if discard => return Disposition::Discard,
-        Ok(false) => return Disposition::Keep(RetainReason::NotMerged),
+        Ok(false) => {
+            return match policy {
+                Policy::Named { discard: true } => Disposition::Discard,
+                _ => Disposition::Keep(RetainReason::NotMerged),
+            };
+        }
         Err(error) => return Disposition::Keep(retain_reason(&error)),
+    }
+    if let Policy::Named { .. } = policy {
+        return Disposition::Merged;
     }
     match is_first_parent_commit(context, integration_tip, tip, cancel) {
         Ok(false) => Disposition::Merged,
@@ -1634,7 +1655,7 @@ fn remove_merged_candidate(
         retain(outcome, branch, RetainReason::Changed);
         return Ok(());
     };
-    let disposition = keep_disposition(context, branch, tip, range, false, cancel);
+    let disposition = keep_disposition(context, branch, tip, range, Policy::Sweep, cancel);
     if let Disposition::Keep(reason) = disposition {
         retain(outcome, branch, reason);
         return Ok(());
@@ -1721,7 +1742,7 @@ pub fn remove(
                     integration: &integration,
                     tip: integration_tip,
                 },
-                discard,
+                Policy::Named { discard },
                 cancel,
             );
             // A dirty or live worktree fails here, before any branch changes.
@@ -2274,10 +2295,10 @@ mod lifecycle_tests {
             &cancellation,
         )?;
         assert_eq!(removed.removed.len(), 1);
-        assert!(removed.pruned_refs.is_empty());
+        assert_eq!(removed.pruned_refs, ["feature/lifecycle"]);
         assert!(!created.path.exists());
         let tips = read_branch_tips(&context, &cancellation)?;
-        assert!(tips.contains_key(&GitRefName::branch("feature/lifecycle")?));
+        assert!(!tips.contains_key(&GitRefName::branch("feature/lifecycle")?));
         Ok(())
     }
 
@@ -2338,9 +2359,10 @@ mod lifecycle_tests {
             &cancellation,
         )?;
         assert_eq!(removed.removed.len(), 1);
+        assert_eq!(removed.pruned_refs, ["feature/existing"]);
         assert!(!created.path.exists());
         assert!(
-            read_branch_tips(&context, &cancellation)?
+            !read_branch_tips(&context, &cancellation)?
                 .contains_key(&GitRefName::branch("feature/existing")?)
         );
         Ok(())

@@ -47,6 +47,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
+            "remove_by_name_deletes_a_branch_fully_contained_in_integration",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
@@ -87,6 +88,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "remove_by_name_follows_the_branch_merge_state" => {
                     remove_by_name_follows_the_branch_merge_state()
+                }
+                "remove_by_name_deletes_a_branch_fully_contained_in_integration" => {
+                    remove_by_name_deletes_a_branch_fully_contained_in_integration()
                 }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
@@ -1160,6 +1164,41 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
         rig.assert_legacy_unchanged()?;
     }
     Ok(())
+}
+
+fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
+    let rig = repository()?;
+    // At the integration tip: nothing unique, so the name removal deletes it.
+    ok(
+        &rig,
+        &["worktree", "create", "at-tip", "--base", "HEAD", "--json"],
+    )?;
+    let at_tip = rig.project.join(".worktrees/at-tip");
+    let removed = ok(&rig, &["worktree", "remove", "at-tip", "--json"])?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["at-tip"])
+    );
+    assert!(!at_tip.exists());
+    assert!(!has_branch(&rig, "at-tip")?);
+
+    // An ancestor of a later integration tip: its commit is contained in main.
+    let old = git(&rig, &["rev-parse", "HEAD"])?;
+    ok(
+        &rig,
+        &["worktree", "create", "behind", "--base", &old, "--json"],
+    )?;
+    git(
+        &rig,
+        &["commit", "--allow-empty", "-qm", "advance integration"],
+    )?;
+    let removed = ok(&rig, &["worktree", "remove", "behind", "--json"])?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["behind"])
+    );
+    assert!(!has_branch(&rig, "behind")?);
+    rig.assert_legacy_unchanged()
 }
 
 fn has_branch(rig: &TestRig, name: &str) -> Result<bool> {
