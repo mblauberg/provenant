@@ -252,7 +252,7 @@ forced branch deletion, deletion of a branch that is not merged, history
 rewrites, credential or connector setup, pushes to shared branches outside
 authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
-[post-merge pruning](../worktrees.md#post-merge-pruning).
+[post-merge pruning](../worktrees.md#ownership-and-cleanup).
 
 Branch protection requires the head to be strictly up to date with `main`, so
 concurrent pull requests still integrate as a serialised merge train: merge
@@ -305,7 +305,7 @@ Afterwards:
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not
-   a later sweep. [Post-merge pruning](../worktrees.md#post-merge-pruning) owns
+   a later sweep. [Post-merge pruning](../worktrees.md#ownership-and-cleanup) owns
    the standing authority, the method-specific proof gates and the deletion
    commands; run the complete repository, branch and merge gate first, and do
    not run the merge-commit and squash-merge paths as one sequence.
