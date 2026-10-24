@@ -171,10 +171,13 @@ fn prepare_with(
         // Repository-bound read-only grants are checked per candidate below.
         if confinement_request(
             project_id,
-            &cwd,
-            &home,
-            &paths.scratch,
-            &paths.provider_state,
+            ConfinementRoots {
+                cwd: &cwd,
+                home: &home,
+                scratch: &paths.scratch,
+                private_state: &paths.provider_state,
+                assets,
+            },
             writer.as_ref(),
             adapter,
         )
@@ -306,10 +309,13 @@ fn prepare_with(
             .join(paths.attempt_id.to_string());
         let (plan, observed_head) = match confinement_request(
             project_id,
-            &cwd,
-            &home,
-            scratch,
-            private_state,
+            ConfinementRoots {
+                cwd: &cwd,
+                home: &home,
+                scratch,
+                private_state,
+                assets,
+            },
             writer.as_ref(),
             adapter.id(),
         )
@@ -633,18 +639,23 @@ fn credential_authority(
     Ok(authority)
 }
 
+struct ConfinementRoots<'a> {
+    cwd: &'a Path,
+    home: &'a Path,
+    scratch: &'a Path,
+    private_state: &'a Path,
+    assets: &'a Path,
+}
+
 fn confinement_request(
     project_id: ProjectId,
-    cwd: &Path,
-    home: &Path,
-    scratch: &Path,
-    private_state: &Path,
+    roots: ConfinementRoots<'_>,
     writer: Option<&run::WriterLaunch>,
     adapter: &str,
 ) -> Result<PlanRequest, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
-            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, home)
+            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
                 .map_err(|error| error.to_string())?,
         )),
         None => AccessMode::ReadOnly,
@@ -658,15 +669,13 @@ fn confinement_request(
         permissions: PlanPermissions {
             read_only: None,
             mode,
-            scratch: grant(scratch),
-            private_state: Some(grant(private_state)),
-            read_roots: if writer.is_some() {
-                Vec::new()
-            } else {
-                vec![grant(cwd)]
-            },
+            scratch: grant(roots.scratch),
+            private_state: Some(grant(roots.private_state)),
+            read_roots: std::iter::once(grant(roots.assets))
+                .chain(writer.is_none().then(|| grant(roots.cwd)))
+                .collect(),
             protected_roots: vec![PathGrant {
-                path: cwd.join("AGENTS.md"),
+                path: roots.cwd.join("AGENTS.md"),
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
@@ -905,13 +914,17 @@ pub fn writer_fixture_plan(
     home: &Path,
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
+    assets: &Path,
 ) -> Result<ConfinedPlan, String> {
     let request = confinement_request(
         project,
-        cwd,
-        home,
-        &paths.scratch,
-        &paths.provider_state,
+        ConfinementRoots {
+            cwd,
+            home,
+            scratch: &paths.scratch,
+            private_state: &paths.provider_state,
+            assets,
+        },
         Some(writer),
         "codex",
     )?;
@@ -964,6 +977,32 @@ mod tests {
         let observed = observe_codex_rollout(&base, thread);
         std::fs::remove_dir_all(&base)?;
         assert_eq!(observed?.model, "gpt-6-luna");
+        Ok(())
+    }
+
+    #[test]
+    fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = Path::new("/project");
+        let assets = Path::new("/release/sha256:active");
+        let home = Path::new("/home/user");
+        let scratch = Path::new("/tmp/lane-scratch");
+        let private_state = Path::new("/state/attempt");
+        let request = confinement_request(
+            ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+            ConfinementRoots {
+                cwd,
+                home,
+                scratch,
+                private_state,
+                assets,
+            },
+            None,
+            "codex",
+        )?;
+        assert!(request.permissions.read_roots.contains(&PathGrant {
+            path: assets.to_owned(),
+            scope: PathScope::Subtree,
+        }));
         Ok(())
     }
 

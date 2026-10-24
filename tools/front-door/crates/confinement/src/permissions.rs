@@ -668,6 +668,8 @@ struct WorktreeWriteGrants {
     /// Sample member of the pathspec-commit temporary index family
     /// (`next-index-<digits>.lock`) in the private git directory.
     next_index: PathGrant,
+    /// Git reads this shared exclude file during status and build fingerprinting.
+    common_exclude: PathGrant,
     head: [PathGrant; 7],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
@@ -693,6 +695,7 @@ impl WorktreeWriteGrants {
             common_git_dir: subtree(common.to_owned()),
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
             next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
+            common_exclude: exact(common.join("info/exclude")),
             // `git commit` writes its message buffer and clears AUTO_MERGE here.
             head: [
                 "HEAD",
@@ -720,6 +723,7 @@ impl WorktreeWriteGrants {
             .chain([&self.private_git_dir, &self.common_git_dir])
             .chain(self.index.iter())
             .chain(std::iter::once(&self.next_index))
+            .chain(std::iter::once(&self.common_exclude))
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
@@ -727,7 +731,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v4\0");
+        digest.update(b"provenant-worktree-git-grants-v5\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1899,6 +1903,13 @@ fn push_worktree_rule(
     source.push_str(&format!(
         "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
     ));
+    push_rule(
+        source,
+        "allow",
+        "file-read*",
+        &grants.common_exclude.path,
+        PathScope::Exact,
+    )?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
@@ -2939,6 +2950,7 @@ mod tests {
             grants.digest(&authority.cargo_cache)
         );
         assert_eq!(grants.objects.path, common.join("objects"));
+        assert_eq!(grants.common_exclude.path, common.join("info/exclude"));
         assert!(
             grants
                 .selected_ref
