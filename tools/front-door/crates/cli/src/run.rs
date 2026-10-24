@@ -247,6 +247,24 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
+        if let Some(ProviderEvent::QuotaLimited { message, .. }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+        {
+            decoded.outcome = run::Outcome::QuotaLimited;
+            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| {
+                    "provider quota exhausted (message redaction unavailable)".into()
+                });
+            let mut end = reason.len().min(8192);
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason.truncate(end);
+            decoded.reason = Some(reason);
+        }
         decoded
     }
 }
@@ -1423,4 +1441,69 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     Ok((data, human))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_run::Providers;
+    use provenant_supervisor::custody::{
+        CaptureTotals, PublicationState, Scope, SettlementEvidence,
+    };
+    #[test]
+    fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: RunId::from_bytes([1; 16]),
+                attempt: AttemptId::from_bytes([2; 16]),
+                generation: 1,
+            },
+            termination: Some(provenant_supervisor::exec::Termination::Exit(1)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        };
+        let route = run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/a-free".into()),
+            ..Default::default()
+        };
+        for (message, expected) in [
+            (
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+            ),
+            (
+                "Free allowance exhausted for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "Free allowance exhausted for [REDACTED]",
+            ),
+        ] {
+            let event = json!({"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":message}}}});
+            let decoded =
+                Registry { roots: None }.decode(&route, event.to_string().as_bytes(), &exit);
+            assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+            assert_eq!(decoded.reason.as_deref(), Some(expected));
+        }
+        let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
+        let decoded = Registry { roots: None }.decode(&route, event.to_string().as_bytes(), &exit);
+        assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        let reason = decoded.reason.unwrap();
+        assert!(
+            reason.len() <= 8192,
+            "reason must leave room in the terminal record"
+        );
+        assert!(reason.ends_with('☀'));
+    }
 }

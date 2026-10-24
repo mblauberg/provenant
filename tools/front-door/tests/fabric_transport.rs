@@ -159,8 +159,8 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
         &replies.iter().find(|r| r["id"] == 1).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["inbox"]["agent"], "codex");
     let run = &replies.iter().find(|r| r["id"] == 2).ok_or("run")?["result"];
-    assert_eq!(run["isError"], true);
-    assert_eq!(run["structuredContent"]["code"], "owner_unavailable");
+    assert_ne!(run["isError"], true, "{run}");
+    assert_eq!(run["structuredContent"]["page"]["items"], json!([]));
     let events =
         &replies.iter().find(|r| r["id"] == 3).ok_or("events")?["result"]["structuredContent"];
     assert_eq!(events["unknown_hosts"], json!([]));
@@ -235,8 +235,8 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
 #[test]
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
+        RunId, TaskId, WaitBudget,
     };
     use provenant_records::{
         CanonicalV1,
@@ -266,42 +266,113 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let attempt = AttemptId::from_bytes([91; 16]);
-    let task = TaskId::from_bytes([92; 16]);
+    let tasks = [
+        TaskId::from_bytes([92; 16]),
+        TaskId::from_bytes([93; 16]),
+        TaskId::from_bytes([94; 16]),
+    ];
+    let attempts = [
+        AttemptId::from_bytes([91; 16]),
+        AttemptId::from_bytes([95; 16]),
+        AttemptId::from_bytes([97; 16]),
+    ];
+    let attempt = attempts[0];
     store.create(
         &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([93; 16]),
+            run_id: RunId::from_bytes([96; 16]),
             operation_id: OperationId::parse("edge-read")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
                 schema_version: 1,
-                tasks: vec![TaskRequest {
-                    profile: provenant_records::run::HarnessProfile::default(),
-                    task_id: task,
-                    prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                    route: RequestedRoute::Model {
-                        provider: "fixture".into(),
-                        model: "fixture".into(),
-                        effort: None,
-                    },
-                    account: None,
-                    fallback: vec![],
-                    authority_digest: Digest::from_bytes([94; 32]),
-                    provider_timeout_seconds: 60,
-                    delivery_id: None,
-                }],
+                tasks: tasks
+                    .iter()
+                    .map(|task_id| TaskRequest {
+                        profile: provenant_records::run::HarnessProfile::default(),
+                        task_id: *task_id,
+                        prompt_digest: CanonicalV1::file_digest(b"prompt"),
+                        route: RequestedRoute::Model {
+                            provider: "fixture".into(),
+                            model: "fixture".into(),
+                            effort: None,
+                        },
+                        account: None,
+                        fallback: vec![],
+                        authority_digest: Digest::from_bytes([94; 32]),
+                        provider_timeout_seconds: 60,
+                        delivery_id: None,
+                    })
+                    .collect(),
                 concurrency: 1,
                 parent: None,
             },
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id: attempt,
-                task_id: task,
-                prompt: "prompt".into(),
-            }],
+            attempts: tasks
+                .iter()
+                .zip(attempts)
+                .map(|(task_id, attempt_id)| provenant_run::NewAttempt {
+                    attempt_id,
+                    task_id: *task_id,
+                    prompt: "prompt".into(),
+                })
+                .collect(),
         },
         &call,
     )?;
     drop(store);
+    let first = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":1}}}),
+        ],
+    )?;
+    let first = &first
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("first page")?["result"]["structuredContent"]["page"];
+    assert_eq!(first["items"][0]["attempt_id"], attempts[0].to_string());
+    assert_eq!(first["truncated"], true);
+    let cursor = first["next_after"].clone();
+    let local_host = HostId::parse(cursor["host"].as_str().ok_or("cursor host")?)?;
+    let mut remote_host_bytes = *local_host.as_bytes();
+    remote_host_bytes[0] ^= 1;
+    let mut remote_cursor = cursor.clone();
+    remote_cursor["host"] = json!(HostId::from_bytes(remote_host_bytes).to_string());
+    let remote = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":remote_cursor,"limit":1}}}),
+        ],
+    )?;
+    let remote = &remote
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("remote cursor")?["result"];
+    assert_eq!(remote["isError"], true);
+    assert_eq!(remote["structuredContent"]["code"], "owner_unavailable");
+    let second = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
+        ],
+    )?;
+    let second = &second
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("second page")?["result"]["structuredContent"]["page"];
+    assert_eq!(second["items"][0]["attempt_id"], attempts[1].to_string());
+    assert_eq!(second["truncated"], true);
+    let cursor = second["next_after"].clone();
+    let third = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
+        ],
+    )?;
+    let third = &third
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("third page")?["result"]["structuredContent"]["page"];
+    assert_eq!(third["items"][0]["attempt_id"], attempts[2].to_string());
+    assert_eq!(third["next_after"], Value::Null);
     let target = json!({"host":null,"attempt":attempt.to_string()});
     let replies = mcp(
         &rig,
