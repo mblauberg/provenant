@@ -70,6 +70,10 @@ pub(crate) enum StoredWriterBinding {
     ReadOnly,
 }
 impl WriterBinding {
+    /// The binding of a read-only attempt, which holds no worktree.
+    pub fn read_only() -> Self {
+        Self(StoredWriterBinding::ReadOnly)
+    }
     pub fn from_verified(
         worktree: &dyn SafeDir,
         git: &dyn SafeDir,

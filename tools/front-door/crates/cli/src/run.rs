@@ -636,8 +636,17 @@ pub fn submit(
             .worktree
             .as_ref()
             .map(|path| {
-                let writer =
-                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?;
+                // A lane cannot read another worktree's registration; the host
+                // verifies the proposal before it launches the child.
+                let writer = if parent_attempt.is_some() {
+                    run::resolve_writer_proposal(
+                        session.context.state_root.as_path(),
+                        edge.cwd,
+                        path,
+                    )?
+                } else {
+                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?
+                };
                 if parent_attempt.is_none() {
                     run::prepare_writer(
                         &writer,
@@ -1094,6 +1103,27 @@ fn launch_on_host(
         project_id: Some(session.context.project_id),
         host: Some(&host),
     };
+    // Fixture guardians observe a recorded boot key, so the reservation must be
+    // taken against the same key as on the lane-launch path of the test host.
+    #[cfg(feature = "fixture")]
+    if host.fixture_state_write {
+        return Ok(session.store.start_with_writer_lease(
+            run,
+            &registry,
+            &holder,
+            &|directory, scope, binding| {
+                provenant_supervisor::fixture::acquire_writer_with_binding(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            call,
+        )?);
+    }
     Ok(session.store.start(run, &registry, &holder, call)?)
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {

@@ -428,9 +428,9 @@ impl RunStore {
                     .ok_or_else(|| local(&"writer custody missing"))?;
                 acquire_writer(directory, scope, binding)
             }
-            None => {
-                custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
-            }
+            // Readers take the same injected acquisition as writers, so a
+            // fixture guardian and its reservation share one boot observer.
+            None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only()),
         }
         .map_err(|e| {
             if matches!(e, custody::CustodyError::Busy) {
