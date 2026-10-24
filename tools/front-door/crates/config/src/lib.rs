@@ -2,11 +2,12 @@
 //!
 //! `load` accepts an already opened optional reader; `read` uses supervisor's
 //! no-follow filesystem boundary. CLI owns envelopes, pagination and exits:
-//! syntax errors map to invalid/2 and check findings to findings/1.
+//! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
 
 mod domains;
 mod harness;
+mod inspection;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
@@ -21,7 +22,7 @@ pub mod test_support;
 mod tests;
 
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
-pub use loader::{check_config, config_show, load, load_with_domains, read, read_with_domains};
+pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{ProjectBinding, ProjectLocation, bind_host, bind_project};
 pub use provenant_records::Finding;
@@ -68,8 +69,6 @@ pub enum ConfigError {
         #[source]
         source: SectionError,
     },
-    #[error("finding limit must be between 1 and 100")]
-    InvalidLimit,
     #[error("project location must be an absolute canonical directory path")]
     InvalidProjectLocation,
     #[error("project binding state is invalid")]
@@ -152,13 +151,22 @@ pub struct ConfigCheck {
     pub profile: Profile,
     pub findings: Vec<Finding>,
     pub count: usize,
-    pub truncated: bool,
+}
+
+/// Complete, ordered findings and the exact configuration input identity.
+#[derive(Debug)]
+pub struct ConfigInspection {
+    pub check: ConfigCheck,
+    /// Malformed configuration remains typed; CLI can report it as a finding
+    /// while still binding pagination to the same bytes inspected here.
+    pub error: Option<ConfigError>,
+    pub input_digest: provenant_records::FileDigest,
 }
 
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
-    InstallFinding, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
-    SelectorChange, Snapshots, Targets, check_install_with_digest, install, plan_install,
+    InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
+    ReleaseSmoke, SelectorChange, Snapshots, Targets, inspect_install, install, plan_install,
     uninstall,
 };
 pub use provenant_records::Harness;

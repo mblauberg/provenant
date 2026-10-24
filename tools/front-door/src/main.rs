@@ -1,5 +1,6 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
+mod checks;
 mod install;
 mod overflow;
 mod roots;
@@ -213,29 +214,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 unavailable("worktree remove", "confinement", globals)
             }
         },
-        Command::Check(check) => {
-            let (name, owner, checkout) = match check {
-                provenant_cli::Check::Config(_) => ("check config", "config", false),
-                provenant_cli::Check::Install(args) => {
-                    return install::run_check_install(args, globals);
-                }
-                provenant_cli::Check::Harness(_) => ("check harness", "cli checks", true),
-                provenant_cli::Check::Release { .. } => ("check release", "cli checks", true),
-                provenant_cli::Check::Writing { .. } => ("check writing", "workflow", false),
-            };
-            if checkout
-                && let Err(error) = roots::selected_project(inv.globals.project.as_deref(), true)
-            {
-                return fail(
-                    name,
-                    Outcome::Invalid,
-                    "CHECKOUT",
-                    &error.to_string(),
-                    globals,
-                );
-            }
-            unavailable(name, owner, globals)
-        }
+        Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => match hook {
             provenant_cli::Hook::Claude(hook) => match hook {
                 provenant_cli::ClaudeHook::PreToolUse => {

@@ -1,5 +1,6 @@
 //! Managed files use supervisor capabilities exclusively. Plans retain bounded
 //! snapshots; every publication rechecks identity and bytes under owner locks.
+use crate::inspection::InspectionEvidence;
 use crate::release::{FILE_LIMIT, Release};
 use provenant_core::{CancelToken, Clock, RelativePath, Roots, WaitBudget};
 use provenant_records::{
@@ -1285,21 +1286,35 @@ pub(crate) fn snapshot_scoped(
     root: &Path,
     fs: &dyn SafeFs,
 ) -> Result<Option<Snapshot>, InstallError> {
+    snapshot_scoped_inspected(path, root, fs, None)
+}
+pub(crate) fn snapshot_scoped_inspected(
+    path: &Path,
+    root: &Path,
+    fs: &dyn SafeFs,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
     let parent = path
         .parent()
         .ok_or_else(|| InstallError::Path(path.into()))?;
     let dir = match directory_scoped(parent, root, false, fs) {
         Ok(dir) => dir,
-        Err(InstallError::Fs(error)) if error.is_not_found() => return Ok(None),
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            if let Some(evidence) = evidence {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
-    snapshot_at(path, dir.as_ref())
+    snapshot_at_inspected(path, dir.as_ref(), evidence)
 }
 
-pub(crate) fn snapshot_below(
+pub(crate) fn snapshot_below_inspected(
     path: &Path,
     root: &Path,
     anchor: &dyn SafeDir,
+    evidence: Option<&mut InspectionEvidence>,
 ) -> Result<Option<Snapshot>, InstallError> {
     let tail = path
         .strip_prefix(root)
@@ -1318,21 +1333,37 @@ pub(crate) fn snapshot_below(
             .open_verified_directory(name)?;
         held = Some(next);
     }
-    snapshot_at(path, held.as_deref().unwrap_or(anchor))
+    snapshot_at_inspected(path, held.as_deref().unwrap_or(anchor), evidence)
 }
 
 pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>, InstallError> {
+    snapshot_inspected(path, fs, None)
+}
+pub(crate) fn snapshot_inspected(
+    path: &Path,
+    fs: &dyn SafeFs,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
     let Some(parent) = path.parent() else {
         return Err(InstallError::Path(path.into()));
     };
     let dir = match directory(parent, false, fs) {
         Ok(dir) => dir,
-        Err(InstallError::Fs(e)) if e.is_not_found() => return Ok(None),
-        Err(e) => return Err(e),
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            if let Some(evidence) = evidence {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
-    snapshot_at(path, dir.as_ref())
+    snapshot_at_inspected(path, dir.as_ref(), evidence)
 }
-fn snapshot_at(path: &Path, dir: &dyn SafeDir) -> Result<Option<Snapshot>, InstallError> {
+fn snapshot_at_inspected(
+    path: &Path,
+    dir: &dyn SafeDir,
+    mut evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
     let parent = path
         .parent()
         .ok_or_else(|| InstallError::Path(path.into()))?;
@@ -1341,9 +1372,17 @@ fn snapshot_at(path: &Path, dir: &dyn SafeDir) -> Result<Option<Snapshot>, Insta
         .ok_or_else(|| InstallError::Path(path.into()))?;
     let metadata = match dir.metadata_at(name, false) {
         Ok(m) => m,
-        Err(e) if e.is_not_found() => return Ok(None),
-        Err(e) => return Err(e.into()),
+        Err(error) if error.is_not_found() => {
+            if let Some(evidence) = evidence.as_deref_mut() {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
     };
+    if let Some(evidence) = evidence.as_deref_mut() {
+        evidence.metadata(path, metadata);
+    }
     let limit = if name == OsStr::new(".claude.json") {
         16 * 1024 * 1024
     } else if Path::new(name)
@@ -1378,6 +1417,9 @@ fn snapshot_at(path: &Path, dir: &dyn SafeDir) -> Result<Option<Snapshot>, Insta
             if file.metadata()? != metadata {
                 return Err(InstallError::Drift(path.into()));
             }
+            if let Some(evidence) = evidence.as_deref_mut() {
+                evidence.observe(b"file", path, Some(&bytes));
+            }
             Value::File {
                 bytes,
                 mode: u64::from(metadata.mode & 0o7777),
@@ -1385,6 +1427,9 @@ fn snapshot_at(path: &Path, dir: &dyn SafeDir) -> Result<Option<Snapshot>, Insta
         }
         FileKind::Symlink => {
             let target = dir.read_link(name)?;
+            if let Some(evidence) = evidence {
+                evidence.observe(b"link", path, Some(target.as_os_str().as_encoded_bytes()));
+            }
             let absolute = if target.is_absolute() {
                 target
             } else {
@@ -1419,8 +1464,15 @@ pub(crate) fn read_receipt(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<InstallReceipt>, InstallError> {
+    read_receipt_inspected(targets, fs, None)
+}
+pub(crate) fn read_receipt_inspected(
+    targets: &Targets,
+    fs: &dyn SafeFs,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<InstallReceipt>, InstallError> {
     let path = targets.roots.state.as_path().join("install/receipt.json");
-    match snapshot_scoped(&path, targets.roots.state.as_path(), fs)? {
+    match snapshot_scoped_inspected(&path, targets.roots.state.as_path(), fs, evidence)? {
         None => Ok(None),
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
@@ -1582,56 +1634,81 @@ fn permitted_entry(
     }
     Ok(false)
 }
-pub(crate) fn digest_snapshot(
-    basis: &mut Vec<u8>,
-    path: &Path,
-    current: &Option<Snapshot>,
-) -> Result<(), InstallError> {
-    basis.extend(provenant_records::encode(&(
-        AbsolutePath::new(path)?,
-        current.as_ref().and_then(|s| owned(&s.value).ok()),
-    ))?);
-    Ok(())
+/// Complete findings plus the bytes, metadata, links, absence and inventory
+/// actually inspected. No locks, repair, extra filesystem reads or state writes.
+#[derive(Debug)]
+pub struct InstallInspection {
+    pub error: Option<InstallError>,
+    pub findings: Vec<InstallFinding>,
+    pub input_digest: FileDigest,
 }
-pub fn check_install_with_digest(
+
+pub fn inspect_install(
     targets: &Targets,
     source: Option<&Release>,
     target: &str,
     fs: &dyn SafeFs,
     smoke: &dyn ReleaseSmoke,
     cancel: &CancelToken,
-) -> Result<(Vec<InstallFinding>, FileDigest), InstallError> {
+) -> Result<InstallInspection, InstallError> {
+    let mut evidence = InspectionEvidence::default();
+    if let Some(source) = source {
+        evidence.observe(
+            b"source-manifest",
+            &source.source,
+            Some(&source.manifest_bytes),
+        );
+        for (path, (bytes, mode)) in &source.files {
+            let path = source.source.join(path);
+            evidence.observe(b"source-file", &path, Some(bytes));
+            evidence.observe(b"source-mode", &path, Some(&mode.to_be_bytes()));
+        }
+    }
+    let (findings, error) =
+        match check_install_inspected(targets, source, target, fs, smoke, cancel, &mut evidence) {
+            Ok(findings) => (findings, None),
+            Err(
+                error @ (InstallError::Decode(_)
+                | InstallError::Manifest(_)
+                | InstallError::Tampered(_)
+                | InstallError::Conflict(_)
+                | InstallError::Platform
+                | InstallError::Path(_)
+                | InstallError::InvalidConfig(_)
+                | InstallError::ConfigFile(_)
+                | InstallError::LegacyUnresolved(_)
+                | InstallError::Config(_)),
+            ) => (Vec::new(), Some(error)),
+            Err(error) => return Err(error),
+        };
+    Ok(InstallInspection {
+        error,
+        findings,
+        input_digest: evidence.finish(),
+    })
+}
+
+fn check_install_inspected(
+    targets: &Targets,
+    source: Option<&Release>,
+    target: &str,
+    fs: &dyn SafeFs,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
+    evidence: &mut InspectionEvidence,
+) -> Result<Vec<InstallFinding>, InstallError> {
     let state_root = targets.roots.state.as_path();
-    let snapshot =
-        |path: &Path, fs: &dyn SafeFs| snapshot_scoped(path, targets.roots.state.as_path(), fs);
-    let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
-    let mut basis = Vec::new();
-    let receipt_snapshot = snapshot(&receipt_path, fs)?;
-    digest_snapshot(&mut basis, &receipt_path, &receipt_snapshot)?;
-    let Some(receipt) = read_receipt(targets, fs)? else {
-        return Ok((
-            vec![InstallFinding {
-                rule: "missing_receipt".into(),
-                path: AbsolutePath::new(&receipt_path)?,
-            }],
-            CanonicalV1::file_digest(&basis),
-        ));
+    let receipt_path = state_root.join("install/receipt.json");
+    let Some(receipt) = read_receipt_inspected(targets, fs, Some(evidence))? else {
+        return Ok(vec![InstallFinding {
+            rule: "missing_receipt".into(),
+            path: AbsolutePath::new(&receipt_path)?,
+        }]);
     };
-    recheck(&receipt_path, &receipt_snapshot, fs, state_root)?;
     let mut findings = Vec::new();
-    let release_path = release_root(targets.roots.state.as_path(), receipt.source_digest);
-    let manifest_path = release_path.join("release.json");
-    let manifest_snapshot = snapshot(&manifest_path, fs)?;
-    digest_snapshot(&mut basis, &manifest_path, &manifest_snapshot)?;
-    match Release::read_scoped(&release_path, target, fs, state_root) {
+    let release_path = release_root(state_root, receipt.source_digest);
+    match Release::read_scoped_inspected(&release_path, target, fs, state_root, Some(evidence)) {
         Ok(release) => {
-            for (path, (bytes, mode)) in &release.files {
-                basis.extend(provenant_records::encode(&(
-                    path_wire(path)?,
-                    CanonicalV1::file_digest(bytes),
-                    mode,
-                ))?);
-            }
             crate::release::verify_binary_identity(&release, smoke, cancel)?;
             if release.manifest.source_digest == receipt.source_digest
                 && release.manifest.target == receipt.target
@@ -1658,26 +1735,21 @@ pub fn check_install_with_digest(
                 });
             }
         }
-        Err(InstallError::Tampered(path)) => {
-            digest_snapshot(&mut basis, &path, &snapshot(&path, fs)?)?;
+        Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
             findings.push(InstallFinding {
                 rule: "release_drift".into(),
                 path: AbsolutePath::new(&release_path)?,
             });
         }
-        Err(InstallError::Manifest(_)) => findings.push(InstallFinding {
-            rule: "release_drift".into(),
-            path: AbsolutePath::new(&release_path)?,
-        }),
-        Err(InstallError::Fs(error)) if error.is_not_found() => findings.push(InstallFinding {
-            rule: "missing_release".into(),
-            path: AbsolutePath::new(&release_path)?,
-        }),
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            findings.push(InstallFinding {
+                rule: "missing_release".into(),
+                path: AbsolutePath::new(&release_path)?,
+            });
+        }
         Err(error) => return Err(error),
     }
-    recheck(&manifest_path, &manifest_snapshot, fs, state_root)?;
     if let Some(source) = source {
-        basis.extend(&source.manifest_bytes);
         crate::release::verify_binary_identity(source, smoke, cancel)?;
         if source.manifest.source_digest != receipt.source_digest
             || source.manifest.asset_digest != receipt.asset_digest
@@ -1692,12 +1764,11 @@ pub fn check_install_with_digest(
         }
     }
     for entry in &receipt.entries {
-        if !permitted_entry(entry, &receipt, targets.roots.state.as_path())? {
+        if !permitted_entry(entry, &receipt, state_root)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        let current = snapshot(&path, fs)?;
-        digest_snapshot(&mut basis, &path, &current)?;
+        let current = snapshot_scoped_inspected(&path, state_root, fs, Some(evidence))?;
         let matches = match &current {
             Some(current) => crate::harness::entry_matches(&current.value, entry)?,
             None => false,
@@ -1710,9 +1781,9 @@ pub fn check_install_with_digest(
         }
     }
     if let Some(legacy) = &receipt.legacy {
-        crate::harness::check_legacy(&receipt, legacy, &mut findings, &mut basis, fs)?;
+        crate::harness::check_legacy(&receipt, legacy, &mut findings, evidence, fs)?;
     }
-    Ok((findings, CanonicalV1::file_digest(&basis)))
+    Ok(findings)
 }
 
 /// Removes unchanged selected harness entries, preserves user edits, and

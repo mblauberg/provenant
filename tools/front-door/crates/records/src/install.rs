@@ -96,7 +96,7 @@ pub struct InstallReceipt {
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInfo {
     pub source_digest: SourceDigest,
     pub asset_digest: SourceDigest,

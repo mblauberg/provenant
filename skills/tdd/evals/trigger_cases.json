@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "target_skill": "tdd",
+  "cases": [
+    {
+      "id": "q262",
+      "relation": "positive",
+      "prompt": "Write the first public-interface test for this new behaviour and witness the right-reason failure.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q263",
+      "relation": "positive",
+      "prompt": "TDD this bug fix: reproduce the exact symptom as a failing regression before repairing it.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q264",
+      "relation": "positive",
+      "prompt": "Use red-green-refactor for this observable contract change, one vertical slice at a time.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q265",
+      "relation": "negative",
+      "prompt": "Restructure this module without changing any observable behaviour.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q266",
+      "relation": "negative",
+      "prompt": "Find why the existing test fails, but do not implement a repair.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q267",
+      "relation": "negative",
+      "prompt": "Review the current test suite source-read-only for gaps and brittle assertions.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q268",
+      "relation": "boundary",
+      "prompt": "Implement the approved feature end-to-end, using TDD for each changed behaviour.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "tdd"
+        ]
+      }
+    },
+    {
+      "id": "q269",
+      "relation": "boundary",
+      "prompt": "The bug's root cause is confirmed; implement its repair with a witnessed regression test.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "tdd"
+        ]
+      }
+    },
+    {
+      "id": "q270",
+      "relation": "boundary",
+      "prompt": "Production code may contain uncommitted user work; add the regression seam without deleting or overwriting it.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q919",
+      "relation": "boundary",
+      "prompt": "Project rules run tests only at the merged-tree landing gate; write this behaviour's test first and report its red and green runs as deferred.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 //! Process-edge wiring for installation. State operations stay in config;
 //! every child is supervised with a bounded wait and isolated environment.
-use provenant_cli::{self as cli, install::InstallCheckError};
+use provenant_cli as cli;
 use provenant_config::{
     self as config, Action, InstallContext, InstallError, InstallFinding, InstallOutcome,
     InstallReporter, ManualInclude, Release, ReleaseSmoke, Targets,
@@ -381,7 +381,7 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         }
     }
 }
-fn install_error(command: &str, error: &InstallError, globals: &cli::Globals) -> u8 {
+pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::Globals) -> u8 {
     let (status, code) = error_class(error);
     let mut result = CommandResult::new(command, status, InstallData::failure(error));
     result.error = Some(CommandError {
@@ -568,76 +568,5 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         "uninstall",
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
         globals,
-    )
-}
-
-fn check_error(error: InstallCheckError, globals: &cli::Globals) -> u8 {
-    match error {
-        InstallCheckError::Cursor => super::fail(
-            "check install",
-            Outcome::Invalid,
-            "CURSOR_INVALID",
-            "invalid check install cursor",
-            globals,
-        ),
-        InstallCheckError::StaleCursor => super::fail(
-            "check install",
-            Outcome::Invalid,
-            "CURSOR_STALE",
-            "check install cursor is stale",
-            globals,
-        ),
-        InstallCheckError::Install(error) => install_error("check install", &error, globals),
-    }
-}
-pub(super) fn run_check_install(args: cli::InstallCheck, globals: &cli::Globals) -> u8 {
-    let all = [
-        Harness::Claude,
-        Harness::Codex,
-        Harness::Cursor,
-        Harness::Agy,
-        Harness::Opencode,
-    ];
-    let targets = match receipt_targets(globals, &all) {
-        Ok(value) => value,
-        Err(error) => return edge_error("check install", error, globals),
-    };
-    let fs = LocalFs;
-    let cancel = CancelToken::new();
-    let smoke = match SystemSmoke::new() {
-        Ok(smoke) => smoke,
-        Err(error) => {
-            return super::fail(
-                "check install",
-                Outcome::Error,
-                "SMOKE_EXECUTOR",
-                &error.to_string(),
-                globals,
-            );
-        }
-    };
-    let result = cli::install::execute_check_install(
-        &args,
-        &targets,
-        &fs,
-        &smoke,
-        &cancel,
-        env!("PROVENANT_TARGET_TRIPLE"),
-    );
-    let page = match result {
-        Ok(page) => page,
-        Err(error) => return check_error(error, globals),
-    };
-    let status = if page.count == 0 {
-        Outcome::Ok
-    } else {
-        Outcome::Failed
-    };
-    let human = format!("check install: {} finding(s)\n", page.count);
-    super::emit(
-        &CommandResult::new("check install", status, page),
-        globals,
-        &human,
-        true,
     )
 }

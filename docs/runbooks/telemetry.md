@@ -17,8 +17,8 @@ collect usage or create telemetry state.
 ## Measurements and estimates
 
 Run supplies validated `AttemptFact` values. The reducer selects `finished_at`
-in `[since, until)`, with an optional project scope. CLI will parse dates as
-midnight UTC and require an offset on timestamps. Every selected retry
+in `[since, until)`, with an optional project scope. CLI parses dates as
+midnight UTC and requires an offset on timestamps. Every selected retry
 contributes usage once; task outcomes use the highest selected attempt number.
 Active attempts come separately from run's `snapshot`.
 
@@ -46,7 +46,7 @@ Coverage is `supervised_terminal_attempts` on the selected host/project/window.
 Unsupervised activity, old-ledger history and other hosts are outside it.
 Missing data never implies zero use. A failed read or reduction produces no
 partial totals. Reduction refuses more than 100,000 selected attempts, 10,000
-combined groups or 1 MiB of retained group keys. CLI will enforce its separate
+combined groups or 1 MiB of retained group keys. CLI enforces its separate
 1 MiB envelope limit and bounded human output.
 
 ## Collector and harness configuration

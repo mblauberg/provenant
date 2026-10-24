@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "target_skill": "grill-me",
+  "cases": [
+    {
+      "id": "q118",
+      "relation": "positive",
+      "prompt": "Grill me on this architecture one decision at a time and recommend an answer to each question.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "grill-me",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q119",
+      "relation": "positive",
+      "prompt": "Stress-test my rollout plan by walking the decision tree one branch per turn.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "grill-me",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q120",
+      "relation": "positive",
+      "prompt": "Read the repository process declaration, then interview me until the design trade-offs are resolved.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "grill-me",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q121",
+      "relation": "negative",
+      "prompt": "Turn these already decided requirements into a final approved specification.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q122",
+      "relation": "negative",
+      "prompt": "Implement the approved design and verify it end-to-end.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q123",
+      "relation": "negative",
+      "prompt": "Review this completed pull request read-only for defects.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q124",
+      "relation": "boundary",
+      "prompt": "Grill me on the vague feature, then turn our decisions into acceptance criteria and open-decision rows.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": [
+          "grill-me"
+        ]
+      }
+    },
+    {
+      "id": "q125",
+      "relation": "boundary",
+      "prompt": "Grill the architecture choices using parallel research scouts before we settle the spec.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": [
+          "grill-me",
+          "orchestrate"
+        ]
+      }
+    },
+    {
+      "id": "q126",
+      "relation": "boundary",
+      "prompt": "Ask one question at a time, run one throwaway spike on the remaining feasibility branch, then resume the interview.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "grill-me",
+        "companion_skills": [
+          "prototype"
+        ]
+      }
+    }
+  ]
+}

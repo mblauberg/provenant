@@ -50,7 +50,7 @@ fn staged(rig: &TestRig) -> Result<PathBuf> {
     // A fake release executable, never a provider or a real harness. Its two
     // stdout envelopes exercise the actual bounded production smoke path.
     let script = format!(
-        "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' '{version_json}' ;;\n--help) printf '%s\\n' '{help_json}' ;;\n*) exit 2 ;;\nesac\n"
+        "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' '{version_json}' ;;\n--help|help) printf '%s\\n' '{help_json}' ;;\n*) exit 2 ;;\nesac\n"
     );
     let binary = stage.join("bin/provenant");
     fs::write(&binary, script)?;
@@ -81,6 +81,36 @@ fn args(stage: &Path, dry: bool) -> Vec<std::ffi::OsString> {
     }
     args
 }
+#[test]
+fn check_install_source_failures_keep_the_typed_outcome() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let missing = rig.root.join("missing-release");
+    fs::write(stage.join("release.json"), "{invalid")?;
+    for (source, expected_status, expected_code) in [
+        (&missing, "refused", "INSTALL_REFUSED"),
+        (&stage, "invalid", "INSTALL_INVALID"),
+    ] {
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "check".into(),
+                "install".into(),
+                "--source".into(),
+                source.into(),
+                "--json".into(),
+            ],
+            None,
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(value["status"], expected_status);
+        assert_eq!(value["error"]["code"], expected_code);
+        assert_ne!(code(&output), 0);
+    }
+    assert!(!rig.state.exists());
+    rig.assert_legacy_unchanged()
+}
+
 #[test]
 fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let rig = TestRig::new()?;
@@ -119,7 +149,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
         code(&checked),
         0,
         "{}",
-        String::from_utf8_lossy(&checked.stderr.bytes)
+        String::from_utf8_lossy(&checked.stdout.bytes)
     );
     let reapplied = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(code(&reapplied), 0);
@@ -252,7 +282,12 @@ fn assert_legacy_git_hook_location(custom_hooks: bool) -> Result {
             .any(|v| v["rule"] == "legacy_entry")
     );
     let checked = rig.command(&["check", "install", "--json"])?;
-    assert_eq!(code(&checked), 1);
+    assert_eq!(
+        code(&checked),
+        1,
+        "{}",
+        String::from_utf8_lossy(&checked.stdout.bytes)
+    );
     let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
         fs::File::open(rig.state.join("install/receipt.json"))?,
         provenant_records::Limits::CONFIG,

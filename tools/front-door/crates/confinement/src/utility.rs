@@ -1,7 +1,7 @@
 //! Closed, bounded Git reads and separately typed Git custody mutations.
 use crate::repo::{
-    GitRefName, GitRevision, RepoError, RepoObjectFormat, RepoPath, RepoPathError, RepoProbeData,
-    VerifiedRepo,
+    GitRefName, GitRevision, ReadOnlyRepo, RepoError, RepoObjectFormat, RepoPath, RepoPathError,
+    RepoProbeData, VerifiedRepo,
 };
 use provenant_core::{CancelToken, GitOid};
 use provenant_supervisor::exec::{
@@ -142,6 +142,14 @@ impl UtilityBudget {
     }
 }
 
+/// Object kinds permitted for raw publication evidence. No caller supplies a
+/// cat-file mode, format string or revision expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitObjectKind {
+    Commit,
+    Blob,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
     Status,
@@ -183,6 +191,20 @@ pub enum GitRead {
     MergeBaseIsAncestor {
         ancestor: GitOid,
         tip: GitOid,
+    },
+    /// Enumerate every entry, with its raw blob size, in one selected tree.
+    AllTreeEntries {
+        oid: GitOid,
+    },
+    RawObject {
+        kind: GitObjectKind,
+        oid: GitOid,
+    },
+    /// All selected commits, including merge side branches, excluding base.
+    /// The caller separately verifies ancestry and a nonempty result.
+    AncestorRange {
+        base: GitOid,
+        head: GitOid,
     },
     TreeEntries {
         oid: GitOid,
@@ -272,6 +294,37 @@ impl UtilityRuntime {
                 attribute_source,
             })
         })
+    }
+
+    /// Read-only evidence supports native object alternates without granting
+    /// the protected repository capability required by mutation services.
+    pub fn open_read_repo(
+        &self,
+        executor: &dyn Executor,
+        path: impl AsRef<Path>,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<ReadOnlyRepo, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        self.revalidate()?;
+        VerifiedRepo::open_mode(self.fs.clone(), path, true, |repo| {
+            verify_repo_binding(self, repo)?;
+            reject_info_attributes(repo)?;
+            verify_local_git_configuration(executor, repo, self, budget, cancel)?;
+            let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
+            let object_format = match attribute_source.len() {
+                40 => RepoObjectFormat::Sha1,
+                64 => RepoObjectFormat::Sha256,
+                _ => return Err(UtilityError::AttributeSourceUnsupported),
+            };
+            Ok(RepoProbeData {
+                object_format,
+                attribute_source,
+            })
+        })
+        .map(ReadOnlyRepo)
     }
 
     /// One project-discovery owner for CLI/runtime callers. A Git marker is
@@ -470,8 +523,42 @@ pub fn run_utility(
         runtime,
         budget,
         cancel,
+        false,
         |attribute_source| Ok((git_args(operation, repo, attribute_source)?, None)),
     )
+}
+
+/// Run a read for the release scan, where shallow boundaries must not hide
+/// commits from the publication history check.
+pub fn run_release_read_utility(
+    executor: &dyn Executor,
+    operation: GitRead,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    execute_git(
+        executor,
+        &repo.0,
+        runtime,
+        budget,
+        cancel,
+        true,
+        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, None)),
+    )
+}
+
+/// Same closed reads and execution boundary, with no mutation capability.
+pub fn run_read_utility(
+    executor: &dyn Executor,
+    operation: GitRead,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    run_utility(executor, operation, &repo.0, runtime, budget, cancel)
 }
 
 /// Keep the authority checks, attribute source and bounded execution identical
@@ -482,6 +569,7 @@ fn execute_git(
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
+    release_scan: bool,
     command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
 ) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
@@ -501,6 +589,9 @@ fn execute_git(
     argv.push(runtime.git.path.as_os_str().to_owned());
     argv.extend(args);
     let mut env = environment(runtime, repo);
+    if release_scan {
+        env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
+    }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
     runtime.git.verify(runtime.fs.as_ref())?;
     let options = exec_options(
@@ -711,6 +802,28 @@ fn git_args(
             ancestor.to_string().into(),
             tip.to_string().into(),
         ],
+        GitRead::AllTreeEntries { oid } => vec![
+            "ls-tree".into(),
+            "-r".into(),
+            "-l".into(),
+            "-z".into(),
+            "--full-tree".into(),
+            oid.to_string().into(),
+            "--".into(),
+        ],
+        GitRead::RawObject { kind, oid } => vec![
+            "cat-file".into(),
+            match kind {
+                GitObjectKind::Commit => "commit".into(),
+                GitObjectKind::Blob => "blob".into(),
+            },
+            oid.to_string().into(),
+        ],
+        GitRead::AncestorRange { base, head } => vec![
+            "rev-list".into(),
+            format!("{base}..{head}").into(),
+            "--".into(),
+        ],
         GitRead::TreeEntries { oid, prefix } => {
             let mut args = vec![
                 "ls-tree".into(),
@@ -775,6 +888,7 @@ pub(crate) fn environment(
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
         ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+        ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
         ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_PAGER".into(), "cat".into()),
@@ -833,6 +947,7 @@ pub(crate) fn execute_git_mutation(
         runtime,
         budget,
         cancel,
+        false,
         |attribute_source| {
             let (mut args, stdin) = mutation_args(mutation)?;
             args.insert(0, format!("--attr-source={attribute_source}").into());
@@ -1078,6 +1193,66 @@ pub(crate) mod tests {
                 &CancelToken::new()
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_reads_respect_shallow_history_while_release_reads_include_it()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["commit", "--allow-empty", "-m", "shallow parent"])?;
+        fixture.run(&["commit", "--allow-empty", "-m", "shallow tip"])?;
+        let tip = fixture.head()?;
+        let parent = fixture.run(&["rev-parse", "HEAD^"])?;
+        let parent = std::str::from_utf8(&parent.stdout.bytes)?.trim();
+        fs::write(
+            fixture.repo.private_git_dir().join("shallow"),
+            format!("{parent}\n"),
+        )?;
+
+        let read_only = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let ordinary = run_read_utility(
+            &fixture.executor,
+            GitRead::FirstParentHistory { tip },
+            &read_only,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(ordinary.termination, Termination::Exit(0));
+        assert_eq!(
+            ordinary
+                .stdout
+                .bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            2
+        );
+
+        let release = run_release_read_utility(
+            &fixture.executor,
+            GitRead::FirstParentHistory { tip },
+            &read_only,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(release.termination, Termination::Exit(0));
+        assert_eq!(
+            release
+                .stdout
+                .bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            3
         );
         Ok(())
     }

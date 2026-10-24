@@ -9,7 +9,7 @@ FIXTURES = SKILL_CRAFT / "evals" / "boundary_trace_cases.yaml"
 
 
 def test_local_history_routing_separates_audit_from_export():
-    # The strictly schema-validated evals/trigger_cases.yaml (see
+    # The strictly schema-validated evals/trigger_cases.json (see
     # tests/test_skill_eval_fixtures.py) only carries the canonical 3+3+3
     # positive/negative/boundary set; these richer local-history/export
     # routing cases carry extra keys (branch, tags beyond that contract) and

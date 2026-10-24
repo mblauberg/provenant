@@ -1,5 +1,6 @@
 //! Verified staged releases and bounded packaging. Build orchestration calls
 //! `package_release` after linking; runtime startup never builds itself.
+use crate::inspection::InspectionEvidence;
 use crate::managed::{InstallError, ReleaseSmoke, directory, normal_absolute, path_wire, snapshot};
 use provenant_core::CancelToken;
 use provenant_records::{
@@ -42,29 +43,49 @@ impl Release {
         })?;
         Self::read_held(source, target, anchor)
     }
-    pub(crate) fn read_scoped(
+    pub(crate) fn read_scoped_inspected(
         source: &Path,
         target: &str,
         fs: &dyn SafeFs,
         state_root: &Path,
+        mut evidence: Option<&mut InspectionEvidence>,
     ) -> Result<Self, InstallError> {
-        Self::read_held(
-            source,
-            target,
-            crate::managed::directory_scoped(source, state_root, false, fs)?,
-        )
+        let anchor = match crate::managed::directory_scoped(source, state_root, false, fs) {
+            Ok(anchor) => anchor,
+            Err(InstallError::Fs(error)) if error.is_not_found() => {
+                if let Some(evidence) = evidence.as_deref_mut() {
+                    evidence.observe(b"snapshot", &source.join("release.json"), None);
+                }
+                return Err(InstallError::Fs(error));
+            }
+            Err(error) => return Err(error),
+        };
+        Self::read_held_inspected(source, target, anchor, evidence)
     }
     fn read_held(
         source: &Path,
         target: &str,
         anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
     ) -> Result<Self, InstallError> {
+        Self::read_held_inspected(source, target, anchor, None)
+    }
+    fn read_held_inspected(
+        source: &Path,
+        target: &str,
+        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
+        mut evidence: Option<&mut InspectionEvidence>,
+    ) -> Result<Self, InstallError> {
         normal_absolute(source)?;
         let manifest_path = source.join("release.json");
         let Some(crate::managed::Snapshot {
             value: crate::managed::Value::File { bytes, mode: 0o600 },
             ..
-        }) = crate::managed::snapshot_below(&manifest_path, source, anchor.as_ref())?
+        }) = crate::managed::snapshot_below_inspected(
+            &manifest_path,
+            source,
+            anchor.as_ref(),
+            evidence.as_deref_mut(),
+        )?
         else {
             return Err(InstallError::Tampered(manifest_path));
         };
@@ -74,13 +95,19 @@ impl Release {
             return Err(InstallError::Platform);
         }
         check_bounds(&manifest)?;
-        let actual = inventory_held(source, anchor.as_ref(), false)?;
+        let actual =
+            inventory_held_inspected(source, anchor.as_ref(), false, evidence.as_deref_mut())?;
         let mut files = BTreeMap::new();
         for item in &manifest.files {
             let relative = item.path.to_relative_path()?.as_path().to_path_buf();
             validate_name(&relative, item.mode)?;
             let path = source.join(&relative);
-            let current = crate::managed::snapshot_below(&path, source, anchor.as_ref())?;
+            let current = crate::managed::snapshot_below_inspected(
+                &path,
+                source,
+                anchor.as_ref(),
+                evidence.as_deref_mut(),
+            )?;
             let Some(crate::managed::Snapshot {
                 value: crate::managed::Value::File { bytes, mode },
                 ..
@@ -393,6 +420,18 @@ pub(crate) fn inventory_held(
     anchor: &dyn provenant_supervisor::fs::SafeDir,
     remove_staging: bool,
 ) -> Result<Vec<PathBuf>, InstallError> {
+    inventory_held_inspected(root, anchor, remove_staging, None)
+}
+pub(crate) fn inventory_held_inspected(
+    root: &Path,
+    anchor: &dyn provenant_supervisor::fs::SafeDir,
+    remove_staging: bool,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Vec<PathBuf>, InstallError> {
+    struct Scan<'a> {
+        count: usize,
+        evidence: Option<&'a mut InspectionEvidence>,
+    }
     fn allowed_directory(path: &Path) -> bool {
         path == Path::new("bin")
             || [
@@ -413,20 +452,32 @@ pub(crate) fn inventory_held(
         depth: usize,
         dir: &dyn provenant_supervisor::fs::SafeDir,
         output: &mut Vec<PathBuf>,
-        count: &mut usize,
+        scan: &mut Scan<'_>,
         remove_staging: bool,
     ) -> Result<(), InstallError> {
         if depth > 64 {
             return Err(InstallError::Manifest("inventory bounds"));
         }
+        let mut names = Vec::new();
         for entry in dir.entries()? {
-            let name = entry?;
-            *count += 1;
-            if *count > ENTRY_LIMIT {
+            names.push(entry?);
+            scan.count += 1;
+            if scan.count > ENTRY_LIMIT {
                 return Err(InstallError::Manifest("inventory bounds"));
             }
+        }
+        names.sort();
+        if let Some(evidence) = scan.evidence.as_deref_mut() {
+            for name in &names {
+                evidence.observe(b"inventory-entry", &root.join(tail).join(name), Some(&[]));
+            }
+        }
+        for name in names {
             let path = tail.join(&name);
             let metadata = dir.metadata_at(&name, false)?;
+            if let Some(evidence) = scan.evidence.as_deref_mut() {
+                evidence.metadata(&root.join(&path), metadata);
+            }
             if matches!(metadata.kind, FileKind::Regular | FileKind::Symlink)
                 && is_supervisor_staging_name(&name)
             {
@@ -443,7 +494,7 @@ pub(crate) fn inventory_held(
                     depth + 1,
                     dir.open_verified_directory(&name)?.as_ref(),
                     output,
-                    count,
+                    scan,
                     remove_staging,
                 )?,
                 FileKind::Regular if path == Path::new("release.json") => {}
@@ -460,7 +511,7 @@ pub(crate) fn inventory_held(
         0,
         anchor,
         &mut output,
-        &mut 0,
+        &mut Scan { count: 0, evidence },
         remove_staging,
     )?;
     output.sort();

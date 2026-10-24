@@ -80,8 +80,8 @@ How to work:
    global mutable state. If the design is wrong or silent on something that
    matters, make the smallest sound choice, note it in the PR, and propose
    the design fix.
-2. Test the new design (PORTING.md R9). External contracts use recorded
-   fixtures of the other tool's real behaviour.
+2. Test the new design (PORTING.md R9) and keep it simple (R12). External
+   contracts use recorded fixtures of the other tool's real behaviour.
 3. Delete the Python/TS this step replaces, its tests and helpers left with
    no caller. Update in-repo callers that still exist. A caller whose owner
    is not yet rewritten keeps calling the old path; if this step removes
@@ -113,7 +113,8 @@ Self-check before review:
 - Bounded waits only; never an unbounded `wait()` on a child.
 - No `unsafe` outside `supervisor::sys`; no `Command::new` outside supervisor.
 - Serde wire forms for external contracts match the recorded fixtures.
-- Tests cover failure and edge cases, not only the happy path.
+- Tests cover the main path and the failures R12 names; no test per branch
+  and none for what a type already guarantees.
 - No in-repo caller points at a deleted path: grep for the module name,
   script path and any `python3 -m` form.
 - macOS: compare canonicalised temporary paths (`/var` links to

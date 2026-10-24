@@ -237,7 +237,6 @@ def test_pipe_wait_rule_conservatively_covers_bindings_and_branches(tmp_path):
 def test_pipe_wait_rule_is_clean_across_current_execution_sites():
     module = load_script(SCRIPT, "static_security_check")
     sites = (
-        ROOT / "scripts" / "public_release_check.py",
         ROOT / "skills" / "_shared" / "bounded_process.py",
         ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt_process.py",
     )

@@ -55,9 +55,9 @@ Static final-tree requirements:
 
 Per-PR checks:
 
-- `scripts/check-harness`, `scripts/static-security-check.py`,
-  `scripts/public-release-check`, `git diff --check`, and the change's focused
-  tests pass.
+- `provenant check harness`, `scripts/static-security-check.py`,
+  `provenant check release`, `git diff --check`, and the change's focused tests
+  pass.
 - Isolated installer fixtures cover Claude and Codex clean install, upgrade of
   a harness-managed file, and an existing unmanaged instructions file. They
   verify expected exit codes, link and manifest state, and byte-identical

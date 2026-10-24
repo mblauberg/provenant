@@ -298,8 +298,9 @@ fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
         Profile::Balanced
     );
     assert_eq!(
-        check_config(&fixture.roots, &fs, &domains::NO_DOMAINS, 50)
+        inspect_config(&fixture.roots, &fs, &domains::NO_DOMAINS)
             .unwrap()
+            .check
             .schema_version,
         1
     );
@@ -313,8 +314,9 @@ fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
     let original = b"# User-owned; preserve exactly.\nschema_version=1\nprofile='rigorous'\n";
     std::fs::write(fixture.config(), original).unwrap();
     assert_eq!(
-        check_config(&fixture.roots, &fs, &domains::NO_DOMAINS, 50)
+        inspect_config(&fixture.roots, &fs, &domains::NO_DOMAINS)
             .unwrap()
+            .check
             .profile,
         Profile::Rigorous
     );
@@ -333,8 +335,9 @@ fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
     );
     std::fs::write(fixture.config(), b"schema_version = 'private-sentinel'").unwrap();
     assert_eq!(
-        check_config(&fixture.roots, &fs, &domains::NO_DOMAINS, 50)
+        inspect_config(&fixture.roots, &fs, &domains::NO_DOMAINS)
             .unwrap()
+            .check
             .count,
         1
     );
@@ -410,7 +413,7 @@ fn version_refusal_precedes_unknown_key_decoding() {
 }
 
 #[test]
-fn check_collects_ordered_unknown_type_range_and_domain_failures_with_a_limit() {
+fn inspect_collects_ordered_unknown_type_range_and_domain_failures() {
     let fixture = Files::new();
     std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
     std::fs::write(
@@ -419,7 +422,7 @@ fn check_collects_ordered_unknown_type_range_and_domain_failures_with_a_limit() 
     )
     .unwrap();
     let fs = provenant_supervisor::fs::LocalFs;
-    let check = check_config(&fixture.roots, &fs, &DOMAINS, 50).unwrap();
+    let check = inspect_config(&fixture.roots, &fs, &DOMAINS).unwrap().check;
     assert_eq!(check.count, 4);
     assert_eq!(
         check
@@ -434,20 +437,12 @@ fn check_collects_ordered_unknown_type_range_and_domain_failures_with_a_limit() 
             ("unknown_key", 6)
         ]
     );
-    let page = check_config(&fixture.roots, &fs, &DOMAINS, 2).unwrap();
-    assert_eq!(page.count, 4);
-    assert!(page.truncated);
-    assert_eq!(page.findings, check.findings[..2]);
-    assert!(matches!(
-        check_config(&fixture.roots, &fs, &DOMAINS, 0),
-        Err(ConfigError::InvalidLimit)
-    ));
     std::fs::write(
         fixture.config(),
         "schema_version=1\n[domains.sample]\nlimit=-1\nenabled='private-sentinel'\n",
     )
     .unwrap();
-    let check = check_config(&fixture.roots, &fs, &DOMAINS, 50).unwrap();
+    let check = inspect_config(&fixture.roots, &fs, &DOMAINS).unwrap().check;
     assert_eq!(
         check
             .findings
@@ -463,8 +458,8 @@ fn check_collects_ordered_unknown_type_range_and_domain_failures_with_a_limit() 
     );
     std::fs::write(fixture.config(), "schema_version = [").unwrap();
     assert!(matches!(
-        check_config(&fixture.roots, &fs, &DOMAINS, 50),
-        Err(ConfigError::Syntax { .. })
+        inspect_config(&fixture.roots, &fs, &DOMAINS).unwrap().error,
+        Some(ConfigError::Syntax { .. })
     ));
 }
 
@@ -616,13 +611,9 @@ fn array_members_are_checked_independently_at_their_exact_paths() {
     let fixture = Files::new();
     std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
     std::fs::write(fixture.config(), "schema_version=1\n[domains.array]\nrows=[{first=-1, second=-2, enabled=1, unknown=true}]\nnumbers=[-1,-2,1.0]\n").unwrap();
-    let check = check_config(
-        &fixture.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &ENTRIES,
-        50,
-    )
-    .unwrap();
+    let check = inspect_config(&fixture.roots, &provenant_supervisor::fs::LocalFs, &ENTRIES)
+        .unwrap()
+        .check;
     assert_eq!(check.count, 7, "{check:?}");
     for key in [
         "rows.0.first",
@@ -702,13 +693,9 @@ fn every_registered_section_reports_all_its_semantic_failures() {
         "schema_version=1\n[domains.first]\nlimit=0\n[domains.second]\nlimit=9",
     )
     .unwrap();
-    let check = check_config(
-        &fixture.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &ENTRIES,
-        50,
-    )
-    .unwrap();
+    let check = inspect_config(&fixture.roots, &provenant_supervisor::fs::LocalFs, &ENTRIES)
+        .unwrap()
+        .check;
     assert_eq!(check.count, 2);
     assert!(
         check
@@ -764,13 +751,9 @@ fn an_invalid_array_member_does_not_hide_other_members_semantic_failures() {
         "schema_version=1\n[domains.list]\nvalues=[{limit=1,enabled=4}, {limit=0,enabled=true}]",
     )
     .unwrap();
-    let check = check_config(
-        &fixture.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &ENTRIES,
-        50,
-    )
-    .unwrap();
+    let check = inspect_config(&fixture.roots, &provenant_supervisor::fs::LocalFs, &ENTRIES)
+        .unwrap()
+        .check;
     assert_eq!(
         check
             .findings
@@ -818,13 +801,9 @@ fn semantic_locations_keep_original_indices_after_invalid_empty_default_array_me
         "schema_version=1\n[domains.list]\nvalues=[\n'private-sentinel',\n0\n]",
     )
     .unwrap();
-    let check = check_config(
-        &fixture.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &ENTRIES,
-        50,
-    )
-    .unwrap();
+    let check = inspect_config(&fixture.roots, &provenant_supervisor::fs::LocalFs, &ENTRIES)
+        .unwrap()
+        .check;
     assert_eq!(check.count, 2);
     assert_eq!(
         (check.findings[1].rule.as_str(), check.findings[1].line),
@@ -862,13 +841,9 @@ fn structured_arrays_without_a_complete_default_key_set_report_findings() {
         "schema_version=1\n[domains.list]\nvalues=[{limit=0,enabled=1}, {limit=0,enabled=true}]",
     )
     .unwrap();
-    let check = check_config(
-        &fixture.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &ENTRIES,
-        50,
-    )
-    .unwrap();
+    let check = inspect_config(&fixture.roots, &provenant_supervisor::fs::LocalFs, &ENTRIES)
+        .unwrap()
+        .check;
     assert_eq!(check.count, 2);
     assert!(check.findings.iter().all(|finding| finding.rule == "type"));
 }
@@ -884,6 +859,45 @@ fn malformed_value_reports_its_recoverable_dotted_key_path() {
     assert!(
         matches!(error, ConfigError::Syntax { location: Location { key_path, line: 3, column, .. } } if key_path == "domains.sample.enabled" && column > 0)
     );
+}
+
+#[test]
+fn inspect_config_returns_all_findings_and_binds_bytes_and_presence() {
+    let files = Files::new();
+    let fs = provenant_supervisor::fs::LocalFs;
+    let absent = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    std::fs::create_dir_all(files.roots.state.as_path()).unwrap();
+    std::fs::write(files.config(), "schema_version=1\n").unwrap();
+    let present = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(absent.check.findings, present.check.findings);
+    assert_ne!(absent.input_digest, present.input_digest);
+    let mut text = String::from("schema_version=1\n");
+    for index in 0_u64..150 {
+        text.push_str(&format!("unknown_{index}=true\n"));
+    }
+    std::fs::write(files.config(), &text).unwrap();
+    let first = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(first.check.findings.len(), 150);
+    assert_eq!(first.check.count, 150);
+    text.push_str("# changed bytes, same findings\n");
+    std::fs::write(files.config(), text).unwrap();
+    let second = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(first.check, second.check);
+    assert_ne!(first.input_digest, second.input_digest);
+}
+
+#[test]
+fn inspect_config_preserves_malformed_input_digest_without_rereading() {
+    let files = Files::new();
+    let fs = provenant_supervisor::fs::LocalFs;
+    std::fs::create_dir_all(files.roots.state.as_path()).unwrap();
+    std::fs::write(files.config(), "schema_version=1\nbroken=[").unwrap();
+    let first = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert!(matches!(first.error, Some(ConfigError::Syntax { .. })));
+    std::fs::write(files.config(), "schema_version=1\nbroken={").unwrap();
+    let second = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert!(matches!(second.error, Some(ConfigError::Syntax { .. })));
+    assert_ne!(first.input_digest, second.input_digest);
 }
 
 #[test]

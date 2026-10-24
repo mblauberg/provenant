@@ -1,18 +1,15 @@
 //! Installation grammar and thin orchestration over config's state machine.
 //! The process edge supplies captured roots, environment and capabilities.
-use crate::{Harness, Page, Switch};
+use crate::{Harness, Switch};
 use clap::builder::TypedValueParser;
-use provenant_config::InstallFinding;
 use provenant_config::{
     self as config, InstallContext, InstallError, InstallOutcome, InstallReporter, Release,
     ReleaseSmoke, Snapshots, Targets,
 };
-use provenant_core::{CancelToken, Roots};
-use provenant_records::FileDigest;
+use provenant_core::Roots;
 use provenant_supervisor::fs::SafeFs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
 #[derive(Debug, clap::Args)]
 pub struct Install {
@@ -36,14 +33,6 @@ pub struct Install {
 pub struct Uninstall {
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
-}
-
-#[derive(Debug, clap::Args)]
-pub struct InstallCheck {
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
-    pub source: Option<PathBuf>,
-    #[command(flatten)]
-    pub page: Page,
 }
 
 fn absolute(path: PathBuf) -> Result<PathBuf, &'static str> {
@@ -120,136 +109,4 @@ pub fn execute_uninstall(
     reporter: &mut dyn InstallReporter,
 ) -> Result<InstallOutcome, InstallError> {
     config::uninstall(targets, context, reporter)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InstallCheckPage {
-    pub findings: Vec<InstallFinding>,
-    pub count: usize,
-    pub truncated: bool,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Error)]
-pub enum InstallCheckError {
-    #[error("invalid check install cursor")]
-    Cursor,
-    #[error("check install cursor is stale")]
-    StaleCursor,
-    #[error(transparent)]
-    Install(#[from] InstallError),
-}
-
-pub fn execute_check_install(
-    args: &InstallCheck,
-    targets: &Targets,
-    fs: &dyn SafeFs,
-    smoke: &dyn ReleaseSmoke,
-    cancel: &CancelToken,
-    target: &str,
-) -> Result<InstallCheckPage, InstallCheckError> {
-    let source = args
-        .source
-        .as_deref()
-        .map(|path| Release::read(path, target, fs))
-        .transpose()?;
-    let (findings, digest) =
-        config::check_install_with_digest(targets, source.as_ref(), target, fs, smoke, cancel)?;
-    page(
-        findings,
-        digest,
-        args.page.limit,
-        args.page.cursor.as_deref(),
-    )
-}
-
-fn page(
-    findings: Vec<InstallFinding>,
-    digest: FileDigest,
-    limit: u64,
-    cursor: Option<&str>,
-) -> Result<InstallCheckPage, InstallCheckError> {
-    let digest_text = digest.to_string();
-    let start = match cursor {
-        None => 0,
-        Some(value) => {
-            let mut parts = value.split('.');
-            let (Some(version), Some(cursor_digest), Some(offset), None) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
-            else {
-                return Err(InstallCheckError::Cursor);
-            };
-            if version != "v1" {
-                return Err(InstallCheckError::Cursor);
-            }
-            let parsed_digest =
-                FileDigest::parse(cursor_digest).map_err(|_| InstallCheckError::Cursor)?;
-            if parsed_digest != digest {
-                return Err(InstallCheckError::StaleCursor);
-            }
-            let parsed = offset
-                .parse::<usize>()
-                .map_err(|_| InstallCheckError::Cursor)?;
-            if parsed.to_string() != offset {
-                return Err(InstallCheckError::Cursor);
-            }
-            parsed
-        }
-    };
-    let count = findings.len();
-    if start > count {
-        return Err(InstallCheckError::Cursor);
-    }
-    let limit = usize::try_from(limit).map_err(|_| InstallCheckError::Cursor)?;
-    let end = start
-        .checked_add(limit)
-        .ok_or(InstallCheckError::Cursor)?
-        .min(count);
-    let selected = findings
-        .get(start..end)
-        .ok_or(InstallCheckError::Cursor)?
-        .to_vec();
-    let truncated = end < count;
-    let next_cursor = truncated.then(|| format!("v1.{digest_text}.{end}"));
-    Ok(InstallCheckPage {
-        findings: selected,
-        count,
-        truncated,
-        next_cursor,
-    })
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn install_cursor_is_digest_bound_and_canonical() {
-        let digest = FileDigest::from_bytes([0xab; 32]);
-        let empty = Vec::new();
-        assert!(matches!(
-            page(
-                empty.clone(),
-                digest,
-                10,
-                Some(
-                    "v1.sha256:0000000000000000000000000000000000000000000000000000000000000000.0"
-                )
-            ),
-            Err(InstallCheckError::StaleCursor)
-        ));
-        assert!(matches!(
-            page(empty.clone(), digest, 10, Some(&format!("v1.{digest}.00"))),
-            Err(InstallCheckError::Cursor)
-        ));
-        assert!(matches!(
-            page(empty.clone(), digest, 10, Some(&format!("v1.{digest}.1"))),
-            Err(InstallCheckError::Cursor)
-        ));
-        let page =
-            page(empty, digest, 10, Some(&format!("v1.{}.0", digest))).expect("canonical cursor");
-        assert_eq!(page.count, 0);
-        assert!(!page.truncated);
-    }
 }

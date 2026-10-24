@@ -377,7 +377,8 @@ inherited config/object redirects, replacements/grafts, fsmonitor, textconv,
 external diff and lazy fetch; support loose/packed objects, linked worktrees
 and native alternates. Missing/truncated objects, unreadable/bounded-out files
 or non-UTF-8 content never yield a clean result. One byte-rule registry;
-prefilters must prove a superset.
+prefilters must prove a superset. Retired skill-path prefixes and `--history`/annotated-tag
+scans are not ported.
 
 `check writing PATHS… [--rules general|academic|legal]` calls workflow's
 data-driven writing rules beside each `SKILL.md`, reuses `Finding` and exits 1

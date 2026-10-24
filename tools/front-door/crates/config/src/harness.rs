@@ -1057,7 +1057,7 @@ pub(crate) fn check_legacy(
     receipt: &InstallReceipt,
     legacy: &provenant_records::LegacyInstall,
     findings: &mut Vec<managed::InstallFinding>,
-    basis: &mut Vec<u8>,
+    evidence: &mut crate::inspection::InspectionEvidence,
     fs: &dyn SafeFs,
 ) -> Result<(), InstallError> {
     if legacy.manifest_digest != crate::legacy::manifest_digest() {
@@ -1100,8 +1100,7 @@ pub(crate) fn check_legacy(
             {
                 continue;
             }
-            let current = managed::snapshot(&path, fs)?;
-            managed::digest_snapshot(basis, &path, &current)?;
+            let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
             if let Some(Snapshot {
                 value: Value::Link(actual),
                 ..
@@ -1115,8 +1114,7 @@ pub(crate) fn check_legacy(
                 }
             }
         }
-        let config = managed::snapshot(&target.mcp_file, fs)?;
-        managed::digest_snapshot(basis, &target.mcp_file, &config)?;
+        let config = managed::snapshot_inspected(&target.mcp_file, fs, Some(evidence))?;
         if config.is_some() {
             let (bytes, _) = file_for(&config, &target.mcp_file, target.harness)?;
             let old_mcp = get_for(&bytes, selector(target.harness), target.harness)?
@@ -1140,8 +1138,7 @@ pub(crate) fn check_legacy(
             }
         }
         for path in target.hook_file.iter() {
-            let current = managed::snapshot(path, fs)?;
-            managed::digest_snapshot(basis, path, &current)?;
+            let current = managed::snapshot_inspected(path, fs, Some(evidence))?;
             if current.is_some() {
                 let (bytes, _) = file(&current, path)?;
                 match crate::legacy::clean_hooks(&bytes, target.harness, &checkout) {
@@ -1162,8 +1159,7 @@ pub(crate) fn check_legacy(
         managed::normal_absolute(&directory)?;
         for link in crate::legacy::git_hook_links(&checkout)? {
             let path = directory.join(&link.name);
-            let current = managed::snapshot(&path, fs)?;
-            managed::digest_snapshot(basis, &path, &current)?;
+            let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
             match current {
                 Some(Snapshot {
                     value: Value::Link(actual),
@@ -1177,8 +1173,7 @@ pub(crate) fn check_legacy(
         }
     }
     let path = home.join(".agents/AGENTS.md");
-    let current = managed::snapshot(&path, fs)?;
-    managed::digest_snapshot(basis, &path, &current)?;
+    let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
     if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if link==&checkout.join("AGENTS.md"))
     {
         add_finding(findings, "legacy_entry", &path)?;

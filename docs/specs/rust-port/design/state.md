@@ -322,7 +322,7 @@ preview/receipt; they cannot be changed by a project/request.
 | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude.json`: `mcpServers.fabric`, stdio command/args/env | `~/.claude/settings.json`: owned command leaves in `hooks.<event>[]` | `~/.claude/skills/` | `~/.claude/CLAUDE.md`, companion `HARNESS.md` |
 | Codex | `~/.codex/config.toml`: `[mcp_servers.fabric]`, command/args/env | `[features] hooks = true` in config plus `~/.codex/hooks.json`; own only required feature/command entries | `~/.codex/skills/` | `~/.codex/AGENTS.md`, companion `HARNESS.md` |
-| Cursor | `~/.cursor/mcp.json`: `mcpServers.fabric` | No supported hook registration | `~/.cursor/skills/` | No global instruction entry in existing installer; manual include until fixture-proven |
+| Cursor | `~/.cursor/mcp.json`: `mcpServers.fabric` | No supported hook registration | `~/.cursor/skills/` | No supported global instruction registration |
 | Agy | `~/.gemini/config/mcp_config.json`: `mcpServers.fabric` | No supported hook registration | `~/.gemini/skills/` | `~/.gemini/GEMINI.md`, companion `HARNESS.md` |
 | OpenCode | `~/.config/opencode/opencode.jsonc`: `mcp.fabric`, `type="local"`, command array/environment | No supported hook registration | `~/.config/opencode/skills/` | `~/.config/opencode/AGENTS.md`, companion `HARNESS.md` |
 

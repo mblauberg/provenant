@@ -1,5 +1,6 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+pub mod check;
 pub mod fabric;
 pub use fabric::Fabric;
 mod grammar;
