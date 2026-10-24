@@ -4,6 +4,7 @@ use crate::git_evidence::{
     MAX_DISCLOSURE_FILES, TrackedFingerprint, canonical_paths, open_parent, read_index_fingerprint,
     read_optional_file, read_tracked_file, refuse_index_lock,
 };
+use crate::plan::read_only::RESERVED;
 use crate::repo::RepoPath;
 use crate::status::{
     StatusError, StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z,
@@ -1229,9 +1230,17 @@ fn is_known_control(path: &Path) -> bool {
         ]
         .iter()
         .any(|control| name.as_bytes().eq_ignore_ascii_case(control))
-    }) || [".github", ".githooks", "hooks", ".claude", ".codex"]
-        .iter()
-        .any(|root| path.starts_with(root))
+    }) || path.components().next().is_some_and(|first| {
+        // The first component is the control root; APFS folds its case. Shares
+        // the read-only plan's reserved list so the two cannot drift, while
+        // .agents is the instruction tree this quarantine exists to review.
+        let root = first.as_os_str().as_bytes();
+        RESERVED
+            .iter()
+            .filter(|reserved| **reserved != ".agents")
+            .chain(&[".githooks", "hooks"])
+            .any(|reserved| root.eq_ignore_ascii_case(reserved.as_bytes()))
+    })
 }
 
 #[cfg(test)]
@@ -1239,6 +1248,26 @@ mod tests {
     use super::{InstructionClass, ProtectedPath, parse_tree_entries};
     use crate::status::parse_index_entries;
     use std::error::Error;
+
+    #[test]
+    fn provider_control_roots_are_protected_case_insensitively() {
+        for path in [
+            ".Claude/settings.json",
+            ".mcp.json",
+            ".VSCode/tasks.json",
+            ".GitHooks/pre-commit",
+            "Hooks/pre-push",
+        ] {
+            assert!(
+                super::is_known_control(std::path::Path::new(path)),
+                "{path}"
+            );
+        }
+        assert!(!super::is_known_control(std::path::Path::new("src/lib.rs")));
+        assert!(!super::is_known_control(std::path::Path::new(
+            ".agents/skills/a/SKILL.md"
+        )));
+    }
 
     #[test]
     fn ordinary_instruction_class_requires_agents_path_and_rejects_control_names()
