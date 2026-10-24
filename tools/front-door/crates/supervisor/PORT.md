@@ -88,6 +88,50 @@ An empty session census cannot disprove an unrecorded setsid escape. Same-boot
 recovery keeps any durable unresolved-cleanup reservation unknown. Linux clears
 that bit only after complete census/tracking checks and a stable bounded scan of
 all guardian threads' kernel children lists proves only the dead leader remains.
-Darwin has no corresponding subreaper proof here, so spawned attempts retain the
-fence for authorised reconciliation (or a changed boot). The design should state
-this availability trade-off or specify a reviewed kernel fork-tracking mechanism.
+Darwin has no corresponding subreaper proof. Settlement instead requires two
+complete censuses with no provider/session/group/history members and a fresh
+lock on the same writer inode after closing the guardian's inherited duplicate.
+An unknown census, inherited lease or protected nested owner retains the fence.
+
+## Supervisor audit corrections
+
+Provider spawn uses a bounded pre-exec socket handshake. A temporary native
+observer thread captures boot/start/PID/group/session identity while the child
+waits, then releases exec and joins before spawn returns. Failure refuses exec;
+post-exec zombie visibility cannot erase that recorded identity. The guardian
+continues cleanup after a reaped leader and retries unavailable censuses until
+the existing cleanup deadline, recording a warning rather than giving up once.
+
+Pipe pumping polls at 5 ms. CPU, cancellation and safety census observations
+run at 100 ms; process checkpoints publish on the first loop turn and then
+at 1 s intervals. Unchanged
+checkpoint/reservation bytes skip durable replacement. Full census still runs
+on the pipe thread: moving or slowing safety tracking needs a validated design
+and remains deferred. Descendant-journal write
+failures warn once per failure episode and mark the current census evidence
+incomplete. A subsequent successful census replaces that flag with its own
+completeness; the bounded exit warnings retain the journal-failure history.
+Cleanup census failures likewise warn once per episode. Routine identity and
+tracking updates use atomic replacement; the final reservation commit alone uses
+the exit publisher's commit hook. Cleanup and publication feed
+actual outcomes into the pure machine, including budget-exhausted unresolved
+cleanup; unresolved facts publish an exit but never release the writer fence.
+Durable reservation/exit retry loops intentionally retain custody without a time
+limit; signals cannot waive publication. `process.json` exposes pending exit
+publication when storage permits.
+
+`CapturePlan.terminal_ms` is removed from the private same-binary handoff and
+launch summary: terminal grace already uses `root_flush_ms`. This rewrite has
+no old-state or mixed-version reader contract. Capture and cleanup defaults use
+the executor/machine constants. Darwin PID listing over-allocates within its
+entry bound and retries a full buffer before claiming truncation. Native boot
+identity is cached only after a successful read.
+
+The design-required `PathIo`/append/following API and typed reconcile API are
+implemented but have no production consumers yet. Retain them as deferred
+consumer wiring under the supervisor design's API table and Run recovery
+contract; do not replace either with a new abstraction. Strict `run_text` stays
+for the same reason. The convenience tee queue is fixture-only. Further pump
+and exit-builder extraction, capture-loop consolidation, exit-record shape
+consolidation, scratch partial-write handling and staging-file recovery need
+separate focused changes; they are not mechanical changes in this audit lane.

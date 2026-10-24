@@ -555,7 +555,6 @@ pub struct CapturePlan {
     pub stdout: StreamMode,
     pub stderr: StreamMode,
     pub wall_ms: u64,
-    pub terminal_ms: u64,
     pub descendant_grace_ms: u64,
     pub root_flush_ms: u64,
 }
@@ -567,15 +566,14 @@ impl Default for CapturePlan {
     fn default() -> Self {
         Self {
             stdout: StreamMode::Capture {
-                limit: 8 * 1024 * 1024,
+                limit: crate::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
             stderr: StreamMode::Capture {
-                limit: 8 * 1024 * 1024,
+                limit: crate::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
             wall_ms: 3600000,
-            terminal_ms: 500,
-            descendant_grace_ms: 500,
-            root_flush_ms: 2000,
+            descendant_grace_ms: crate::machine::DEFAULT_DESCENDANT_GRACE_MS,
+            root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             silence_ms: default_silence_ms(),
         }
     }
@@ -593,7 +591,6 @@ impl CapturePlan {
             || self.silence_ms > 3_600_000
             || self.wall_ms == 0
             || self.wall_ms > 86400000
-            || self.terminal_ms > 60000
             || self.descendant_grace_ms > 60000
             || self.root_flush_ms > 60000
         {
@@ -719,27 +716,7 @@ pub fn launch(
         } else {
             None
         };
-        let record = ProcessExit {
-            schema_version: 1,
-            scope,
-            termination: None,
-            never_spawned: true,
-            stop_reason: reason,
-            delivered_signals: vec![],
-            reaped: vec![],
-            omitted_reaped: 0,
-            spared: vec![],
-            omitted_spared: 0,
-            failed_deliveries: vec![],
-            omitted_failed_deliveries: 0,
-            terminal_observed: false,
-            unresolved_cleanup: false,
-            settlement_evidence: SettlementEvidence::NeverSpawned,
-            stdout: CaptureTotals::default(),
-            stderr: CaptureTotals::default(),
-            warnings: vec![],
-            omitted_warnings: 0,
-        };
+        let record = ProcessExit::never_spawned(scope, reason, vec![]);
         let publication_result = write_record(
             &owned.lease.directory,
             "reservation.json",
@@ -847,6 +824,8 @@ pub struct FailedSignalDelivery {
 /// The observation that permitted cleanup settlement, never a signal authority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Darwin cannot prove a nested owner's flock custody with public libproc.
+/// Registered nested owners remain protected and can leave settlement unresolved.
 pub enum SettlementEvidence {
     #[default]
     Unresolved,
@@ -878,6 +857,34 @@ pub struct ProcessExit {
     pub omitted_warnings: u64,
 }
 impl ProcessExit {
+    pub(crate) fn never_spawned(
+        scope: Scope,
+        stop_reason: Option<StopReason>,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            scope,
+            termination: None,
+            never_spawned: true,
+            stop_reason,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            failed_deliveries: vec![],
+            omitted_failed_deliveries: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+            warnings,
+            omitted_warnings: 0,
+        }
+    }
+
     /// The observation of a record this guardian has just published durably.
     pub(crate) fn durable_observation(&self) -> ExitObservation {
         ExitObservation {
@@ -1052,7 +1059,7 @@ pub fn observe(
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
-            return observe_checkpoint(&handle.directory, handle.scope);
+            return observe_checkpoint(&handle.directory, handle.scope, &SystemProcessObserver);
         }
         crate::sys::wait_pause(
             deadline
@@ -1062,7 +1069,11 @@ pub fn observe(
     }
 }
 
-fn observe_checkpoint(directory: &Directory, scope: Scope) -> Result<Observation> {
+fn observe_checkpoint(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> Result<Observation> {
     let Ok(observation) = read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT)
     else {
         return Ok(Observation::Unknown);
@@ -1074,7 +1085,7 @@ fn observe_checkpoint(directory: &Directory, scope: Scope) -> Result<Observation
         return Ok(Observation::PublicationPending);
     }
     let live = observation.guardian.as_ref().is_some_and(|guardian| {
-        matches!(SystemProcessObserver.observe(guardian.pid), ProcessObservation::Present(fact)
+        matches!(observer.observe(guardian.pid), ProcessObservation::Present(fact)
             if fact.identity == *guardian && !fact.zombie)
     });
     Ok(if live {
@@ -1387,7 +1398,6 @@ pub(crate) fn verify_release(
     receipt.sync()?;
     Ok(())
 }
-/// Clear a verified, proven-absent fence while the writer lease is held.
 /// Publish Run's release attestations for one committed terminal attempt:
 /// `terminal-commit.json`, `quarantine/manifest.json`, then `release.json`
 /// naming both digests. Repeating it with the same scope is idempotent;
@@ -1437,6 +1447,7 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
     })?;
     seal(attempt, "release.json", &release)
 }
+/// Clear a verified, proven-absent fence while the writer lease is held.
 pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<()> {
     require_durable(write_record(
         directory,

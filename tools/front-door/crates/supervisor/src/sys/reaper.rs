@@ -5,7 +5,10 @@ use std::process::Child;
 use std::sync::Condvar;
 #[cfg(feature = "fixture")]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(any(test, feature = "fixture"))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar as WakeCondvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 #[cfg(feature = "fixture")]
@@ -21,6 +24,7 @@ enum Slot {
 struct State {
     slots: Mutex<Vec<Slot>>,
     worker: Weak<Worker>,
+    #[cfg(test)]
     unknown_outcomes: AtomicUsize,
     #[cfg(feature = "fixture")]
     paused: AtomicBool,
@@ -101,6 +105,7 @@ impl Worker {
                                     // Status is unknown (for example ECHILD),
                                     // but retaining this slot would deadlock
                                     // future admissions forever.
+                                    #[cfg(test)]
                                     state.unknown_outcomes.fetch_add(1, Ordering::Relaxed);
                                     *slot = Slot::Free;
                                     #[cfg(feature = "fixture")]
@@ -176,6 +181,7 @@ impl Reaper {
         let state = Arc::new(State {
             slots: Mutex::new((0..capacity).map(|_| Slot::Free).collect()),
             worker: Arc::downgrade(&worker),
+            #[cfg(test)]
             unknown_outcomes: AtomicUsize::new(0),
             #[cfg(feature = "fixture")]
             paused: AtomicBool::new(false),
