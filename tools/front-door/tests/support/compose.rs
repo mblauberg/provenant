@@ -243,14 +243,21 @@ pub(crate) fn provider() -> Result {
         return Err("unknown compose prompt".into());
     }
     fs::write(state.join("compose-proof"), b"proved")?;
+    std::io::stdout().write_all(b"{\"type\":\"thread.started\",\"thread_id\":\"compose-fixture\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"confinement proved\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n")?;
+    std::io::stdout().flush()?;
     if prompt.ends_with("reader") || prompt.ends_with("reader-empty") {
         // Replace this fixture with Git under the same profile and guardian.
         // The host utility runner's pre-exec fd census is deliberately outside
         // the lane's read grants; it is not the provider's tool launcher.
-        let args: Vec<OsString> = ["--no-optional-locks", "status", "--porcelain"]
-            .into_iter()
-            .map(OsString::from)
-            .collect();
+        let args: Vec<OsString> = [
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
         let env: Vec<_> = std::env::vars_os().collect();
         return Err(provenant_supervisor::sys::replace_process(
             Path::new("/usr/bin/git"),
@@ -259,7 +266,6 @@ pub(crate) fn provider() -> Result {
         )
         .into());
     }
-    std::io::stdout().write_all(b"{\"type\":\"thread.started\",\"thread_id\":\"compose-fixture\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"confinement proved\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n")?;
     Ok(())
 }
 fn denied(path: &Path) -> Result {
