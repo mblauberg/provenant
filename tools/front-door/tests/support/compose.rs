@@ -197,28 +197,6 @@ pub(crate) fn provider() -> Result {
         let primary = cwd.parent().and_then(Path::parent).ok_or("primary")?;
         fs::read(primary.join(".git/config"))
             .map_err(|error| format!("common Git read: {error}"))?;
-        let args: Vec<OsString> = [
-            "/usr/bin/git",
-            "--no-optional-locks",
-            "status",
-            "--porcelain",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-        use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor};
-        let env: Vec<_> = std::env::vars_os().collect();
-        let mut options = ExecOptions::new(&args, &cwd, std::time::Duration::from_secs(3));
-        options.env = Some(&env);
-        let output = SystemExecutor::new(1)?
-            .execute(options)
-            .map_err(|error| format!("Git status execution: {error}"))?;
-        assert_eq!(
-            code(&output),
-            0,
-            "Git status stderr: {}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
         denied(&primary.join(".git/config"))?;
         if prompt.ends_with("reader-empty") {
             denied(&cwd.join(".agent-run/locks/compose-lock"))?;
@@ -265,6 +243,22 @@ pub(crate) fn provider() -> Result {
         return Err("unknown compose prompt".into());
     }
     fs::write(state.join("compose-proof"), b"proved")?;
+    if prompt.ends_with("reader") || prompt.ends_with("reader-empty") {
+        // Replace this fixture with Git under the same profile and guardian.
+        // The host utility runner's pre-exec fd census is deliberately outside
+        // the lane's read grants; it is not the provider's tool launcher.
+        let args: Vec<OsString> = ["--no-optional-locks", "status", "--porcelain"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let env: Vec<_> = std::env::vars_os().collect();
+        return Err(provenant_supervisor::sys::replace_process(
+            Path::new("/usr/bin/git"),
+            &args,
+            &env,
+        )
+        .into());
+    }
     std::io::stdout().write_all(b"{\"type\":\"thread.started\",\"thread_id\":\"compose-fixture\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"confinement proved\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n")?;
     Ok(())
 }
