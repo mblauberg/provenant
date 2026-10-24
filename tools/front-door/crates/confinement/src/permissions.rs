@@ -275,7 +275,8 @@ pub struct ProviderProfileSpec {
     /// session transcript. It never overlaps an authentication root.
     pub state_writes: Vec<PathGrant>,
     /// Directories whose executables the provider's own tools may run, for
-    /// providers whose file reading goes through a shell.
+    /// providers whose file reading goes through a shell. Exec only: reading
+    /// them needs the runtime baseline or another grant.
     pub tool_exec_roots: Vec<PathGrant>,
     pub provider_api: Vec<NetworkEndpoint>,
     /// The CLI talks to its own private server over loopback TCP: bind,
@@ -935,7 +936,6 @@ fn compile_sbpl(
     read_grants.extend(plan.protected_roots.iter().cloned());
     read_grants.extend(profile.spec.runtime_reads.iter().cloned());
     read_grants.extend(profile.spec.process_executables.iter().cloned());
-    read_grants.extend(profile.spec.tool_exec_roots.iter().cloned());
     let mut credential_writes = Vec::new();
     if let Some(mechanism) = &plan.selected_authentication {
         let selected = profile

@@ -1,5 +1,6 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
+    subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::CodexPolicy;
@@ -8,7 +9,7 @@ use provenant_confinement::permissions::{
 };
 use serde::Deserialize;
 use std::ffi::OsString;
-use std::path::Path;
+
 pub struct Codex;
 crate::adapter!(Codex, "codex", prepare);
 /// The exec JSON stream carries no answering-model position.
@@ -68,17 +69,18 @@ fn prepare(
     }
     argv.push("-".into());
 
-    let prefix = install_prefix(input.executable);
-    let mut tool_exec_roots: Vec<_> = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/libexec"]
-        .into_iter()
-        .map(subtree)
-        .collect();
-    let mut search_path = String::from("/usr/bin:/bin:/usr/sbin:/sbin");
-    if let Some(prefix) = prefix {
-        tool_exec_roots.push(subtree(prefix));
-        search_path = format!("{prefix}/bin:{search_path}");
-    }
-    let mut env = base_env(input, &plan.scratch.path, &search_path);
+    // Codex runs helpers from its own package (code-mode host, bundled `rg`
+    // and `zsh`), and its shell tool runs system programs. System directories
+    // are readable through the runtime baseline; exec roots add exec, not
+    // reads. No shared install prefix: its etc/ and var/ stay unreadable.
+    let package = package_root(input.executable)?;
+    let tool_exec_roots = vec![
+        subtree("/bin"),
+        subtree("/usr/bin"),
+        subtree("/usr/libexec"),
+        subtree(package),
+    ];
+    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
     Ok(LaunchSpec {
@@ -94,6 +96,7 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
+                runtime_reads: vec![subtree(package)],
                 authentication: vec![AuthenticationProfile {
                     mechanism: "login".into(),
                     roots: vec![exact(&credential)],
@@ -113,12 +116,6 @@ fn prepare(
     })
 }
 
-/// Homebrew-style install prefixes whose programs the shell tool may run.
-fn install_prefix(executable: &Path) -> Option<&'static str> {
-    ["/opt/homebrew", "/usr/local"]
-        .into_iter()
-        .find(|prefix| executable.starts_with(prefix))
-}
 crate::quota_source!(Codex, "codex");
 #[derive(Deserialize)]
 #[serde(tag = "type")]

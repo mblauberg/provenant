@@ -1,4 +1,4 @@
 {"thread_id":"FIXTURE_SESSION_IDENTIFIER","type":"thread.started"}
 {"type":"turn.started"}
 {"item":{"id":"item_0","text":"ok","type":"agent_message"},"type":"item.completed"}
-{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":38528,"input_tokens":41141,"output_tokens":71,"reasoning_output_tokens":0}}
+{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":38528,"input_tokens":41167,"output_tokens":72,"reasoning_output_tokens":0}}

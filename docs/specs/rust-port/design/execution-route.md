@@ -260,8 +260,8 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL` only; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to `~/.codex/auth.json`. Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` only; default config directory and keychain login. No shell tool. No endpoint profile. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL` only, `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to `~/.codex/auth.json`. Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only; default config directory, with the access token read by the host. No shell tool, no keychain access, no exec beyond the CLI. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
@@ -289,7 +289,7 @@ writes. Writers must also create a file through the model's own edit tool.
 their manifest entries in `<adapter>/recordings.json` and the observations in
 `confinement.json`. Session ids, paths under `HOME` or the root, emails,
 identifiers and token-shaped strings are substituted. Credentials are opened
-only by the CLIs; probes read zero bytes. A test fails if an enabled mode cites
+only by the CLIs, except Claude's access token (below); probes read zero bytes. A test fails if an enabled mode cites
 evidence from another access or session mode, so read-only evidence never
 enables a writer.
 
@@ -299,23 +299,36 @@ macOS 27.0.1 arm64, 2026-10-24):
 - Confinement carries a fixed runtime baseline (global metadata reads,
   preferences, trust, DNS and directory services, `/dev` nodes, zoneinfo).
   Secret and protected denials still override it.
+- Exec roots grant exec only, never reads. Readable install files come from
+  the CLI's own package (`package_root`: the parent of its `bin/`); a shared
+  prefix such as `/opt/homebrew` or `/usr/local` is refused, so its `etc/` and
+  `var/` stay unreadable.
 - Codex: refreshing its token rewrites `~/.codex/auth.json` in place through
-  the link, so its authentication profile carries that one exact write. Its
-  shell tool may run programs under the system directories and the install
-  prefix. Residual risk: that tool can read Codex's own `auth.json`. It cannot
-  read other credentials: the login keychain file is not readable, and a probe
-  showed `security` finds nothing in a keychain the profile cannot read.
-- Claude: the CLI reads its keychain login through `/usr/bin/security`, so the
-  model gets no shell, only file tools. `~/.claude.json` is not readable (it
-  can hold MCP secrets and the launch does not need it). The only writable
-  state is this session's transcript under `~/.claude/projects`. The launch
-  needs `USER` for the keychain lookup.
-- Expired Claude sign-in (#1260): refreshing would write the login keychain,
-  which no profile grants, because the model's edit tools could then corrupt
-  it. Not reproduced on 2026-10-24 (the token was valid). A failed sign-in
-  decodes as `authentication_failed`, so the outcome is `Refused`
-  (`claude/live-auth-required.jsonl`) and the user signs in again outside the
-  sandbox.
+  the link, so its authentication profile carries that one exact write. It
+  reads and execs its own package (code-mode host, bundled `rg` and `zsh`);
+  its shell tool may also run programs in `/bin`, `/usr/bin` and
+  `/usr/libexec`. Residual risk: that tool can read Codex's own `auth.json`.
+  It cannot read other credentials: the login keychain file is not readable,
+  and a probe showed `security` finds nothing in a keychain the profile cannot
+  read.
+- Claude: the keychain file is not readable. Before launch the host reads the
+  default identity's access token (`claude::token_argv`, the
+  `Claude Code-credentials` item for `USER`, stdout captured in memory and
+  never logged or stored; only `accessToken` and `expiresAt` are kept) and
+  passes it as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15 minutes the
+  host first runs `claude::refresh_argv` outside the sandbox (`claude -p x
+  --model provenant-refresh-probe --max-turns 1`, stdin null: the CLI
+  refreshes its stored token, then the API rejects the model, so no usage is
+  spent) and reads again. Same identity only; other config directories are
+  never read. The model still gets no shell, only file tools.
+  `~/.claude.json` is not readable (it can hold MCP secrets and the launch
+  does not need it). The only writable state is this session's transcript
+  under `~/.claude/projects`.
+- Expired Claude sign-in (#1260): the sandbox never refreshes or writes the
+  keychain; the host refreshes first. Not reproduced on 2026-10-24 (the token
+  was valid). A token the API still rejects decodes as `authentication_failed`,
+  so the outcome is `Refused` (`claude/live-auth-required.jsonl`) and the user
+  signs in again outside the sandbox.
 - Codex continuation needs no model evidence because its exec stream carries
   none; the resume argv pins the same `-m`. Adapters that report a model must
   have reported the requested one.
@@ -596,11 +609,11 @@ the historical observation. A previously recorded plan name is not evidence of
 the current subscription after an account upgrade.
 
 The installed Claude CLI's `auth --help` advertises login, logout and status;
-`auth status --help` advertises JSON/text status only. There is no recorded
-non-billable token-renewal or usage-refresh command. Status success is not proof
-that usage was refreshed. Provenant does not run a model to renew tokens, copy
-credentials between `.claude-<label>` identities, write credentials, or widen a
-sandbox's keychain access. Expired identities need renewal through that selected
+`auth status --help` advertises JSON/text status only. Status success is not
+proof that usage was refreshed. The one renewal Provenant runs is the
+zero-cost refresh before a Claude launch (see Live activation); it never copies
+credentials between `.claude-<label>` identities, writes credentials itself,
+or widens a sandbox's keychain access. Expired identities need renewal through that selected
 Claude identity outside the utility sandbox before a supported quota probe can
 replace the last-known reading. Current Rust quota sources remain disabled
 without their activation recording and credential authority.

@@ -27,7 +27,7 @@
     "process_exit": 0,
     "prompt": "Reply with the word ok",
     "session_mode": "fresh",
-    "sha256": "136d586c99183650225b326da57ac950c99952915b803b933ec8d9f43031ef14",
+    "sha256": "68b0508713db76d1088aef92e3d6bd40167420e8b5517cb2bd4c1e214ab3176c",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"
@@ -70,7 +70,7 @@
     "process_exit": 0,
     "prompt": "Reply with the word ok again",
     "session_mode": "resume",
-    "sha256": "f2524774b44759393bbc0e0113b7a2d1c78310dc246c261931f856418e409795",
+    "sha256": "7178bcd381edcce069b98e3ea86f8fe3110cf8d58c67034c7773594f4b2295e9",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"
@@ -111,7 +111,7 @@
     "process_exit": 0,
     "prompt": "Create the file note.txt in the current directory containing the word ok, then reply with the word ok",
     "session_mode": "fresh",
-    "sha256": "f19ffc8f0b52d836c918733bcf0780892ec6ac67a55a2ce30dde182025655a00",
+    "sha256": "ae4062581a6d90492cf2a2b2ce47df2e040a93c0bbd172c6759cdf3d31749a5b",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"
@@ -154,7 +154,7 @@
     "process_exit": 0,
     "prompt": "Reply with the word ok again",
     "session_mode": "resume",
-    "sha256": "952325b4810282acb39ef6e40b8a801baab5a6503312fd7f4738a207a5f1d741",
+    "sha256": "046d7d65822dbe2ff09882e114cead9b6adb51ae8321da12fb636e94599f429e",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"

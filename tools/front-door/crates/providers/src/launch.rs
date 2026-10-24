@@ -25,7 +25,8 @@ pub enum Stdin {
 /// compiling, all inside roots the plan or profile already names.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetupStep {
-    /// Create this directory and any missing parents with mode 0700.
+    /// Create this directory and any missing parents with mode 0700. Refuse
+    /// any symbolic link component, so creation and chmod stay inside it.
     CreateDir(PathBuf),
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },
@@ -59,8 +60,10 @@ pub struct PrepareInput<'a> {
     pub executable: &'a Path,
     /// The user's home directory.
     pub home: &'a Path,
-    /// The user's login name; Claude's keychain lookup is keyed by `USER`.
+    /// The user's login name.
     pub user: &'a OsStr,
+    /// Claude's login token, read by the host outside the sandbox.
+    pub token: Option<&'a crate::claude::OauthToken>,
     /// Working directory: the worktree for writers, a read root otherwise.
     pub cwd: &'a Path,
     /// Caller-supplied randomness; Claude uses it as a fresh session id.
@@ -205,6 +208,30 @@ pub(crate) fn base_env(
         ("TMPDIR".into(), scratch.into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ]
+}
+
+/// The CLI's own install directory: the parent of a `bin/` directory, or the
+/// executable's directory. A shared prefix (`/opt/homebrew`, `/usr/local`,
+/// `/usr`) is refused: its `etc/` and `var/` must never become readable.
+pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
+    let package = match executable.parent() {
+        Some(bin) if bin.file_name() == Some("bin".as_ref()) => bin.parent(),
+        parent => parent,
+    }
+    .ok_or(ProviderError::InvalidPath)?;
+    let shared = [
+        "/",
+        "/opt",
+        "/opt/homebrew",
+        "/usr",
+        "/usr/local",
+        "/bin",
+        "/usr/bin",
+    ];
+    if shared.iter().any(|prefix| package == Path::new(prefix)) {
+        return Err(ProviderError::InvalidPath);
+    }
+    Ok(package)
 }
 
 pub(crate) fn exact(path: impl Into<PathBuf>) -> PathGrant {

@@ -1,4 +1,6 @@
-use crate::launch::{Access, PrepareInput, Session, Stdin, base_env, exact, observations, subtree};
+use crate::launch::{
+    Access, PrepareInput, Session, Stdin, base_env, exact, observations, package_root, subtree,
+};
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use serde::Deserialize;
@@ -61,11 +63,7 @@ fn prepare(
     let config = format!(
         r#"{{"autoupdate":false,"share":"disabled","mcp":{{}},"plugin":[],"permission":{{"edit":"{edit}","bash":"deny","webfetch":"deny"}}}}"#
     );
-    let package = match input.executable.parent() {
-        Some(bin) if bin.file_name() == Some("bin".as_ref()) => bin.parent(),
-        parent => parent,
-    }
-    .ok_or(ProviderError::InvalidPath)?;
+    let package = package_root(input.executable)?;
     // No Git on the search path: project discovery finds none and OpenCode
     // treats the working directory as a plain folder, so no Git is executed.
     let mut env = base_env(input, &plan.scratch.path, "/bin");

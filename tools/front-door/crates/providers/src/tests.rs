@@ -589,7 +589,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     ));
 }
 
-fn read_only_plan(root: &str) -> provenant_confinement::ConfinedPlan {
+fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
@@ -609,7 +609,7 @@ fn read_only_plan(root: &str) -> provenant_confinement::ConfinedPlan {
             read_roots: vec![grant("repo")],
             protected_roots: vec![],
             secret_roots: vec![],
-            selected_authentication: Some("login".into()),
+            selected_authentication: authentication.map(Into::into),
             include_continuation: false,
             network: vec![],
             capabilities: vec![],
@@ -619,21 +619,33 @@ fn read_only_plan(root: &str) -> provenant_confinement::ConfinedPlan {
     .expect("fixture plan")
 }
 
+const FIXTURE_TOKEN: &str = "fixture-access-token";
+
+fn fixture_token() -> crate::claude::OauthToken {
+    let item = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"{FIXTURE_TOKEN}","refreshToken":"fixture-refresh","expiresAt":4000000000000}}}}"#
+    );
+    crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
+}
+
 fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
     prompt: &'a Prompt,
     cwd: &'a std::path::Path,
+    token: Option<&'a crate::claude::OauthToken>,
 ) -> PrepareInput<'a> {
+    let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
         route,
         confined,
         prompt,
         continuation: None,
         grant_digest: "fixture",
-        executable: std::path::Path::new("/opt/homebrew/bin/provider"),
+        executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
+        token,
         cwd,
         nonce: [9; 16],
     }
@@ -641,15 +653,18 @@ fn fixture_input<'a>(
 
 #[test]
 fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<(), ProviderError> {
-    let confined = read_only_plan("/fixture");
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");
+    let token = fixture_token();
     for entry in REGISTRY {
         let id = entry.adapter.id();
         let route = route(id, "fixture-model");
+        // Only Codex reads a credential inside the sandbox.
+        let confined = read_only_plan("/fixture", (id == "codex").then_some("login"));
+        let token = (id == "claude").then_some(&token);
         let result = entry
             .adapter
-            .prepare(fixture_input(&route, &confined, &prompt, repo));
+            .prepare(fixture_input(&route, &confined, &prompt, repo, token));
         if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
             assert!(
                 matches!(result, Err(ProviderError::Disabled { .. })),
@@ -671,6 +686,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             _ => &[],
         };
@@ -697,16 +713,69 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             "claude" => {
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
                 assert_eq!(argv[tools + 1], "Read,Grep,Glob");
+                // The host's token is the only credential: no keychain or
+                // other credential path is readable and nothing else runs.
+                assert!(
+                    spec.env
+                        .iter()
+                        .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN"
+                            && value == FIXTURE_TOKEN)
+                );
+                assert!(spec.profile.spec.authentication.is_empty());
+                assert_eq!(spec.profile.spec.process_executables.len(), 1);
+                assert!(matches!(
+                    entry
+                        .adapter
+                        .prepare(fixture_input(&route, &confined, &prompt, repo, None)),
+                    Err(ProviderError::UnsupportedPolicy)
+                ));
+                let with_login = read_only_plan("/fixture", Some("login"));
+                assert!(matches!(
+                    entry.adapter.prepare(fixture_input(
+                        &route,
+                        &with_login,
+                        &prompt,
+                        repo,
+                        Some(&fixture_token())
+                    )),
+                    Err(ProviderError::UnsupportedPolicy)
+                ));
             }
             _ => {}
         }
+        // The package is the CLI's own install directory, never a shared
+        // prefix whose etc/ and var/ would become readable.
+        let shared = PrepareInput {
+            executable: std::path::Path::new("/opt/homebrew/bin/provider"),
+            ..fixture_input(&route, &confined, &prompt, repo, token)
+        };
+        assert!(matches!(
+            entry.adapter.prepare(shared),
+            Err(ProviderError::InvalidPath)
+        ));
+        let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .iter()
+                .all(|grant| grant.path == package)
+        );
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .all(|grant| grant.path == package || !grant.path.starts_with("/opt"))
+        );
         // A read-only launch may only start inside a declared read root.
         assert!(matches!(
             entry.adapter.prepare(fixture_input(
                 &route,
                 &confined,
                 &prompt,
-                std::path::Path::new("/fixture/elsewhere")
+                std::path::Path::new("/fixture/elsewhere"),
+                token,
             )),
             Err(ProviderError::InvalidPath)
         ));
@@ -946,4 +1015,26 @@ fn claude_signin_does_not_call_a_locked_or_present_identity_signed_out() {
     );
     let report = serde_json::to_string(&signin_status(negative, Some(1), C::Present)).unwrap();
     assert!(!report.contains("never-publish"));
+}
+
+#[test]
+fn claude_token_keeps_only_a_live_access_token_and_never_prints_it() {
+    use crate::claude::OauthToken;
+    let item = |token: &str, expires: u64| {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"fixture-refresh","expiresAt":{expires}}}}}"#
+        )
+    };
+    let now = 1_000_000_000;
+    let token = OauthToken::parse(item("fixture-access", now + 3_600_000).as_bytes(), now)
+        .expect("live token");
+    let printed = format!("{token:?}");
+    assert!(!printed.contains("fixture-access") && !printed.contains("fixture-refresh"));
+    assert!(!token.needs_refresh(now));
+    // Inside the refresh window, the host refreshes before launching.
+    assert!(token.needs_refresh(now + 3_600_000 - 14 * 60 * 1000));
+    for refused in [item("fixture-access", now), item("", now + 3_600_000)] {
+        assert!(OauthToken::parse(refused.as_bytes(), now).is_err());
+    }
+    assert!(OauthToken::parse(b"not json", now).is_err());
 }

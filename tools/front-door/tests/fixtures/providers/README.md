@@ -31,12 +31,14 @@ marked `activation_eligible`, that decoded as success; a test enforces this, so
 read-only evidence never enables a writer. Each live capture replays through
 the real decoder, resumes bound to their fresh capture's continuation.
 `claude/live-auth-required.jsonl` is not activation evidence: it records how a
-missing or expired sign-in decodes (`Refused`).
+rejected sign-in decodes (`Refused`). Claude's recordings use the host-read
+access token in `CLAUDE_CODE_OAUTH_TOKEN`; the keychain is unreadable inside.
 
 Redaction substitutes session ids, paths under `HOME` or the recording root,
 emails, `prefix_<id>` and UUID identifiers and token-shaped strings. Model
-text, usage and timestamps are kept. Credentials are opened only by the CLIs;
-probes read zero bytes from them.
+text, usage and timestamps are kept. Credentials are opened only by the CLIs,
+except Claude's access token, which the host reads outside the sandbox and
+passes in the environment; probes read zero bytes from them.
 
 ## Projected recordings
 

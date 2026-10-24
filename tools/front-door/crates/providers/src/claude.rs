@@ -1,13 +1,11 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, subtree,
-    uuid_v4,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
+    subtree, uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{
-    AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
-};
+use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use serde::Deserialize;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 pub struct Claude;
 crate::adapter!(Claude, "claude", prepare);
@@ -18,10 +16,103 @@ const OBSERVATIONS: &str = include_str!(concat!(
     "/../../tests/fixtures/providers/claude/confinement.json"
 ));
 
-/// Claude uses the default config directory and its keychain login, which it
-/// reads through `/usr/bin/security`. Because that keychain path could reach
-/// other credentials, the model gets no shell: file tools only, and edit tools
-/// only for writers. The one writable state is this session's transcript.
+/// The default config directory's keychain item. Other identities (a
+/// `CLAUDE_CONFIG_DIR` adds a suffix) are never read.
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+/// Refresh when the access token expires within this window.
+const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
+
+/// A short-lived OAuth access token for the default identity, read by the host
+/// outside the sandbox. It is never logged, persisted or printed: `Debug` is
+/// redacted and the refresh token is never retained.
+pub struct OauthToken {
+    access: String,
+    expires_at_ms: u64,
+}
+
+impl std::fmt::Debug for OauthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OauthToken(redacted)")
+    }
+}
+
+impl OauthToken {
+    /// Parses the keychain item's JSON, keeping only the access token and its
+    /// expiry. An empty or expired token is refused.
+    pub fn parse(item: &[u8], now_ms: u64) -> Result<Self, ProviderError> {
+        #[derive(Deserialize)]
+        struct Item {
+            #[serde(rename = "claudeAiOauth")]
+            oauth: Oauth,
+        }
+        #[derive(Deserialize)]
+        struct Oauth {
+            #[serde(rename = "accessToken")]
+            access: String,
+            #[serde(rename = "expiresAt")]
+            expires_at_ms: u64,
+        }
+        let Item { oauth } = serde_json::from_slice::<Item>(item.trim_ascii())
+            .map_err(|_| ProviderError::Malformed)?;
+        if oauth.access.is_empty()
+            || oauth
+                .access
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            || oauth.expires_at_ms <= now_ms
+        {
+            return Err(ProviderError::UnsupportedPolicy);
+        }
+        Ok(Self {
+            access: oauth.access,
+            expires_at_ms: oauth.expires_at_ms,
+        })
+    }
+
+    /// True when the host should refresh before launching.
+    pub fn needs_refresh(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.saturating_sub(now_ms) < REFRESH_WINDOW_MS
+    }
+}
+
+/// The host's keychain read for the default identity, run outside the sandbox
+/// with stdout captured and never logged; parse it with [`OauthToken::parse`].
+pub fn token_argv(user: &OsStr) -> Vec<OsString> {
+    [
+        "/usr/bin/security".as_ref(),
+        "find-generic-password".as_ref(),
+        "-s".as_ref(),
+        KEYCHAIN_SERVICE.as_ref(),
+        "-a".as_ref(),
+        user,
+        "-w".as_ref(),
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Zero-cost refresh, run by the host outside the sandbox with the default
+/// config directory and stdin null: the CLI refreshes its stored token, then
+/// the API rejects the model, so no usage is spent. Re-read the token after.
+pub fn refresh_argv(executable: &Path) -> Vec<OsString> {
+    [
+        executable.as_os_str(),
+        "-p".as_ref(),
+        "x".as_ref(),
+        "--model".as_ref(),
+        "provenant-refresh-probe".as_ref(),
+        "--max-turns".as_ref(),
+        "1".as_ref(),
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Claude uses the default config directory. The host reads its login token
+/// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
+/// unreadable and the CLI execs nothing. The model still gets no shell: file
+/// tools only, and edit tools only for writers. The one writable state is this
+/// session's transcript.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -29,9 +120,11 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    if plan.selected_authentication.as_deref() != Some("login") {
+    // No credential path is granted: the token arrives in the environment.
+    if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
+    let token = input.token.ok_or(ProviderError::UnsupportedPolicy)?;
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
         (Session::Resume, None) => return Err(ProviderError::UnknownIdentity),
@@ -80,18 +173,15 @@ fn prepare(
         .join(".claude/projects")
         .join(project_key(input.cwd));
     let transcript_dir = project.join(&session_id);
-    let package = match input.executable.parent() {
-        Some(bin) if bin.file_name() == Some("bin".as_ref()) => bin.parent(),
-        parent => parent,
-    }
-    .ok_or(ProviderError::InvalidPath)?;
+    let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
-    let mut env = base_env(input, scratch, "/usr/bin:/bin:/usr/sbin:/sbin");
+    let mut env = base_env(input, scratch, "/usr/bin:/bin");
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
             ("DISABLE_AUTOUPDATER", "1".as_ref()),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".as_ref()),
+            ("CLAUDE_CODE_OAUTH_TOKEN", token.access.as_ref()),
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
@@ -103,18 +193,11 @@ fn prepare(
         setup: vec![SetupStep::CreateDir(transcript_dir.clone())],
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![exact(input.executable), exact("/usr/bin/security")],
+                process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
+                // Not `~/.claude.json`: it can hold MCP server secrets and the
+                // launch never needs it.
                 runtime_reads: vec![subtree(package)],
-                authentication: vec![AuthenticationProfile {
-                    mechanism: "login".into(),
-                    // Not `~/.claude.json`: it can hold MCP server secrets
-                    // and the launch never needs it.
-                    roots: vec![exact(
-                        input.home.join("Library/Keychains/login.keychain-db"),
-                    )],
-                    in_place_writes: vec![],
-                }],
                 state_writes: vec![
                     exact(project.join(format!("{session_id}.jsonl"))),
                     subtree(transcript_dir),

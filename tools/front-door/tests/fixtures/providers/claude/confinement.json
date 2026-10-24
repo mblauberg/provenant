@@ -1,6 +1,5 @@
 {
   "read_only": {
-    "authentication_read": "allowed",
     "declared_process_exec": "allowed",
     "declared_read": "allowed",
     "other_network": "denied",
@@ -16,7 +15,6 @@
     "undeclared_write": "denied"
   },
   "worktree_write": {
-    "authentication_read": "allowed",
     "declared_process_exec": "allowed",
     "declared_read": "allowed",
     "git_config_write": "denied",

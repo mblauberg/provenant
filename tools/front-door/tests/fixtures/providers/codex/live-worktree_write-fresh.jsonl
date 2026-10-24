@@ -4,4 +4,4 @@
 {"item":{"aggregated_output":"","command":"/bin/zsh -lc \"printf 'ok' > note.txt\"","exit_code":null,"id":"item_1","status":"in_progress","type":"command_execution"},"type":"item.started"}
 {"item":{"aggregated_output":"","command":"/bin/zsh -lc \"printf 'ok' > note.txt\"","exit_code":0,"id":"item_1","status":"completed","type":"command_execution"},"type":"item.completed"}
 {"item":{"id":"item_2","text":"ok","type":"agent_message"},"type":"item.completed"}
-{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":24960,"input_tokens":27388,"output_tokens":66,"reasoning_output_tokens":0}}
+{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":24960,"input_tokens":27405,"output_tokens":67,"reasoning_output_tokens":0}}
