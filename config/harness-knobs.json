@@ -29,27 +29,27 @@
     "review.extra_reviewers": {
       "project": "strengthen",
       "type": "int", "min": 0, "max": 2, "default": 0, "status": "wired",
-      "reader": "provenant config show",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "Independent reviews added on top of the HARNESS.md ladder minimum for the tier.",
       "trade_off": "Each extra review costs one reviewer lane and adjudication time for wider defect coverage."
     },
     "review.cross_family": {
       "project": "strengthen",
       "type": "enum", "values": ["prefer", "require"], "default": "prefer", "status": "wired",
-      "reader": "provenant config show",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead.",
       "trade_off": "require keeps decorrelated review at the price of waiting on quota or outages."
     },
     "review.rereview_scope": {
       "project": "strengthen",
       "type": "enum", "values": ["delta", "full"], "default": "delta", "status": "wired",
-      "reader": "provenant config show",
+      "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "After a repair, re-review only the repair delta, or the whole change again.",
       "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
     },
     "review.polish": {
       "project": "strengthen", "type": "enum", "values": ["auto", "always", "off"], "default": "auto", "status": "wired",
-      "reader": "provenant config show",
+      "reader": "skills/implement/SKILL.md",
       "effect": "auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never.",
       "trade_off": "Polish costs one writer lane per qualifying change for a simpler diff and shorter review."
     },
@@ -61,7 +61,7 @@
     },
     "council.junior_size": {
       "type": "int", "min": 1, "max": 8, "default": 3, "status": "advisory",
-      "reader": "provenant config show",
+      "reader": "skills/orchestrate/references/tiered-council.md (council: 3 per part)",
       "effect": "Junior council members per part in a bottom-up tiered council.",
       "trade_off": "Fewer juniors cut lens passes and tokens; more widen family spread on blind spots."
     },
@@ -73,13 +73,13 @@
     },
     "writing.final_polish": {
       "type": "enum", "values": ["off", "optional"], "default": "optional", "status": "advisory",
-      "reader": "provenant config show",
+      "reader": "skills/engineering-writing/SKILL.md step 6",
       "effect": "Whether reader-facing prose may take a final voice pass by the dossier's polish model.",
       "trade_off": "off saves one writing lane per document; optional improves voice at some risk of drift the chair must diff."
     },
     "context.summary_tokens": {
       "type": "int", "min": 500, "max": 8000, "default": 2000, "status": "advisory",
-      "reader": "provenant config show",
+      "reader": "skills/orchestrate/references/layering-and-context.md (roughly 1-2k tokens)",
       "effect": "Cap on a worker's returned summary; the file stays the record.",
       "trade_off": "Smaller keeps the chair's context lean; larger carries more detail inline."
     },
