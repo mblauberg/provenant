@@ -532,6 +532,14 @@ dependencies = [
 [[package]]
 name = "provenant-providers"
 version = "0.1.0"
+dependencies = [
+ "provenant-confinement",
+ "provenant-quota",
+ "provenant-records",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-quota"

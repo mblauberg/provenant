@@ -4,6 +4,13 @@ Status: proposed for chair acceptance under [PORTING v7](../PORTING.md).
 Author route: `codex/gpt-6.1-sol@high` via Fabric.
 The [cross-area decisions](README.md#cross-area-decisions) bind this design.
 
+Provider step 1 status: Agy `--print-timeout` handling remains a gap. The current
+Rust `finish(ExitObservation)` has no artifacts/stderr input, so it cannot
+recognise the timeout diagnostic and preserve answer text as partial as the
+current product does. A qualifying activation recording must establish that
+stderr/exit/answer combination and the finalisation input before Agy activation;
+no timeout inference is implemented from exit status alone.
+
 `routing` resolves explicit model choices and named routes; `providers` prepares
 CLI invocations and interprets provider evidence; `quota` schedules current
 allowance reads and supplies admission advice. Run owns the registry, atomic
