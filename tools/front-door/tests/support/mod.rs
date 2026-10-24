@@ -22,7 +22,10 @@ pub struct TestRig {
 }
 impl TestRig {
     pub fn new() -> Result<Self> {
-        let temp = tempfile::tempdir_in("/tmp")?;
+        Self::in_directory(Path::new("/tmp"))
+    }
+    pub fn in_directory(parent: &Path) -> Result<Self> {
+        let temp = tempfile::tempdir_in(parent)?;
         let root = fs::canonicalize(temp.path())?;
         let home = root.join("home");
         let project = root.join("project");

@@ -246,8 +246,8 @@ def initialise(workspace: Path, run_id: str = "DEL-TEST") -> Path:
     return workspace / ".agent-run" / run_id
 
 
-def install_canonical_check_harness(workspace: Path, body: str = "printf 'pass\\n'") -> None:
-    script = workspace / "scripts" / "check-harness"
+def install_fixture_command(workspace: Path, body: str = "printf 'pass\\n'") -> None:
+    script = workspace / "scripts" / "fixture-check"
     script.parent.mkdir(exist_ok=True)
     script.write_text(f"#!/bin/sh\n{body}\n")
     script.chmod(0o755)
@@ -323,7 +323,7 @@ def deliver_run(tmp_path: Path) -> Path:
     This is the producer happy path, shared by the end-to-end test and by the
     regressions that need a realistic receipt to attack.
     """
-    install_canonical_check_harness(tmp_path)
+    install_fixture_command(tmp_path)
     approval_raw = (
         b'{"approved":true,"approver":"human-owner","gate":"task-success",'
         b'"measured_value":1}\n'
@@ -375,7 +375,7 @@ def deliver_run(tmp_path: Path) -> Path:
     executed = run_cli(
         tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--", "scripts/check-harness",
+        "--source", "intent.md", "--", "scripts/fixture-check",
     )
     assert executed.returncode == 0, executed.stderr
 
@@ -519,7 +519,7 @@ def test_producer_run_reaches_a_validator_clean_closed_receipt(tmp_path):
         "id": "tests",
         "gate": "tests",
         "status": "pass",
-        "method": "scripts/check-harness",
+        "method": "scripts/fixture-check",
         "source_paths": ["intent.md"],
         "exit_code": 0,
     }]
@@ -712,49 +712,6 @@ def test_regression_closed_run_refuses_every_mutation(tmp_path):
     ) == sealed_files
 
 
-def test_regression_tests_gate_records_only_the_canonical_harness(tmp_path):
-    """Scoped test runs were once recorded as if they were the full gate.
-
-    Incident: issue #582, fixed by commit a2e7205b and narrowed by commit
-    c6be0a93. Two lanes in one run recorded gate evidence as "tests: pass" from
-    a narrow selection, one reporting 15 passing tests against a brief
-    specifying thousands, because the receipt recorded the gate status without
-    recording what was actually executed.
-
-    The narrowing in c6be0a93 matters as much as the refusal: the canonical
-    command is only demanded where a canonical harness exists, so a workspace
-    without one can still record a generic tests gate.
-    """
-    run_dir = initialise(tmp_path)
-    install_canonical_check_harness(tmp_path)
-    write_bundle(run_dir)
-    assert add_artifact(
-        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
-    ).returncode == 0
-    evidence_run = [
-        "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
-        "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--",
-    ]
-
-    scoped = run_cli(tmp_path, *evidence_run, sys.executable, "-c", "print('green')")
-
-    assert scoped.returncode == 1
-    assert "scripts/check-harness" in scoped.stderr
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    assert not any(item["id"] == "tests" for item in receipt["evidence"])
-
-    (tmp_path / "scripts" / "check-harness").unlink()
-    without_harness = run_cli(
-        tmp_path, *evidence_run, sys.executable, "-c", "print('green')",
-    )
-
-    assert without_harness.returncode == 0, without_harness.stderr
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    row = next(item for item in receipt["evidence"] if item["id"] == "tests")
-    assert row["method"] == f"{sys.executable} -c 'print('\"'\"'green'\"'\"')'"
-    assert row["stdout"] == "green\n"
-    assert row["result"]["exit_code"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -809,7 +766,7 @@ def test_evidence_bundle_publication_keeps_old_receipt_valid_on_run_write_failur
     tmp_path, monkeypatch,
 ):
     run_dir = initialise(tmp_path)
-    install_canonical_check_harness(tmp_path)
+    install_fixture_command(tmp_path)
     bundle_path = write_bundle(run_dir)
     original_bundle = bundle_path.read_bytes()
     assert add_artifact(
@@ -825,7 +782,7 @@ def test_evidence_bundle_publication_keeps_old_receipt_valid_on_run_write_failur
     args = module.build_parser().parse_args([
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--", "scripts/check-harness",
+        "--source", "intent.md", "--", "scripts/fixture-check",
     ])
     with pytest.raises(module.ReceiptError, match="injected RUN write failure"):
         module.command_evidence_run(args)
@@ -863,7 +820,7 @@ def test_evidence_run_rechecks_source_scope_after_command_execution(
     args = module.build_parser().parse_args([
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "allowed/source", "--", "scripts/check-harness",
+        "--source", "allowed/source", "--", "scripts/fixture-check",
     ])
 
     with pytest.raises(module.ReceiptError, match="allowed_source_paths"):

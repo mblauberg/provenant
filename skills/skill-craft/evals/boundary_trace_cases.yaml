@@ -1,7 +1,7 @@
 # Boundary-mutation fixtures for skill-craft (Epic #124, Workstream A).
 #
 # This file is NOT validated by tests/test_skill_eval_fixtures.py, so it may
-# keep structure the strict trigger_cases.yaml contract forbids: extra case
+# keep structure the strict trigger_cases.json contract forbids: extra case
 # keys, `branch`/`note`/`prior_branch` fields, and the tool-call-trace
 # assertions below.
 #
@@ -114,12 +114,12 @@ cases:
       note: "skill-craft stays the read-only audit companion; implement remains action-owner for the fix step post-merge. tree_unchanged applies to skill-craft's own audit pass, not to implement's later authorised fix."
 
 # Richer branch/composition routing cases, migrated out of the strictly
-# schema-validated evals/trigger_cases.yaml (Codex review, Epic #124): these
+# schema-validated evals/trigger_cases.json (Codex review, Epic #124): these
 # sc-* ids carried `branch`, `note` and `prior_branch` fields that violate
 # that file's exact-key contract (tests/test_skill_eval_fixtures.py). They
 # are retained here, unconstrained, as supplementary routing/branch-selection
 # evidence, not as the canonical positive/negative/boundary set (see
-# trigger_cases.yaml q700-q708 for that).
+# trigger_cases.json q700-q708 for that).
 routing_reference_cases:
   - {id: sc-001, relation: positive, prompt: "Audit this existing Agent Skill for missed triggers, false triggers, overlap, and token cost.", tags: [direct], expected: {primary_skill: skill-craft, companion_skills: [], branch: audit}}
   - {id: sc-002, relation: positive, prompt: "Review the current skill portfolio read-only for portability, security, and catalogue-budget problems.", tags: [direct], expected: {primary_skill: skill-craft, companion_skills: [], branch: audit}}

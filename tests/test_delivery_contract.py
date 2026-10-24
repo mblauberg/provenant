@@ -678,17 +678,6 @@ def test_validator_rechecks_live_risk_override_artifact_digest(tmp_path):
         module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
 
 
-def test_validator_requires_canonical_method_for_full_tests_gate(tmp_path):
-    module = load_validator()
-    candidate = fixture(workspace_root=tmp_path)
-    harness = tmp_path / "scripts" / "check-harness"
-    harness.parent.mkdir()
-    harness.write_text("#!/bin/sh\nexit 0\n")
-    tests_evidence = next(item for item in candidate["evidence"] if item["gate"] == "tests")
-    tests_evidence["method"] = "python -m pytest tests/test_delivery_contract.py -q"
-
-    with pytest.raises(module.Invalid, match="scripts/check-harness"):
-        module.validate(candidate, ROOT, workspace_root=tmp_path)
 
 
 def test_validator_allows_custom_method_for_generic_tests_gate(tmp_path):

@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "target_skill": "evaluate",
+  "cases": [
+    {
+      "id": "q091",
+      "relation": "positive",
+      "prompt": "Design a versioned held-out benchmark to compare these two agent prompts.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q092",
+      "relation": "positive",
+      "prompt": "Build a repeatable red-team evaluation for this retrieval and ranking system.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q093",
+      "relation": "positive",
+      "prompt": "Define the dataset, rubric, trials, thresholds, and blinded judges for model-output quality.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q094",
+      "relation": "negative",
+      "prompt": "Write a deterministic unit test for this pure parser function.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q095",
+      "relation": "negative",
+      "prompt": "Review this ordinary code diff for correctness and regressions.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q096",
+      "relation": "negative",
+      "prompt": "Find why this benchmark command suddenly runs twice as slowly.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q097",
+      "relation": "boundary",
+      "prompt": "Compare a terse-output prompt against baseline on current models for fidelity, total tokens, and reread burden.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q098",
+      "relation": "boundary",
+      "prompt": "Deliver the approved agent benchmark through objective checks, independent review and evidence-based acceptance.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": [
+          "evaluate"
+        ]
+      }
+    },
+    {
+      "id": "q099",
+      "relation": "boundary",
+      "prompt": "Evaluate frontend visual quality with a blinded rubric and evidence-bearing UI reviewers.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      }
+    }
+  ]
+}

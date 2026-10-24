@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "target_skill": "diagnose",
+  "cases": [
+    {
+      "id": "q064",
+      "relation": "positive",
+      "prompt": "Reproduce this crash and identify the root cause without making a permanent fix.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q065",
+      "relation": "positive",
+      "prompt": "Find why this test flakes by building a repeatable signal and testing falsifiable hypotheses.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q066",
+      "relation": "positive",
+      "prompt": "Profile this regression, establish the baseline, and tell me which mechanism causes the slowdown.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q067",
+      "relation": "negative",
+      "prompt": "The root cause is confirmed; implement the approved fix and verify it end-to-end.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q068",
+      "relation": "negative",
+      "prompt": "Review this pull request for defects without reproducing a reported failure.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q069",
+      "relation": "negative",
+      "prompt": "Compare two ranking prompts with a repeatable held-out benchmark.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "evaluate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q070",
+      "relation": "boundary",
+      "prompt": "Reproduce this checkout failure against the rendered interface and isolate its root cause; do not fix it.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      }
+    },
+    {
+      "id": "q071",
+      "relation": "boundary",
+      "prompt": "Find the cause of this rendering regression using production measurements, then write the incident note.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": [
+          "engineering-writing"
+        ]
+      }
+    },
+    {
+      "id": "q072",
+      "relation": "boundary",
+      "prompt": "Reproduce the bug, confirm its root cause, then implement the authorised repair behind a regression test.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "diagnose",
+          "tdd"
+        ]
+      }
+    }
+  ]
+}

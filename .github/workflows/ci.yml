@@ -213,13 +213,18 @@ jobs:
         run: uv sync --locked --only-group test
       - name: Run workspace checks
         run: npm run check
+      # Tracked-asset rules run as `provenant check harness` in the asset job;
+      # syntax checks, runners and the remaining Python linters stay here.
       - name: Run ordinary checks
-        env:
-          # Remaining Python checks use an isolated checkout fixture.
-          AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
-          AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: scripts/check-harness --checks-only
+        run: |
+          find skills -type f -name '*.sh' ! -name '*cross-family.sh' -print0 | xargs -0 -r -n1 bash -n
+          find skills -type f -name '*cross-family.sh' -print0 | xargs -0 -r -n1 sh -n
+          find skills -type d -name node_modules -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0 \
+            | xargs -0 -r -n1 node --check
+          find skills runtime -type d -name node_modules -prune -o -type f -name '*.test.mjs' -print0 \
+            | xargs -0 -r node --test
+          .venv/bin/python scripts/static-security-check.py
+          .venv/bin/python scripts/lint-timebomb-fixtures.py
 
   python-tests:
     name: Python tests (${{ matrix.shard }})
@@ -258,40 +263,38 @@ jobs:
           PROVENANT_TEST_SHARD: ${{ matrix.shard == 'fabric-hosts' && '1/3' || matrix.shard == 'python-a' && '2/3' || '3/3' }}
         run: .venv/bin/python -m pytest -q --durations=30 --durations-min=1 -n auto
 
-  # Quick path for pull requests that change only prose under docs/: the
-  # frontmatter, link and issue-form checks plus the two tests that read every
-  # document. Runs only when `harness` is skipped; push, merge-group and any
-  # non-prose change run the full suite instead.
+  # `provenant check harness` covers tracked skill, document and issue-form
+  # assets. It runs whenever those assets or the checker itself change,
+  # including prose-only pull requests that skip the full harness suite.
   docs:
-    name: Documentation checks
+    name: Harness asset checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
     needs: detect-changes
-    if: needs.detect-changes.outputs.docs == 'true' && needs.detect-changes.outputs.harness != 'true'
+    if: needs.detect-changes.outputs.harness == 'true' || needs.detect-changes.outputs.docs == 'true' || needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      - name: Run document and link checks
+          workspaces: tools/front-door
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check harness assets
+        working-directory: tools/front-door
         env:
-          AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
-          AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
-        run: |
-          .venv/bin/python scripts/check_harness.py
-          .venv/bin/python -m pytest -q tests/test_harness_document_contract.py
+          PROVENANT_ROOT: ${{ github.workspace }}
+          PROVENANT_STATE_DIR: ${{ runner.temp }}/provenant-state
+          TMPDIR: ${{ runner.temp }}
+        run: cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"
 
   rust:
     name: Rust front door

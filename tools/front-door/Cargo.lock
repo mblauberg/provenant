@@ -420,6 +420,7 @@ version = "0.1.0"
 dependencies = [
  "provenant-cli",
  "provenant-config",
+ "provenant-confinement",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
@@ -444,6 +445,7 @@ dependencies = [
  "provenant-records",
  "provenant-routing",
  "provenant-supervisor",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
