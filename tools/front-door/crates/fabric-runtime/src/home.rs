@@ -176,6 +176,8 @@ impl RemoteCoordination<'_> {
                             let commit = match &response.result {
                                 PeerResult::Coordination(_) => true,
                                 PeerResult::Error { code, .. } if is_retryable_refusal(code) => {
+                                    // Resending is safe here: the owner records a receipt per
+                                    // operation id, so a late-applied mutation replays, not repeats.
                                     self.journal
                                         .retry_peer(self.project, self.actor, &id, &store_request)
                                         .map_err(|_| PeerError::Unknown {
