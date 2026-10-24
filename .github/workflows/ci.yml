@@ -140,6 +140,7 @@ jobs:
               - *node-workspace
               - '.github/**'
               - 'apps/**'
+              - 'assets/**'
               - 'config/**'
               - 'docs/**'
               - 'evals/**'
@@ -168,6 +169,7 @@ jobs:
               - 'uv.lock'
             rust:
               - *ci-contract
+              - 'assets/**'
               - 'scripts/**'
               - 'runtime/**'
               - 'skills/**'
