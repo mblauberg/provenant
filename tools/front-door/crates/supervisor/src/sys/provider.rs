@@ -486,6 +486,7 @@ pub(crate) struct ProviderGroup {
     _reaper: Reaper,
     pid: i32,
     last_direct_signal: Option<i32>,
+    last_group_signal: Option<i32>,
     observed: Option<Termination>,
     provider_identity: Option<ProcessIdentity>,
     owned_descendants: BTreeSet<ProcessIdentity>,
@@ -559,6 +560,7 @@ impl ProviderGroup {
             _reaper: reaper,
             pid,
             last_direct_signal: None,
+            last_group_signal: None,
             observed: None,
             provider_identity: Some(identity),
             owned_descendants: BTreeSet::new(),
@@ -637,6 +639,37 @@ impl ProviderGroup {
         // this signals only that provider, never its mutable process group.
         if unsafe { libc::kill(self.pid, signal) } == 0 {
             self.last_direct_signal = Some(signal);
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    /// Signal the provider's whole process group, for explicit cancellation
+    /// only. The unreaped leader (live or a WNOWAIT-observed zombie) reserves
+    /// the PGID, so the target cannot be a reused identity; once the leader is
+    /// consumed this refuses. Members that left the group are not reached.
+    pub(crate) fn stop_group(&mut self, escalation: bool) -> io::Result<bool> {
+        if self.child.is_none() {
+            return Ok(false);
+        }
+        let signal = if escalation {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        if self.last_group_signal == Some(signal) {
+            return Ok(false);
+        }
+        // SAFETY: the provider was spawned as its own group leader
+        // (`process_group(0)`) and is still unreaped, so `-pid` names exactly
+        // the group it leads; the PGID cannot be reallocated while it exists.
+        if unsafe { libc::kill(-self.pid, signal) } == 0 {
+            self.last_group_signal = Some(signal);
             return Ok(true);
         }
         let error = io::Error::last_os_error();

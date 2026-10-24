@@ -1892,7 +1892,10 @@ fn reconcile_inner(
         let attempts: Vec<Value> = found
             .iter()
             .map(|(id, state)| {
-                if matches!(state, run::Reconciled::Uncertain { .. }) {
+                if matches!(
+                    state,
+                    run::Reconciled::Uncertain { .. } | run::Reconciled::Escaped { .. }
+                ) {
                     *fenced = true;
                 }
                 human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
@@ -2152,6 +2155,7 @@ mod tests {
             omitted_warnings: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
+            unresolved_pids: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
@@ -2231,6 +2235,7 @@ mod tests {
             omitted_warnings: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
+            unresolved_pids: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),

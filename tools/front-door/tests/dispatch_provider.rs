@@ -415,6 +415,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         omitted_warnings: 0,
         terminal_observed: true,
         unresolved_cleanup: false,
+        unresolved_pids: vec![],
         settlement_evidence: evidence,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),

@@ -45,6 +45,9 @@ pub enum Reconciled {
     Finished,
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
+    /// Cleanup ended with these descendants possibly alive (for example one
+    /// that left the process group); custody stays fenced until they exit.
+    Escaped { pids: Vec<i64> },
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: String },
 }
@@ -328,6 +331,13 @@ impl RunStore {
                 let budget = provenant_core::WaitBudget::cli(call.clock.mono_now(), 1)
                     .map_err(|_| RunError::Validation("observation budget"))?;
                 match custody::observe(&handle, budget, call.cancel, call.clock) {
+                    Ok(Observation::Exited(exit))
+                        if exit.unresolved_cleanup && !exit.unresolved_pids.is_empty() =>
+                    {
+                        Ok(Reconciled::Escaped {
+                            pids: exit.unresolved_pids,
+                        })
+                    }
                     Ok(Observation::Exited(exit)) => {
                         let attempt = dir()?;
                         self.finish(id, &attempt, &exit, providers, call)?;
