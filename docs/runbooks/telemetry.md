@@ -21,14 +21,17 @@ Arguments, prompts and results are never logged. Skill loads and scripts are
 not counted. These counters are separate from token and cost reports, and do
 not enable OTel prompt or tool logging.
 
-Writes are best effort: one nonblocking lock attempt, one small `O_APPEND`
-write, no sync or background collector. A busy lock or I/O failure drops the
-counter without changing the command result. A torn tail is separated before
-the next record. Stats holds a shared nonblocking lock while reading both logs
-and reports an error if a writer is busy. Before a write would exceed
-5 MB, the current log replaces `.1`. Only two logs are retained, so a 30-day
-query can cover less than 30 days on a busy host. The report skips malformed
-or incomplete lines and creates no config, provider or run-store state.
+Writes are best effort: one small `O_APPEND` write, no sync or background
+collector. I/O failures leave command results unchanged. Only rotation takes
+an exclusive nonblocking lock; a busy rotation lock still allows appends.
+MCP rotation runs on existing workers, keeping it off the event loop. At
+5 MB the current log replaces `.1`. Concurrent writes can briefly exceed the
+cap. Reports read without locks, tolerate a missing `.1`, and skip malformed
+or incomplete lines. A concurrent rotation can make a report approximate.
+Only two logs are retained, so a 30-day query can cover less than 30 days on a
+busy host. Set `PROVENANT_USAGE_STATE_DIR` to isolate counters from the main
+state directory, as integration tests do. No config, provider or run-store
+state is created by these counters.
 
 ## Quota
 

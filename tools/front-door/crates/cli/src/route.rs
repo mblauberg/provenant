@@ -26,6 +26,8 @@ pub struct RouteRequest {
     pub effort: Option<String>,
     #[arg(long)]
     pub confidential: bool,
+    #[arg(long)]
+    pub allow_free: bool,
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
 }
@@ -60,6 +62,7 @@ impl RouteRequest {
             choice,
             effort: self.effort.clone(),
             confidential: self.confidential,
+            allow_free: self.allow_free,
             fallback,
         })
     }

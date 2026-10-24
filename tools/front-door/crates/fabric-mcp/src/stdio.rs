@@ -51,6 +51,8 @@ pub trait Factory: Send + Sync + 'static {
     where
         Self: 'a;
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;
+    /// Log maintenance runs only on an existing worker.
+    fn maintain_usage(&self) {}
     /// Optional composition hook. Names/outcomes are fixed metadata, never arguments.
     fn record_usage(&self, _tool: &str, _outcome: &str, _duration_ms: u64) {}
     fn input_limits(&self) -> provenant_records::Limits {
@@ -130,21 +132,6 @@ struct Job {
     modern: bool,
     call: ToolCall,
     cancel: CancelToken,
-}
-// Unknown caller-supplied names may contain secrets. Persist only installed names.
-fn usage_tool(frame: &[u8]) -> Option<&'static str> {
-    let frame: Value = serde_json::from_slice(frame).ok()?;
-    if frame["method"] != "tools/call" {
-        return None;
-    }
-    let name = frame["params"]["name"].as_str();
-    Some(
-        tools::catalogue()
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .find(|known| Some(*known) == name)
-            .unwrap_or("unknown"),
-    )
 }
 struct Completion {
     tool: &'static str,
@@ -335,6 +322,7 @@ fn serve_with_timeouts(
                     Err(_) => return,
                 };
                 let Ok(job) = received else { return };
+                factory.maintain_usage();
                 let mut completion = CompletionGuard::new(
                     job.id.clone(),
                     job.modern,
@@ -433,9 +421,10 @@ fn serve_loop(
     loop {
         match events.recv_timeout(timeouts.event) {
             Ok(Event::Frame(frame)) => {
-                let tool = usage_tool(&frame);
                 let started = Instant::now();
-                match protocol.receive_with_limits(&frame, limits) {
+                let action = protocol.receive_with_limits(&frame, limits);
+                let tool = protocol.usage_tool();
+                match action {
                     Action::Ignore => {}
                     Action::Cancel(id) => {
                         if let Some(cancel) = live.get(&id) {
@@ -460,8 +449,9 @@ fn serve_loop(
                         }
                     }
                     Action::Call { id, modern, call } => {
+                        let tool = call.name();
                         if live.contains_key(&id) {
-                            factory.record_usage(tool.unwrap_or("unknown"), "error", 0);
+                            factory.record_usage(tool, "error", 0);
                             write(
                                 output,
                                 &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
@@ -471,7 +461,7 @@ fn serve_loop(
                         }
                         let cancel = CancelToken::new();
                         let job = Job {
-                            tool: tool.unwrap_or("unknown"),
+                            tool,
                             started,
                             id: id.clone(),
                             modern,

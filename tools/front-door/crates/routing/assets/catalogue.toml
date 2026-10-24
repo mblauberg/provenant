@@ -1,5 +1,6 @@
 # Listing/answering evidence only. No row enables execution or proves lineage.
-# No retained recording proves effort controls, so efforts are empty.
+# Utility Haiku low effort follows the user-approved routing policy;
+# other effort controls remain empty without retained evidence.
 schema_version = 1
 revision = "recordings-20261024-utility-v1"
 
@@ -8,17 +9,20 @@ model = "claude/claude-haiku-4-5-20251001"
 efforts = []
 family = "anthropic"
 evidence_ref = "providers/claude/direct-model.jsonl"
+trains_on_prompts = false
 
 [[models]]
 model = "claude/claude-sonnet-5"
 efforts = []
 family = "anthropic"
 evidence_ref = "providers/claude/model-mismatch.jsonl"
+trains_on_prompts = false
 
 [[models]]
 model = "cursor/gpt-5.3-codex-low"
 efforts = []
 evidence_ref = "model-listings/cursor-models.txt"
+trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode-go/beam-free"
@@ -29,20 +33,23 @@ evidence_ref = "model-listings/opencode-models.txt"
 model = "opencode/opencode-go/claude-haiku-5-5"
 efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
+trains_on_prompts = false
 
 [[models]]
 model = "opencode/openrouter/~anthropic/claude-fable-latest"
 efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
+trains_on_prompts = false
 
 [[models]]
 model = "opencode/openrouter/~anthropic/claude-haiku-latest"
 efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
+trains_on_prompts = false
 
 [[models]]
 model = "claude/claude-haiku-5-5"
-efforts = []
+efforts = ["low"]
 family = "anthropic"
 evidence_ref = "config/model-routing.json"
 trains_on_prompts = false
@@ -68,8 +75,8 @@ trains_on_prompts = false
 
 [pools]
 utility = [
-    { model = "claude/claude-haiku-5-5" },
+    { model = "claude/claude-haiku-5-5", effort = "low" },
     { model = "codex/gpt-6-luna" },
-    { model = "opencode/opencode/deepseek-v4.1-flash-free" },
-    { model = "opencode/opencode/glm-5.3-flash-free" },
+    { model = "opencode/opencode/deepseek-v4.1-flash-free", free = true },
+    { model = "opencode/opencode/glm-5.3-flash-free", free = true },
 ]

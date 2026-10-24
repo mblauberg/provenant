@@ -250,9 +250,6 @@
                 }
               ]
             },
-            "confidential": {
-              "type": "boolean"
-            },
             "effort": {
               "anyOf": [
                 {
@@ -694,9 +691,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [
@@ -1243,9 +1237,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [
@@ -1854,9 +1845,6 @@
                 }
               ]
             },
-            "confidential": {
-              "type": "boolean"
-            },
             "effort": {
               "anyOf": [
                 {
@@ -2362,9 +2350,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [
@@ -2899,9 +2884,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [
@@ -3453,9 +3435,6 @@
                 }
               ]
             },
-            "confidential": {
-              "type": "boolean"
-            },
             "effort": {
               "anyOf": [
                 {
@@ -3978,9 +3957,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [
@@ -4545,9 +4521,6 @@
                 }
               ]
             },
-            "confidential": {
-              "type": "boolean"
-            },
             "effort": {
               "anyOf": [
                 {
@@ -5052,9 +5025,6 @@
                 }
               ]
             },
-            "confidential": {
-              "type": "boolean"
-            },
             "effort": {
               "anyOf": [
                 {
@@ -5547,9 +5517,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "confidential": {
-              "type": "boolean"
             },
             "effort": {
               "anyOf": [

@@ -61,14 +61,16 @@ plus CLI exit code or MCP outcome. Unknown tool names are `unknown`; argument,
 prompt and result text never enter the writer. Skill loads and script entry
 points remain unrecorded. OTel prompt and tool logging stays off.
 
-Supervisor supplies descriptor-relative, no-follow `O_APPEND` access and a
-single nonblocking lock attempt. Each line is at most 512 bytes. The writer
-rotates before the next line would exceed 5,000,000 bytes, replacing the single
-`usage.jsonl.1` backup, and performs no sync, polling or background collection.
-I/O errors and lock contention discard the event without affecting the call.
-The next append separates an incomplete tail so a short write cannot swallow
-a later complete event. A shared nonblocking report lock prevents rotation
-from changing either log during a read; a busy writer refuses the report.
+Supervisor supplies descriptor-relative, no-follow `O_APPEND` access. Each
+line is at most 512 bytes and uses one write without a lock, tail read or sync.
+Only rotation tries an exclusive nonblocking lock; a busy lock still permits
+appends. CLI completion and existing MCP workers rotate around 5,000,000 bytes,
+replacing the single `usage.jsonl.1` backup. MCP's event loop never rotates or
+locks. Concurrent writes can briefly exceed the cap. Reports read up to the cap
+from each file without locks and tolerate a missing backup; rotation can make
+a concurrent report approximate. I/O errors discard the event without changing
+the call. Readers skip torn lines, including a record joined to a torn tail.
+`PROVENANT_USAGE_STATE_DIR` optionally isolates counters from other state.
 Local filesystem operations add small overhead, without a hard latency
 promise on a stalled filesystem.
 

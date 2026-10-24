@@ -16,10 +16,6 @@ pub struct AttemptTarget {
 }
 
 /// A closed set of route preferences accepted for a submission.
-fn default_confidential() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutePreference {
@@ -29,8 +25,6 @@ pub struct RoutePreference {
     pub model: Option<String>,
     #[serde(default)]
     pub route: Option<String>,
-    #[serde(default = "default_confidential")]
-    pub confidential: bool,
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]

@@ -107,7 +107,7 @@ fn check_install_source_failures_keep_the_typed_outcome() -> Result {
         assert_eq!(value["error"]["code"], expected_code);
         assert_ne!(code(&output), 0);
     }
-    rig.assert_only_usage_state()?;
+    assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -123,7 +123,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
         "{}",
         String::from_utf8_lossy(&dry.stderr.bytes)
     );
-    rig.assert_only_usage_state()?;
+    assert!(!rig.state.exists());
     let preview: serde_json::Value = serde_json::from_slice(
         dry.stderr
             .bytes
@@ -243,7 +243,7 @@ fn assert_legacy_git_hook_location(custom_hooks: bool) -> Result {
         fs::read_to_string(sensitive.join("release.json"))?,
         "private manifest sentinel"
     );
-    rig.assert_only_usage_state()?;
+    assert!(!rig.state.exists());
     let old = hooks.join("post-merge");
     symlink(legacy.join("scripts/hooks/post-merge"), &old)?;
     let retained = hooks.join("pre-push");
@@ -354,7 +354,7 @@ fn recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run() -> Res
     assert!(preview.contains("hook") && preview.contains("compact"));
     assert!(preview.contains("utility_output_hook.py"));
     assert_eq!(fs::read_to_string(&settings)?, fixture);
-    rig.assert_only_usage_state()?;
+    assert!(!rig.state.exists());
     // Apply only to this disposable home, then check order and foreign bytes.
     let apply: Vec<_> = arguments
         .into_iter()
@@ -466,6 +466,6 @@ fn repository_hooks_path_cannot_authorise_writes_outside_the_selected_checkout()
     ])?;
     assert_ne!(code(&output), 0);
     assert_eq!(fs::read_link(&foreign)?, target);
-    rig.assert_only_usage_state()?;
+    assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }

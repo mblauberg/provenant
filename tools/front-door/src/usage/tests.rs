@@ -16,96 +16,58 @@ fn roots(path: &Path) -> Result<Roots> {
     Ok(inputs.resolve(&Resolver)?)
 }
 #[test]
-fn append_rotates_and_never_waits_for_a_busy_writer_or_follows_log_links() -> Result {
+fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
     let temp = tempfile::tempdir_in("/tmp")?;
     let roots = roots(temp.path())?;
     record_cli(&roots, "root", 0, 4);
     let log = roots.state.as_path().join(LOG);
-    let before = std::fs::read(&log)?;
-    record_tool(&roots, "fabric_identity", "ok", 2);
-    assert!(std::fs::read(&log)?.starts_with(&before));
+    assert!(!roots.state.as_path().join(LOCK).exists());
     let directory = Directory::open_anchor(roots.state.as_path())?;
     let lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let before = std::fs::read(&log)?;
-    let start = std::time::Instant::now();
     record_cli(&roots, "root", 0, 1);
-    assert!(start.elapsed() < std::time::Duration::from_millis(100));
-    assert_eq!(std::fs::read(&log)?, before);
-    drop(lock);
-    // A previous interrupted/short append must not swallow the next event.
-    std::fs::write(&log, b"{\"kind\":\"cli.verb\"")?;
-    record_cli(&roots, "root", 0, 1);
+    assert!(std::fs::read(&log)?.len() > before.len());
     let stats = Stats {
         usage: true,
         since: None,
         until: None,
         detail: false,
     };
-    assert_eq!(
-        report(&roots, &stats)?
-            .units
-            .iter()
+    let count = |data: Report| {
+        data.units
+            .into_iter()
             .find(|u| u.unit == "root")
-            .ok_or("root")?
-            .calls,
-        1
-    );
+            .map(|u| u.calls)
+    };
+    assert_eq!(count(report(&roots, &stats)?), Some(2));
     std::fs::OpenOptions::new()
         .write(true)
         .open(&log)?
         .set_len(CAP)?;
     record_cli(&roots, "root", 0, 1);
-    assert_eq!(
-        std::fs::metadata(roots.state.as_path().join(BACKUP))?.len(),
-        CAP
-    );
-    let fresh = std::fs::read(&log)?;
-    assert!(fresh.len() < LINE_CAP);
+    assert!(std::fs::metadata(&log)?.len() > CAP);
+    assert_eq!(count(report(&roots, &stats)?), Some(2));
+    drop(lock);
+    // MCP logging only appends; existing workers perform rotation.
+    record_tool(&roots, "fabric_identity", "ok", 1);
+    assert!(!roots.state.as_path().join(BACKUP).exists());
+    maintain_tools(&roots);
+    // Rotation is permitted again; the old log is retained as the backup.
+    record_cli(&roots, "root", 0, 1);
+    assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
+    assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
+    assert_eq!(count(report(&roots, &stats)?), Some(3));
+    // A torn line is ignored, including an event appended to that line.
+    std::fs::write(&log, b"{partial")?;
+    record_cli(&roots, "root", 0, 1);
+    record_cli(&roots, "root", 0, 1);
+    std::fs::remove_file(roots.state.as_path().join(BACKUP))?;
+    assert_eq!(count(report(&roots, &stats)?), Some(1));
     let target = temp.path().join("foreign");
     std::fs::write(&target, "unchanged")?;
     std::fs::remove_file(&log)?;
     std::os::unix::fs::symlink(&target, &log)?;
     record_cli(&roots, "root", 0, 1);
     assert_eq!(std::fs::read_to_string(target)?, "unchanged");
-    Ok(())
-}
-#[test]
-fn report_filters_time_reads_both_files_and_ignores_partial_lines() -> Result {
-    let temp = tempfile::tempdir_in("/tmp")?;
-    let roots = roots(temp.path())?;
-    let dir = roots.state.as_path();
-    std::fs::create_dir(dir)?;
-    let line = |date: &str| {
-        format!(
-            "{{\"kind\":\"cli.verb\",\"unit\":\"root\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"{date}T00:00:00.000000Z\"}}\n"
-        )
-    };
-    std::fs::write(dir.join(BACKUP), line("2026-01-01") + &line("2026-02-01"))?;
-    std::fs::write(
-        dir.join(LOG),
-        line("2026-02-02") + &line("2026-02-03") + "{\"partial\":",
-    )?;
-    let stats = Stats {
-        usage: true,
-        since: Some("2026-02-01T00:00:00Z".parse()?),
-        until: Some("2026-02-03T00:00:00Z".parse()?),
-        detail: false,
-    };
-    let directory = Directory::open_anchor(dir)?;
-    let writer = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
-    assert!(
-        report(&roots, &stats).is_err(),
-        "stats must not race a rotating writer"
-    );
-    drop(writer);
-    let data = report(&roots, &stats)?;
-    assert_eq!(
-        data.units
-            .iter()
-            .find(|u| u.unit == "root")
-            .ok_or("root")?
-            .calls,
-        2
-    );
     Ok(())
 }

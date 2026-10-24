@@ -53,6 +53,7 @@ impl TestRig {
             ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
             ("GIT_CONFIG_SYSTEM", root.join("git-system")),
             ("PROVENANT_STATE_DIR", state.clone()),
+            ("PROVENANT_USAGE_STATE_DIR", root.join("usage-state")),
             ("PROVENANT_ROOT", project.clone()),
             ("TMPDIR", root.clone()),
         ]
@@ -94,6 +95,10 @@ impl TestRig {
             return Err("git init failed".into());
         }
         Ok(rig)
+    }
+    pub fn enable_usage(&mut self) {
+        self.env
+            .retain(|(key, _)| key != "PROVENANT_USAGE_STATE_DIR");
     }
     pub fn command(&self, args: &[&str]) -> Result<ExecOutcome> {
         let mut arguments = vec![
@@ -140,10 +145,6 @@ impl TestRig {
         }
         Ok(result)
     }
-    /// Read-only leaves may emit demand counters, but no owner state.
-    pub fn assert_only_usage_state(&self) -> Result {
-        assert_only_usage_state(&self.state)
-    }
     pub fn assert_legacy_unchanged(&self) -> Result {
         for tail in [
             ".agents/sentinel",
@@ -166,26 +167,3 @@ pub fn code(output: &ExecOutcome) -> i64 {
 }
 
 pub mod mcp;
-
-pub fn assert_only_usage_state(state: &Path) -> Result {
-    if !state.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(state)? {
-        let entry = entry?;
-        assert!(
-            entry.file_type()?.is_file(),
-            "unexpected state: {:?}",
-            entry.path()
-        );
-        assert!(
-            matches!(
-                entry.file_name().to_str(),
-                Some("usage.jsonl" | "usage.jsonl.1" | "usage.lock")
-            ),
-            "unexpected state: {:?}",
-            entry.path()
-        );
-    }
-    Ok(())
-}

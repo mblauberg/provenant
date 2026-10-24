@@ -37,6 +37,43 @@ pub enum InvalidInput {
 }
 
 impl ToolCall {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Identity(_) => "fabric_identity",
+            Self::Mail(_) => "fabric_mail",
+            Self::Task(_) => "fabric_task",
+            Self::Events(_) => "fabric_events",
+            Self::Claim(_) => "fabric_claim",
+            Self::Landing(_) => "fabric_landing",
+            Self::Submit(_) => "fabric_submit",
+            Self::Run(_) => "fabric_run",
+            Self::Output(_) => "fabric_output",
+            Self::Hosts(_) => "fabric_hosts",
+            Self::Graph(_) => "fabric_graph",
+        }
+    }
+    // Never persist arbitrary caller-supplied tool names.
+    pub(crate) fn usage_name(name: &str) -> &'static str {
+        const NAMES: &[&str] = &[
+            "fabric_identity",
+            "fabric_mail",
+            "fabric_task",
+            "fabric_events",
+            "fabric_claim",
+            "fabric_landing",
+            "fabric_submit",
+            "fabric_run",
+            "fabric_output",
+            "fabric_hosts",
+            "fabric_graph",
+        ];
+        NAMES
+            .iter()
+            .copied()
+            .find(|known| *known == name)
+            .unwrap_or("unknown")
+    }
+
     fn validate_limits(&self, limits: &Limits) -> Result<(), InputError> {
         let body = |value: &str, path: &str| {
             if u64::try_from(value.len()).unwrap_or(u64::MAX) > limits.body_bytes {

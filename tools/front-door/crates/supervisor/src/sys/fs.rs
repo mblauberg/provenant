@@ -170,7 +170,7 @@ pub(crate) fn open_append_at(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
         name,
-        libc::O_RDWR | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         0o600,
     )
 }

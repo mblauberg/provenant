@@ -50,7 +50,7 @@ pub struct ModelEntry {
     pub efforts: Vec<String>,
     pub evidence_ref: String,
     pub family: Option<String>,
-    /// Unknown is treated as training for confidential pool selection.
+    /// Unknown is treated as training for confidential selection.
     #[serde(default)]
     pub trains_on_prompts: Option<bool>,
 }
@@ -60,6 +60,8 @@ pub struct ModelEntry {
 pub struct RoutePoolMember {
     pub model: ModelId,
     pub effort: Option<String>,
+    #[serde(default)]
+    pub free: bool,
 }
 /// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
 /// change family/effort rows while retaining an existing revision.

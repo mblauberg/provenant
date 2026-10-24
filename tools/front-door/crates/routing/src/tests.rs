@@ -29,6 +29,7 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
         confidential: false,
+        allow_free: false,
         fallback: Fallback::None,
     })
 }
@@ -101,6 +102,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         choice: RouteChoice::NamedRoute("review".into()),
         effort: None,
         confidential: false,
+        allow_free: false,
         fallback: Fallback::None,
     };
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
@@ -134,6 +136,7 @@ fn utility_pool_resolves_and_confidential_skips_training_members()
         choice: RouteChoice::NamedRoute("utility".into()),
         effort: None,
         confidential: true,
+        allow_free: false,
         fallback: Fallback::Models(BoundedModels::new(vec![
             ModelId::parse("claude/claude-haiku-5-5")?,
             ModelId::parse("codex/unclassified")?,
@@ -169,6 +172,36 @@ fn utility_pool_resolves_and_confidential_skips_training_members()
     let route = resolve(&query, &context)?;
     assert_eq!(route.model, "gpt-6-luna");
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
+#[test]
+fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let query = serde_json::json!({"choice":{"kind":"named_route","value":"utility"},"effort":null,"confidential":true});
+    let request: RouteRequest = serde_json::from_value(query.clone())?;
+    assert_eq!(
+        resolve(&request, &context(&catalogue, &config, now()?))?
+            .effort
+            .as_deref(),
+        Some("low")
+    );
+    // Confidential callers cannot use the paid members in this fixture.
+    for row in &mut catalogue.models {
+        if row.model.adapter() != "opencode" {
+            row.trains_on_prompts = Some(true);
+        }
+    }
+    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
+    let mut query = query;
+    query["allow_free"] = serde_json::json!(true);
+    let request: RouteRequest = serde_json::from_value(query)?;
+    assert_eq!(
+        resolve(&request, &context(&catalogue, &config, now()?))?.model,
+        "opencode/deepseek-v4.1-flash-free"
+    );
     Ok(())
 }
 

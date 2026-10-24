@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     path::Path,
 };
 
@@ -59,38 +59,56 @@ fn directory(path: &Path) -> Result<Directory, FsError> {
     }
 }
 
-fn append(roots: &Roots, event: Event) -> Option<()> {
+// Tests and operators can isolate demand counters from other owner state.
+fn state_path(roots: &Roots) -> std::path::PathBuf {
+    std::env::var_os("PROVENANT_USAGE_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| roots.state.as_path().to_owned())
+}
+
+fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
+    let size = || {
+        directory
+            .open_read(OsStr::new(LOG))
+            .ok()?
+            .metadata()
+            .ok()
+            .map(|m| m.size)
+    };
+    if size()?.saturating_add(incoming) <= CAP {
+        return Some(());
+    }
+    // Only rotation locks. Contending appenders keep their single write.
+    let _lock = directory
+        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
+        .ok()?;
+    if size()?.saturating_add(incoming) > CAP {
+        directory
+            .replace(OsStr::new(LOG), directory, OsStr::new(BACKUP))
+            .ok()?;
+    }
+    Some(())
+}
+
+/// Called by existing MCP workers, never by the transport event loop.
+pub fn maintain_tools(roots: &Roots) {
+    if let Ok(directory) = Directory::open_anchor(&state_path(roots)) {
+        let _ = rotate(&directory, LINE_CAP as u64);
+    }
+}
+
+fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
     if line.len() > LINE_CAP {
         return None;
     }
-    let directory = directory(roots.state.as_path()).ok()?;
-    // One attempt, no waiting/retries/fsync. Busy or broken logging is dropped.
-    let _lock = directory
-        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-        .ok()?;
+    let directory = directory(&state_path(roots)).ok()?;
+    if rotate_log {
+        let _ = rotate(&directory, line.len() as u64);
+    }
     let mut file = directory.open_append(OsStr::new(LOG)).ok()?;
-    let mut size = file.metadata().ok()?.size;
-    if size.saturating_add(line.len() as u64).saturating_add(1) > CAP {
-        directory
-            .replace(OsStr::new(LOG), &directory, OsStr::new(BACKUP))
-            .ok()?;
-        file = directory.open_append(OsStr::new(LOG)).ok()?;
-        size = 0;
-    }
-    if size > 0 {
-        // Isolate a torn previous append so it cannot swallow this record.
-        file.seek(SeekFrom::End(-1)).ok()?;
-        let mut tail = [0];
-        if file.read(&mut tail).ok()? != 1 {
-            return None;
-        }
-        if tail[0] != b'\n' && file.write(b"\n").ok()? != 1 {
-            return None;
-        }
-    }
-    // O_APPEND and a single small write keep complete records together.
+    // O_APPEND and one small write; readers skip torn/malformed lines.
     (file.write(&line).ok()? == line.len()).then_some(())
 }
 
@@ -106,6 +124,7 @@ pub fn record_cli(roots: &Roots, verb: &str, exit_code: u8, duration_ms: u64) {
             duration_ms,
             timestamp,
         },
+        true,
     );
 }
 pub fn record_tool(roots: &Roots, tool: &str, outcome: &str, duration_ms: u64) {
@@ -120,6 +139,7 @@ pub fn record_tool(roots: &Roots, tool: &str, outcome: &str, duration_ms: u64) {
             duration_ms,
             timestamp,
         },
+        false,
     );
 }
 fn timestamp() -> Option<String> {
@@ -160,21 +180,22 @@ fn inventory() -> BTreeMap<(String, String), u64> {
 }
 fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Error>> {
     let mut units = inventory();
-    let directory = match Directory::open_anchor(roots.state.as_path()) {
+    let directory = match Directory::open_anchor(&state_path(roots)) {
         Ok(directory) => Some(directory),
         Err(error) if error.is_not_found() => None,
         Err(error) => return Err(error.into()),
     };
     if let Some(directory) = directory {
-        // Keep rotation from replacing either file during a report. Never wait.
-        let _lock = directory.try_lock(OsStr::new(LOCK), LockMode::Shared)?;
         for name in [BACKUP, LOG] {
             let mut file = match directory.open_read(OsStr::new(name)) {
                 Ok(file) => file,
                 Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(error.into()),
             };
-            let bytes = file.read_bounded(CAP)?;
+            let mut bytes = Vec::new();
+            // A writer can cross the cap while rotation is busy. Bound the read,
+            // rather than failing the report when the file grows.
+            (&mut file).take(CAP).read_to_end(&mut bytes)?;
             // Ignore torn or malformed records; only complete bounded lines count.
             for line in bytes.split_inclusive(|byte| *byte == b'\n') {
                 if line.len() > LINE_CAP || !line.ends_with(b"\n") {

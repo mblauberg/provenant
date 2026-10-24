@@ -279,7 +279,9 @@ pub fn resolve(
                 let mut first_unavailable = None;
                 let mut selected = None;
                 for member in pool {
-                    if !privacy_allowed(&member.model, request.confidential, context.catalogue) {
+                    if (member.free && !request.allow_free)
+                        || !privacy_allowed(&member.model, request.confidential, context.catalogue)
+                    {
                         continue;
                     }
                     let effort = request.effort.as_deref().or(member.effort.as_deref());
