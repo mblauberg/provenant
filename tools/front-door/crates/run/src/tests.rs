@@ -62,6 +62,7 @@ pub(super) fn input() -> PreparedRun {
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,
@@ -84,7 +85,7 @@ pub(super) fn route() -> RouteRecord {
         ..Default::default()
     }
 }
-fn publication() -> TerminalPublication<'static> {
+pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
         outcome: Outcome::Succeeded,
         finished_at: WallTime::from_micros(200).unwrap(),

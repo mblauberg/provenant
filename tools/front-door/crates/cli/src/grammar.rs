@@ -177,6 +177,14 @@ pub struct Dispatch {
     pub task_id: Option<TaskId>,
     #[arg(long)]
     pub delivery_id: Option<DeliveryId>,
+    /// Fetch and deliver this writer's final head on the host.
+    #[arg(long, requires_all = ["deliver_branch", "worktree"])]
+    pub deliver_remote: Option<String>,
+    #[arg(long, requires = "deliver_remote")]
+    pub deliver_branch: Option<String>,
+    /// Create a pull request after the host verifies the pushed head.
+    #[arg(long, requires = "deliver_remote")]
+    pub open_pr: bool,
     #[command(flatten)]
     pub route: RouteRequest,
     #[command(flatten)]

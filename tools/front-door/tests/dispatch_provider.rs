@@ -352,6 +352,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
                 writer: None,
                 provider_timeout_seconds: 60,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,

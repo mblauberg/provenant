@@ -705,6 +705,7 @@ fn writer_run(
                 writer: Some(writer),
                 provider_timeout_seconds: 20,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,
@@ -863,6 +864,7 @@ fn holder_context<'a>(
             actor_id: context.actor_id,
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
+            host_delivery: None,
         }
         .encode()
     }

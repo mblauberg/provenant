@@ -1240,6 +1240,7 @@ impl BinaryRunOwner<'_> {
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
                 delivery_id: task.delivery_id,
+                deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
             });
         }
@@ -1716,6 +1717,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: Some(1),
             knobs: vec![],

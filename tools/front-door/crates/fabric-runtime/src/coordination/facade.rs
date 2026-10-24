@@ -49,6 +49,8 @@ pub struct SubmittedTask {
     pub timeout_ms: u64,
     #[serde(default)]
     pub delivery_id: Option<DeliveryId>,
+    #[serde(default)]
+    pub deliver: Option<provenant_records::run::WriterDeliveryRequest>,
 }
 
 bounded_input! {
