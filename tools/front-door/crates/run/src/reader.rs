@@ -96,7 +96,6 @@ fn reviewer_fact(
         actor_id: ActorId::from_bytes(id),
         family: None,
         model: observed.and_then(|r| r.model.clone()),
-        outcome: None,
     })
 }
 impl AttemptReader for RunStore {
@@ -128,7 +127,6 @@ impl AttemptReader for RunStore {
             finished_at,
             resolved_route: r.resolved_route.map(Into::into),
             usage: r.usage.into(),
-            output_paths: vec![output.path.clone()],
             reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
             delivery_id: r.delivery_id,
             subject: r.subject,

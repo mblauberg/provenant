@@ -262,7 +262,7 @@ Run owns schema and transactions; shared typed records live in records:
 - `AttemptFact`: `Serialize`-only terminal projection in records, built by run
   from validated store records: task, attempt number, operation, project,
   terminal state, exit, `started_at`/`finished_at`, resolved route (provider,
-  model, effort, account label), usage counts (`u64`), output paths, reviewer
+  model, effort, account label), usage counts (`u64`), reviewer
   and optional `delivery_id`. Timing adds `queued_at` (admission accepted),
   optional `started_at` (ticket granted) and optional `provider_ms`
   (supervisor-observed execution) for telemetry's comparison view. It also

@@ -158,13 +158,11 @@ mod tests {
             finished_at: UtcMicros::from_micros(2).unwrap(),
             resolved_route: None,
             usage: Usage::default(),
-            output_paths: vec![path.clone()],
             reviewer: Some(ReviewerFact {
                 provenance: ReviewerProvenance::Observed,
                 actor_id: ActorId::from_bytes([5; 16]),
                 family: Some("openai".into()),
                 model: None,
-                outcome: None,
             }),
             delivery_id: Some(DeliveryId::from_bytes([9; 16])),
             subject: None,
