@@ -452,7 +452,11 @@ Failed or racing identity reads remain unknown. The provider inherits that
 lease description. Supervisor records
 `darwin_census_and_custody_lease` settlement evidence; any missing proof stays
 fenced. An unsampled `setsid` escape that closed the lease is the documented
-macOS residual. Run never converts an uncertain observation into absence.
+macOS residual. Run never converts an uncertain observation into absence. When
+the guardian is gone and its exit is unresolved, reconcile asks supervisor to
+end the named descendants it can prove (recorded identity, or the attempt
+sandbox) and settle the exit; unproven pids are never signalled and the attempt
+settles `lost` naming them (see supervisor.md).
  Continued resume
 preserves route, account, confinement and exact provider session; unsupported
 or missing sessions fail without a fresh launch. A new route or fresh session
