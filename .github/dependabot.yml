@@ -13,39 +13,6 @@ updates:
     labels:
       - dependencies
 
-  # Python test tooling for the harness gate: pyproject.toml + uv.lock
-  # (issue #200). Keeps the transitively pinned lock from rotting.
-  - package-ecosystem: uv
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    cooldown:
-      default-days: 7
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    cooldown:
-      default-days: 7
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-    ignore:
-      - dependency-name: "@types/node"
-        update-types:
-          - "version-update:semver-major"
-    groups:
-      workspace-development-dependencies:
-        dependency-type: development
-      workspace-production-dependencies:
-        dependency-type: production
-
   # Rust workspace dependencies approved by ADR 0028.
   - package-ecosystem: cargo
     directory: /tools/front-door

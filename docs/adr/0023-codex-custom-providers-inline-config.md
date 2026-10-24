@@ -1,5 +1,9 @@
 # ADR 0023 — Codex custom providers arrive inline, not by relaxing `--ignore-user-config`
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../specs/rust-port/design/README.md) for owners.
+
 **Status:** Accepted 2026-09-02 (issue [#772](https://github.com/mblauberg/provenant/issues/772))
 
 **Extends:** [ADR 0021](0021-configured-workspace-dispatch-boundaries.md), which

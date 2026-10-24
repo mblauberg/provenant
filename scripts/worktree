@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -eu
-
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# shellcheck source=scripts/lib/harness-python.sh
-source "$SCRIPT_DIR/lib/harness-python.sh"
-run_stdlib "$SCRIPT_DIR/worktree.py" "$@"

@@ -1,8 +1,0 @@
-{
-  "session_id": 123,
-  "observed_model": "codex-pro",
-  "reset_at": "not-a-date",
-  "retry_after": "later",
-  "live_failure": null,
-  "semantic_lines": [{"s": "stdout", "line": "bad stream"}]
-}

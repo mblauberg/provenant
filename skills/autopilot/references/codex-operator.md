@@ -10,7 +10,7 @@ loop driver.
 - Read the user-owned goal, current scope, and authority before acting. Check
   `STATUS` at the start and end of each work iteration.
 - Use `provenant lanes` and Fabric tasks to see what is active, ready, blocked,
-  or complete. Dispatch bounded work with `skills/orchestrate/scripts/dispatch_run.py` through
+  or complete. Dispatch bounded work with `provenant dispatch` through
   `orchestrate`; read results with `provenant output`.
 - After an interruption, run `provenant reconcile`, inspect the exact task and
   artifact, and use `provenant resume` for the existing run. Preserve partial
