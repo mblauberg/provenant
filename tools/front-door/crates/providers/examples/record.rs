@@ -789,6 +789,47 @@ fn successful_bash(stream: &[u8]) -> bool {
     false
 }
 
+/// Codex streams carry no answering model: only its private rollout under the
+/// recording's `CODEX_HOME` can establish one. Other adapters report it in-stream.
+fn answering_model(
+    adapter: &str,
+    session: Option<&str>,
+    stream_model: Option<&str>,
+    codex_home: &Path,
+) -> Option<String> {
+    if adapter == "codex" {
+        session
+            .and_then(|thread| provenant_providers::codex_rollout::observe(codex_home, thread).ok())
+            .map(|turn| turn.model)
+    } else {
+        stream_model.map(str::to_owned)
+    }
+}
+
+#[test]
+fn codex_answering_model_comes_from_the_private_rollout() {
+    let home = std::env::temp_dir().join(format!("provenant-record-{}", std::process::id()));
+    let day = home.join("sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    std::fs::write(
+        day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":thread}}),
+            json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+        ),
+    )
+    .unwrap();
+    let observed = answering_model("codex", Some(thread), None, &home);
+    let unbound = answering_model("codex", None, Some("argv-model"), &home);
+    let claude = answering_model("claude", None, Some("claude-sonnet-5"), &home);
+    std::fs::remove_dir_all(&home).unwrap();
+    assert_eq!(observed.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(unbound, None);
+    assert_eq!(claude.as_deref(), Some("claude-sonnet-5"));
+}
+
 #[test]
 fn bash_proof_needs_a_matching_successful_tool_result() {
     let request = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"printf provenant-shell-proof"}}]}}"#;
@@ -982,11 +1023,16 @@ fn main() -> Result<()> {
         let mut stream = spec.stream;
         adapter.observe(&mut stream, &run.outcome.stdout.bytes)?;
         let outcome = adapter.finish(stream, exit(&run.outcome))?;
+        let model = answering_model(
+            &args.adapter,
+            outcome.session(),
+            outcome.model(),
+            &layout.state,
+        );
         eprintln!(
-            "{session}: exit={:?} status={:?} model={:?} stderr={}",
+            "{session}: exit={:?} status={:?} model={model:?} stderr={}",
             run.outcome.termination,
             outcome.status(),
-            outcome.model(),
             String::from_utf8_lossy(&run.outcome.stderr.bytes)
                 .chars()
                 .take(2000)
@@ -1010,7 +1056,7 @@ fn main() -> Result<()> {
         if session == "fresh" {
             continuation = Some(adapter.continuation(&outcome, &route, "recording")?);
         }
-        records.push((session, run, outcome, writer_shell_proof));
+        records.push((session, run, outcome, model, writer_shell_proof));
         last_profile = Some((plan, spec.profile));
     }
 
@@ -1085,7 +1131,7 @@ fn main() -> Result<()> {
         .trim()
         .to_owned();
     let platform = platform()?;
-    for (session, run, outcome, writer_shell_proof) in &records {
+    for (session, run, outcome, model, writer_shell_proof) in &records {
         let redacted = redactor.stream(&run.outcome.stdout.bytes)?;
         let argv: Vec<String> = run
             .argv
@@ -1107,7 +1153,7 @@ fn main() -> Result<()> {
             "access_mode": access,
             "process_exit": exit(&run.outcome).code,
             "outcome": format!("{:?}", outcome.status()),
-            "answering_model": outcome.model(),
+            "answering_model": model,
             "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
             "writer_shell_proof": writer_shell_proof,
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
