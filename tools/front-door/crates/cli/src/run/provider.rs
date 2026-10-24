@@ -99,6 +99,7 @@ fn prepare_with(
                 "codex",
                 &executable,
                 &home,
+                &user,
                 &directory,
                 &paths.scratch,
             )
@@ -125,17 +126,15 @@ fn prepare_with(
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut availability = Vec::new();
     let mut reasons = Vec::new();
+    let probe = Probe {
+        executor: &executor,
+        home: &home,
+        user: &user,
+        scratch: &paths.scratch,
+    };
     for entry in &entries {
         match locate(&entry.adapter).and_then(|executable| {
-            observe_account(
-                entry,
-                &executable,
-                &executor,
-                &home,
-                &paths.scratch,
-                catalogue.revision(),
-                timestamp,
-            )
+            observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {
             Ok(record) => availability.push(record),
             Err(error) => reasons.push(format!(
@@ -412,15 +411,27 @@ fn prepare_with(
     Err(reasons.join("; "))
 }
 
+/// Host context for fresh account identity and version probes.
+struct Probe<'a> {
+    executor: &'a provenant_supervisor::exec::SystemExecutor,
+    home: &'a Path,
+    user: &'a std::ffi::OsStr,
+    scratch: &'a Path,
+}
+
 fn observe_account(
     entry: &provenant_providers::accounts::Registration,
     executable: &Path,
-    executor: &provenant_supervisor::exec::SystemExecutor,
-    home: &Path,
-    scratch: &Path,
+    probe: &Probe<'_>,
     catalogue_revision: &str,
     timestamp: i64,
 ) -> Result<provenant_providers::AvailabilityRecord, String> {
+    let Probe {
+        executor,
+        home,
+        user,
+        scratch,
+    } = *probe;
     let directory = canonical(&entry.directory)?;
     if directory != entry.directory
         || (entry.adapter == "claude" && directory != home.join(format!(".claude-{}", entry.label)))
@@ -438,6 +449,7 @@ fn observe_account(
             &entry.adapter,
             executable,
             home,
+            user,
             &directory,
             scratch,
         )

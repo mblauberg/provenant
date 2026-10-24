@@ -1168,6 +1168,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             adapter,
             &executable,
             &home,
+            "fixture".as_ref(),
             &directory,
             &rig.root,
         )?;

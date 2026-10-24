@@ -50,11 +50,16 @@ pub fn execute(
         }
         let executable = crate::run::provider_executable(adapter)?;
         let executor = SystemExecutor::new(1).map_err(|e| e.to_string())?;
+        let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
+            .map_err(|e| e.to_string())?
+            .ok_or("current user identity is unavailable")?
+            .name;
         let key = provenant_providers::accounts::detect(
             &executor,
             adapter,
             &executable,
             home,
+            &user,
             &directory,
             cwd,
         )

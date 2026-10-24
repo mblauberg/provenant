@@ -62,11 +62,13 @@ fn defaults(_: Profile) -> &'static str {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>("accounts", defaults);
 
 /// Status output is projected immediately to its fingerprint; email is never retained.
+/// Claude Code selects its keychain account from `USER`, so the probe carries it.
 pub fn detect(
     executor: &dyn Executor,
     adapter: &str,
     executable: &Path,
     home: &Path,
+    user: &OsStr,
     directory: &Path,
     cwd: &Path,
 ) -> Result<String, ProviderError> {
@@ -91,6 +93,7 @@ pub fn detect(
     .to_vec();
     let env = [
         ("HOME".into(), home.into()),
+        ("USER".into(), user.into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("CLAUDE_CONFIG_DIR".into(), directory.into()),
     ];

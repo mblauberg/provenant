@@ -1750,3 +1750,27 @@ fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), 
     assert!(launch.profile.spec.tool_exec_roots.is_empty());
     Ok(())
 }
+
+#[test]
+fn claude_account_probe_carries_user_for_keychain_selection() {
+    let script = KeychainScript {
+        items: Default::default(),
+        statuses: std::sync::Mutex::new(
+            vec![br#"{"loggedIn":true,"email":"fixture@example.test"}"#.to_vec()].into(),
+        ),
+        calls: std::sync::Mutex::new(vec![]),
+    };
+    let key = crate::accounts::detect(
+        &script,
+        "claude",
+        Path::new("/opt/homebrew/bin/claude"),
+        Path::new("/home/u"),
+        OsStr::new("u"),
+        Path::new("/home/u/.claude-pro"),
+        Path::new("/scratch/empty"),
+    );
+    assert!(key.is_ok());
+    let calls = script.calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].1.iter().any(|entry| entry == "USER=u"));
+}
