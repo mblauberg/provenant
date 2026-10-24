@@ -687,3 +687,106 @@ fn harness_ignores_inline_code_links_and_checks_real_links() -> Result {
     assert_eq!(json(&output)?["data"]["count"], 1);
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn writing_checks_use_typed_findings_and_input_exits() -> Result {
+    let rig = check_rig()?;
+    let owner = rig.project.join("skills/natural-writing");
+    std::fs::create_dir_all(&owner)?;
+    std::fs::write(
+        owner.join("lint-rules.json"),
+        include_str!("../../../skills/natural-writing/lint-rules.json"),
+    )?;
+    std::fs::write(rig.project.join("clean.md"), "Plain prose.\n")?;
+    let clean = rig.command(&["check", "writing", "clean.md", "--json"])?;
+    assert_eq!(
+        code(&clean),
+        0,
+        "{}",
+        String::from_utf8_lossy(&clean.stdout.bytes)
+    );
+    assert_eq!(json(&clean)?["data"]["count"], 0);
+    std::fs::write(rig.project.join("draft.md"), "é — robust\n")?;
+    let found = rig.command(&["check", "writing", "draft.md", "--json"])?;
+    assert_eq!(code(&found), 1);
+    let result = json(&found)?;
+    assert_eq!(result["command"], "check writing");
+    assert_eq!(result["data"]["findings"][0]["column"], 3);
+    assert_eq!(result["data"]["findings"][0]["start"], 3);
+    let invalid = rig.command(&["check", "writing", "../outside.md", "--json"])?;
+    assert_eq!(code(&invalid), 2);
+    assert_eq!(json(&invalid)?["error"]["code"], "INVALID");
+    let missing = rig.command(&["check", "writing", "missing.md", "--json"])?;
+    assert_eq!(code(&missing), 2);
+    std::os::unix::fs::symlink(rig.project.join("clean.md"), rig.project.join("link.md"))?;
+    assert_eq!(
+        code(&rig.command(&["check", "writing", "link.md", "--json"])?),
+        3
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn writing_pages_bind_rules_files_and_selector() -> Result {
+    let rig = check_rig()?;
+    let owner = rig.project.join("skills/legal-writing");
+    std::fs::create_dir_all(&owner)?;
+    std::fs::write(
+        owner.join("lint-rules.json"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../skills/legal-writing/lint-rules.json"
+        )),
+    )?;
+    std::fs::write(
+        rig.project.join("draft.md"),
+        format!("{}TODO\n", "robust.\n".repeat(120)),
+    )?;
+    let first = rig.command(&[
+        "check", "writing", "draft.md", "--rules", "legal", "--json", "--limit", "1",
+    ])?;
+    assert_eq!(code(&first), 1);
+    assert!(first.stdout.bytes.len() < 1024 * 1024);
+    let first = json(&first)?;
+    assert_eq!(first["data"]["count"], 121);
+    assert_eq!(first["data"]["blockers"], 1);
+    let human = rig.command(&[
+        "check", "writing", "draft.md", "--rules", "legal", "--limit", "1",
+    ])?;
+    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("121 finding(s), 1 blocker(s)"));
+    let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
+    let second = rig.command(&[
+        "check", "writing", "draft.md", "--rules", "legal", "--json", "--limit", "1", "--cursor",
+        cursor,
+    ])?;
+    assert_eq!(json(&second)?["data"]["findings"][0]["line"], 2);
+    std::fs::write(rig.project.join("draft.md"), "Plain prose.")?;
+    assert_eq!(
+        code(&rig.command(&[
+            "check", "writing", "draft.md", "--rules", "legal", "--json", "--cursor", cursor
+        ])?),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn writing_refuses_inputs_that_only_resolve_skipped_legal_files() -> Result {
+    let rig = check_rig()?;
+    std::fs::create_dir_all(rig.project.join("skills/legal-writing"))?;
+    std::fs::write(
+        rig.project.join("skills/legal-writing/lint-rules.json"),
+        include_str!("../../../skills/legal-writing/lint-rules.json"),
+    )?;
+    std::fs::write(rig.project.join("draft.md"), "TODO\n")?;
+    let control = rig.command(&["check", "writing", "draft.md", "--rules", "legal", "--json"])?;
+    assert_eq!(code(&control), 1);
+    assert_eq!(json(&control)?["data"]["blockers"], 1);
+    for name in ["index.md", "README.md"] {
+        std::fs::write(rig.project.join(name), "TODO\n")?;
+        let output = rig.command(&["check", "writing", name, "--rules", "legal", "--json"])?;
+        assert_eq!(code(&output), 2, "{name}");
+        assert_eq!(json(&output)?["status"], "invalid");
+    }
+    rig.assert_legacy_unchanged()
+}

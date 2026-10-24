@@ -203,16 +203,15 @@ For submissions and written advocacy; see `references/argument-structure-and-par
 Run the lint with explicit project paths. It has no implicit project directories:
 
 ```bash
-python3 "$(provenant root)/skills/legal-writing/scripts/lint_legal_style.py" path/to/source path/to/correspondence
+provenant check writing path/to/source path/to/correspondence --rules legal
 ```
 
 Project build tooling should pass its filing-facing source, correspondence and annexure paths explicitly.
 
-To scan this skill's own reference files, add `--allow-quoted-examples` so quoted bad examples are not treated as filing-facing prose:
+To scan this skill's own reference files, select the product checkout as the project. The skill-owned JSON declares its quoted-example paths and exclusions:
 
 ```bash
-python3 "$(provenant root)/skills/legal-writing/scripts/lint_legal_style.py" \
-  "$(provenant root)/skills/legal-writing" --include-readme --allow-quoted-examples
+provenant --project "$(provenant root)" check writing skills/legal-writing --rules legal
 ```
 
 Treat failures as blockers for filing-facing documents. Treat warnings as review prompts.

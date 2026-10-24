@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -13,27 +11,8 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_academic_capability_moved_into_the_two_writing_owners(tmp_path: Path) -> None:
+def test_academic_capability_moved_into_the_two_writing_owners() -> None:
     assert not (ROOT / "skills/academic-writing").exists()
-
-    checker = ROOT / "skills/natural-writing/scripts/check_academic_style.py"
-    sample = tmp_path / "chapter.tex"
-    sample.write_text(
-        "This thesis report demonstrates a groundbreaking result --- "
-        "see \\cite{key-a}.\n",
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        [sys.executable, str(checker), str(sample)],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "Meta-discourse or report-referential" in result.stdout
-    assert "LaTeX prose em dash marker" in result.stdout
-    assert "cite" not in result.stdout
 
     prose = ROOT / "skills/natural-writing/references/academic-prose.md"
     artefacts = ROOT / "skills/engineering-writing/references/academic-artefacts.md"

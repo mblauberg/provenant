@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 pub const STATE_DIRECTORY_ENV: &str = "PROVENANT_STATE_DIR";
-pub const DEFAULT_STATE_SUFFIX: &str = ".local/share/provenant/v1";
+const DEFAULT_STATE_SUFFIX: &str = ".local/share/provenant/v1";
 
 /// The sole filesystem seam for root binding. Implementations resolve existing
 /// ancestor aliases and append only normal missing components; they must fail
@@ -35,19 +35,6 @@ impl RootInputs {
             old_roots: Vec::new(),
         }
     }
-    /// Selection alone is not a filesystem safety proof. Use `resolve` before
-    /// passing a state path to an owner that performs I/O.
-    pub fn candidate(&self) -> Result<PathBuf, RootError> {
-        absolute_normal(&self.home)?;
-        let candidate = self
-            .state_dir
-            .as_ref()
-            .or(self.environment_state_dir.as_ref())
-            .cloned()
-            .unwrap_or_else(|| self.home.join(DEFAULT_STATE_SUFFIX));
-        absolute_normal(&candidate)?;
-        Ok(candidate)
-    }
     pub fn resolve(&self, resolver: &impl PathResolver) -> Result<Roots, RootError> {
         StateRoot::resolve(self, resolver).map(|state| Roots { state })
     }
@@ -75,7 +62,14 @@ pub struct Roots {
 }
 impl StateRoot {
     pub fn resolve(inputs: &RootInputs, resolver: &impl PathResolver) -> Result<Self, RootError> {
-        let candidate = inputs.candidate()?;
+        absolute_normal(&inputs.home)?;
+        let candidate = inputs
+            .state_dir
+            .as_ref()
+            .or(inputs.environment_state_dir.as_ref())
+            .cloned()
+            .unwrap_or_else(|| inputs.home.join(DEFAULT_STATE_SUFFIX));
+        absolute_normal(&candidate)?;
         let mut protected = vec![
             inputs.checkout.clone(),
             inputs.home.join(".agents"),
@@ -109,9 +103,6 @@ impl StateRoot {
     }
     pub fn as_path(&self) -> &Path {
         &self.0
-    }
-    pub fn into_path_buf(self) -> PathBuf {
-        self.0
     }
 }
 impl AsRef<Path> for StateRoot {

@@ -201,7 +201,6 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         vec!["worktree", "create", "fixture"],
         vec!["worktree", "list"],
         vec!["worktree", "remove", "fixture"],
-        vec!["check", "writing", "fixture.md"],
     ];
     for leaf in leaves {
         for (flag, path) in [
@@ -217,7 +216,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             )?;
             assert_eq!(code(&out), 2, "{leaf:?} {flag}");
         }
-        if leaf == ["root"] || matches!(leaf.first(), Some(&"quota" | &"route")) {
+        if leaf == ["root"] || matches!(leaf.first(), Some(&"quota" | &"route" | &"worktree")) {
             continue;
         }
         let out = rig.command(&leaf)?;

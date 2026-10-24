@@ -541,6 +541,7 @@ name = "provenant-providers"
 version = "0.1.0"
 dependencies = [
  "provenant-confinement",
+ "provenant-core",
  "provenant-quota",
  "provenant-records",
  "serde",
@@ -590,6 +591,16 @@ dependencies = [
 [[package]]
 name = "provenant-run"
 version = "0.1.0"
+dependencies = [
+ "provenant-core",
+ "provenant-records",
+ "provenant-supervisor",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-supervisor"
@@ -626,6 +637,7 @@ dependencies = [
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

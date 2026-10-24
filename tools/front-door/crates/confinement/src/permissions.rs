@@ -360,6 +360,8 @@ impl WorktreeWriteGrants {
 pub struct PlanPermissions {
     pub mode: AccessMode,
     pub scratch: PathGrant,
+    /// Attempt-private retained provider state, separate from disposable scratch.
+    pub private_state: Option<PathGrant>,
     pub read_roots: Vec<PathGrant>,
     /// Readable control files that remain immutable during the attempt.
     pub protected_roots: Vec<PathGrant>,
@@ -910,12 +912,22 @@ fn compile_sbpl(
             verified.repo().private_git_dir(),
             verified.repo().common_git_dir(),
         ] {
-            if path_overlaps(&plan.scratch.path, path) {
+            if std::iter::once(&plan.scratch)
+                .chain(&plan.private_state)
+                .any(|private| path_overlaps(&private.path, path))
+            {
                 return Err(PermissionError::ProtectedOverlap);
             }
         }
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
+    if let Some(state) = &plan.private_state {
+        validate_noncredential_grant(state)?;
+        if state.overlaps(&plan.scratch) {
+            return Err(PermissionError::ProtectedOverlap);
+        }
+        verify_private_scratch(state, &scratch_exclusions, anchors)?;
+    }
     for grant in &plan.network {
         verify_network_anchor(grant, anchors)?;
     }
@@ -972,6 +984,9 @@ fn compile_sbpl(
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
+    if let Some(state) = &plan.private_state {
+        verify_private_scratch(state, &scratch_exclusions, anchors)?;
+    }
     anchors.verify_all()?;
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
@@ -1119,20 +1134,17 @@ fn render_profile(
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
     }
-    push_rule(
-        &mut source,
-        "allow",
-        "file-read*",
-        &plan.scratch.path,
-        PathScope::Subtree,
-    )?;
-    push_rule(
-        &mut source,
-        "allow",
-        "file-write*",
-        &plan.scratch.path,
-        PathScope::Subtree,
-    )?;
+    for private in std::iter::once(&plan.scratch).chain(&plan.private_state) {
+        for operation in ["file-read*", "file-write*"] {
+            push_rule(
+                &mut source,
+                "allow",
+                operation,
+                &private.path,
+                PathScope::Subtree,
+            )?;
+        }
+    }
 
     if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
         push_worktree_rule(
@@ -1538,7 +1550,7 @@ fn is_credential_root(path: &Path) -> bool {
         })
         .collect();
     let single = [
-        ".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude", ".cursor",
+        ".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude", ".cursor", ".gemini",
     ];
     if components
         .iter()
@@ -2039,6 +2051,7 @@ mod tests {
             .into(),
         };
         let plan = PlanPermissions {
+            private_state: None,
             mode: AccessMode::WorktreeWrite(Box::new(authority)),
             scratch: PathGrant {
                 path: scratch.clone(),
@@ -2224,6 +2237,7 @@ mod tests {
             observations: BTreeMap::new(),
         };
         let plan = PlanPermissions {
+            private_state: None,
             mode: AccessMode::ReadOnly,
             scratch: PathGrant {
                 path: PathBuf::from("/tmp/attempt-scratch"),

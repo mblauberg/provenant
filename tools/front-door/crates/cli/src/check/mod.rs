@@ -108,14 +108,14 @@ fn wire(path: &Path) -> Result<PathWire, CheckError> {
 /// Inputs include the selected root and the full rule bundle identity; no cursor
 /// acknowledges or stores a private snapshot. The caller rechecks every page.
 #[derive(Debug, Serialize)]
-pub struct CheckPage {
-    pub findings: Vec<Finding>,
+pub struct CheckPage<T = Finding> {
+    pub findings: Vec<T>,
     pub count: u64,
     pub offset: u64,
     pub next_cursor: Option<String>,
     pub input_digest: FileDigest,
 }
-impl CheckPage {
+impl<T> CheckPage<T> {
     pub fn outcome(&self) -> Outcome {
         if self.count == 0 {
             Outcome::Ok
@@ -123,6 +123,8 @@ impl CheckPage {
             Outcome::Failed
         }
     }
+}
+impl CheckPage {
     pub fn human(&self) -> Result<String, serde_json::Error> {
         let mut text = String::new();
         for finding in &self.findings {
@@ -148,21 +150,22 @@ struct Cursor {
     digest: String,
     offset: u64,
 }
-fn paginate(
-    mut scan: Scan,
+fn paginate(scan: Scan, selector: impl Serialize, page: &Page) -> Result<CheckPage, CheckError> {
+    findings_page(scan.findings, scan.evidence, selector, page)
+}
+/// Page typed owner findings without changing or discarding their fields.
+pub fn findings_page<T: Serialize>(
+    mut findings: Vec<T>,
+    evidence: Vec<(String, FileDigest)>,
     selector: impl Serialize,
     page: &Page,
-) -> Result<CheckPage, CheckError> {
+) -> Result<CheckPage<T>, CheckError> {
     if !(1..=100).contains(&page.limit) {
         return Err(CheckError::Invalid("check limit must be 1..100"));
     }
     // Source digest binds rule code, configuration assets and external fixture
     // bundle, not just a manually incremented rule number.
-    let digest = CanonicalV1::record_digest(
-        "check-input",
-        1,
-        &(selector, &scan.evidence, &scan.findings),
-    )?;
+    let digest = CanonicalV1::record_digest("check-input", 1, &(selector, &evidence, &findings))?;
     let input_digest = CanonicalV1::file_digest(&digest.as_bytes()[..]);
     let offset = match &page.cursor {
         None => 0,
@@ -180,7 +183,7 @@ fn paginate(
             cursor.offset
         }
     };
-    let count = scan.findings.len() as u64;
+    let count = findings.len() as u64;
     if offset > count || (offset == count && offset != 0) {
         return Err(CheckError::Invalid("check cursor is outside the findings"));
     }
@@ -191,8 +194,7 @@ fn paginate(
         next_cursor: None,
         input_digest,
     };
-    for finding in scan
-        .findings
+    for finding in findings
         .drain(..)
         .skip(offset as usize)
         .take(page.limit as usize)
@@ -203,7 +205,7 @@ fn paginate(
         // All check command names are at most this length. Human formatting is
         // smaller than its JSON envelope because it retains the same path form.
         let envelope =
-            provenant_records::CommandResult::new("check harness", result.outcome(), &result);
+            provenant_records::CommandResult::new("check writing", result.outcome(), &result);
         match crate::render(&envelope, crate::RenderMode::Json, &mut std::io::sink()) {
             Ok(()) => {}
             Err(crate::RenderError::TooLarge) if result.findings.len() > 1 => {
@@ -219,7 +221,7 @@ fn paginate(
     }
     Ok(result)
 }
-fn next_cursor(page: &CheckPage) -> Result<Option<String>, CheckError> {
+fn next_cursor<T>(page: &CheckPage<T>) -> Result<Option<String>, CheckError> {
     let end = page.offset + page.findings.len() as u64;
     if end < page.count {
         serde_json::to_string(&Cursor {

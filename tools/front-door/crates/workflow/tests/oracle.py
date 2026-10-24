@@ -20,8 +20,6 @@ if unit == "authority_mapping":
     source = root / "skills/deliver/scripts/authority_mapping.py"
 if unit == "writer_branch":
     source = root / "skills/orchestrate/scripts/writer_lease.py"
-if unit == "style_lint":
-    source = root / "skills/natural-writing/scripts/style_lint.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 if unit != "review_panel":
@@ -41,20 +39,7 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "style_lint":
-        import tempfile
-        operation = case.get("op", "scan")
-        if operation == "spans":
-            results.append(module.ignored_spans(case["text"], case["suffix"], latex=case.get("latex", False)))
-        else:
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / ("fixture" + case["suffix"])
-                path.write_text(case["text"], encoding="utf-8")
-                if operation == "wordcount":
-                    results.append(module.prose_word_count(path, latex=case.get("latex", False)))
-                else:
-                    results.append(module.scan(path, latex=case.get("latex", False)))
-    elif unit == "writer_branch":
+    if unit == "writer_branch":
         results.append(None if len(case) <= 48 and module.BRANCH_PATTERN.fullmatch(case) else f"branch {case} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention")
     elif unit == "authority_mapping":
         try:

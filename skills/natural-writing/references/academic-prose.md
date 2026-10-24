@@ -280,9 +280,8 @@ comprehension-blocking density, in that order.
 
 Follow the hub condense procedure and stop rule. Two additions:
 
-- The checker's `--wordcount` mode ignores macros, labels and math when counting
-  prose words, so the reported count matches what an examiner reads rather than
-  the source markup. Report words before and after plus the percentage cut.
+- Count prose words with macros, labels and maths excluded. Report words before
+  and after plus the percentage cut.
 - Lock every referenced `\label`, every citation key, every result macro and
   every cross-reference target before condensing, and verify each survives in
   its new home by grep, not by re-reading for a feeling of completeness.
@@ -307,7 +306,7 @@ The study evaluates the primary and comparator methods on two datasets. Comparis
 For local files, use the checker as a review prompt, not proof:
 
 ```sh
-python3 "$(provenant root)/skills/natural-writing/scripts/check_academic_style.py" path/to/file.tex
+provenant check writing path/to/file.tex --rules academic
 ```
 
 Its silence is necessary, not sufficient: it scans fixed patterns and cannot see
