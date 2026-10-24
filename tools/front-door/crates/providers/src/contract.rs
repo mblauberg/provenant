@@ -1,5 +1,5 @@
 use crate::{ExitObservation, ProviderEvent, ProviderOutcome, StreamState};
-use provenant_confinement::permissions::ConfinedLaunch;
+use provenant_confinement::ConfinedPlan;
 use provenant_records::ResolvedRoute;
 use serde::{Deserialize, Serialize};
 
@@ -72,11 +72,11 @@ impl Prompt {
     }
 }
 
-/// ConfinedLaunch is the current confinement-owned compiled profile. No provider
-/// can turn it into a launch until activation evidence is available.
+/// Frozen confinement policy, compiled before launch by the composition edge.
+/// No provider can launch until activation evidence is available.
 pub struct PrepareInput<'a> {
     pub route: &'a ResolvedRoute,
-    pub confined: &'a ConfinedLaunch,
+    pub confined: &'a ConfinedPlan,
     pub prompt: &'a Prompt,
     pub continuation: Option<&'a Continuation>,
     pub grant_digest: &'a str,

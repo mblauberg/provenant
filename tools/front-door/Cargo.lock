@@ -540,6 +540,7 @@ name = "provenant-providers"
 version = "0.1.0"
 dependencies = [
  "provenant-confinement",
+ "provenant-core",
  "provenant-quota",
  "provenant-records",
  "serde",

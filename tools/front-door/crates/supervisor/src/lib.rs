@@ -6,6 +6,7 @@
 pub mod clock;
 pub mod exec;
 pub mod fs;
+pub mod home;
 mod identity;
 pub mod pid;
 // This is the sole syscall boundary, including nonblocking child/lock waits.
