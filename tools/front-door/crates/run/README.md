@@ -45,8 +45,9 @@ provider timing and unknown route observations. Its iterator snapshots the
 upper sequence and reads at most 64 IDs per page, surfacing read/validation
 errors. `record`, `run`, `operation`, `events` and `work_snapshot` provide the
 other scoped reads. Workspace selection is refused until the confinement
-association exists. Work snapshots currently describe stored nonterminal work;
-lease/custody observations and durable cursor acknowledgement land with controls.
+association exists. Work snapshots describe stored nonterminal work only;
+`reconcile` observes custody directly, and durable cursor acknowledgement
+arrives with the Fabric facade binding.
 
 `read_output` supports sealed prompt and result bytes, and the attempt's
 stderr capture, with exact offsets,
@@ -89,5 +90,16 @@ attestations so custody can clear. The holder context carries a `RootSeed`
 because the guardian's environment is cleared. The design's "Decisions taken
 in steps 2+3" lists the limits and deferrals.
 
+## Controls
+
+`cancel` withdraws queued work or asks the attempt's guardian to stop.
+`resume` accepts a continuation of one terminal attempt as a new run, once
+per attempt, and `start` hands the prior attempt to `Providers::prepare` so
+the exact session is continued. `reconcile` commits durable exits, withdraws
+launches that provably never reached a guardian, and reports anything else as
+held or uncertain without touching it. `open_runs` lists runs with
+nonterminal work for a recovery scan.
+
 Tests use fake providers and resources at this boundary. The CLI composes the
-production provider registry and the `dispatch`, `lanes` and `output` leaves.
+production provider registry and the `dispatch`, `lanes`, `output`, `cancel`,
+`resume`, `reconcile` and `telemetry stats` leaves.

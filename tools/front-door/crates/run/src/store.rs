@@ -208,15 +208,24 @@ impl RunStore {
                 let taken = tx.execute("INSERT INTO continuations(target,run) VALUES (?1,?2) ON CONFLICT DO NOTHING", params![target.to_string(), input.run_id.to_string()])?;
                 if taken != 1 { return Err(RunError::Conflict); }
             }
+            // A continuation is the next attempt of the prior task.
+            let number: i64 = match input.request.parent {
+                None => 1,
+                Some(target) => {
+                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
+                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
+                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
+                }
+            };
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
-                    schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: 1, revision: 1, generation: 0,
+                    schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
-                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,1,1,0,?5)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), bytes(&attempt)?])?;
+                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
                 self.queue_ticket(tx, &attempt, input.request.concurrency, waves.saturating_mul(task.provider_timeout_seconds))?;

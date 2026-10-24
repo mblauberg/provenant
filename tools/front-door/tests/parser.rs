@@ -21,7 +21,7 @@ fn invalid_json_is_an_envelope_and_unbuilt_owners_never_succeed() -> Result {
 }
 
 #[test]
-fn run_leaves_accept_work_and_refuse_unactivated_providers_per_task() -> Result {
+fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let state = rig.state.to_string_lossy().into_owned();
@@ -63,6 +63,50 @@ fn run_leaves_accept_work_and_refuse_unactivated_providers_per_task() -> Result 
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["text"], "hello");
+
+    let cancel = rig.command(&["cancel", &attempt, "--operation-id", "stop", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&cancel.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["receipts"][0]["receipt"]["state"],
+        "already_terminal"
+    );
+    // Providers expose no sessions yet, so a continuation is refused per task.
+    let resume = [
+        "--state-dir",
+        &state,
+        "resume",
+        &attempt,
+        "--prompt-stdin",
+        "--operation-id",
+        "again",
+        "--json",
+    ];
+    let out = rig.execute(binary, &resume, Some(b"more"))?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(value["data"]["lanes"][0]["state"], "rejected");
+    assert_eq!(value["data"]["resumed_from"], lane["attempt_id"]);
+    let reconcile = rig.command(&["reconcile", "--json"])?;
+    assert_eq!(code(&reconcile), 0);
+    let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;
+    assert_eq!(value["data"]["runs"], serde_json::json!([]));
+    // Prices ship as a reviewed product asset beside the binary.
+    std::fs::create_dir_all(rig.project.join("config"))?;
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/telemetry-prices.toml"
+        ),
+        rig.project.join("config/telemetry-prices.toml"),
+    )?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(
+        code(&stats),
+        0,
+        "{}",
+        String::from_utf8_lossy(&stats.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert_eq!(value["data"]["totals"]["attempts"], 2);
     rig.assert_legacy_unchanged()
 }
 
@@ -265,7 +309,18 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         if leaf == ["root"]
             || matches!(
                 leaf.first(),
-                Some(&"quota" | &"route" | &"worktree" | &"dispatch" | &"lanes" | &"output")
+                Some(
+                    &"quota"
+                        | &"route"
+                        | &"worktree"
+                        | &"dispatch"
+                        | &"lanes"
+                        | &"output"
+                        | &"cancel"
+                        | &"resume"
+                        | &"reconcile"
+                        | &"telemetry"
+                )
             )
         {
             continue;

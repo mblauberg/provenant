@@ -366,6 +366,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let next = AttemptId::from_bytes([21; 16]);
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
+    assert_eq!(record.attempt_number, 2);
     assert_eq!(
         record.requested_route,
         store.record(prior, &call)?.requested_route

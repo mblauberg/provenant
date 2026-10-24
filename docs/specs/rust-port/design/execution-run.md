@@ -743,6 +743,37 @@ scheduler daemon. Within that, the lane decided:
 - **The guardian re-resolves the state root** from a `RootSeed` in the holder
   context, because its environment is cleared.
 
+### Decisions taken in steps 4+5
+
+- **Cancel** ends queued work at once as `cancelled`, with the caller's reason.
+  Started work gets a supervisor stop request, and its guardian maps the exit
+  to `cancelled`; a guardian still waiting for admission sees `cancel.json`,
+  publishes a never-spawned exit and the attempt becomes `cancelled`. The
+  receipt says requested, not exited. An attempt with no launch summary is
+  reported as unobservable for `reconcile`. Cancellation is naturally
+  idempotent, so the operation ID is echoed, not stored.
+- **Resume** creates a new single-task run whose attempt is the next attempt
+  number of the prior task, with `retry_of` set and route, access and timeout
+  copied from it. Each terminal attempt can be continued once: a
+  `continuations` table enforces it and the CLI sends expected generation 0.
+  The provider seam receives the prior attempt and must continue its exact
+  session; no provider exposes sessions yet, so production `prepare` refuses
+  every continuation task-locally instead of starting a fresh one.
+- **Reconcile** observes each nonterminal attempt through supervisor custody.
+  A durable exit is committed through the same `finish` path as the guardian
+  and its settlement published; a starting attempt without a launch summary,
+  whose reservation is provably absent and which has no exit, is withdrawn as
+  `rejected`; queued work is started; everything else stays fenced and is
+  reported as held or uncertain. Accepting lost custody
+  (`--abandon-uncertain`) is refused as unsupported until its evidence rules
+  are designed. Reader fences on terminal attempts stay, because attempt
+  directories are never reused.
+- **Telemetry stats** reads this project's terminal attempt facts and prices
+  them from the reviewed `config/telemetry-prices.toml` product asset.
+  Cross-project totals are out of scope for this slice.
+- **Fabric's facade** binds to these leaves after the Fabric binding lands;
+  the run-directory cut already landed with the Python removal.
+
 Supervisor/confinement must accept the holder and writer-reservation protocol
 before step 2; Fabric must accept event reconciliation and continuation before
 step 5. These are owner acceptance conditions,
