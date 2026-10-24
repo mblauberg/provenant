@@ -45,9 +45,6 @@ pub struct Usage {
     pub reasoning: Option<u64>,
 }
 
-/// Compatibility name for consumers of the original attempt projection.
-pub type UsageCounts = Usage;
-
 /// Evidence supporting reviewer attribution, as required by workflow policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

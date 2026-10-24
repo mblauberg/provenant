@@ -24,6 +24,8 @@ pub enum RoutingError {
     UnknownRoute,
     #[error("route is not permitted for confidential input")]
     ConfidentialModel,
+    #[error("no eligible pool member: {exclusions:?}")]
+    NoEligiblePoolMember { exclusions: Vec<String> },
     #[error("effort is not supported by recorded model controls")]
     UnsupportedEffort,
     #[error("invalid catalogue")]
