@@ -150,7 +150,7 @@ fn legacy_tools_list_omits_modern_output_schemas() {
     let Action::Reply(initialized) = protocol.receive(
         br#"{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}"#,
     ) else {
-        panic!("expected legacy initialization")
+        panic!("expected legacy initialisation")
     };
     assert_eq!(initialized["result"]["protocolVersion"], LEGACY);
     protocol.receive(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);

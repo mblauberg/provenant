@@ -48,7 +48,7 @@ fn fixture() -> Result {
         );
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
-            json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1,"output_tokens":1}}}),
+            json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1,"output_tokens":1}}}),
             json!({"type":"result","session_id":"fixture-session","subtype":"success","is_error":false}),
         ] {
             writeln!(io::stdout(), "{frame}")?;
@@ -216,7 +216,7 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","model":"claude/claude-sonnet-5","effort":"low","account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[
@@ -252,7 +252,7 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     }
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(lane["account"], "pro");
-    assert_eq!(lane["observed_route"]["model"], "claude/claude-sonnet-5");
+    assert_eq!(lane["observed_route"]["model"], "claude/claude-sonnet-5-5");
     assert!(account.join("refreshed").exists());
     let attempt = rig
         .state
