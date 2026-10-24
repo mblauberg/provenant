@@ -335,7 +335,6 @@ pub(crate) fn resolve_dispatch(
                 let admission = provenant_quota::Admission {
                     now_unix_seconds,
                     records,
-                    refusals: &[],
                     pools: &pools,
                 };
                 if let Err(error) = admission.check(&resolved) {
@@ -461,7 +460,6 @@ pub(crate) fn check_dispatch_candidate(
     provenant_quota::Admission {
         now_unix_seconds: jiff::Timestamp::now().as_second(),
         records: &crate::quota::read_cache(roots).map_err(|e| e.to_string())?,
-        refusals: &[],
         pools: &pools,
     }
     .check(route)
