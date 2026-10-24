@@ -12,7 +12,6 @@ mod spans;
 
 pub const MAX_RULE_BYTES: usize = 64 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
-const MAX_RULES: usize = 256;
 const MAX_FINDINGS: usize = 65_536;
 #[derive(Debug, Error)]
 pub enum WritingError {
@@ -38,7 +37,7 @@ pub enum RuleSet {
     Legal,
 }
 impl RuleSet {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::General => "general",
             Self::Academic => "academic",
@@ -104,13 +103,6 @@ enum Kind {
     HeadingGap,
     SentenceWords,
 }
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ExclusionCheck {
-    #[default]
-    WholeMatch,
-    Start,
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Rule {
@@ -123,15 +115,11 @@ struct Rule {
     #[serde(default)]
     case_insensitive: bool,
     #[serde(default)]
-    word_boundary: bool,
-    #[serde(default)]
     except_matches: Vec<String>,
     #[serde(default)]
     reject_adjacent: Option<char>,
     #[serde(default)]
     words: usize,
-    #[serde(default)]
-    exclusion_check: ExclusionCheck,
 }
 struct CompiledRule {
     data: Rule,
@@ -143,16 +131,15 @@ pub struct Matcher {
     exclusions: Exclusions,
     excluded_patterns: Vec<Regex>,
     latex: bool,
+    markdown: bool,
     quoted_paths: Vec<String>,
     skip_files: Vec<String>,
 }
 fn compile(pattern: &str, insensitive: bool) -> Result<Regex, WritingError> {
-    if pattern.len() > 4096 {
-        return Err(WritingError::RulesLimit);
-    }
     RegexBuilder::new(pattern)
         .case_insensitive(insensitive)
         .multi_line(true)
+        .crlf(true)
         .size_limit(1024 * 1024)
         .dfa_size_limit(1024 * 1024)
         .nest_limit(64)
@@ -166,7 +153,7 @@ impl Matcher {
             return Err(WritingError::RulesLimit);
         }
         let mut bundle: Bundle = serde_json::from_slice(bytes).map_err(|_| WritingError::Rules)?;
-        if bundle.version != 1 || bundle.sets.len() > 3 {
+        if bundle.version != 1 {
             return Err(WritingError::Rules);
         }
         let set = bundle
@@ -178,36 +165,11 @@ impl Matcher {
             .into_iter()
             .chain(set.rules)
             .collect::<Vec<_>>();
-        if all_rules.is_empty() || all_rules.len() > MAX_RULES {
+        if all_rules.is_empty() {
             return Err(WritingError::RulesLimit);
         }
         let ex = &bundle.exclusions;
-        if ex.regex.len() > 32
-            || ex.latex_commands.len() > 128
-            || ex.latex_environments.len() > 32
-            || ex.verbatim_commands.len() > 32
-            || ex.math_delimiters.len() > 16
-            || set.quoted_example_paths.len() > 32
-            || set.skip_files.len() > 32
-        {
-            return Err(WritingError::RulesLimit);
-        }
-        if ex
-            .latex_commands
-            .iter()
-            .chain(&ex.latex_environments)
-            .chain(&ex.verbatim_commands)
-            .any(|s| s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_alphabetic()))
-            || ex
-                .math_delimiters
-                .iter()
-                .flatten()
-                .any(|s| s.is_empty() || s.len() > 16)
-            || set
-                .quoted_example_paths
-                .iter()
-                .any(|s| s.is_empty() || s.starts_with('/') || s.split('/').any(|s| s == ".."))
-        {
+        if ex.math_delimiters.iter().flatten().any(String::is_empty) {
             return Err(WritingError::Rules);
         }
         let excluded_patterns = ex
@@ -218,17 +180,7 @@ impl Matcher {
         let mut ids = BTreeSet::new();
         let mut rules = Vec::new();
         for data in all_rules {
-            if data.id.is_empty()
-                || data.id.len() > 80
-                || !data
-                    .id
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c))
-                || !ids.insert(data.id.clone())
-                || data.message.is_empty()
-                || data.message.len() > 512
-                || data.except_matches.len() > 16
-            {
+            if data.id.is_empty() || !ids.insert(data.id.clone()) || data.message.is_empty() {
                 return Err(WritingError::Rules);
             }
             let pattern = match data.kind {
@@ -245,11 +197,7 @@ impl Matcher {
                     Some(compile(&data.pattern, data.case_insensitive)?)
                 }
                 Kind::HeadingGap if data.pattern.is_empty() => None,
-                Kind::SentenceWords
-                    if data.pattern.is_empty() && (1..=1000).contains(&data.words) =>
-                {
-                    None
-                }
+                Kind::SentenceWords if data.pattern.is_empty() && data.words > 0 => None,
                 _ => return Err(WritingError::Rules),
             };
             if pattern.as_ref().is_some_and(|p| p.is_match("")) {
@@ -271,6 +219,7 @@ impl Matcher {
             exclusions: bundle.exclusions,
             excluded_patterns,
             latex: set.latex,
+            markdown: selected != RuleSet::Legal,
             quoted_paths: set.quoted_example_paths,
             skip_files: set.skip_files,
         })
@@ -282,20 +231,17 @@ impl Matcher {
         let path = path
             .to_str()
             .ok_or(WritingError::Invalid("path is not UTF-8"))?;
-        if self.skip_files.iter().any(|s| {
-            Path::new(path)
-                .file_name()
-                .is_some_and(|n| n.eq_ignore_ascii_case(s))
-        }) {
-            return Ok(Vec::new());
-        }
         let quoted = self.quoted_paths.iter().any(|p| path.starts_with(p));
         let latex = self.latex
             && matches!(
                 Path::new(path).extension().and_then(|x| x.to_str()),
                 Some("tex" | "latex" | "sty" | "cls")
             );
-        let excluded = spans::excluded(self, text, latex, quoted);
+        let excluded = if self.markdown || quoted {
+            spans::excluded(self, text, latex, quoted)
+        } else {
+            vec![false; text.len()]
+        };
         let mut findings = Vec::new();
         let line_starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
@@ -352,14 +298,7 @@ impl Matcher {
                 }
             }
             for range in hits {
-                let ignored = if rule.data.kind == Kind::SentenceWords
-                    || matches!(rule.data.exclusion_check, ExclusionCheck::Start)
-                {
-                    excluded.get(range.start).copied().unwrap_or(false)
-                } else {
-                    excluded[range.clone()].iter().any(|b| *b)
-                };
-                if ignored {
+                if excluded.get(range.start).copied().unwrap_or(false) {
                     continue;
                 }
                 let matched = &text[range.clone()];
@@ -368,7 +307,7 @@ impl Matcher {
                 }
                 let before = text[..range.start].chars().next_back();
                 let after = text[range.end..].chars().next();
-                if rule.data.word_boundary
+                if rule.data.kind == Kind::Literal
                     && (before.is_some_and(|c| c.is_ascii_alphabetic())
                         || after.is_some_and(|c| c.is_ascii_alphabetic()))
                 {
@@ -380,9 +319,6 @@ impl Matcher {
                     .is_some_and(|c| before == Some(c) || after == Some(c))
                 {
                     continue;
-                }
-                if findings.len() >= MAX_FINDINGS {
-                    return Err(WritingError::EvidenceLimit);
                 }
                 let index = line_starts.partition_point(|start| *start <= range.start) - 1;
                 findings.push(Finding {

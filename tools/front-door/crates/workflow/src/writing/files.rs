@@ -62,9 +62,13 @@ pub fn inspect(
         findings: Vec::new(),
         evidence: vec![(asset.to_owned(), bytes)],
     };
-    let mut seen = BTreeSet::new();
-    let mut total = 0;
-    let mut visited = 0;
+    let mut scan = Scan {
+        matcher: &matcher,
+        result: &mut inspection,
+        seen: BTreeSet::new(),
+        total: 0,
+        visited: 0,
+    };
     for path in paths {
         let (dir, name) = parent(project, &path).map_err(|error| match error {
             WritingError::Io(ref e) if e.is_not_found() => {
@@ -72,19 +76,9 @@ pub fn inspect(
             }
             _ => error,
         })?;
-        visit(
-            &matcher,
-            &dir,
-            &name,
-            &path,
-            0,
-            &mut inspection,
-            &mut seen,
-            &mut total,
-            &mut visited,
-        )?;
+        scan.visit(&dir, &name, &path)?;
     }
-    if seen.is_empty() {
+    if scan.seen.is_empty() {
         return Err(WritingError::Invalid("no writing files resolved"));
     }
     inspection.findings.sort_by(|a, b| {
@@ -97,88 +91,81 @@ pub fn inspect(
     });
     Ok(inspection)
 }
-#[allow(clippy::too_many_arguments)]
-fn visit(
-    matcher: &Matcher,
-    dir: &Directory,
-    name: &OsStr,
-    path: &Path,
-    depth: usize,
-    result: &mut Inspection,
-    seen: &mut BTreeSet<PathBuf>,
-    total: &mut usize,
-    visited: &mut usize,
-) -> Result<(), WritingError> {
-    *visited += 1;
-    if depth > 64 || *visited > 4096 {
-        return Err(WritingError::EvidenceLimit);
-    }
-    let metadata = dir.metadata_at(name, false).map_err(|e| {
-        if e.is_not_found() {
-            WritingError::Invalid("input path does not exist")
-        } else {
-            e.into()
+struct Scan<'a> {
+    matcher: &'a Matcher,
+    result: &'a mut Inspection,
+    seen: BTreeSet<PathBuf>,
+    total: usize,
+    visited: usize,
+}
+impl Scan<'_> {
+    fn visit(&mut self, dir: &Directory, name: &OsStr, path: &Path) -> Result<(), WritingError> {
+        self.visited += 1;
+        if self.visited > 4096 {
+            return Err(WritingError::EvidenceLimit);
         }
-    })?;
-    match metadata.kind {
-        FileKind::Directory => {
-            let child = dir.open_verified_directory(name)?;
-            let mut names = Vec::new();
-            for entry in child.entries()? {
-                names.push(entry?);
-                if names.len() > 4096 {
-                    return Err(WritingError::EvidenceLimit);
+        let metadata = dir.metadata_at(name, false).map_err(|e| {
+            if e.is_not_found() {
+                WritingError::Invalid("input path does not exist")
+            } else {
+                e.into()
+            }
+        })?;
+        match metadata.kind {
+            FileKind::Directory => {
+                let child = dir.open_verified_directory(name)?;
+                let mut names = Vec::new();
+                for entry in child.entries()? {
+                    names.push(entry?);
+                }
+                names.sort();
+                for name in names {
+                    let path = path.join(&name);
+                    let kind = child.metadata_at(&name, false)?.kind;
+                    if kind == FileKind::Directory
+                        || matches!(
+                            path.extension().and_then(|s| s.to_str()),
+                            Some("md" | "markdown" | "tex" | "latex" | "sty" | "cls" | "txt")
+                        )
+                    {
+                        self.visit(&child, &name, &path)?;
+                    }
                 }
             }
-            names.sort();
-            for name in names {
-                let path = path.join(&name);
-                let kind = child.metadata_at(&name, false)?.kind;
-                if kind == FileKind::Directory
-                    || matches!(
-                        path.extension().and_then(|s| s.to_str()),
-                        Some("md" | "markdown" | "tex" | "latex" | "sty" | "cls" | "txt")
-                    )
+            FileKind::Regular => {
+                if self
+                    .matcher
+                    .skip_files
+                    .iter()
+                    .any(|s| path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(s)))
+                    || !self.seen.insert(path.to_owned())
                 {
-                    visit(
-                        matcher,
-                        &child,
-                        &name,
-                        &path,
-                        depth + 1,
-                        result,
-                        seen,
-                        total,
-                        visited,
-                    )?;
+                    return Ok(());
                 }
-            }
-        }
-        FileKind::Regular => {
-            if !seen.insert(path.to_owned()) {
-                return Ok(());
-            }
-            if seen.len() > MAX_FILES {
-                return Err(WritingError::EvidenceLimit);
-            }
-            let bytes = dir.read_bounded(name, MAX_TEXT_BYTES as u64)?;
-            *total += bytes.len();
-            if *total > MAX_TOTAL {
-                return Err(WritingError::EvidenceLimit);
-            }
-            let text = std::str::from_utf8(&bytes).map_err(|_| WritingError::Encoding)?;
-            for finding in matcher.scan(path, text)? {
-                if result.findings.len() >= MAX_FINDINGS {
+                if self.seen.len() > MAX_FILES {
                     return Err(WritingError::EvidenceLimit);
                 }
-                result.findings.push(FileFinding {
-                    path: path.to_owned(),
-                    finding,
-                });
+                let bytes = dir.read_bounded(name, MAX_TEXT_BYTES as u64)?;
+                self.total += bytes.len();
+                if self.total > MAX_TOTAL {
+                    return Err(WritingError::EvidenceLimit);
+                }
+                let text = std::str::from_utf8(&bytes).map_err(|_| WritingError::Encoding)?;
+                self.result
+                    .findings
+                    .extend(self.matcher.scan(path, text)?.into_iter().map(|finding| {
+                        FileFinding {
+                            path: path.to_owned(),
+                            finding,
+                        }
+                    }));
+                if self.result.findings.len() > MAX_FINDINGS {
+                    return Err(WritingError::EvidenceLimit);
+                }
+                self.result.evidence.push((path.to_owned(), bytes));
             }
-            result.evidence.push((path.to_owned(), bytes));
+            _ => return Err(WritingError::Evidence),
         }
-        _ => return Err(WritingError::Evidence),
+        Ok(())
     }
-    Ok(())
 }

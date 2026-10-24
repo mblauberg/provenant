@@ -40,10 +40,11 @@ pub(super) fn excluded(matcher: &Matcher, text: &str, latex: bool, quoted: bool)
     let mut fence: Option<(u8, usize)> = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start_matches([' ', '\t']);
+        let trimmed = line.trim_start_matches(' ');
         let marker = trimmed.as_bytes().first().copied().unwrap_or(0);
         let width = trimmed.bytes().take_while(|b| *b == marker).count();
-        let delimiter = matches!(marker, b'`' | b'~') && width >= 3;
+        let delimiter =
+            line.len() - trimmed.len() <= 3 && matches!(marker, b'`' | b'~') && width >= 3;
         if let Some((opening, count)) = fence {
             mask[offset..offset + line.len()].fill(true);
             if delimiter
@@ -53,7 +54,7 @@ pub(super) fn excluded(matcher: &Matcher, text: &str, latex: bool, quoted: bool)
             {
                 fence = None;
             }
-        } else if delimiter {
+        } else if delimiter && !trimmed[width..].contains(&trimmed[..width]) {
             fence = Some((marker, width));
             mask[offset..offset + line.len()].fill(true);
         } else if quoted && trimmed.starts_with('>') {
@@ -71,7 +72,7 @@ pub(super) fn excluded(matcher: &Matcher, text: &str, latex: bool, quoted: bool)
         if bytes[i] == b'`' && !esc[i] {
             let count = bytes[i..].iter().take_while(|b| **b == b'`').count();
             let mut end = i + count;
-            while end < bytes.len() {
+            while end < bytes.len() && bytes[end] != b'\n' {
                 if bytes[end] == b'`' {
                     let width = bytes[end..].iter().take_while(|b| **b == b'`').count();
                     if width == count {

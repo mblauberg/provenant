@@ -280,9 +280,8 @@ comprehension-blocking density, in that order.
 
 Follow the hub condense procedure and stop rule. Two additions:
 
-- The checker's `--wordcount` mode ignores macros, labels and math when counting
-  prose words, so the reported count matches what an examiner reads rather than
-  the source markup. Report words before and after plus the percentage cut.
+- Count prose words with macros, labels and maths excluded. Report words before
+  and after plus the percentage cut.
 - Lock every referenced `\label`, every citation key, every result macro and
   every cross-reference target before condensing, and verify each survives in
   its new home by grep, not by re-reading for a feeling of completeness.

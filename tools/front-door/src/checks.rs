@@ -119,19 +119,23 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
 #[serde(untagged)]
 enum Inspection {
     Check(CheckPage),
-    Writing(CheckPage<provenant_workflow::writing::FileFinding>),
+    Writing {
+        #[serde(flatten)]
+        page: CheckPage<provenant_workflow::writing::FileFinding>,
+        blockers: usize,
+    },
 }
 impl Inspection {
     fn outcome(&self) -> Outcome {
         match self {
             Self::Check(p) => p.outcome(),
-            Self::Writing(p) => p.outcome(),
+            Self::Writing { page, .. } => page.outcome(),
         }
     }
     fn human(&self) -> Result<String, serde_json::Error> {
         match self {
             Self::Check(p) => p.human(),
-            Self::Writing(p) => {
+            Self::Writing { page: p, blockers } => {
                 let mut text = String::new();
                 for row in &p.findings {
                     let f = &row.finding;
@@ -145,7 +149,7 @@ impl Inspection {
                         f.message
                     ));
                 }
-                text.push_str(&format!("{} finding(s)\n", p.count));
+                text.push_str(&format!("{} finding(s), {blockers} blocker(s)\n", p.count));
                 if let Some(cursor) = &p.next_cursor {
                     text.push_str(&format!("next cursor: {cursor}\n"));
                 }
@@ -186,12 +190,20 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 )
             })
             .collect();
-        return Ok(Inspection::Writing(provenant_cli::check::findings_page(
-            inspection.findings,
-            evidence,
-            ("writing", set_name(rules), selector),
-            &page,
-        )?));
+        let blockers = inspection
+            .findings
+            .iter()
+            .filter(|f| f.finding.severity == writing::Severity::Blocker)
+            .count();
+        return Ok(Inspection::Writing {
+            blockers,
+            page: provenant_cli::check::findings_page(
+                inspection.findings,
+                evidence,
+                ("writing", set.name(), selector),
+                &page,
+            )?,
+        });
     }
     let page = match check {
         Inspectable::Writing { .. } => return Err(CheckError::Invalid("writing selector").into()),
@@ -258,13 +270,6 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         }
     }?;
     Ok(Inspection::Check(page))
-}
-fn set_name(rules: provenant_cli::Rules) -> &'static str {
-    match rules {
-        provenant_cli::Rules::General => "general",
-        provenant_cli::Rules::Academic => "academic",
-        provenant_cli::Rules::Legal => "legal",
-    }
 }
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
     let temp = fs::canonicalize(Path::new("/tmp"))?;

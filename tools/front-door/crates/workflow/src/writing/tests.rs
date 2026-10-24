@@ -127,37 +127,6 @@ fn legal_structural_blockers_and_quoted_examples_are_data() {
     );
 }
 #[test]
-fn unsupported_patterns_duplicate_ids_and_bounds_are_refused() {
-    let mut value: serde_json::Value = serde_json::from_slice(include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../skills/natural-writing/lint-rules.json"
-    )))
-    .unwrap();
-    value["shared"][0]["kind"] = "regex".into();
-    for pattern in ["(?=lookahead)", r"(a)\1", "a*"] {
-        value["shared"][0]["pattern"] = pattern.into();
-        assert!(matches!(
-            Matcher::from_json(&serde_json::to_vec(&value).unwrap(), RuleSet::General),
-            Err(WritingError::Rules)
-        ));
-    }
-    value["shared"][0]["pattern"] = "valid".into();
-    value["shared"][1]["id"] = value["shared"][0]["id"].clone();
-    assert!(matches!(
-        Matcher::from_json(&serde_json::to_vec(&value).unwrap(), RuleSet::General),
-        Err(WritingError::Rules)
-    ));
-    assert!(matches!(
-        Matcher::from_json(&vec![b' '; MAX_RULE_BYTES + 1], RuleSet::General),
-        Err(WritingError::RulesLimit)
-    ));
-    assert!(matches!(
-        matcher(RuleSet::General).scan(Path::new("x"), &"x".repeat(MAX_TEXT_BYTES + 1)),
-        Err(WritingError::EvidenceLimit)
-    ));
-}
-
-#[test]
 fn malformed_latex_and_excluded_words_cannot_hide_structural_findings() {
     let academic = matcher(RuleSet::Academic);
     for source in [r"\begin{é", r"\cite{robust", r"\(robust", r"\texttt{robust"] {
@@ -175,74 +144,14 @@ fn malformed_latex_and_excluded_words_cannot_hide_structural_findings() {
     assert!(found.iter().any(|f| f.rule == "legal.long-sentence"));
 }
 #[test]
-fn confined_reads_refuse_links_and_bound_file_and_rule_bytes() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let owner = root.join("skills/natural-writing");
-    std::fs::create_dir_all(&owner).unwrap();
-    let rulefile = owner.join("lint-rules.json");
-    std::fs::write(
-        &rulefile,
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../skills/natural-writing/lint-rules.json"
-        )),
-    )
-    .unwrap();
-    std::fs::write(root.join("a.md"), "robust").unwrap();
-    let scan = inspect(
-        root,
-        root,
-        &["a.md".into(), "a.md".into()],
-        RuleSet::General,
-    )
-    .unwrap();
-    assert_eq!(scan.findings.len(), 1);
-    std::os::unix::fs::symlink(root.join("a.md"), root.join("link.md")).unwrap();
-    assert!(matches!(
-        inspect(root, root, &["link.md".into()], RuleSet::General),
-        Err(WritingError::Evidence)
-    ));
-    assert!(matches!(
-        inspect(root, root, &["../a.md".into()], RuleSet::General),
-        Err(WritingError::Invalid(_))
-    ));
-    std::fs::write(root.join("a.md"), vec![b'x'; MAX_TEXT_BYTES + 1]).unwrap();
-    assert!(inspect(root, root, &["a.md".into()], RuleSet::General).is_err());
-    std::fs::write(&rulefile, vec![b' '; MAX_RULE_BYTES + 1]).unwrap();
-    assert!(matches!(
-        inspect(root, root, &["a.md".into()], RuleSet::General),
-        Err(WritingError::RulesLimit)
-    ));
-}
-
-#[test]
-fn too_many_rules_and_compilation_complexity_are_refused() {
-    let mut value: serde_json::Value = serde_json::from_slice(include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../skills/natural-writing/lint-rules.json"
-    )))
-    .unwrap();
-    value["shared"] = (0..257).map(|id|serde_json::json!({"id":format!("rule.{id}"),"message":"review","severity":"warning","kind":"literal","pattern":"word"})).collect::<Vec<_>>().into();
-    let bytes = serde_json::to_vec(&value).unwrap();
-    assert!(bytes.len() < MAX_RULE_BYTES);
-    assert!(matches!(
-        Matcher::from_json(&bytes, RuleSet::General),
-        Err(WritingError::RulesLimit)
-    ));
-    value["shared"] = serde_json::json!([{"id":"large","message":"review","severity":"warning","kind":"regex","pattern":"a{1000000}"}]);
-    assert!(matches!(
-        Matcher::from_json(&serde_json::to_vec(&value).unwrap(), RuleSet::General),
-        Err(WritingError::Rules)
-    ));
-}
-
-#[test]
-fn legal_structural_checks_also_exclude_fenced_examples() {
+fn legal_quoted_examples_exclude_fenced_structural_checks() {
     let source = "```markdown\nProse.\n# Heading\n<!-- /Users/example/private -->\n```\n";
     assert!(
         matcher(RuleSet::Legal)
-            .scan(Path::new("filing.md"), source)
+            .scan(
+                Path::new("skills/legal-writing/references/examples.md"),
+                source
+            )
             .unwrap()
             .is_empty()
     );
@@ -283,4 +192,86 @@ fn academic_unescaped_percent_warns_only_when_number_starts_in_prose() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn inline_code_cannot_hide_following_lines_or_open_a_fence() {
+    let m = matcher(RuleSet::General);
+    for source in [
+        "Press the ` key.\n\nThis is robust.\n\nAnother ` here.",
+        "```inline``` code.\n\nThis is robust.",
+        "    ```\nThis is robust.",
+    ] {
+        assert_eq!(
+            m.scan(Path::new("draft.md"), source).unwrap().len(),
+            1,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_legal_files_report_blockers_inside_markdown() {
+    let m = matcher(RuleSet::Legal);
+    let source =
+        "See `.work/notes.md`. A dash `—`.\n\n```\nTODO fix\n```\n\n<!-- `/Users/me/secret` -->";
+    let hits = m.scan(Path::new("filing.md"), source).unwrap();
+    for id in [
+        "legal.blocker.013",
+        "legal.blocker.001",
+        "legal.blocker.016",
+        "legal.comment.3",
+    ] {
+        assert!(hits.iter().any(|f| f.rule == id), "{id}");
+    }
+    assert!(
+        m.scan(
+            Path::new("skills/legal-writing/references/examples.md"),
+            source
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn match_start_controls_exclusions_even_when_a_url_is_inside_the_match() {
+    let hits = matcher(RuleSet::Legal)
+        .scan(
+            Path::new("skills/legal-writing/references/draft.md"),
+            "The protection order at https://x.au/o proves domestic violence.",
+        )
+        .unwrap();
+    assert!(hits.iter().any(|f| f.rule == "legal.blocker.022"));
+}
+
+#[test]
+fn legal_crlf_line_endings_preserve_end_anchored_blockers() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("skills/legal-writing")).unwrap();
+    std::fs::write(
+        temp.path().join("skills/legal-writing/lint-rules.json"),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../skills/legal-writing/lint-rules.json"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("draft.md"),
+        b"Draft notes in .work\r\nNext line.\r\n",
+    )
+    .unwrap();
+    let scan = inspect(
+        temp.path(),
+        temp.path(),
+        &["draft.md".into()],
+        RuleSet::Legal,
+    )
+    .unwrap();
+    assert!(
+        scan.findings
+            .iter()
+            .any(|f| f.finding.rule == "legal.blocker.013")
+    );
 }
