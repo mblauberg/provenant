@@ -22,7 +22,7 @@ pub fn decide_switch<'a>(
     let threshold = threshold_percent * 100;
     if automatic {
         let Some(current) = current.filter(|s| fresh(s, now)) else {
-            return SwitchDecision::Refuse("current account quota is missing or stale");
+            return SwitchDecision::Stay;
         };
         if !current.windows.iter().any(|w| {
             relevant(&w.pool)
@@ -144,9 +144,6 @@ mod tests {
             ),
             SwitchDecision::Refuse(_)
         ));
-    }
-    #[test]
-    fn chair_switch_refuses_unknown_stale_partial_and_full_targets() {
         let hot = snapshot(9200, 100);
         let mut stale = snapshot(100, 100);
         stale.observed_unix_seconds = 0;
@@ -166,9 +163,11 @@ mod tests {
             decide_switch(Some(&hot), &[], 92, 1001, true),
             SwitchDecision::Refuse(_)
         ));
-        assert!(matches!(
-            decide_switch(None, &targets, 92, 1001, true),
-            SwitchDecision::Refuse(_)
-        ));
+        for current in [None, Some(&stale)] {
+            assert_eq!(
+                decide_switch(current, &targets, 92, 1001, true),
+                SwitchDecision::Stay
+            );
+        }
     }
 }

@@ -32,8 +32,6 @@ struct Input {
     session_id: HostSessionId,
     cwd: PathBuf,
     transcript_path: Option<PathBuf>,
-    #[serde(default)]
-    prompt: Option<String>,
 }
 struct Context {
     roots: Roots,
@@ -43,7 +41,9 @@ struct Context {
 }
 impl Context {
     fn new(globals: &Globals, cwd: &Path) -> Result<Self, Error> {
+        terminal_path(cwd)?;
         let cwd = std::fs::canonicalize(cwd)?;
+        terminal_path(&cwd)?;
         if !cwd.is_dir() {
             return Err("working directory unavailable".into());
         }
@@ -119,6 +119,29 @@ fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
 fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
+fn terminal_path(path: &Path) -> Result<&str, Error> {
+    path.to_str()
+        .filter(|text| !text.chars().any(char::is_control))
+        .ok_or_else(|| "launch paths must be UTF-8 without control characters".into())
+}
+fn fixed_target(context: &Context, target: &RegisteredAccount) -> Result<(), Error> {
+    let rotating = context.home.join(".claude");
+    let rotating = std::fs::canonicalize(&rotating).unwrap_or(rotating);
+    if target.directory() == rotating {
+        return Err(
+            "~/.claude rotates between accounts; use a fixed ~/.claude-<label> target".into(),
+        );
+    }
+    Ok(())
+}
+fn check_time(deadline: Option<Instant>) -> Result<(), Error> {
+    if deadline
+        .is_some_and(|d| d.saturating_duration_since(Instant::now()) < Duration::from_secs(3))
+    {
+        return Err("hook deadline near; continuing without a switch".into());
+    }
+    Ok(())
+}
 fn command(
     context: &Context,
     target: &RegisteredAccount,
@@ -126,11 +149,13 @@ fn command(
 ) -> Result<String, Error> {
     // Supply these hooks to the new session even when the target has only its
     // own credentials/settings. No config directory contents are copied.
+    fixed_target(context, target)?;
+    let checkpoint = terminal_path(checkpoint)?;
     let executable = std::env::current_exe()?;
     let hook = |leaf: &str| -> Result<String, Error> {
         Ok(format!(
             "{} hook claude {leaf}",
-            quote(executable.to_str().ok_or("executable path is not UTF-8")?)
+            quote(terminal_path(&executable)?)
         ))
     };
     let settings = json!({"hooks":{
@@ -139,25 +164,13 @@ fn command(
     }});
     let prompt = format!(
         "Continue the chair handoff from checkpoint {}. Read it and its state/handoff file first. Inspect the listed Fabric lane IDs in the run store before acting; collect existing results and never re-run completed lanes. Preserve the originating authority limits.",
-        checkpoint.display()
+        checkpoint
     );
     Ok(format!(
         "cd {} && CLAUDE_CONFIG_DIR={} PROVENANT_STATE_DIR={} claude --settings {} {}",
-        quote(context.cwd.to_str().ok_or("cwd is not UTF-8")?),
-        quote(
-            target
-                .directory()
-                .to_str()
-                .ok_or("account directory is not UTF-8")?
-        ),
-        quote(
-            context
-                .roots
-                .state
-                .as_path()
-                .to_str()
-                .ok_or("state directory is not UTF-8")?
-        ),
+        quote(terminal_path(&context.cwd)?),
+        quote(terminal_path(target.directory())?),
+        quote(terminal_path(context.roots.state.as_path())?),
         quote(&settings.to_string()),
         quote(&prompt)
     ))
@@ -176,12 +189,13 @@ fn execute_herdr(args: &[OsString]) -> Result<Value, Error> {
     }
     Ok(serde_json::from_slice(&out.stdout.bytes)?)
 }
-fn launch(context: &Context, command: &str) -> Result<String, Error> {
+fn launch(context: &Context, command: &str, deadline: Option<Instant>) -> Result<String, Error> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1")
         || std::env::var_os("HERDR_PANE_ID").is_none()
     {
         return Err("not running in a Herdr-managed pane".into());
     }
+    check_time(deadline)?;
     let split = execute_herdr(&[
         "pane".into(),
         "split".into(),
@@ -196,6 +210,7 @@ fn launch(context: &Context, command: &str) -> Result<String, Error> {
         .pointer("/result/pane/pane_id")
         .and_then(Value::as_str)
         .ok_or("Herdr did not return the new pane ID")?;
+    check_time(deadline)?;
     execute_herdr(&["pane".into(), "run".into(), pane.into(), command.into()])?;
     Ok(pane.into())
 }
@@ -205,10 +220,8 @@ fn switch(
     to: Option<&str>,
     dry_run: bool,
     automatic: bool,
+    deadline: Option<Instant>,
 ) -> Result<Option<Value>, Error> {
-    if !dry_run && let Some(previous) = context.store().prepared(&input.session_id)? {
-        return Ok(Some(prepared_response(context, &previous)));
-    }
     let config = provenant_config::read_with_domains(
         &context.roots,
         &LocalFs,
@@ -217,6 +230,10 @@ fn switch(
     let knob = |name: &str| config.knobs.get(name).map(|k| &k.value);
     if automatic && knob("chair.auto_switch").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
+    }
+    check_time(deadline)?;
+    if !dry_run && let Some(previous) = context.store().prepared(&input.session_id)? {
+        return Ok(Some(prepared_response(context, &previous)));
     }
     let threshold = knob("chair.switch_threshold")
         .and_then(Value::as_u64)
@@ -227,11 +244,17 @@ fn switch(
     let accounts = crate::quota_live::registered_claude()?;
     let current = current(&accounts, &context.home)?;
     let snapshot = cached(&context.roots, current.key());
+    let mut rotating_target = false;
     let targets = allowed
         .iter()
         .filter_map(Value::as_str)
         .filter(|label| *label != current.key() && to.is_none_or(|to| to == *label))
         .filter_map(|label| accounts.iter().find(|a| a.key() == label))
+        .filter(|account| {
+            let fixed = fixed_target(context, account).is_ok();
+            rotating_target |= !fixed;
+            fixed
+        })
         .collect::<Vec<_>>();
     let snapshots = targets
         .iter()
@@ -242,26 +265,41 @@ fn switch(
         .zip(&snapshots)
         .map(|(a, s)| (a.key(), s.as_ref()))
         .collect::<Vec<_>>();
+    check_time(deadline)?;
     let decision = decide_switch(snapshot.as_ref(), &choices, threshold, now(), automatic);
     let (target, reason) = match decision {
-        SwitchDecision::Stay => return Ok(None),
+        SwitchDecision::Stay => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "chair switch: current quota below threshold or unavailable/stale; continuing"
+            );
+            return Ok(None);
+        }
         SwitchDecision::Switch(label) => (
             targets.iter().find(|a| a.key() == label).copied(),
             "quota-aware chair handoff",
         ),
-        SwitchDecision::Refuse(reason) => (None, reason),
+        SwitchDecision::Refuse(reason) => (
+            None,
+            if rotating_target {
+                "~/.claude rotates between accounts; use a fixed ~/.claude-<label> target"
+            } else {
+                reason
+            },
+        ),
     };
     let store = context.store();
+    if !dry_run && target.is_none() && store.recorded_refusal(&input.session_id)? {
+        return Ok(None);
+    }
     let path = store.path(&input.session_id);
+    terminal_path(&path)?;
     let mut handoff = Handoff {
         session_id: input.session_id.clone(),
         cwd: context.cwd.clone(),
         transcript_path: input.transcript_path.clone(),
         state_handoff_file: None,
-        next_step: input
-            .prompt
-            .as_ref()
-            .map(|text| text.chars().take(4000).collect()),
+        created_unix: now(),
         open_lanes: vec![],
         target_account: target.map(|a| a.key().into()),
         reason: reason.into(),
@@ -269,11 +307,13 @@ fn switch(
     };
     if dry_run {
         return Ok(Some(
-            json!({"dry_run":true,"target_account":handoff.target_account,"reason":reason,"checkpoint":path,"command":target.map(|a| command(context,a,&path)).transpose()?}),
+            json!({"outcome":if target.is_some() {"prepared"} else {"refused"},"dry_run":true,"target_account":handoff.target_account,"reason":reason,"checkpoint":path,"command":target.map(|a| command(context,a,&path)).transpose()?}),
         ));
     }
+    check_time(deadline)?;
     let (project, lanes) =
         provenant_cli::run::chair_snapshot(&context.edge()).map_err(|e| e.message)?;
+    check_time(deadline)?;
     handoff.open_lanes = lanes;
     if SessionStore::new(
         context.roots.state.clone(),
@@ -288,21 +328,29 @@ fn switch(
             input.session_id.as_str()
         )));
     }
+    check_time(deadline)?;
     let launch_command = target.map(|a| command(context, a, &path)).transpose()?;
     let (path, fresh) = store.save(&handoff)?;
     if !fresh && let Some(previous) = store.prepared(&input.session_id)? {
         return Ok(Some(prepared_response(context, &previous)));
     }
     let Some(target) = target else {
+        if !fresh {
+            return Ok(None);
+        }
         return Ok(Some(
-            json!({"refused":true,"reason":reason,"checkpoint":path,"dry_run":false}),
+            json!({"outcome":"refused","reason":reason,"checkpoint":path,"dry_run":false}),
         ));
     };
+    check_time(deadline)?;
     let command = launch_command.ok_or("launch command unavailable")?;
     let (pane, launch_error) = if fresh {
-        match launch(context, &command) {
+        match launch(context, &command, deadline) {
             Ok(pane) => (Some(pane), None),
-            Err(error) => (None, Some(error.to_string())),
+            Err(error) => {
+                check_time(deadline)?;
+                (None, Some(error.to_string()))
+            }
         }
     } else {
         (
@@ -311,7 +359,7 @@ fn switch(
         )
     };
     Ok(Some(
-        json!({"dry_run":false,"target_account":target.key(),"checkpoint":path,"command":command,"pane":pane,"launch_error":launch_error,"already_prepared":!fresh}),
+        json!({"outcome":"prepared","dry_run":false,"target_account":target.key(),"checkpoint":path,"command":command,"pane":pane,"launch_error":launch_error}),
     ))
 }
 fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
@@ -341,7 +389,7 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
             .ok_or("handoff target is no longer registered")?;
         command(context, target, &path)
     })();
-    json!({"dry_run":false,"target_account":handoff.target_account,"checkpoint":path,"already_prepared":true,"command":recovery.as_ref().ok(),"launch_error":recovery.as_ref().err().map(|e|e.to_string())})
+    json!({"outcome":"already_prepared","dry_run":false,"target_account":handoff.target_account,"checkpoint":path,"command":recovery.as_ref().ok(),"launch_error":recovery.as_ref().err().map(|e|e.to_string())})
 }
 pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let Chair::Switch {
@@ -352,26 +400,23 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let result = (|| -> Result<Value, Error> {
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let context = Context::new(globals, &cwd)?;
-        let id = session_id
-            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
-            .unwrap_or(format!(
-                "manual-{}",
-                provenant_supervisor::fs::temporary_name()?.to_string_lossy()
-            ));
+        let id = match session_id.or_else(|| std::env::var("CLAUDE_SESSION_ID").ok()) {
+            Some(id) => id,
+            None if dry_run => "dry-run".into(),
+            None => return Err("a real switch requires --session-id or CLAUDE_SESSION_ID".into()),
+        };
         let input = Input {
             hook_event_name: "manual".into(),
             session_id: HostSessionId::parse(&id)?,
             cwd: context.cwd.clone(),
             transcript_path: None,
-            prompt: None,
         };
-        switch(&context, &input, to.as_deref(), dry_run, false)?
+        switch(&context, &input, to.as_deref(), dry_run, false, None)?
             .ok_or_else(|| "no switch decision".into())
     })();
     match result {
         Ok(value) => {
-            let refused = value.get("refused").and_then(Value::as_bool) == Some(true)
-                || value.get("target_account") == Some(&Value::Null);
+            let refused = value["outcome"] == "refused";
             let human = message(&value);
             let result = CommandResult::new(
                 "chair switch",
@@ -386,7 +431,7 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
         }
         Err(error) => crate::fail(
             "chair switch",
-            Outcome::Error,
+            Outcome::Refused,
             "CHAIR_SWITCH",
             &error.to_string(),
             globals,
@@ -402,17 +447,15 @@ fn message(value: &Value) -> String {
             value["command"].as_str().unwrap_or("")
         );
     }
-    if value["already_prepared"] == true {
+    if value["outcome"] == "already_prepared" {
         let recovery = value["command"].as_str().map(|command| format!("If no successor session is running, use this exact recovery command:\n{command}"))
             .unwrap_or_else(|| format!("Recovery command unavailable: {}", value["launch_error"].as_str().unwrap_or("check the handoff target registration")));
         return format!(
-            "Chair handoff already prepared. Stop this session; inspect the successor before launching again. Checkpoint: {}. {recovery}",
+            "Chair handoff already prepared. Inspect the successor before launching again. Checkpoint: {}. {recovery}",
             value["checkpoint"].as_str().unwrap_or("unavailable")
         );
     }
-    if value.get("refused").and_then(Value::as_bool) == Some(true)
-        || value.get("target_account") == Some(&Value::Null)
-    {
+    if value["outcome"] == "refused" {
         return format!(
             "Chair switch refused: {}. Checkpoint log: {}",
             value["reason"].as_str().unwrap_or("unavailable"),
@@ -436,7 +479,8 @@ fn message(value: &Value) -> String {
     )
 }
 pub fn hook(start: bool, globals: &Globals) -> u8 {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // Stay inside the registered 5s SessionStart and 10s prompt timeouts.
+    let deadline = Instant::now() + Duration::from_secs(if start { 4 } else { 8 });
     let result = (|| -> Result<Option<Value>, Error> {
         let input = hook_io::read_stdin(1024 * 1024, Instant::now() + Duration::from_secs(1))?;
         let input: Input = serde_json::from_slice(&input)?;
@@ -450,14 +494,20 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         {
             return Err("invalid chair hook input".into());
         }
+        check_time(Some(deadline))?;
         let context = Context::new(globals, &input.cwd)?;
+        check_time(Some(deadline))?;
         if start {
-            if context.store().pending()?.is_none() {
+            if context.store().pending(now())?.is_none() {
                 return Ok(None);
             }
             let accounts = crate::quota_live::registered_claude()?;
             let target = current(&accounts, &context.home)?;
-            let Some(handoff) = context.store().consume(target.key(), &input.session_id)? else {
+            check_time(Some(deadline))?;
+            let Some(handoff) = context
+                .store()
+                .consume(target.key(), &input.session_id, now())?
+            else {
                 return Ok(None);
             };
             let path = context.store().path(&handoff.session_id);
@@ -470,12 +520,12 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
                 json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":text}}),
             ))
         } else {
-            let Some(value) = switch(&context, &input, None, false, true)? else {
+            let Some(value) = switch(&context, &input, None, false, true, Some(deadline))? else {
                 return Ok(None);
             };
             let text = message(&value);
-            if value.get("refused").and_then(Value::as_bool) == Some(true) {
-                Ok(Some(json!({"systemMessage":text})))
+            if value["outcome"] != "prepared" {
+                Ok(Some(json!({"continue":true,"systemMessage":text})))
             } else {
                 Ok(Some(
                     json!({"continue":false,"stopReason":text,"systemMessage":text}),
@@ -497,4 +547,24 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn chair_launch_paths_require_utf8() {
+        use super::*;
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
+        assert!(terminal_path(&path).is_err());
+    }
+    #[test]
+    fn chair_hook_reserves_time_before_snapshot_and_launch() {
+        use super::*;
+        let instant = Instant::now();
+        assert!(check_time(None).is_ok());
+        assert!(check_time(Some(instant + Duration::from_secs(8))).is_ok());
+        assert!(check_time(Some(instant + Duration::from_secs(2))).is_err());
+        assert!(check_time(Some(instant)).is_err());
+    }
 }

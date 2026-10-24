@@ -13,7 +13,7 @@ pub struct Handoff {
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
     pub state_handoff_file: Option<PathBuf>,
-    pub next_step: Option<String>,
+    pub created_unix: i64,
     pub open_lanes: Vec<String>,
     pub target_account: Option<String>,
     pub reason: String,
@@ -31,6 +31,11 @@ pub enum Error {
 pub struct HandoffStore {
     root: StateRoot,
     cwd: PathBuf,
+}
+impl Handoff {
+    fn live(&self, now: i64) -> bool {
+        (0..=3600).contains(&now.saturating_sub(self.created_unix))
+    }
 }
 impl HandoffStore {
     pub fn new(root: StateRoot, cwd: PathBuf) -> Self {
@@ -96,13 +101,25 @@ impl HandoffStore {
             Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error.into()),
         }
     }
-    pub fn pending(&self) -> Result<Option<Handoff>, Error> {
+    pub fn pending(&self, now: i64) -> Result<Option<Handoff>, Error> {
         let dir = match self.directory(false) {
             Ok(dir) => dir,
             Err(Error::Filesystem(error)) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(self.read(&dir, ".pending.json")?.filter(|h| !h.consumed))
+        Ok(self
+            .read(&dir, ".pending.json")?
+            .filter(|h| !h.consumed && h.live(now)))
+    }
+    pub fn recorded_refusal(&self, session: &HostSessionId) -> Result<bool, Error> {
+        let dir = match self.directory(false) {
+            Ok(dir) => dir,
+            Err(Error::Filesystem(error)) if error.is_not_found() => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(self
+            .read(&dir, &format!("{}.json", session.as_str()))?
+            .is_some_and(|h| h.target_account.is_none()))
     }
     pub fn prepared(&self, session: &HostSessionId) -> Result<Option<Handoff>, Error> {
         let dir = match self.directory(false) {
@@ -140,6 +157,20 @@ impl HandoffStore {
             Self::write(&dir, &prepared, &pending)?;
             return Ok((path, false));
         }
+        if handoff.target_account.is_some()
+            && self.read(&dir, ".pending.json")?.is_some_and(|pending| {
+                !pending.consumed
+                    && pending.live(handoff.created_unix)
+                    && pending.session_id != handoff.session_id
+            })
+        {
+            return Err(Error::Invalid(
+                "another source session has an unconsumed handoff for this cwd",
+            ));
+        }
+        if handoff.target_account.is_none() && self.read(&dir, &name)?.is_some() {
+            return Ok((path, false));
+        }
         Self::write(&dir, &name, handoff)?;
         if handoff.target_account.is_some() {
             Self::write(&dir, ".pending.json", handoff)?;
@@ -149,9 +180,14 @@ impl HandoffStore {
         }
         Ok((path, true))
     }
-    /// Only the selected account's new session consumes the newest handoff.
+    /// Only the selected account's new session consumes a handoff within one hour.
     /// The atomic consumed marker is durable before context leaves this store.
-    pub fn consume(&self, target: &str, session: &HostSessionId) -> Result<Option<Handoff>, Error> {
+    pub fn consume(
+        &self,
+        target: &str,
+        session: &HostSessionId,
+        now: i64,
+    ) -> Result<Option<Handoff>, Error> {
         let dir = match self.directory(false) {
             Ok(dir) => dir,
             Err(Error::Filesystem(error)) if error.is_not_found() => return Ok(None),
@@ -162,6 +198,7 @@ impl HandoffStore {
             return Ok(None);
         };
         if handoff.consumed
+            || !handoff.live(now)
             || handoff.target_account.as_deref() != Some(target)
             || handoff.session_id == *session
         {
@@ -186,7 +223,7 @@ mod tests {
         }
     }
     #[test]
-    fn chair_handoff_selects_newest_for_cwd_and_consumes_once_for_target_only() {
+    fn chair_handoff_preserves_pending_source_and_consumes_once_for_target_only() {
         let tmp = tempfile::tempdir_in("/tmp").unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let state = base.join("state");
@@ -203,7 +240,7 @@ mod tests {
             cwd: base.clone(),
             transcript_path: Some(base.join("transcript.jsonl")),
             state_handoff_file: None,
-            next_step: Some("read existing lane results".into()),
+            created_unix: 1000,
             open_lanes: vec!["run/task/attempt".into()],
             target_account: Some("target".into()),
             reason: "quota threshold".into(),
@@ -225,26 +262,49 @@ mod tests {
         let (path, fresh) = store.save(&handoff).unwrap();
         assert!(fresh && path.is_file());
         assert!(!store.save(&handoff).unwrap().1);
-        assert!(store.consume("wrong", &id("new")).unwrap().is_none());
-        assert!(store.consume("target", &id("old")).unwrap().is_none());
+        assert!(store.consume("wrong", &id("new"), 1001).unwrap().is_none());
+        assert!(store.consume("target", &id("old"), 1001).unwrap().is_none());
         handoff.session_id = id("newer");
-        store.save(&handoff).unwrap();
-        let restored = store.consume("target", &id("new")).unwrap().unwrap();
-        assert_eq!(restored.session_id, id("newer"));
+        assert!(store.save(&handoff).is_err());
+        handoff.session_id = id("old");
+        let restored = store.consume("target", &id("new"), 1001).unwrap().unwrap();
+        assert_eq!(restored.session_id, id("old"));
         assert_eq!(restored.open_lanes, handoff.open_lanes);
         // Interruption after pending publication and target consumption, but
         // before the prepare marker, must not overwrite consumed context.
-        dir.unlink(OsStr::new(".prepared-newer.json")).unwrap();
+        dir.unlink(OsStr::new(".prepared-old.json")).unwrap();
         let original = std::fs::read(store.path(&handoff.session_id)).unwrap();
-        handoff.next_step = Some("a different retry prompt".into());
+        handoff.reason = "a different retry reason".into();
         assert!(!store.save(&handoff).unwrap().1);
         assert_eq!(
             std::fs::read(store.path(&handoff.session_id)).unwrap(),
             original
         );
 
-        assert!(store.consume("target", &id("another")).unwrap().is_none());
+        assert!(
+            store
+                .consume("target", &id("another"), 1001)
+                .unwrap()
+                .is_none()
+        );
+        handoff.session_id = id("expiring");
+        handoff.created_unix = 1002;
+        store.save(&handoff).unwrap();
+        assert!(store.pending(4603).unwrap().is_none());
+        assert!(
+            store
+                .consume("target", &id("late"), 4603)
+                .unwrap()
+                .is_none()
+        );
+        handoff.session_id = id("replacement");
+        handoff.created_unix = 4603;
+        assert!(store.save(&handoff).unwrap().1);
+        assert_eq!(
+            store.pending(4603).unwrap().unwrap().session_id,
+            id("replacement")
+        );
         let other = HandoffStore::new(root, base.join("other"));
-        assert!(other.consume("target", &id("new")).unwrap().is_none());
+        assert!(other.consume("target", &id("new"), 1001).unwrap().is_none());
     }
 }

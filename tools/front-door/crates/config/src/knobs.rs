@@ -400,17 +400,9 @@ pub fn edit_config(
 mod chair_tests {
     use super::*;
     #[test]
-    fn chair_knobs_round_trip_boolean_percent_and_ordered_labels() {
+    fn chair_string_list_preserves_order_and_rejects_non_strings() {
         let text = apply(
             None,
-            KnobEdit::Set {
-                name: "chair.auto_switch",
-                value: "true",
-            },
-        )
-        .unwrap();
-        let text = apply(
-            Some(&text),
             KnobEdit::Set {
                 name: "chair.switch_accounts",
                 value: "[\"second\",\"first\"]",
@@ -419,32 +411,8 @@ mod chair_tests {
         .unwrap();
         let doc: DocumentMut = text.parse().unwrap();
         assert_eq!(
-            from_toml(&doc["knobs"]["chair.auto_switch"]),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
             from_toml(&doc["knobs"]["chair.switch_accounts"]),
             Some(serde_json::json!(["second", "first"]))
-        );
-        assert!(
-            apply(
-                None,
-                KnobEdit::Set {
-                    name: "chair.auto_switch",
-                    value: "yes"
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            apply(
-                None,
-                KnobEdit::Set {
-                    name: "chair.switch_threshold",
-                    value: "101"
-                }
-            )
-            .is_err()
         );
         assert!(
             apply(

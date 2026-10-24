@@ -91,7 +91,7 @@ fn chair_dry_run_reports_registered_target_and_creates_no_checkpoint() -> Result
     assert_ne!(code(&refused), 0);
     let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
     assert_eq!(value["status"], "refused");
-    assert!(value["data"]["command"].is_null());
+    assert_eq!(value["data"]["outcome"], "refused");
     Ok(())
 }
 
@@ -101,7 +101,7 @@ fn hook(
     session: &str,
 ) -> Result<provenant_supervisor::exec::ExecOutcome> {
     rig.execute(std::path::Path::new(env!("CARGO_BIN_EXE_provenant")), &["hook", "claude", if start {"chair-start"} else {"chair-prompt"}], Some(&serde_json::to_vec(&json!({
-        "hook_event_name":if start {"SessionStart"} else {"UserPromptSubmit"}, "session_id":session,"cwd":rig.project,"transcript_path":rig.root.join("transcript.jsonl"),"prompt":"collect the existing lane results"
+        "hook_event_name":if start {"SessionStart"} else {"UserPromptSubmit"}, "session_id":session,"cwd":rig.project,"transcript_path":rig.root.join("transcript.jsonl"),"prompt":"PRIVATE PROMPT MUST NOT BE STORED"
     }))?))
 }
 #[test]
@@ -123,6 +123,16 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
         "{}",
         String::from_utf8_lossy(&saved.stderr.bytes)
     );
+    let plan = rig.command(&[
+        "chair",
+        "switch",
+        "--session-id",
+        "old",
+        "--dry-run",
+        "--json",
+    ])?;
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout.bytes)?;
+    let checkpoint = plan["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
     let output = hook(&rig, false, "old")?;
     assert_eq!(code(&output), 0);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes).map_err(|e| {
@@ -133,33 +143,17 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     })?;
     assert_eq!(value["continue"], false);
     let reason = value["stopReason"].as_str().ok_or("stop reason")?;
-    assert!(
-        reason.contains("exact command") && reason.contains("CLAUDE_CONFIG_DIR="),
-        "{reason}"
-    );
-    let checkpoint = fs::read_dir(rig.state.join("chair-switch"))?
-        .next()
-        .ok_or("cwd directory")??
-        .path()
-        .join("old.json");
-    let handoff: serde_json::Value = serde_json::from_slice(&fs::read(&checkpoint)?)?;
-    assert_eq!(handoff["session_id"], "old");
-    assert_eq!(handoff["target_account"], "spare");
-    assert_eq!(handoff["next_step"], "collect the existing lane results");
-    assert!(
-        handoff["state_handoff_file"]
-            .as_str()
-            .is_some_and(|p| std::path::Path::new(p).is_file())
-    );
-    assert_eq!(
-        handoff["transcript_path"].as_str(),
-        rig.root.join("transcript.jsonl").to_str()
-    );
-    assert!(handoff["open_lanes"].is_array());
+    assert!(reason.contains("CLAUDE_CONFIG_DIR="), "{reason}");
+    // The public plan locates the checkpoint. Check privacy without pinning
+    // the private record layout.
+    let bytes = fs::read(checkpoint)?;
+    assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE PROMPT"));
     let repeat = hook(&rig, false, "old")?;
-    let repeated = String::from_utf8_lossy(&repeat.stdout.bytes);
-    assert!(repeated.contains("already prepared"));
-    assert!(repeated.contains("exact recovery command") && repeated.contains("CLAUDE_CONFIG_DIR="));
+    let repeated: serde_json::Value = serde_json::from_slice(&repeat.stdout.bytes)?;
+    assert_eq!(repeated["continue"], true);
+    assert!(repeated["systemMessage"].is_string());
+    fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
+    assert!(hook(&rig, false, "old")?.stdout.bytes.is_empty());
     // The source account cannot consume its own handoff on compaction.
     assert!(hook(&rig, true, "old")?.stdout.bytes.is_empty());
     rig.env.retain(|(k, _)| k != "CLAUDE_CONFIG_DIR");
@@ -172,7 +166,7 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     let context = value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("resume context")?;
-    assert!(context.contains("old") && context.contains("never re-run completed lanes"));
+    assert!(context.contains("old") && context.contains(checkpoint));
     assert!(hook(&rig, true, "newer")?.stdout.bytes.is_empty());
     Ok(())
 }
@@ -193,24 +187,11 @@ fn chair_disabled_and_refused_paths_never_launch() -> Result {
             String::from_utf8_lossy(&refused.stderr.bytes)
         )
     })?;
-    assert!(value.get("continue").is_none());
-    assert!(
-        value["systemMessage"]
-            .as_str()
-            .is_some_and(|s| s.contains("no allowed"))
-    );
-    let dir = fs::read_dir(rig.state.join("chair-switch"))?
-        .next()
-        .ok_or("cwd directory")??
-        .path();
-    let logged: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("refused.json"))?)?;
-    assert!(logged["target_account"].is_null());
-    assert!(
-        logged["reason"]
-            .as_str()
-            .is_some_and(|s| s.contains("no allowed"))
-    );
-    assert!(!dir.join(".pending.json").exists());
+    assert_eq!(value["continue"], true);
+    assert!(value["systemMessage"].as_str().is_some());
+    assert!(hook(&rig, false, "refused")?.stdout.bytes.is_empty());
+    fs::remove_file(rig.state.join("quota/current/claude.json"))?;
+    assert!(hook(&rig, false, "unknown")?.stdout.bytes.is_empty());
     Ok(())
 }
 #[test]
@@ -253,7 +234,7 @@ esac
     assert!(
         value["stopReason"]
             .as_str()
-            .is_some_and(|s| s.contains("Opened pane new-pane"))
+            .is_some_and(|s| s.contains("new-pane"))
     );
     let calls = fs::read_to_string(&log)?;
     assert!(
@@ -276,6 +257,62 @@ fn chair_failed_auth_refresh_cannot_establish_target_headroom() -> Result {
     let refused = rig.command(&["chair", "switch", "--to", "spare", "--dry-run", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
     assert_eq!(value["status"], "refused");
-    assert!(value["data"]["command"].is_null());
+    assert_eq!(value["data"]["outcome"], "refused");
+    Ok(())
+}
+
+#[test]
+fn chair_real_manual_switch_requires_a_stable_source_session() -> Result {
+    let rig = configured()?;
+    let refused = rig.command(&["chair", "switch", "--json"])?;
+    assert_ne!(code(&refused), 0);
+    let first = rig.command(&["chair", "switch", "--session-id", "source", "--json"])?;
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout.bytes)?;
+    assert_eq!(first["data"]["outcome"], "prepared");
+    let repeat = rig.command(&["chair", "switch", "--session-id", "source", "--json"])?;
+    let repeat: serde_json::Value = serde_json::from_slice(&repeat.stdout.bytes)?;
+    assert_eq!(repeat["data"]["outcome"], "already_prepared");
+    Ok(())
+}
+
+#[test]
+fn chair_refuses_rotating_default_directory_as_a_target() -> Result {
+    let rig = configured()?;
+    let rotating = rig.home.join(".claude");
+    fs::create_dir(&rotating)?;
+    fs::write(
+        rig.home.join(".agents/config/telemetry.json"),
+        serde_json::to_vec(&json!({"accounts":{"claude":{
+            "current":{"identity_dir":rig.root.join("claude")}, "spare":{"identity_dir":rotating}
+        }}}))?,
+    )?;
+    let output = rig.command(&["chair", "switch", "--dry-run", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(value["data"]["outcome"], "refused");
+    assert!(
+        value["data"]["reason"]
+            .as_str()
+            .is_some_and(|s| s.contains("~/.claude"))
+    );
+    Ok(())
+}
+
+#[test]
+fn chair_rejects_terminal_controls_in_cwd_and_checkpoint_paths() -> Result {
+    for cwd in [false, true] {
+        let mut rig = configured()?;
+        if cwd {
+            let unsafe_cwd = rig.root.join("line\nbreak");
+            fs::rename(&rig.project, &unsafe_cwd)?;
+            rig.project = unsafe_cwd;
+        } else {
+            let unsafe_state = rig.root.join("line\nbreak");
+            fs::rename(&rig.state, &unsafe_state)?;
+            rig.state = unsafe_state;
+        }
+        let output = rig.command(&["chair", "switch", "--dry-run", "--json"])?;
+        assert_ne!(code(&output), 0);
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("control characters"));
+    }
     Ok(())
 }

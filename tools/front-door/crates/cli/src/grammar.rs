@@ -81,7 +81,7 @@ pub enum Chair {
         to: Option<String>,
         #[arg(long)]
         dry_run: bool,
-        /// Host session to hand off; otherwise use CLAUDE_SESSION_ID or a manual key.
+        /// Source session; required for real runs unless CLAUDE_SESSION_ID is set.
         #[arg(long)]
         session_id: Option<String>,
     },
