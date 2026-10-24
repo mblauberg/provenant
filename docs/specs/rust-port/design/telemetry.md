@@ -81,7 +81,7 @@ points, durations are milliseconds and money is a six-place decimal string:
 ```text
 { key: { adapter?, model?, effort?, account? }, attempts, tasks, retries,
   outcomes: { <run outcome>: n }, success_bp, partial_bp, failure_bp,
-  wall_ms: { p50, p90, missing }, admission_wait_ms: { p50, p90, missing },
+  wall_ms: { sum, p50, p90, missing }, admission_wait_ms: { p50, p90, missing },
   provider_ms: { sum, missing }, usage: { <category>: { sum, missing } },
   cost: { estimate, known_lower_bound, missing },
   accepted: { deliveries, cost, attempt_wall_ms, cost_per_delivery,
@@ -90,7 +90,10 @@ points, durations are milliseconds and money is a six-place decimal string:
 
 The key holds only the selected fields. Success is `succeeded`, partial is
 `input_required`, and failure is every other run outcome; `outcomes` keeps the
-exact counts so readers can regroup. Retries are attempts minus distinct tasks.
+exact counts so readers can regroup. Retries are selected attempts whose run
+attempt number is above 1, counted in the retry's own group, so a retry on
+another route or outside the window still counts once. `wall_ms.sum` adds
+known values only and reports the rest in `missing`.
 Percentiles are nearest-rank over the group's known values. A group renders in
 roughly 1 KiB, so about 900 groups fit; a larger report takes the bounded error.
 
@@ -246,7 +249,7 @@ through run over the same tasks, then reads `telemetry stats --since START --by
 route --json` once for the evaluation's project and window: each arm is a route
 group with outcome rates, p50/p90 wall time, usage and cost. Quality comes from
 evaluate's graders, not telemetry; quality per hour divides graded passes by the
-arm's summed wall time. For real work, the user compares routes over a period by
+arm's `wall_ms.sum`, and is unavailable while `wall_ms.missing` is nonzero. For real work, the user compares routes over a period by
 cost and attempt time per accepted delivery. Coverage excludes unsupervised
 interactive harness sessions, and account-level consumption comes from quota
 snapshots.
