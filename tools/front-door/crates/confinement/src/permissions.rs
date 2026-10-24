@@ -1370,12 +1370,13 @@ fn render_profile(
             for operation in ["file-read*", "file-write*"] {
                 push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
             }
+            // Restrict this exception, preserving separate provider auth grants.
+            source.push_str(&format!(
+                "(deny file-write* (require-all (subpath \"{}\") (regex #\"{}\")))\n",
+                sbpl_path(&grant.path)?,
+                crate::plan::read_only::exclusion_regex()
+            ));
         }
-        // Config stays immutable even when created below an allowed subtree.
-        source.push_str(&format!(
-            "(deny file-write* (regex #\"{}\"))\n",
-            crate::plan::read_only::exclusion_regex()
-        ));
         for git in &read_only.git_reads {
             push_rule(&mut source, "deny", "file-write*", &git.path, git.scope)?;
         }
@@ -2256,7 +2257,11 @@ mod tests {
             "(allow file-read* (subpath \"{}\"))",
             home.join(".cargo").display()
         )));
-        assert!(source.contains("(deny file-write* (regex #"));
+        assert!(source.contains(&format!(
+            "(deny file-write* (require-all (subpath \"{}\") (regex #",
+            root.join(".agent-run/locks").display()
+        )));
+        assert!(!source.contains("(deny file-write* (regex #"));
         assert!(source.contains(&crate::plan::read_only::exclusion_regex()));
         // A component swapped for a symlink after resolution cannot be compiled.
         std::fs::rename(root.join(".agent-run"), root.join("moved"))?;

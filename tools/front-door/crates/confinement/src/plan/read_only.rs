@@ -6,11 +6,7 @@ use crate::{
 use provenant_core::RelativePath;
 use provenant_supervisor::fs::SafeDir;
 use serde::Deserialize;
-use std::{
-    ffi::OsStr,
-    io::Read,
-    path::{Component, PathBuf},
-};
+use std::{ffi::OsStr, io::Read, path::Component};
 
 /// Stored in the host's project state, never loaded from lane-controlled config.
 #[derive(Default, Deserialize)]
@@ -81,6 +77,7 @@ impl ReadOnlyPolicy {
             });
         }
         Ok(ReadOnlyGrants {
+            #[cfg(any(target_os = "macos", test))]
             root: repo.0.root_path().to_owned(),
             // The host binding is authority; the lane's Git marker is not.
             // Its subtree includes each linked worktree's private directory.
@@ -98,7 +95,8 @@ impl ReadOnlyPolicy {
 /// constructor that can turn a lane's Git marker into authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadOnlyGrants {
-    pub(crate) root: PathBuf,
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) root: std::path::PathBuf,
     pub(crate) git_reads: [PathGrant; 1],
     pub(crate) writes: Vec<PathGrant>,
     relative: Vec<String>,
@@ -107,6 +105,7 @@ impl ReadOnlyGrants {
     pub fn writable_paths(&self) -> &[String] {
         &self.relative
     }
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn revalidate(
         &self,
         fs: &dyn provenant_supervisor::fs::SafeFs,
