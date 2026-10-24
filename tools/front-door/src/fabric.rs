@@ -137,6 +137,7 @@ impl F3Facade for BoundFacade<'_> {
         BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
+            actor: None,
         }
         .submit(input, budget, cancel)
     }
@@ -149,6 +150,7 @@ impl F3Facade for BoundFacade<'_> {
         BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
+            actor: None,
         }
         .run(input, budget, cancel)
     }
@@ -169,6 +171,7 @@ impl F3Facade for BoundFacade<'_> {
         BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
+            actor: None,
         }
         .output(input, budget, cancel)
     }
@@ -218,6 +221,7 @@ impl F3Facade for BoundFacade<'_> {
                         BinaryRunOwner {
                             factory: self.factory,
                             allow_remote: true,
+                            actor: None,
                         }
                         .capabilities()
                         .submit,
@@ -482,6 +486,7 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
         let mut owner = BinaryRunOwner {
             factory: &peer_factory,
             allow_remote: false,
+            actor: None,
         };
         let result = match &request.action {
             PeerAction::RunStatuses { targets } => {
@@ -898,6 +903,8 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
 struct BinaryRunOwner<'a> {
     factory: &'a Factory,
     allow_remote: bool,
+    /// Replay submissions under this actor instead of the process's own.
+    actor: Option<provenant_core::ActorId>,
 }
 fn peer_result<T>(
     result: Result<T, FacadeError>,
@@ -971,7 +978,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?,
             project_id: ctx.identity.project,
-            actor_id: ctx.identity.inbox.actor,
+            actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor),
             read_prompts: false,
         };
         let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
@@ -1703,6 +1710,9 @@ struct BoundGraphOwner<'a> {
 }
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn actor(&self) -> String {
+        self.factory.context.identity.inbox.actor.to_string()
+    }
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -1710,14 +1720,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         route: &provenant_fabric_runtime::graph::GraphRoute,
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
-        stored_ref: Option<&str>,
+        replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
         let mut owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
+            actor: None,
         };
-        let (target, reference) = if let Some(reference) = stored_ref {
+        let (target, reference) = if let Some(reference) = replay.stored_ref {
             // An accepted attempt is observed by reference: operation replay is
             // actor-scoped, so resubmitting under another actor would launch again.
             let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
@@ -1751,7 +1762,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 knobs: vec![],
                 host: None,
             };
+            // Operation replay is actor-scoped: submit under the recorded launch actor.
+            owner.actor = Some(
+                provenant_core::ActorId::parse(replay.launch_actor)
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            );
             let receipt = owner.submit(input, self.budget, self.cancel)?;
+            owner.actor = None;
             let target = receipt
                 .targets
                 .into_iter()
@@ -1885,6 +1902,7 @@ impl Factory {
             let mut owner = BinaryRunOwner {
                 factory: self,
                 allow_remote: true,
+                actor: None,
             };
             // One unresolvable target must not strand the others; report the first failure last.
             let mut first_error = None;
@@ -2053,6 +2071,7 @@ impl Factory {
         let mut owner = BinaryRunOwner {
             factory: self,
             allow_remote: true,
+            actor: None,
         };
         let mut hosts = std::collections::BTreeSet::new();
         hosts.insert(ctx.identity.host);
