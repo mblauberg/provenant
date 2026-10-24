@@ -1,0 +1,457 @@
+//! Quota arguments, composition through supervisor's safe filesystem, and render.
+use clap::{Args, Subcommand, ValueEnum};
+use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_quota::{
+    schedule::{self, Detection, QuotaQuery, QuotaTick},
+    *,
+};
+use provenant_records::{CommandError, CommandResult, Outcome};
+use provenant_supervisor::{
+    clock::SystemClock,
+    fs::{Directory, FsError, LockMode, Publication, PublishMode, SafeDir},
+};
+use std::{
+    ffi::OsStr,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
+use thiserror::Error;
+
+#[derive(Debug, Args)]
+pub struct Filter {
+    #[arg(long)]
+    pub adapter: Option<String>,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Trigger {
+    Timer,
+    Panel,
+    Manual,
+    Wake,
+    Power,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Power {
+    Ac,
+    Battery,
+    Low,
+}
+#[derive(Debug, Subcommand)]
+pub enum Quota {
+    Show(Filter),
+    Tick {
+        #[command(flatten)]
+        adapter: Filter,
+        #[arg(long, value_enum, default_value = "manual")]
+        trigger: Trigger,
+        #[arg(long, value_enum, default_value = "ac")]
+        power: Power,
+    },
+}
+impl From<Trigger> for schedule::Trigger {
+    fn from(value: Trigger) -> Self {
+        match value {
+            Trigger::Timer => Self::Timer,
+            Trigger::Panel => Self::Panel,
+            Trigger::Manual => Self::Manual,
+            Trigger::Wake => Self::Wake,
+            Trigger::Power => Self::Power,
+        }
+    }
+}
+impl From<Power> for schedule::Power {
+    fn from(value: Power) -> Self {
+        match value {
+            Power::Ac => Self::Ac,
+            Power::Battery => Self::Battery,
+            Power::Low => Self::Low,
+        }
+    }
+}
+#[derive(Debug, Error)]
+enum EdgeError {
+    #[error(transparent)]
+    Quota(#[from] QuotaError),
+    #[error(transparent)]
+    Config(#[from] provenant_config::ConfigError),
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    #[error("cannot encode quota record")]
+    Encode(#[from] serde_json::Error),
+    #[error("cannot read quota record at {path:?}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("quota state requires private owned directories")]
+    Permissions,
+    #[error("quota time is out of range")]
+    Time,
+    #[error("invalid quota adapter")]
+    Adapter,
+    #[error("quota report exceeds 1 MiB; filter with --adapter")]
+    TooLarge,
+    #[error("quota report path is not UTF-8")]
+    Path,
+}
+fn durable(publication: Publication) -> Result<(), EdgeError> {
+    match publication {
+        Publication::Durable => Ok(()),
+        Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error.into()),
+    }
+}
+fn create_path(path: &Path) -> Result<Directory, EdgeError> {
+    let dir = match Directory::open_anchor(path) {
+        Ok(dir) => dir,
+        Err(error) if error.is_not_found() => {
+            let parent = create_path(path.parent().ok_or(EdgeError::Permissions)?)?;
+            let name = path.file_name().ok_or(EdgeError::Permissions)?;
+            match parent.mkdir(name, 0o700) {
+                Ok(()) => parent.sync()?,
+                Err(e) if e.is_exists() => {}
+                Err(e) => return Err(e.into()),
+            }
+            parent.open_verified_directory(name)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(dir)
+}
+fn private(path: &Path) -> Result<Directory, EdgeError> {
+    let dir = create_path(path)?;
+    let meta = dir.metadata()?;
+    if meta.mode & 0o077 != 0 || meta.uid != provenant_supervisor::fs::effective_uid() {
+        return Err(EdgeError::Permissions);
+    }
+    Ok(dir)
+}
+fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeError> {
+    match parent.mkdir(name, 0o700) {
+        Ok(()) => parent.sync()?,
+        Err(e) if e.is_exists() => {}
+        Err(e) => return Err(e.into()),
+    }
+    let dir = parent.open_verified_directory(name)?;
+    let meta = dir.metadata()?;
+    if meta.mode & 0o077 != 0 || meta.uid != provenant_supervisor::fs::effective_uid() {
+        return Err(EdgeError::Permissions);
+    }
+    Ok(dir)
+}
+fn check_private(dir: &Directory) -> Result<(), EdgeError> {
+    let meta = dir.metadata()?;
+    if meta.mode & 0o777 != 0o700 || meta.uid != provenant_supervisor::fs::effective_uid() {
+        return Err(EdgeError::Permissions);
+    }
+    Ok(())
+}
+fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
+    check_private(dir)?;
+    let mut records = Vec::new();
+    for entry in dir.entries()? {
+        let entry = entry?;
+        if entry == "report.json"
+            || entry == "quota.lock"
+            || entry.to_str().is_some_and(|s| s.starts_with('.'))
+        {
+            continue;
+        }
+        let Some(key) = entry.to_str().filter(|s| component(s)) else {
+            return Err(QuotaError::Invalid("account directory").into());
+        };
+        let account_dir = dir.open_verified_directory(&entry)?;
+        check_private(&account_dir)?;
+        for file in account_dir.entries()? {
+            let file = file?;
+            if file.to_str().is_some_and(|s| s.starts_with('.')) {
+                continue;
+            }
+            let name = file
+                .to_str()
+                .and_then(|s| s.strip_suffix(".json"))
+                .filter(|s| component(s))
+                .ok_or(QuotaError::Invalid("snapshot path"))?;
+            let mut bytes = Vec::new();
+            let reader = account_dir.open_read(&file)?;
+            let meta = reader.metadata()?;
+            if meta.mode & 0o777 != 0o600 || meta.uid != provenant_supervisor::fs::effective_uid() {
+                return Err(EdgeError::Permissions);
+            }
+            reader
+                .take(MAX_RECORD_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|source| EdgeError::Read {
+                    path: PathBuf::from(key).join(&file),
+                    source,
+                })?;
+            let record = AccountRecord::decode(&bytes)?;
+            if record.account.adapter != name || record.account.account_key != key {
+                return Err(QuotaError::Invalid("snapshot path identity").into());
+            }
+            records.push(record);
+            if records.len() > MAX_ACCOUNTS {
+                return Err(QuotaError::Invalid("account bound").into());
+            }
+        }
+    }
+    records.sort_by(|a, b| {
+        (&a.account.adapter, &a.account.account_key)
+            .cmp(&(&b.account.adapter, &b.account.account_key))
+    });
+    Ok(records)
+}
+fn write_intent(
+    dir: &Directory,
+    intent: &UpdateIntent,
+    records: &mut Vec<AccountRecord>,
+) -> Result<(), EdgeError> {
+    let pos = records.iter().position(|r| {
+        r.account.adapter == intent.account.adapter
+            && r.account.account_key == intent.account.account_key
+    });
+    intent.check(pos.and_then(|p| records.get(p)))?;
+    let account_dir = child(dir, OsStr::new(&intent.account.account_key))?;
+    let name = format!("{}.json", intent.account.adapter);
+    match &intent.replacement {
+        Some(record) => {
+            let bytes = serde_json::to_vec(record)?;
+            if bytes.len() as u64 > MAX_RECORD_BYTES {
+                return Err(QuotaError::Invalid("record bound").into());
+            }
+            durable(SafeDir::atomic_write(
+                &account_dir,
+                OsStr::new(&name),
+                ".quota",
+                &bytes,
+                0o600,
+                PublishMode::Replace,
+            )?)?;
+            if let Some(p) = pos {
+                records[p] = record.clone();
+            } else {
+                records.push(record.clone());
+            }
+        }
+        None => {
+            account_dir.unlink(OsStr::new(&name))?;
+            account_dir.sync()?;
+            if let Some(p) = pos {
+                records.remove(p);
+            }
+        }
+    }
+    Ok(())
+}
+fn detections(registry: &[provenant_providers::Registration]) -> Vec<Detection> {
+    registry
+        .iter()
+        .map(|r| {
+            let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
+            Detection {
+                adapter: r.adapter.id().into(),
+                accounts: None,
+                status: match status {
+                    Ok(provenant_providers::AccountDetection::AuthRequired) => {
+                        QuotaStatus::AuthRequired
+                    }
+                    _ if r.quota_source.is_none() => QuotaStatus::Unsupported,
+                    _ => QuotaStatus::Unknown,
+                },
+            }
+        })
+        .collect()
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Domains {
+    quota: Settings,
+}
+static ENTRIES: [provenant_config::DomainSection; 1] = [SECTION];
+static SECTIONS: provenant_config::DomainSections<Domains> =
+    provenant_config::DomainSections::new(&ENTRIES);
+
+fn execute(
+    command: &Quota,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+) -> Result<QuotaReport, EdgeError> {
+    let (filter, tick) = match command {
+        Quota::Show(filter) => (filter, None),
+        Quota::Tick {
+            adapter,
+            trigger,
+            power,
+        } => (
+            adapter,
+            Some(QuotaTick {
+                adapter: adapter.adapter.clone(),
+                trigger: (*trigger).into(),
+                power: (*power).into(),
+            }),
+        ),
+    };
+    if filter
+        .adapter
+        .as_ref()
+        .is_some_and(|id| !registry.iter().any(|r| r.adapter.id() == id))
+    {
+        return Err(EdgeError::Adapter);
+    }
+    let settings =
+        provenant_config::read_with_domains(roots, &provenant_supervisor::fs::LocalFs, &SECTIONS)?
+            .domains
+            .quota;
+    let clock = SystemClock::new();
+    let now = clock
+        .wall_now()
+        .map_err(|_| EdgeError::Time)?
+        .as_timestamp()
+        .as_second();
+    let path = roots.state.as_path().join("quota/report.json");
+    let report_path = path.to_str().ok_or(EdgeError::Path)?.to_owned();
+    let detected = detections(registry);
+    let query = QuotaQuery {
+        adapter: filter.adapter.clone(),
+    };
+    let Some(tick) = tick else {
+        let records = match Directory::open_anchor(roots.state.as_path()) {
+            Ok(root) => {
+                check_private(&root)?;
+                match root.open_verified_directory(OsStr::new("quota")) {
+                    Ok(dir) => read_records(&dir)?,
+                    Err(e) if e.is_not_found() => Vec::new(),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) if e.is_not_found() => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        return Ok(schedule::report(
+            &records,
+            &detected,
+            &query,
+            now,
+            report_path,
+        )?);
+    };
+    let root = private(roots.state.as_path())?;
+    let dir = child(&root, OsStr::new("quota"))?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+    let _lock = dir.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut records = read_records(&dir)?;
+    let plan = schedule::plan_tick_with_settings(&records, &detected, &tick, now, &settings)?;
+    for drop in &plan.drops {
+        write_intent(&dir, drop, &mut records)?;
+    }
+    // No known account or executable probe form exists without an activation
+    // recording. Never synthesize identity or credential authority to probe it.
+    let report = schedule::report(
+        &records,
+        &detected,
+        &QuotaQuery { adapter: None },
+        now,
+        report_path,
+    )?;
+    let bytes = serde_json::to_vec(&report)?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(EdgeError::TooLarge);
+    }
+    durable(SafeDir::atomic_write(
+        &dir,
+        OsStr::new("report.json"),
+        ".report",
+        &bytes,
+        0o600,
+        PublishMode::Replace,
+    )?)?;
+    // Publish all accounts even when the caller requests a filtered projection.
+    Ok(schedule::report(
+        &records,
+        &detected,
+        &query,
+        now,
+        report.report_path,
+    )?)
+}
+pub fn run(
+    command: Quota,
+    globals: &crate::Globals,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+) -> u8 {
+    let name = match command {
+        Quota::Show(_) => "quota show",
+        Quota::Tick { .. } => "quota tick",
+    };
+    let result = execute(&command, roots, registry);
+    let (envelope, human) = match result {
+        Ok(report) => {
+            let human = format!(
+                "Quota: {}/{} current readings\nReport: {}\n",
+                report.coverage.known, report.coverage.total, report.report_path
+            );
+            (CommandResult::new(name, Outcome::Ok, Some(report)), human)
+        }
+        Err(error) => {
+            let status = match &error {
+                EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
+                EdgeError::Adapter
+                | EdgeError::Config(_)
+                | EdgeError::Quota(
+                    QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
+                ) => Outcome::Invalid,
+                EdgeError::Quota(QuotaError::Refused(_) | QuotaError::Disabled) => Outcome::Refused,
+                EdgeError::Fs(FsError::Cancelled { .. }) => Outcome::Cancelled,
+                _ => Outcome::Error,
+            };
+            let mut result = CommandResult::new(name, status, None);
+            result.error = Some(CommandError {
+                code: "QUOTA".into(),
+                message: error.to_string(),
+                cause: None,
+                repair: None,
+            });
+            (result, String::new())
+        }
+    };
+    let mode = if globals.json {
+        crate::RenderMode::Json
+    } else {
+        crate::RenderMode::Human {
+            text: &human,
+            read_only: matches!(command, Quota::Show(_)),
+        }
+    };
+    let rendered = if globals.json || envelope.error.is_none() {
+        crate::render(&envelope, mode, &mut io::stdout().lock())
+    } else {
+        crate::render(&envelope, mode, &mut io::stderr().lock())
+    };
+    match rendered {
+        Ok(()) => crate::exit_status(&envelope.status),
+        Err(crate::RenderError::TooLarge) => {
+            let mut bounded = CommandResult::new(name, Outcome::Error, ());
+            bounded.error = Some(CommandError {
+                code: "RESULT_TOO_LARGE".into(),
+                message: "quota report exceeds 1 MiB; filter with --adapter".into(),
+                cause: None,
+                repair: None,
+            });
+            if globals.json {
+                let _ = crate::render(&bounded, crate::RenderMode::Json, &mut io::stdout().lock());
+            } else {
+                let _ = crate::render(&bounded, mode, &mut io::stderr().lock());
+            }
+            3
+        }
+        Err(_) => 3,
+    }
+}

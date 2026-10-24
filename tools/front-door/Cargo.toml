@@ -46,13 +46,10 @@ provenant-cli = { path = "crates/cli" }
 # Empty rewrite crates and the retained CLI-owned generated scaffold are
 # deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = [
-  "crates/providers/src/lib.rs",
   "crates/run/src/lib.rs",
 ]
 ignored = [
   "provenant-fabric-mcp",
-  "provenant-providers",
-  "provenant-quota",
   "provenant-routing",
   "provenant-run",
   "provenant-telemetry",
@@ -84,6 +81,7 @@ publish = false
 license.workspace = true
 
 [dependencies]
+provenant-providers = { workspace = true }
 provenant-cli = { workspace = true }
 provenant-core = { workspace = true }
 serde = { workspace = true }

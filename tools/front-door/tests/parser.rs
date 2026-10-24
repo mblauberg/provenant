@@ -243,7 +243,7 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
             )?;
             assert_eq!(code(&out), 2, "{leaf:?} {flag}");
         }
-        if leaf == ["root"] {
+        if leaf == ["root"] || leaf.first() == Some(&"quota") {
             continue;
         }
         let out = rig.command(&leaf)?;

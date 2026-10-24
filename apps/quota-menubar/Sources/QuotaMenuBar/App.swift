@@ -20,9 +20,8 @@ struct QuotaMenuBarApp: App {
     }
 }
 
-/// A template gauge symbol and the headline account's use (`quota.menubar.headline`); the gauge alone for `none`
-/// or when nothing usable remains. It reads only the model's settled label, so a refresh that changes nothing
-/// the status item shows never redraws it.
+/// A template gauge symbol and the highest-use available account; the gauge alone when no account is usable.
+/// It reads only the model's settled label, so a refresh that changes nothing the status item shows never redraws it.
 struct MenuBarLabel: View {
     let model: QuotaModel
 
@@ -49,12 +48,12 @@ struct MenuLabel: Equatable {
         let level = ["0", "33", "50", "67", "100"][[20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4]
         symbol = failed ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(level)percent"
         text = report.map { report in
-            !report.enabled ? "Off" : featured.map { Fmt.percent($0.window.usedPercent ?? 0) }
+            featured.map { Fmt.percent($0.window.usedPercent ?? 0) }
                 ?? (report.iconOnly ? nil : report.headline(now: now).map(Fmt.percent) ?? "–")
         } ?? "–"
         let exhausted = report?.exhausted(now: now).count ?? 0
         let drawing = report?.drawing(now: now).count ?? 0
-        let unavailable = report?.accounts.filter { !$0.hasReading && !$0.isSignedOut }.count ?? 0
+        let unavailable = report?.accounts.filter { !$0.hasReading && !$0.requiresAuth }.count ?? 0
         spoken = ["Provider quota",
                   featured.map { "\($0.account.title), \($0.window.fullTitle) \(Fmt.percent($0.window.usedPercent ?? 0)) used" },
                   exhausted > 0 ? "\(exhausted) exhausted" : nil,
@@ -97,7 +96,7 @@ struct QuotaPanel: View {
 
     private func content(now: Date) -> some View {
         let report = model.report, alert = report?.alertPercent ?? 90
-        let accounts = report.map { $0.enabled ? $0.sorted(now: now) : [] } ?? []
+        let accounts = report?.sorted(now: now) ?? []
         let refreshing = model.isRefreshing || report?.isRefreshing(now: now) == true
         let updated = model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? "Not updated yet"
         let status = refreshing ? "Refreshing…" : ([updated] + [report?.nextCheck.map { Fmt.next($0, now: now) }].compactMap { $0 })
@@ -146,7 +145,7 @@ struct QuotaPanel: View {
     }
 
     private func rows(_ accounts: [QuotaReport.Account], now: Date, alert: Double) -> some View {
-        let sections = [("Available", 0), ("Drawing on credits", 1), ("Unavailable", 2), ("Exhausted", 3), ("Signed out", 4)]
+        let sections = [("Available", 0), ("Drawing on credits", 1), ("Unavailable", 2), ("Exhausted", 3), ("Authentication required", 4)]
             .map { title, rank in (title, accounts.filter { $0.rank(now) == rank }) }.filter { !$0.1.isEmpty }
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(sections, id: \.0) { title, members in
@@ -156,8 +155,7 @@ struct QuotaPanel: View {
                 ForEach(members) { account in
                     AccountRow(account: account, now: now, alert: alert, expanded: Binding(
                         get: { expanded.contains(account.id) },
-                        set: { if $0 { expanded.insert(account.id) } else { expanded.remove(account.id) } }),
-                               forget: model.forget)
+                        set: { if $0 { expanded.insert(account.id) } else { expanded.remove(account.id) } }))
                 }
             }
         }
@@ -177,8 +175,12 @@ struct Summary: View {
         let drawing = report?.drawing(now: now) ?? []
         let (title, detail): (String, String) = switch (report, featured) {
         case (nil, _): error.map { ("Quota unavailable", $0) } ?? ("Loading…", "")
-        case (let report?, _) where !report.enabled: ("Quota is off", "Turned off in Provenant's quota settings.")
-        case (let report?, _) where report.accounts.isEmpty: ("No accounts", "No quota accounts are configured.")
+        case (let report?, _) where report.accounts.isEmpty:
+            let sources = report.sources.map { source in
+                "\(source.title): \(source.statusTitle)" + (source.error.map { " (\($0))" } ?? "")
+            }
+            let coverage = "\(report.coverage.known) of \(report.coverage.total) quota report rows have current account data."
+            ("No account snapshots", ([coverage] + sources).joined(separator: "\n"))
         case (_, let featured?): (featured.account.title, [featured.window.fullTitle, Fmt.resets(featured.window.resetAt, now: now)]
                                     .compactMap { $0 }.joined(separator: " · "))
         case _ where !drawing.isEmpty: ("Drawing on credits", drawing.map(\.title).joined(separator: ", "))
@@ -205,18 +207,16 @@ struct Summary: View {
     }
 }
 
-/// One account as a menu item: its rings, its name over one short fact, and its use or when it is back. Clicking it
-/// discloses every window. A signed-out account offers Forget.
+/// One account as a menu item: its rings, its name over one short fact, and its use or reset time.
 struct AccountRow: View {
     let account: QuotaReport.Account, now: Date, alert: Double
     @Binding var expanded: Bool
-    let forget: (String) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         let usable = account.rank(now) == 0, drawing = account.isDrawing(now: now)
-        let aged = !account.isSignedOut && (account.status == "stale" || account.observedAt.map { now.timeIntervalSince($0) > 1800 } ?? false)
+        let aged = !account.requiresAuth && (account.status == "stale" || account.observedAt.map { now.timeIntervalSince($0) > 1800 } ?? false)
         let row = Fmt.row(account, now: now, alert: alert)
         let spent = usable ? account.spentPools(now: now).map { Fmt.spent($0, now: now) } : []
         // The binding pool takes the outer ring; its use is the figure on the right.
@@ -243,14 +243,13 @@ struct AccountRow: View {
                         Text(trailing).font(usable ? .body : .subheadline).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
-                // Exhausted, unreadable and signed-out accounts recede; less so when the user asks for more contrast.
+                // Exhausted and unavailable accounts recede; less so when the user asks for more contrast.
                 .opacity(usable || drawing ? 1 : contrast == .increased ? 0.8 : 0.55)
             }
             .help(account.id)   // fingerprinted accounts can share a title
             .accessibilityLabel(spoken.joined(separator: ", "))
             .accessibilityHint(expanded ? "Hides the windows" : "Shows every window")
-            .modifier(ForgetMenu(account: account, forget: forget))
-            if expanded { WindowList(account: account, now: now, forget: forget).padding(.leading, 38).padding([.trailing, .bottom], 8) }
+            if expanded { WindowList(account: account, now: now).padding(.leading, 38).padding([.trailing, .bottom], 8) }
         }
     }
 
@@ -263,17 +262,6 @@ struct AccountRow: View {
         case let (lead?, nil): return Text(lead)
         case (nil, nil): return nil
         }
-    }
-}
-
-/// "Forget" in a signed-out row's context menu; signed-in rows have none.
-struct ForgetMenu: ViewModifier {
-    let account: QuotaReport.Account, forget: (String) -> Void
-
-    func body(content: Content) -> some View {
-        if account.isSignedOut {
-            content.contextMenu { Button("Forget \(account.title)") { forget(account.id) } }
-        } else { content }
     }
 }
 
@@ -302,11 +290,10 @@ struct PoolRings: View {
 
 struct WindowList: View {
     let account: QuotaReport.Account, now: Date
-    let forget: (String) -> Void
 
     var body: some View {
-        let meta = [account.planTitle, account.isSignedOut ? "signed out" : nil,
-                    account.observedAt.map { "\(account.isSignedOut ? "last read" : "observed") \(Fmt.ago($0, now: now))" },
+        let meta = [account.planTitle, account.requiresAuth ? "authentication required" : nil,
+                    account.observedAt.map { "observed \(Fmt.ago($0, now: now))" },
                     account.status == "stale" ? (account.error != nil ? "last fetch failed" : "window reset since reading") : nil].compactMap { $0 }
         let burn = account.isDrawing(now: now) ? account.creditBurnPerHour : nil
         // Present only when the account has some.
@@ -318,10 +305,6 @@ struct WindowList: View {
             }
             ForEach(extras, id: \.self) { Text($0).lineLimit(2) }
             if !meta.isEmpty { Text(Fmt.sentence(meta.joined(separator: " · "))).foregroundStyle(.tertiary) }
-            if account.isSignedOut {
-                Button("Forget this account") { forget(account.id) }.buttonStyle(.link).font(.subheadline)
-                    .help("Removes the remembered reading. Signing in again brings the account back.")
-            }
         }
         .font(.subheadline).foregroundStyle(.secondary)
     }

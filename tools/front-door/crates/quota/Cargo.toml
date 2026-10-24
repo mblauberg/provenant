@@ -9,12 +9,12 @@ publish = false
 [dependencies]
 jiff = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["float_roundtrip"] }
-sha2 = { workspace = true }
+serde_json = { workspace = true }
+provenant-core = { workspace = true }
+provenant-config = { workspace = true }
+provenant-records = { workspace = true }
 thiserror = { workspace = true }
 
-[dev-dependencies]
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

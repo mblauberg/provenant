@@ -1,7 +1,9 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
 pub mod fabric;
+pub mod quota;
 pub use fabric::Fabric;
+pub use quota::Quota;
 mod grammar;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
