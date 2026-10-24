@@ -319,3 +319,156 @@ fn jiff_time() -> Result<i64> {
         .as_timestamp()
         .as_second())
 }
+
+#[test]
+fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> Result {
+    use std::fs;
+    let rig = quota_rig()?;
+    let mut accounts = serde_json::Map::new();
+    for provider in ["codex", "cursor"] {
+        let mut entries = serde_json::Map::new();
+        for (name, identity) in [
+            ("one", "fixture-account-one"),
+            ("two", "fixture-account-two"),
+            ("missing", ""),
+        ] {
+            let dir = rig.home.join(format!("{provider}-{name}"));
+            fs::create_dir(&dir)?;
+            if !identity.is_empty() {
+                if provider == "codex" {
+                    fs::write(
+                        dir.join("auth.json"),
+                        serde_json::to_vec(&serde_json::json!({"tokens":{"account_id":identity}}))?,
+                    )?;
+                } else {
+                    let db = rusqlite::Connection::open(dir.join("state.vscdb"))?;
+                    db.execute(
+                        "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+                        [],
+                    )?;
+                    let token = match name {
+                        "one" => {
+                            "fixture.eyJzdWIiOiJhdXRoaDB8Zml4dHVyZS1hY2NvdW50LW9uZSIsImV4cCI6NDAwMDAwMDAwMH0.signature"
+                        }
+                        _ => {
+                            "fixture.eyJzdWIiOiJhdXRoaDB8Zml4dHVyZS1hY2NvdW50LXR3byIsImV4cCI6NDAwMDAwMDAwMH0.signature"
+                        }
+                    };
+                    db.execute(
+                        "INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', ?1)",
+                        [token],
+                    )?;
+                }
+            }
+            entries.insert(name.into(), serde_json::json!({"identity_dir":dir}));
+        }
+        accounts.insert(provider.into(), entries.into());
+    }
+    for provider in ["claude", "agy", "opencode"] {
+        accounts.insert(provider.into(), serde_json::json!({}));
+    }
+    fs::write(
+        rig.home.join(".agents/config/telemetry.json"),
+        serde_json::to_vec(&serde_json::json!({"accounts":accounts}))?,
+    )?;
+    let out = rig.command(&["quota", "show", "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = report["data"]["accounts"].as_array().unwrap();
+    for provider in ["codex", "cursor"] {
+        let rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r["account"]["adapter"] == provider)
+            .collect();
+        assert_eq!(rows.len(), 3);
+        let unknown = rows
+            .iter()
+            .filter(|r| r["account"]["account_key"] == "unknown")
+            .count();
+        assert_eq!(unknown, 1, "{provider}: unreadable sign-in must be unknown");
+        let keys: std::collections::BTreeSet<_> = rows
+            .iter()
+            .map(|r| r["account"]["account_key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 3);
+        for key in keys {
+            assert!(key == "unknown" || key.starts_with(&format!("{provider}-")));
+        }
+        use provenant_quota::{AccountScope, Admission, ProbeCapture, QuotaProbeInput, Refusal};
+        use provenant_records::{
+            ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+        };
+        let known: Vec<AccountScope> = rows
+            .iter()
+            .filter(|r| r["account"]["account_key"] != "unknown")
+            .map(|r| serde_json::from_value(r["account"].clone()).unwrap())
+            .collect();
+        let at = jiff_time()?;
+        let input = QuotaProbeInput {
+            now_unix_seconds: at,
+            deadline_unix_seconds: at + 30,
+            authority_ref: Some("fixture".into()),
+        };
+        let fixture = if provider == "codex" {
+            include_str!("../crates/providers/src/quota/fixtures/codex-app-server.json")
+        } else {
+            include_str!("../crates/providers/src/quota/fixtures/cursor.json")
+        };
+        for account in &known {
+            let plan = provenant_providers::quota::plan(provider, account, &input)?;
+            let snapshot = provenant_providers::quota::decode(
+                &plan,
+                &ProbeCapture {
+                    stdout: fixture.as_bytes().to_vec(),
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                },
+            )?;
+            assert_eq!(&snapshot.account, account);
+        }
+        let refusals = [Refusal {
+            account: known[0].clone(),
+            model: "fixture-model".into(),
+            pool: None,
+            observed_unix_seconds: at,
+            resets_unix_seconds: Some(at + 300),
+        }];
+        let admission = Admission {
+            now_unix_seconds: at,
+            records: &[],
+            refusals: &refusals,
+            pools: &[],
+        };
+        let mut route = ResolvedRoute {
+            adapter: provider.into(),
+            model: "fixture-model".into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: None,
+            host: "fixture".into(),
+            alternatives: Default::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: at + 60,
+            },
+            confidentiality: RouteConfidentiality {
+                evidence_ref: "fixture".into(),
+            },
+        };
+        let operation = provenant_core::OperationId::parse("fixture")?;
+        for (account, allowed) in [(&known[0], false), (&known[1], true), (&known[0], false)] {
+            route.account_key = Some(account.account_key.clone());
+            assert_eq!(admission.admit(&route, &operation).is_ok(), allowed);
+        }
+    }
+    assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("fixture-account"));
+    rig.assert_legacy_unchanged()
+}

@@ -29,6 +29,9 @@ pub struct TaskRequest {
     pub task_id: TaskId,
     pub prompt_digest: FileDigest,
     pub route: RequestedRoute,
+    /// Optional dispatch override; normal placement comes from routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub fallback: Vec<RouteRecord>,
     /// Digest of the verified confinement/authority plan supplied by the edge.
     pub authority_digest: Digest,

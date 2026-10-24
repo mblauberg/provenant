@@ -782,3 +782,126 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
     );
     Ok(())
 }
+
+#[test]
+fn distinct_accounts_of_one_adapter_are_valid_resolution_inputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut second = availability();
+    second.account_key = Some("second-account".into());
+    let records = [availability(), second];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    let query = request("codex/test")?;
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    context.access = &access;
+    let observations = [quota(
+        "codex/test",
+        "opaque-account",
+        provenant_quota::QuotaStatus::Exhausted,
+        1,
+        80,
+        120,
+    )?];
+    context.quota = &observations;
+    let resolved = resolve(&query, &context)?;
+    assert_eq!(resolved.account_key.as_deref(), Some("opaque-account"));
+    assert!(matches!(
+        resolved.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::Exhausted
+        }
+    ));
+    let selected = resolve_for_account(&query, &context, Some("second-account"))?;
+    assert_eq!(selected.account_key.as_deref(), Some("second-account"));
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    let back = resolve_for_account(&query, &context, Some("opaque-account"))?;
+    assert!(matches!(
+        back.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::Exhausted
+        }
+    ));
+    let missing = resolve_for_account(&query, &context, Some("not-registered"))?;
+    assert!(matches!(
+        missing.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    for id in ["codex/test", "claude/test"] {
+        catalogue.models.push(ModelEntry {
+            model: ModelId::parse(id)?,
+            efforts: vec![],
+            evidence_ref: "synthetic-controls".into(),
+            family: None,
+            trains_on_prompts: None,
+        });
+    }
+    catalogue.pools.insert(
+        "identity-test".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("codex/test")?,
+                effort: None,
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("claude/test")?,
+                effort: None,
+                free: false,
+            },
+        ],
+    );
+    let config = RoutingConfig::default();
+    let mut second = availability();
+    second.account_key = Some("second-account".into());
+    let mut other = availability();
+    other.adapter = "claude".into();
+    other.account_key = Some("other-provider".into());
+    let records = [availability(), second, other];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "claude",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    context.access = &access;
+    let mut query = request("codex/test")?;
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("claude/test")?])?);
+    let selected = resolve_for_account(&query, &context, Some("second-account"))?;
+    assert_eq!(selected.account_key.as_deref(), Some("second-account"));
+    assert_eq!(
+        selected.alternatives.as_slice()[0].account_key.as_deref(),
+        Some("other-provider")
+    );
+    query.choice = RouteChoice::NamedRoute("identity-test".into());
+    query.fallback = Fallback::None;
+    let selected = resolve_for_account(&query, &context, Some("second-account"))?;
+    assert_eq!(selected.adapter, "codex");
+    assert_eq!(selected.account_key.as_deref(), Some("second-account"));
+    let selected = resolve_for_account(&query, &context, Some("other-provider"))?;
+    assert_eq!(selected.adapter, "claude");
+    assert_eq!(selected.account_key.as_deref(), Some("other-provider"));
+    Ok(())
+}

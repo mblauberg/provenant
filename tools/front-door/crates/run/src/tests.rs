@@ -55,6 +55,7 @@ pub(super) fn input() -> PreparedRun {
                     model: "fixture/model".into(),
                     effort: Some("high".into()),
                 },
+                account: None,
                 fallback: vec![],
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,

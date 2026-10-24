@@ -173,6 +173,7 @@ impl RunStore {
                         input.prompt.as_bytes(),
                     ),
                     route: prior.requested_route.clone(),
+                    account: task.account.clone(),
                     fallback: vec![],
                     authority_digest: prior.authority_digest,
                     provider_timeout_seconds: task.provider_timeout_seconds,
