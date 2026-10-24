@@ -25,7 +25,7 @@ doctrine_invariants:
   - "serial ownership"
   - "native same-session subagents"
   - "Ordinary configured-provider CLI dispatch may use same-family routes"
-  - "The current `cf_dispatch.py` distinct-family requirement belongs to its assurance path"
+  - "The distinct-family requirement belongs to the assurance path of Rust dispatch"
   - "cross-family broad review"
   - "CROSS-FAMILY-NOT-RUN"
   - "Final gate"

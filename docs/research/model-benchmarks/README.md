@@ -65,8 +65,8 @@ and do not use it to override a fresher one. Next scheduled refresh: January
 3. Where sources conflict, record both and explain in `notes`; do not average or
    choose silently.
 4. A missing result belongs in `gaps`, not in a guess.
-5. Update the summary table below, then run
-   `uv run pytest tests/test_model_benchmarks.py`.
+5. Update the summary table below, then check `benchmarks.json` against
+   `benchmarks.schema.json`.
 
 ## Frontier effort range per model
 

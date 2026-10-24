@@ -1,5 +1,9 @@
 # Spec: graph runner for contract-driven plan graphs
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **proposed**, 2026-10-22. Implements requirement R2 of the
 [operating model](operating-model.md) and is brought forward from its last
 rollout position at the user's direction. GitHub owns delivery state; this
