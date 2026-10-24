@@ -24,7 +24,12 @@ provenant worktree remove fix-repo-example
 ```
 
 Rust confinement validates repository identity and refuses primary, dirty,
-live or unknown writers. No force removal is offered.
+live or unknown writers. It reports `git_operation_in_progress` and refuses
+removal when the worktree's private Git directory contains an unfinished
+cherry-pick, revert, rebase, merge or sequencer operation, even if the index
+and working tree are clean. Execution owners must call
+`worktrees::check_writer_terminal` before accepting a writer's terminal result.
+No force removal is offered.
 
 ## Ownership and cleanup
 
