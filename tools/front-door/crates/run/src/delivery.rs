@@ -478,35 +478,28 @@ impl HostDeliveryContext {
                 Stage::Upstream,
             )?;
         }
-        let upstream = self.command(
-            cwd,
-            "git",
-            &["rev-parse", "--symbolic-full-name", "@{upstream}"],
-            Stage::Verify,
-        )?;
-        let status = self.command(
-            cwd,
-            "git",
-            &[
-                "status",
-                "-sb",
-                "--porcelain=v1",
-                "--untracked-files=no",
-                "--ignore-submodules=all",
-                "--",
-                ":(exclude)*",
-            ],
-            Stage::Verify,
-        )?;
-        if upstream != tracking
-            || !status.lines().next().is_some_and(|line| {
-                line == format!(
-                    "## {}...{}/{}",
-                    bound.lane_branch, request.remote, request.branch
-                )
-            })
-        {
-            return Err(RunError::Delivery(Stage::Verify));
+        // Read the upstream back from config: `@{upstream}` and `status -sb`
+        // only resolve when the remote's fetch refspec covers the branch, and a
+        // narrowed clone (for example main only) is legitimate.
+        for (key, value) in [
+            ("remote", request.remote.as_str()),
+            ("merge", destination.as_str()),
+            ("pushRemote", request.remote.as_str()),
+        ] {
+            let stored = self.command(
+                cwd,
+                "git",
+                &[
+                    "config",
+                    "--local",
+                    "--get",
+                    &format!("branch.{}.{key}", bound.lane_branch),
+                ],
+                Stage::Verify,
+            )?;
+            if stored != value {
+                return Err(RunError::Delivery(Stage::Verify));
+            }
         }
         if request.open_pr {
             let url = self.command(

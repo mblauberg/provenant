@@ -57,6 +57,16 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         &project,
         &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
     )?;
+    // A narrowed fetch refspec that omits the delivered branch, as in a
+    // main-only clone, must not defeat delivery.
+    git(
+        &project,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/base:refs/remotes/origin/base",
+        ],
+    )?;
     git(&project, &["push", "-q", "origin", "HEAD:refs/heads/base"])?;
     let initial = git(&project, &["rev-parse", "HEAD"])?;
     git(&project, &["update-ref", "-d", "refs/remotes/origin/base"])?;
@@ -125,7 +135,6 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         git(&lane, &["config", "branch.lane.merge"])?,
         "refs/heads/published/lane"
     );
-    assert!(git(&lane, &["status", "-sb"])?.starts_with("## lane...origin/published/lane"));
     assert!(
         git(&lane, &["ls-remote", "origin", "refs/heads/published/lane"])?
             .starts_with(head_text.as_str())
