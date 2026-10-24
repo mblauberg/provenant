@@ -264,8 +264,8 @@ fn account_placement() -> Result {
         assert_eq!(selected.in_place_writes[0].path, auth);
         for step in &spec.setup {
             match step {
+                SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
                 SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
-                _ => return Err("unexpected setup".into()),
             }
         }
         specs.push((key, state, spec));
