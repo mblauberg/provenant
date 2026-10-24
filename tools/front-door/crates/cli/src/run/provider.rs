@@ -805,32 +805,9 @@ fn apply_setup(
                 };
                 setup_directory(&parent, name)?;
             }
-            SetupStep::WriteFile { path, bytes } => {
-                let (parent, name) = setup_parent(&roots[..1], path, false)?;
-                let matches = match parent.metadata_at(name, false) {
-                    Ok(metadata) if metadata.kind == FileKind::Regular => {
-                        let mut file = parent.open_read(name).map_err(|error| error.to_string())?;
-                        match file.read_bounded(bytes.len() as u64) {
-                            Ok(existing) if existing == *bytes => {
-                                file.sync().map_err(|error| error.to_string())?;
-                                parent.sync().map_err(|error| error.to_string())?;
-                                true
-                            }
-                            Ok(_) | Err(provenant_supervisor::fs::FsError::TooLarge { .. }) => {
-                                false
-                            }
-                            Err(error) => return Err(error.to_string()),
-                        }
-                    }
-                    Ok(_) => false,
-                    Err(error) if error.is_not_found() => false,
-                    Err(error) => return Err(error.to_string()),
-                };
-                if !matches {
-                    parent
-                        .atomic_write(name, ".provider-setup.", bytes, PublishMode::Replace)
-                        .map_err(|error| error.to_string())?;
-                }
+            SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
+            SetupStep::WriteExecutable { path, bytes } => {
+                write_setup_file(roots, path, bytes, true)?;
             }
             SetupStep::Symlink { link, target } => {
                 let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
@@ -854,6 +831,44 @@ fn apply_setup(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn write_setup_file(
+    roots: &[&Path],
+    path: &Path,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<(), String> {
+    let (parent, name) = setup_parent(&roots[..1], path, false)?;
+    let matches = match parent.metadata_at(name, false) {
+        Ok(metadata) if metadata.kind == FileKind::Regular => {
+            let mut file = parent.open_read(name).map_err(|error| error.to_string())?;
+            match file.read_bounded(bytes.len() as u64) {
+                Ok(existing) if existing == *bytes => {
+                    file.sync().map_err(|error| error.to_string())?;
+                    parent.sync().map_err(|error| error.to_string())?;
+                    true
+                }
+                Ok(_) | Err(provenant_supervisor::fs::FsError::TooLarge { .. }) => false,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(_) => false,
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if !matches {
+        parent
+            .atomic_write(name, ".provider-setup.", bytes, PublishMode::Replace)
+            .map_err(|error| error.to_string())?;
+    }
+    if executable {
+        parent
+            .open_read(name)
+            .and_then(|file| file.make_owner_executable())
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }

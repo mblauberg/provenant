@@ -102,11 +102,15 @@ impl LaneRuntime<'_> {
         Ok(())
     }
 
+    /// `scrubbed_git_config` is for a provider whose shell subprocesses lose
+    /// `GIT_CONFIG_GLOBAL`: `scratch/bin/git` then wraps the selected Git and
+    /// sets the variable itself, so Git never opens the unreadable `~/.gitconfig`.
     pub(crate) fn environment(
         &self,
         scratch: &Path,
         env: &mut Vec<(OsString, OsString)>,
         setup: &mut Vec<SetupStep>,
+        scrubbed_git_config: bool,
     ) -> Result<(), ProviderError> {
         // A private name also pins ordinary shell `git`, independently of
         // PATH's system shim and of the override executable's basename.
@@ -118,13 +122,18 @@ impl LaneRuntime<'_> {
         *path =
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
                 .map_err(|_| ProviderError::InvalidPath)?;
-        setup.extend([
-            SetupStep::CreateDir(bin.clone()),
+        setup.push(SetupStep::CreateDir(bin.clone()));
+        setup.push(if scrubbed_git_config {
+            SetupStep::WriteExecutable {
+                path: bin.join("git"),
+                bytes: self.git_wrapper()?,
+            }
+        } else {
             SetupStep::Symlink {
                 link: bin.join("git"),
                 target: self.git.to_owned(),
-            },
-        ]);
+            }
+        });
         env.extend([
             ("PROVENANT_ROOT".into(), self.assets.into()),
             ("PROVENANT_GIT".into(), self.git.into()),
@@ -136,6 +145,18 @@ impl LaneRuntime<'_> {
             (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
         ]);
         Ok(())
+    }
+
+    fn git_wrapper(&self) -> Result<Vec<u8>, ProviderError> {
+        let git = self.git.to_str().ok_or(ProviderError::InvalidPath)?;
+        if git.contains(['\'', '\n']) {
+            return Err(ProviderError::InvalidPath);
+        }
+        Ok(format!(
+            "#!/bin/sh\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\n\
+             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\nexec '{git}' \"$@\"\n"
+        )
+        .into_bytes())
     }
 
     /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.

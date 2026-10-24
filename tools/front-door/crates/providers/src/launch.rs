@@ -34,6 +34,8 @@ pub enum SetupStep {
     /// Create a mode-0600 file with these bytes, refusing an existing entry.
     /// The launcher writes and syncs it before anchoring the profile.
     WriteFile { path: PathBuf, bytes: Vec<u8> },
+    /// Like `WriteFile`, then mark the file owner-executable.
+    WriteExecutable { path: PathBuf, bytes: Vec<u8> },
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },
 }

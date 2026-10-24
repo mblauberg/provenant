@@ -1814,6 +1814,20 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
         link: "/fixture/scratch/cargo-home/registry".into(),
         target: "/fixture/home/.cargo/registry".into(),
     }));
+    // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
+    // wrapper that sets it, and its directory is executable.
+    assert!(launch.setup.iter().any(|step| matches!(
+        step,
+        crate::launch::SetupStep::WriteExecutable { path, .. } if path == Path::new("/fixture/scratch/bin/git")
+    )));
+    assert!(
+        launch
+            .profile
+            .spec
+            .tool_exec_roots
+            .iter()
+            .any(|g| g.path == Path::new("/fixture/scratch/bin"))
+    );
     assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
         !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
     }));
