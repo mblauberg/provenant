@@ -6,7 +6,7 @@ use provenant_fabric_mcp::{
     tools::{Service, ServiceError},
 };
 use provenant_fabric_runtime::runs::{
-    AttemptPage, RunCapabilities, RunEventsPage, RunOwner, RunResult, SubmissionReceipt,
+    AttemptPage, RunCapabilities, RunEventsPage, RunResult, SubmissionReceipt,
 };
 use provenant_fabric_runtime::{
     coordination::{facade::*, *},
@@ -43,6 +43,8 @@ pub enum EdgeError {
     Io(#[from] io::Error),
     #[error("invalid Fabric setup")]
     Invalid,
+    #[error("Git executable is unavailable")]
+    GitUnavailable,
 }
 
 struct Factory {
@@ -72,11 +74,10 @@ impl Factory {
         )
     }
 }
-fn system_ssh() -> Option<&'static Path> {
-    ["/usr/bin/ssh", "/bin/ssh"]
-        .into_iter()
-        .map(Path::new)
-        .find(|p| provenant_supervisor::sys::is_executable(p))
+fn fair_probe_micros(remaining_micros: u64, probes_remaining: usize) -> Option<u64> {
+    let probes_remaining = u64::try_from(probes_remaining).ok()?;
+    let share = remaining_micros.checked_div(probes_remaining)?;
+    (share > 0).then_some(share)
 }
 impl stdio::Factory for Factory {
     fn maintain_usage(&self) {
@@ -181,38 +182,67 @@ impl F3Facade for BoundFacade<'_> {
     ) -> Result<Vec<HostHealth>, FacadeError> {
         let HostsInput::List { after, limit } = input;
         let ctx = &self.factory.context;
-        let mut hosts = std::collections::BTreeMap::new();
-        hosts.insert(
-            ctx.identity.host,
-            HostHealth {
-                host: ctx.identity.host,
-                available: true,
-                execution: Some(
-                    BinaryRunOwner {
-                        factory: self.factory,
-                        allow_remote: true,
-                    }
-                    .capabilities()
-                    .submit,
-                ),
-            },
-        );
+        let mut candidates: std::collections::BTreeMap<
+            provenant_core::HostId,
+            Option<&provenant_fabric_runtime::config::Peer>,
+        > = std::collections::BTreeMap::new();
+        candidates.insert(ctx.identity.host, None);
         for peer in ctx.config.peers.values() {
-            if hosts.contains_key(&peer.host) {
-                continue;
+            candidates.entry(peer.host).or_insert(Some(peer));
+        }
+        let selected = candidates
+            .into_iter()
+            .filter(|(host, _)| after.is_none_or(|cursor| *host > cursor))
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+        let mut probes_remaining = selected.iter().filter(|(_, peer)| peer.is_some()).count();
+        let locator = (probes_remaining > 0)
+            .then(|| ProjectLocator::new(&ctx.identity, &self.factory.home).ok())
+            .flatten();
+        let executable = (probes_remaining > 0)
+            .then(|| {
+                provenant_fabric_runtime::hosts::discover_ssh_executable(
+                    ctx.config.ssh_executable.as_deref(),
+                )
+                .ok()
+            })
+            .flatten();
+        let mut page = Vec::with_capacity(selected.len());
+        for (host, peer) in selected {
+            if cancel.is_cancelled() {
+                return Err(FacadeError::Cancelled);
             }
+            let Some(peer) = peer else {
+                page.push(HostHealth {
+                    host,
+                    available: true,
+                    execution: Some(
+                        BinaryRunOwner {
+                            factory: self.factory,
+                            allow_remote: true,
+                        }
+                        .capabilities()
+                        .submit,
+                    ),
+                });
+                continue;
+            };
             let mut health = HostHealth {
-                host: peer.host,
+                host,
                 available: false,
                 execution: None,
             };
-            if let (Ok(project), Some(executable)) = (
-                ProjectLocator::new(&ctx.identity, &self.factory.home),
-                system_ssh(),
-            ) {
+            let cap = fair_probe_micros(
+                budget.remaining(self.factory.clock.mono_now()).as_micros(),
+                probes_remaining,
+            );
+            probes_remaining = probes_remaining.saturating_sub(1);
+            if let (Some(project), Some(executable), Some(cap)) =
+                (locator.clone(), executable.clone(), cap)
+            {
                 let request = PeerRequest {
                     version: 1,
-                    target_host: peer.host,
+                    target_host: host,
                     source_host: ctx.identity.host,
                     agent: ctx.identity.inbox.agent.clone(),
                     project,
@@ -229,21 +259,22 @@ impl F3Facade for BoundFacade<'_> {
                 if let Ok(PeerResponse {
                     result: PeerResult::Health(value),
                     ..
-                }) = transport.exchange(peer, &request, budget, cancel)
-                {
+                }) = transport.exchange_with_cap(
+                    peer,
+                    &request,
+                    budget,
+                    cancel,
+                    std::time::Duration::from_micros(cap),
+                ) {
                     health = value;
                 }
             }
-            hosts.insert(peer.host, health);
+            page.push(health);
         }
         if cancel.is_cancelled() {
             return Err(FacadeError::Cancelled);
         }
-        Ok(hosts
-            .into_values()
-            .filter(|h| after.is_none_or(|a| h.host > a))
-            .take(limit as usize)
-            .collect())
+        Ok(page)
     }
 }
 
@@ -455,6 +486,20 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
             allow_remote: false,
         };
         let result = match &request.action {
+            PeerAction::RunStatuses { targets } => {
+                if !(1..=100).contains(&targets.len()) {
+                    PeerResult::Error {
+                        code: "invalid_input".into(),
+                        operation_id: None,
+                    }
+                } else {
+                    peer_result(
+                        owner.snapshots_local(targets, budget, &cancel),
+                        None,
+                        PeerResult::RunStatuses,
+                    )
+                }
+            }
             PeerAction::Run { input } => peer_result(
                 owner.run(input.clone(), budget, &cancel),
                 request.operation(),
@@ -509,10 +554,14 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
                         &cancel,
                     ) {
                         Ok(value) => PeerResult::Push(value),
-                        Err(_) => PeerResult::Error {
-                            code: "launch_unknown".into(),
-                            operation_id: Some(operation_id.clone()),
-                        },
+                        Err(error) => {
+                            let code = landing_error_code(error.as_ref());
+                            PeerResult::Error {
+                                code: code.into(),
+                                operation_id: (code == "launch_unknown")
+                                    .then(|| operation_id.clone()),
+                            }
+                        }
                     }
                 }
             }
@@ -619,6 +668,54 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
     }
 }
 
+fn store_error_code(error: &provenant_fabric_store::Error) -> &'static str {
+    use provenant_fabric_store::Error as StoreError;
+    match error {
+        StoreError::NotFound => "not_found",
+        StoreError::StaleFence => "stale_fence",
+        StoreError::Conflict
+        | StoreError::PushUnresolved { .. }
+        | StoreError::PushTransition { .. }
+        | StoreError::Overlap { .. } => "conflict",
+        StoreError::Busy => "busy",
+        StoreError::Cancelled => "cancelled",
+        StoreError::Invalid(_) | StoreError::PathEncoding => "invalid_input",
+        StoreError::Decode(_)
+        | StoreError::Encode(_)
+        | StoreError::SchemaVersion(_)
+        | StoreError::UnversionedDatabase
+        | StoreError::JournalMode(_) => "state_corrupt",
+        _ => "io",
+    }
+}
+
+fn landing_error_code(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    use provenant_fabric_runtime::git_transport::GitTransportError as GitError;
+    if let Some(error) = error.downcast_ref::<GitError>() {
+        if error.is_unknown() {
+            return "launch_unknown";
+        }
+        return match error {
+            GitError::Store(error) => store_error_code(error),
+            GitError::PushNotFound { .. } => "not_found",
+            GitError::Invalid(_) | GitError::InvalidRemote | GitError::BundleTooLarge => {
+                "invalid_input"
+            }
+            GitError::DirtyWorktree
+            | GitError::IncompleteRepository
+            | GitError::OidMismatch
+            | GitError::NonFastForward
+            | GitError::BundleHeadMismatch
+            | GitError::TransportConflict
+            | GitError::RemoteMoved => "conflict",
+            _ => "io",
+        };
+    }
+    error
+        .downcast_ref::<provenant_fabric_store::Error>()
+        .map_or("io", store_error_code)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn landing_local(
     context: &context::Context,
@@ -646,9 +743,11 @@ fn landing_local(
         generation: proof.generation,
         token: proof.token,
     };
-    let git = provenant_fabric_runtime::git_transport::GitTransport::discover(
+    let git = provenant_fabric_runtime::git_transport::GitTransport::discover_with_policy(
         executor,
         std::env::var_os("SSH_AUTH_SOCK").map(Into::into),
+        context.config.ssh_executable.as_deref(),
+        context.config.limits.bundle_bytes,
     )?;
     let cwd = context.identity.cwd.to_path_buf()?;
     if reconcile {
@@ -699,7 +798,9 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                     .values()
                     .find(|p| p.host == *host)
                     .ok_or(PeerError::Unavailable)?;
-                let executable = system_ssh().ok_or(PeerError::Unavailable)?;
+                let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
+                    ctx.config.ssh_executable.as_deref(),
+                )?;
                 let request = PeerRequest {
                     version: 1,
                     target_host: *host,
@@ -717,7 +818,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                     clock: &factory.clock,
                     home: &factory.home,
                     cwd: &factory.cwd,
-                    executable,
+                    executable: executable.clone(),
                     seconds: ctx.config.limits.peer_seconds,
                 };
                 return match transport.exchange(peer, &request, budget, &cancel)?.result {
@@ -990,6 +1091,31 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)
     }
+    fn snapshots_local(
+        &self,
+        targets: &[AttemptTarget],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
+        let host = self.factory.context.identity.host;
+        if targets
+            .iter()
+            .any(|target| target.host.is_some_and(|target_host| target_host != host))
+        {
+            return Err(FacadeError::InvalidInput);
+        }
+        let session = self.session(budget, cancel)?;
+        let call = self.call(budget, cancel);
+        targets
+            .iter()
+            .map(|target| {
+                session
+                    .store
+                    .record(target.attempt, &call)
+                    .map_err(run_error)
+            })
+            .collect()
+    }
     fn peer(
         &self,
         host: provenant_core::HostId,
@@ -1014,20 +1140,26 @@ impl BinaryRunOwner<'_> {
             project,
             action,
         };
+        let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
+            ctx.config.ssh_executable.as_deref(),
+        )
+        .map_err(|_| FacadeError::HomeUnavailable)?;
         let transport = SshTransport {
             executor: &self.factory.executor,
             clock: &self.factory.clock,
             home: &self.factory.home,
             cwd: &self.factory.cwd,
-            executable: system_ssh().ok_or(FacadeError::HomeUnavailable)?,
+            executable,
             seconds: ctx.config.limits.peer_seconds,
         };
         match transport
             .exchange(peer, &request, budget, cancel)
-            .map_err(|e| match e {
-                PeerError::Unknown { operation_id } => FacadeError::LaunchUnknown { operation_id },
-                PeerError::Version => FacadeError::PeerVersion,
-                _ => FacadeError::HomeUnavailable,
+            .map_err(|error| {
+                let operation_id = match &error {
+                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
+                    _ => None,
+                };
+                FacadeError::from_code(error.code(), operation_id)
             })?
             .result
         {
@@ -1036,24 +1168,10 @@ impl BinaryRunOwner<'_> {
         }
     }
 }
-/// Decode a peer's refusal, keeping the operation an uncertain mutation names.
 fn peer_error(code: &str, operation_id: Option<provenant_core::OperationId>) -> FacadeError {
-    match (code, operation_id) {
-        ("launch_unknown", Some(operation_id)) => FacadeError::LaunchUnknown { operation_id },
-        ("not_found", _) => FacadeError::NotFound,
-        ("worktree_missing", _) => FacadeError::WorktreeMissing,
-        ("output_too_large", _) => FacadeError::OutputTooLarge,
-        ("invalid_input", _) => FacadeError::InvalidInput,
-        ("confinement_refused", _) => FacadeError::ConfinementRefused,
-        ("continuation_unsupported", _) => FacadeError::ContinuationUnsupported,
-        ("owner_unavailable", _) => FacadeError::OwnerUnavailable,
-        ("cancelled", _) => FacadeError::Cancelled,
-        ("conflict", _) => FacadeError::Conflict,
-        ("busy", _) => FacadeError::Busy,
-        _ => FacadeError::HomeUnavailable,
-    }
+    FacadeError::from_code(code, operation_id)
 }
-impl RunOwner for BinaryRunOwner<'_> {
+impl BinaryRunOwner<'_> {
     fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
             submit: true,
@@ -1174,7 +1292,6 @@ impl RunOwner for BinaryRunOwner<'_> {
                 let artifact = match part {
                     OutputPart::Stdout => provenant_run::ArtifactPart::Result,
                     OutputPart::Stderr => provenant_run::ArtifactPart::Stderr,
-                    OutputPart::Combined => return Err(FacadeError::InvalidInput),
                 };
                 let chunk = session
                     .store
@@ -1269,7 +1386,34 @@ impl RunOwner for BinaryRunOwner<'_> {
                     } else {
                         budget
                     };
+                if !(1..=100).contains(&targets.len()) {
+                    return Err(FacadeError::InvalidInput);
+                }
+                let local_host = self.factory.context.identity.host;
+                let mut local_indices = Vec::new();
+                let mut remote_batches = std::collections::BTreeMap::new();
+                for (index, target) in targets.iter().enumerate() {
+                    match target.host {
+                        Some(host) if host != local_host => {
+                            remote_batches
+                                .entry(host)
+                                .or_insert_with(Vec::new)
+                                .push((index, target.clone()));
+                        }
+                        _ => local_indices.push(index),
+                    }
+                }
+                if !self.allow_remote && !remote_batches.is_empty() {
+                    return Err(FacadeError::ConfinementRefused);
+                }
+                let local_session = if local_indices.is_empty() {
+                    None
+                } else {
+                    Some(self.session(budget, cancel)?)
+                };
+                let local_call = self.call(budget, cancel);
                 let mut last_attempts = None;
+                let mut backoff_micros = 50_000_u64;
                 loop {
                     if cancel.is_cancelled() {
                         return Err(FacadeError::Cancelled);
@@ -1285,10 +1429,48 @@ impl RunOwner for BinaryRunOwner<'_> {
                         }
                         return Err(FacadeError::Timeout);
                     }
-                    let attempts = targets
-                        .iter()
-                        .map(|target| self.snapshot(target.clone(), budget, cancel))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut attempts: Vec<Option<provenant_records::run::AttemptRecord>> =
+                        std::iter::repeat_with(|| None)
+                            .take(targets.len())
+                            .collect();
+                    if let Some(session) = &local_session {
+                        for index in &local_indices {
+                            attempts[*index] = Some(
+                                session
+                                    .store
+                                    .record(targets[*index].attempt, &local_call)
+                                    .map_err(run_error)?,
+                            );
+                        }
+                    }
+                    for (host, batch) in &remote_batches {
+                        let requested = batch
+                            .iter()
+                            .map(|(_, target)| target.clone())
+                            .collect::<Vec<_>>();
+                        let result = self.peer(
+                            *host,
+                            PeerAction::RunStatuses { targets: requested },
+                            budget,
+                            cancel,
+                        )?;
+                        let PeerResult::RunStatuses(records) = result else {
+                            return Err(FacadeError::StateCorrupt);
+                        };
+                        if records.len() != batch.len() {
+                            return Err(FacadeError::StateCorrupt);
+                        }
+                        for ((index, target), record) in batch.iter().zip(records) {
+                            if record.attempt_id != target.attempt {
+                                return Err(FacadeError::StateCorrupt);
+                            }
+                            attempts[*index] = Some(record);
+                        }
+                    }
+                    let attempts = attempts
+                        .into_iter()
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(FacadeError::StateCorrupt)?;
                     let satisfied = provenant_fabric_runtime::runs::wait_satisfied(
                         condition,
                         attempts.iter().map(|r| &r.state),
@@ -1307,10 +1489,12 @@ impl RunOwner for BinaryRunOwner<'_> {
                     provenant_fabric_store::RetryWait::wait(
                         &self.factory.backoff,
                         provenant_core::DurationMicros::from_micros(
-                            50_000.min(budget.remaining(self.factory.clock.mono_now()).as_micros()),
+                            backoff_micros
+                                .min(budget.remaining(self.factory.clock.mono_now()).as_micros()),
                         ),
                         cancel,
                     );
+                    backoff_micros = backoff_micros.saturating_mul(2).min(500_000);
                 }
             }
             RunInput::Cancel {
@@ -1457,21 +1641,29 @@ impl RunOwner for BinaryRunOwner<'_> {
         if !(1..=64).contains(&limit) {
             return Err(FacadeError::InvalidInput);
         }
-        let items = self
-            .store(budget, cancel)?
-            .events(
-                after,
-                usize::from(limit),
-                None,
-                &provenant_run::Request {
-                    clock: &self.factory.clock,
-                    budget,
-                    cancel,
-                },
-            )
+        let store = self.store(budget, cancel)?;
+        let call = provenant_run::Request {
+            clock: &self.factory.clock,
+            budget,
+            cancel,
+        };
+        let requested = usize::from(limit).saturating_add(1).min(64);
+        let mut items = store
+            .events(after, requested, None, &call)
             .map_err(run_error)?;
+        let truncated = if limit < 64 {
+            items.len() > usize::from(limit)
+        } else if items.len() == 64 {
+            let cursor = items.last().map_or(after, |event| event.sequence);
+            !store
+                .events(cursor, 1, None, &call)
+                .map_err(run_error)?
+                .is_empty()
+        } else {
+            false
+        };
+        items.truncate(usize::from(limit));
         let cursor = items.last().map_or(after, |event| event.sequence);
-        let truncated = items.len() == usize::from(limit);
         Ok(RunEventsPage {
             items,
             cursor,
@@ -1953,6 +2145,26 @@ pub fn events(
 }
 #[cfg(test)]
 mod peer_tests {
+    #[test]
+    fn peer_refusal_codes_keep_their_facade_meaning() {
+        for code in [
+            "stale_fence",
+            "timeout",
+            "state_corrupt",
+            "peer_version",
+            "publication_failed",
+            "home_unavailable",
+        ] {
+            assert_eq!(super::peer_error(code, None).code(), code, "{code}");
+        }
+    }
+
+    #[test]
+    fn host_probe_budget_is_shared_fairly() {
+        assert_eq!(super::fair_probe_micros(10_000_000, 4), Some(2_500_000));
+        assert_eq!(super::fair_probe_micros(55_000_000, 100), Some(550_000));
+    }
+
     #[test]
     fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>>
     {

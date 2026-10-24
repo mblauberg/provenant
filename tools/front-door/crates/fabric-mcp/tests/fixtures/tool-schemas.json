@@ -5268,8 +5268,7 @@
             "part": {
               "enum": [
                 "stdout",
-                "stderr",
-                "combined"
+                "stderr"
               ],
               "type": "string"
             },

@@ -173,23 +173,50 @@ impl RemoteCoordination<'_> {
                         .exchange(&self.peer, &request, budget, cancel)
                     {
                         Ok(response) => {
-                            self.journal
-                                .peer_phase(
-                                    self.project,
-                                    self.actor,
-                                    &id,
-                                    PeerPhaseChange::Committed {
-                                        response: serde_json::to_vec(&response)
-                                            .map_err(CoordinationError::ResponseEncoding)?,
-                                    },
-                                    &store_request,
-                                )
-                                .map_err(|_| PeerError::Unknown {
-                                    operation_id: id.clone(),
-                                })?;
+                            let commit = match &response.result {
+                                PeerResult::Coordination(_) => true,
+                                PeerResult::Error { code, .. } if is_retryable_refusal(code) => {
+                                    self.journal
+                                        .retry_peer(self.project, self.actor, &id, &store_request)
+                                        .map_err(|_| PeerError::Unknown {
+                                            operation_id: id.clone(),
+                                        })?;
+                                    false
+                                }
+                                PeerResult::Error { code, .. } if is_definitive_refusal(code) => {
+                                    true
+                                }
+                                _ => {
+                                    let _ = self.journal.peer_phase(
+                                        self.project,
+                                        self.actor,
+                                        &id,
+                                        PeerPhaseChange::Unknown,
+                                        &store_request,
+                                    );
+                                    return Err(PeerError::Unknown { operation_id: id }.into());
+                                }
+                            };
+                            if commit {
+                                self.journal
+                                    .peer_phase(
+                                        self.project,
+                                        self.actor,
+                                        &id,
+                                        PeerPhaseChange::Committed {
+                                            response: serde_json::to_vec(&response)
+                                                .map_err(CoordinationError::ResponseEncoding)?,
+                                        },
+                                        &store_request,
+                                    )
+                                    .map_err(|_| PeerError::Unknown {
+                                        operation_id: id.clone(),
+                                    })?;
+                            }
                             response
                         }
                         Err(_) => {
+                            // Sent already recovers from the owner's receipt if this write fails.
                             let _ = self.journal.peer_phase(
                                 self.project,
                                 self.actor,
@@ -217,6 +244,23 @@ impl RemoteCoordination<'_> {
         }
     }
 }
+
+fn is_retryable_refusal(code: &str) -> bool {
+    matches!(code, "busy" | "timeout" | "cancelled")
+}
+
+fn is_definitive_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_input"
+            | "not_found"
+            | "conflict"
+            | "stale_fence"
+            | "peer_version"
+            | "home_unavailable"
+    )
+}
+
 macro_rules! route {
     ($method:ident,$input:ty,$result:ty,$variant:ident) => {
         fn $method(
@@ -281,11 +325,7 @@ impl<'a> CoordinationService<'a> {
                 project: ProjectLocator::new(identity, home)?,
                 action: PeerAction::Health,
             };
-            let executable = ["/usr/bin/ssh", "/bin/ssh"]
-                .into_iter()
-                .map(std::path::Path::new)
-                .find(|p| provenant_supervisor::sys::is_executable(p))
-                .ok_or(PeerError::Unavailable)?;
+            let executable = discover_ssh_executable(config.ssh_executable.as_deref())?;
             let transport = SshTransport {
                 executor,
                 clock,
@@ -386,6 +426,143 @@ mod tests {
         }
     }
 
+    struct TransientThenSuccessPeer {
+        actions: Arc<Mutex<Vec<PeerAction>>>,
+        code: String,
+    }
+    impl PeerTransport for TransientThenSuccessPeer {
+        fn exchange(
+            &self,
+            _peer: &crate::config::Peer,
+            request: &PeerRequest,
+            _budget: WaitBudget,
+            _cancel: &CancelToken,
+        ) -> std::result::Result<PeerResponse, PeerError> {
+            let mut actions = self.actions.lock().unwrap();
+            let first = actions.is_empty();
+            actions.push(request.action.clone());
+            if first {
+                assert!(matches!(
+                    &request.action,
+                    PeerAction::Coordination {
+                        input: CoordinationInput::Events(EventsInput::Note { .. }),
+                        operation_id: Some(_),
+                    }
+                ));
+                return Ok(PeerResponse {
+                    version: request.version,
+                    host: request.target_host,
+                    project: request.project.key.clone(),
+                    result: PeerResult::Error {
+                        code: self.code.clone(),
+                        operation_id: request.operation(),
+                    },
+                });
+            }
+
+            assert!(matches!(
+                &request.action,
+                PeerAction::Coordination {
+                    input: CoordinationInput::Events(EventsInput::Note { .. }),
+                    operation_id: Some(_),
+                }
+            ));
+            Ok(PeerResponse {
+                version: request.version,
+                host: request.target_host,
+                project: request.project.key.clone(),
+                result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
+                    seq: 73,
+                })),
+            })
+        }
+    }
+
+    struct RemoteFixture {
+        _temporary: tempfile::TempDir,
+        root: StateRoot,
+        clock: SystemClock,
+        cancel: CancelToken,
+        backoff: ThreadWait,
+        budget: WaitBudget,
+        local_host: HostId,
+        remote_host: HostId,
+        project: ProjectId,
+        actor: ActorId,
+        project_key: CrossHostProjectKey,
+    }
+    impl RemoteFixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir_in("/tmp").unwrap();
+            std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let base = temporary.path().canonicalize().unwrap();
+            let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+            inputs.state_dir = Some(base.join("state"));
+            let root: StateRoot = inputs.resolve(&LocalFs).unwrap().state;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let backoff = ThreadWait;
+            let budget = WaitBudget::cli(clock.mono_now(), 30).unwrap();
+            let local_host = HostId::from_bytes([81; 16]);
+            let remote_host = HostId::from_bytes([82; 16]);
+            let project_key = CrossHostProjectKey::from_home(
+                Path::new("/home/local"),
+                Path::new("/home/local/project/.git"),
+            )
+            .unwrap();
+            Self {
+                _temporary: temporary,
+                root,
+                clock,
+                cancel,
+                backoff,
+                budget,
+                local_host,
+                remote_host,
+                project: ProjectId::from_bytes([83; 16]),
+                actor: ActorId::from_bytes([84; 16]),
+                project_key,
+            }
+        }
+
+        fn remote<'a>(&'a self, transport: Box<dyn PeerTransport + 'a>) -> RemoteCoordination<'a> {
+            let request = PeerRequest {
+                version: 1,
+                target_host: self.remote_host,
+                source_host: self.local_host,
+                agent: "chair".into(),
+                project: ProjectLocator {
+                    key: self.project_key.clone(),
+                    common_dir: "project/.git".into(),
+                },
+                action: PeerAction::Health,
+            };
+            let store_request = Request {
+                clock: &self.clock,
+                budget: self.budget,
+                cancel: &self.cancel,
+                backoff: &self.backoff,
+            };
+            let journal = Store::open(&self.root, &store_request).unwrap();
+            RemoteCoordination {
+                transport,
+                peer: crate::config::Peer {
+                    host: self.remote_host,
+                    destination: "worker".into(),
+                    remote_executable: None,
+                    connect_timeout_seconds: 10,
+                },
+                request,
+                journal,
+                project: self.project,
+                actor: self.actor,
+                clock: &self.clock,
+                backoff: &self.backoff,
+            }
+        }
+    }
+
     fn note(text: &str) -> CoordinationInput {
         CoordinationInput::Events(EventsInput::Note {
             note: text.to_owned(),
@@ -402,64 +579,20 @@ mod tests {
 
     #[test]
     fn remote_coordination_recovers_lost_reply_by_receipt_then_replays_locally() {
-        let temporary = tempfile::tempdir_in("/tmp").unwrap();
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let base = temporary.path().canonicalize().unwrap();
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let root: StateRoot = inputs.resolve(&LocalFs).unwrap().state;
-
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let backoff = ThreadWait;
-        let budget = WaitBudget::cli(clock.mono_now(), 30).unwrap();
-        let store_request = Request {
-            clock: &clock,
-            budget,
-            cancel: &cancel,
-            backoff: &backoff,
-        };
-        let journal = Store::open(&root, &store_request).unwrap();
-
-        let local_host = HostId::from_bytes([81; 16]);
-        let remote_host = HostId::from_bytes([82; 16]);
-        let project_key = CrossHostProjectKey::from_home(
-            Path::new("/home/local"),
-            Path::new("/home/local/project/.git"),
-        )
-        .unwrap();
-        let project = ProjectId::from_bytes([83; 16]);
-        let actor = ActorId::from_bytes([84; 16]);
+        let fixture = RemoteFixture::new();
         let operation = OperationId::parse("coordination-lost-reply-1").unwrap();
         let peer_actions = Arc::new(Mutex::new(Vec::new()));
-        let remote = RemoteCoordination {
-            transport: Box::new(ReceiptPeer {
-                actions: Arc::clone(&peer_actions),
-            }),
-            peer: crate::config::Peer {
-                host: remote_host,
-                destination: "worker".into(),
-            },
-            request: PeerRequest {
-                version: 1,
-                target_host: remote_host,
-                source_host: local_host,
-                agent: "chair".into(),
-                project: ProjectLocator {
-                    key: project_key,
-                    common_dir: "project/.git".into(),
-                },
-                action: PeerAction::Health,
-            },
-            journal,
-            project,
-            actor,
-            clock: &clock,
-            backoff: &backoff,
-        };
+        let remote = fixture.remote(Box::new(ReceiptPeer {
+            actions: Arc::clone(&peer_actions),
+        }));
 
         assert!(matches!(
-            remote.call(note("first body"), Some(operation.clone()), budget, &cancel),
+            remote.call(
+                note("first body"),
+                Some(operation.clone()),
+                fixture.budget,
+                &fixture.cancel,
+            ),
             Err(CoordinationError::Peer(PeerError::Unknown { operation_id }))
                 if operation_id == operation
         ));
@@ -470,14 +603,14 @@ mod tests {
             PeerAction::Coordination { operation_id: Some(id), .. } if id == &operation
         ));
         let journal_request = Request {
-            clock: &clock,
-            budget,
-            cancel: &cancel,
-            backoff: &backoff,
+            clock: &fixture.clock,
+            budget: fixture.budget,
+            cancel: &fixture.cancel,
+            backoff: &fixture.backoff,
         };
         let pending = remote
             .journal
-            .lookup_peer(project, actor, &operation, &journal_request)
+            .lookup_peer(fixture.project, fixture.actor, &operation, &journal_request)
             .unwrap()
             .unwrap();
         assert_eq!(pending.phase, PeerPhase::Unknown);
@@ -485,7 +618,12 @@ mod tests {
         assert_eq!(
             noted(
                 remote
-                    .call(note("first body"), Some(operation.clone()), budget, &cancel)
+                    .call(
+                        note("first body"),
+                        Some(operation.clone()),
+                        fixture.budget,
+                        &fixture.cancel,
+                    )
                     .unwrap()
             ),
             73
@@ -498,7 +636,7 @@ mod tests {
         ));
         let committed = remote
             .journal
-            .lookup_peer(project, actor, &operation, &journal_request)
+            .lookup_peer(fixture.project, fixture.actor, &operation, &journal_request)
             .unwrap()
             .unwrap();
         assert_eq!(committed.phase, PeerPhase::Committed);
@@ -507,7 +645,12 @@ mod tests {
         assert_eq!(
             noted(
                 remote
-                    .call(note("first body"), Some(operation.clone()), budget, &cancel)
+                    .call(
+                        note("first body"),
+                        Some(operation.clone()),
+                        fixture.budget,
+                        &fixture.cancel,
+                    )
                     .unwrap()
             ),
             73
@@ -516,11 +659,62 @@ mod tests {
 
         // Same key with a changed mutation conflicts before contacting the peer.
         assert!(matches!(
-            remote.call(note("changed body"), Some(operation), budget, &cancel),
+            remote.call(
+                note("changed body"),
+                Some(operation),
+                fixture.budget,
+                &fixture.cancel,
+            ),
             Err(CoordinationError::Store(
                 provenant_fabric_store::Error::Conflict
             ))
         ));
         assert_eq!(peer_actions.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn remote_coordination_transient_error_remains_retryable() {
+        for code in ["busy", "timeout", "cancelled"] {
+            let fixture = RemoteFixture::new();
+            let actions = Arc::new(Mutex::new(Vec::new()));
+            let remote = fixture.remote(Box::new(TransientThenSuccessPeer {
+                actions: Arc::clone(&actions),
+                code: code.to_owned(),
+            }));
+            let operation = OperationId::parse("transient-peer-operation-1").unwrap();
+
+            assert!(matches!(
+                remote.call(
+                    note("retry transient operation"),
+                    Some(operation.clone()),
+                    fixture.budget,
+                    &fixture.cancel,
+                ),
+                Err(CoordinationError::Peer(PeerError::Refused { code: actual }))
+                    if actual == code
+            ));
+            assert_eq!(
+                noted(
+                    remote
+                        .call(
+                            note("retry transient operation"),
+                            Some(operation.clone()),
+                            fixture.budget,
+                            &fixture.cancel,
+                        )
+                        .unwrap()
+                ),
+                73
+            );
+            assert_eq!(actions.lock().unwrap().len(), 2);
+            assert!(matches!(
+                &actions.lock().unwrap()[0],
+                PeerAction::Coordination { operation_id: Some(id), .. } if id == &operation
+            ));
+            assert!(matches!(
+                &actions.lock().unwrap()[1],
+                PeerAction::Coordination { operation_id: Some(id), .. } if id == &operation
+            ));
+        }
     }
 }

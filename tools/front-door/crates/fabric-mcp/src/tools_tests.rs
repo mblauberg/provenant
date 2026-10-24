@@ -34,23 +34,38 @@ fn every_mcp_observation_wait_uses_the_transport_cap() {
     for (tool, mut args) in [
         (
             "fabric_events",
-            json!({"op":"read","limit":1,"wait_ms":55000}),
+            json!({"op":"read","limit":1,"wait_ms":crate::MAX_WAIT_MS}),
         ),
         (
             "fabric_landing",
-            json!({"op":"wait","reference":"main","generation":1,"wait_ms":55000}),
+            json!({"op":"wait","reference":"main","generation":1,"wait_ms":crate::MAX_WAIT_MS}),
         ),
         (
             "fabric_run",
-            json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_ms":55000}),
+            json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_ms":crate::MAX_WAIT_MS}),
         ),
     ] {
         assert!(ToolCall::parse(tool, args.clone()).is_ok());
-        args["wait_ms"] = json!(55001);
+        args["wait_ms"] = json!(crate::MAX_WAIT_MS + 1);
         assert!(
             matches!(ToolCall::parse(tool, args), Err(InvalidInput::Arguments { path }) if path == "arguments.wait_ms")
         );
     }
+}
+
+#[test]
+fn spent_wait_budget_preserves_last_good_event_coverage() {
+    let host = provenant_core::HostId::from_bytes([7; 16]);
+    let last_good = EventCoverage {
+        unknown_hosts: vec![host],
+        more_events: true,
+    };
+
+    let recovered =
+        coverage_after_timeout(Some(&last_good), FacadeError::OwnerUnavailable).unwrap();
+
+    assert_eq!(recovered.unknown_hosts, vec![host]);
+    assert!(recovered.more_events);
 }
 
 fn limits() -> Limits {

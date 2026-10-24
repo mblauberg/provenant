@@ -11,8 +11,9 @@ its idempotency key: an identical replay succeeds, changed content conflicts.
 `read_mail` with `None` uses that recipient's durable cursor; `Some(seq)` replays
 history without changing it. `mark_mail_read` advances monotonically up to that
 recipient's highest delivery. Actor IDs are bound to external addresses by F3.
-Mail and event reads return store-owned `Page` values with integer sequences
-and a `truncated` flag for the 1 MiB byte bound; resume after the last sequence.
+Mail and event reads return store-owned `Page` values with integer sequences;
+task reads use a task-ID cursor. Each page has a `truncated` flag for the 1 MiB
+byte bound; resume after the last returned sequence or task ID.
 Fabric-only records, `Page` and any future `Cursor` stay in fabric-store until
 a second owner needs them.
 

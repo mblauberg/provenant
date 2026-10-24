@@ -1,7 +1,52 @@
 //! Explicit field catalogue, shared schema pieces and a cached MCP catalogue.
-//! Runtime owns bounds; generated schema/serde probes detect catalogue drift.
+//! Runtime validates inputs; exported bounds are shared and schema probes detect drift.
+use provenant_fabric_runtime::coordination::input::{
+    MAX_ARTIFACT_PATH_BYTES, MAX_FETCH_BYTES, MAX_REFERENCE_BYTES, MAX_ROUTE_BYTES, MAX_TEXT_BYTES,
+};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolKind {
+    Identity,
+    Mail,
+    Task,
+    Events,
+    Claim,
+    Landing,
+    Submit,
+    Run,
+    Output,
+    Hosts,
+    Graph,
+}
+
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 11] = [
+    (ToolKind::Identity, "fabric_identity"),
+    (ToolKind::Mail, "fabric_mail"),
+    (ToolKind::Task, "fabric_task"),
+    (ToolKind::Events, "fabric_events"),
+    (ToolKind::Claim, "fabric_claim"),
+    (ToolKind::Landing, "fabric_landing"),
+    (ToolKind::Submit, "fabric_submit"),
+    (ToolKind::Run, "fabric_run"),
+    (ToolKind::Graph, "fabric_graph"),
+    (ToolKind::Output, "fabric_output"),
+    (ToolKind::Hosts, "fabric_hosts"),
+];
+
+pub(crate) fn tool_name(kind: ToolKind) -> &'static str {
+    TOOL_NAMES
+        .iter()
+        .find_map(|(known, name)| (*known == kind).then_some(*name))
+        .unwrap_or("unknown")
+}
+
+pub(crate) fn tool_kind(name: &str) -> Option<ToolKind> {
+    TOOL_NAMES
+        .iter()
+        .find_map(|(kind, known)| (*known == name).then_some(*kind))
+}
 
 fn integer(min: u64, max: u64) -> Value {
     json!({"type":"integer","minimum":min,"maximum":max})
@@ -53,7 +98,7 @@ fn tagged(tag: &str, variants: Value) -> Value {
 fn proof(key: &str, landing: bool) -> Value {
     let mut fields = json!({key: reference("Id"), "generation":integer(0,u64::MAX),"token":array(integer(0,255),16,16)});
     if landing {
-        fields["reference"] = text(1024);
+        fields["reference"] = text(MAX_REFERENCE_BYTES);
     }
     object(fields)
 }
@@ -63,7 +108,7 @@ fn definitions() -> Value {
         json!({
             "local":{"id":reference("Id")},
             "remote":{"host":reference("Id"),"id":reference("Id")},
-            "legacy":{"reference":object(json!({"source":text(1024),"project":text(1024),"id":text(1024)}))}
+            "legacy":{"reference":object(json!({"source":text(MAX_REFERENCE_BYTES),"project":text(MAX_REFERENCE_BYTES),"id":text(MAX_REFERENCE_BYTES)}))}
         }),
     );
     json!({
@@ -73,55 +118,50 @@ fn definitions() -> Value {
         "AttemptTarget":object(json!({"attempt":reference("Id"),"host?":nullable(reference("Id"))})),
         "TaskProof":proof("task",false),"ClaimProof":proof("id",false),"LandingProof":proof("id",true),
         "MessageRef":message_ref,
-        "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(4096)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
-        "Route":object(json!({"adapter?":nullable(text(128)),"model?":nullable(text(128)),"route?":nullable(text(128)),"role?":nullable(text(128)),"task_class?":nullable(text(128)),"effort?":nullable(text(128))})),
-        "Scope":tagged("kind",json!({"issue":{"key":text(1024)},"paths":{"paths":array(text(4096),1,100)},"worktree":{"path":text(4096)}}))
+        "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
+        "Route":object(json!({"adapter?":nullable(text(MAX_ROUTE_BYTES)),"model?":nullable(text(MAX_ROUTE_BYTES)),"route?":nullable(text(MAX_ROUTE_BYTES)),"role?":nullable(text(MAX_ROUTE_BYTES)),"task_class?":nullable(text(MAX_ROUTE_BYTES)),"effort?":nullable(text(MAX_ROUTE_BYTES))})),
+        "Scope":tagged("kind",json!({"issue":{"key":text(MAX_REFERENCE_BYTES)},"paths":{"paths":array(text(MAX_ARTIFACT_PATH_BYTES),1,100)},"worktree":{"path":text(MAX_ARTIFACT_PATH_BYTES)}}))
     })
 }
 fn build_catalogue() -> Vec<Value> {
     let page = integer(1, 100);
     let lease = integer(1000, 3_600_000);
-    let wait = integer(1000, 55_000);
+    let wait = integer(1000, crate::MAX_WAIT_MS);
     let seq = integer(0, i64::MAX as u64);
     let count = integer(0, u64::MAX);
     let artifacts = array(reference("Artifact"), 0, 100);
     let mut recipients = array(reference("Id"), 1, 100);
     recipients["uniqueItems"] = json!(true);
-    let tools = [
+    let tools: [(&str, Value); TOOL_NAMES.len()] = [
         (
-            "fabric_identity",
             "Inspect the authenticated Fabric identity.",
             json!({"inspect":{}}),
         ),
         (
-            "fabric_mail",
             "Send and read mail with explicit cursors.",
             json!({
-                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(65_536),"artifacts":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
+                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
                 "read":{"after?":nullable(seq.clone()),"limit":page.clone()},"mark_read":{"through":seq.clone()}
             }),
         ),
         (
-            "fabric_task",
             "Create and manage fenced project tasks.",
             json!({
-                "create":{"objective":text(65_536),"note?":nullable(text(65_536))},
+                "create":{"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
                 "list":{"state?":nullable(choices(&["open","done","cancelled"])),"after?":nullable(reference("Id")),"limit":page.clone()},
                 "claim":{"id":reference("Id"),"lease_ms":lease.clone()},
-                "update":{"proof":reference("TaskProof"),"objective":text(65_536),"note?":nullable(text(65_536))},
+                "update":{"proof":reference("TaskProof"),"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
                 "finish":{"proof":reference("TaskProof"),"state":choices(&["done","cancelled"])},"release":{"proof":reference("TaskProof")}
             }),
         ),
         (
-            "fabric_events",
             "Read the activity journal or append a note.",
             json!({
                 "read":{"after?":nullable(seq),"limit":page.clone(),"wait_ms?":nullable(wait.clone())},
-                "note":{"note":text(65_536),"dedup_key?":nullable(text(1024))}
+                "note":{"note":text(MAX_TEXT_BYTES),"dedup_key?":nullable(text(MAX_REFERENCE_BYTES))}
             }),
         ),
         (
-            "fabric_claim",
             "Manage advisory work claims.",
             json!({
                 "acquire":{"scope":reference("Scope"),"lease_ms":lease.clone()},"renew":{"proof":reference("ClaimProof"),"lease_ms":lease.clone()},
@@ -129,56 +169,51 @@ fn build_catalogue() -> Vec<Value> {
             }),
         ),
         (
-            "fabric_landing",
             "Manage landing leases and observe a generation.",
             json!({
-                "acquire":{"reference":text(1024),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_ms":lease.clone()},
+                "acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_ms":lease.clone()},
                 "renew":{"proof":reference("LandingProof"),"lease_ms":lease},"verify":{"proof":reference("LandingProof")},"release":{"proof":reference("LandingProof")},
-                "wait":{"reference":text(1024),"generation":count.clone(),"wait_ms":wait.clone()}
+                "wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_ms":wait.clone()}
             }),
         ),
         (
-            "fabric_submit",
             "Submit one batch to the run service.",
             json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(65_536),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(4096)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
+                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
             }),
         ),
         (
-            "fabric_run",
             "List, inspect, wait for, cancel or resume runs.",
             json!({
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit":page.clone()},"status":{"target":reference("AttemptTarget")},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_ms":wait},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
-                "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(65_536),"expected_generation":count.clone()}
+                "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone()}
             }),
         ),
         (
-            "fabric_graph",
             "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
             json!({
-                "run":{"document":text(4096)},"status":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},
-                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},"resume":{"document":text(4096)}
+                "run":{"document":text(MAX_ARTIFACT_PATH_BYTES)},"status":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},
+                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},"resume":{"document":text(MAX_ARTIFACT_PATH_BYTES)}
             }),
         ),
         (
-            "fabric_output",
             "Read bounded output or fetch a manifest artefact.",
             json!({
-                "read":{"target":reference("AttemptTarget"),"part":choices(&["stdout","stderr","combined"]),"offset":count,"max_bytes":integer(1,65_536)},
-                "fetch":{"target":reference("AttemptTarget"),"artifact":reference("Artifact"),"max_bytes":integer(1,provenant_fabric_runtime::coordination::input::MAX_FETCH_BYTES)}
+                "read":{"target":reference("AttemptTarget"),"part":choices(&["stdout","stderr"]),"offset":count,"max_bytes":integer(1,provenant_records::run::OUTPUT_LIMIT)},
+                "fetch":{"target":reference("AttemptTarget"),"artifact":reference("Artifact"),"max_bytes":integer(1,MAX_FETCH_BYTES)}
             }),
         ),
         (
-            "fabric_hosts",
             "List peer hosts and readiness observations.",
             json!({"list":{"after?":nullable(reference("Id")),"limit":page}}),
         ),
     ];
-    tools
-        .into_iter()
-        .map(|(name, description, operations)| {
+    TOOL_NAMES
+        .iter()
+        .zip(tools)
+        .map(|((_, name), (description, operations))| {
             let mut input = tagged("op", operations);
             input["type"] = json!("object");
             input["$defs"] = definitions();

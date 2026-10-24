@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 pub struct FabricConfig {
     pub agent_label: String,
     pub client_label: String,
+    #[serde(default, deserialize_with = "deserialize_ssh_executable")]
+    pub ssh_executable: Option<std::path::PathBuf>,
     pub home_hosts: BTreeMap<String, HostId>,
     pub peers: BTreeMap<String, Peer>,
     pub limits: Limits,
@@ -18,6 +20,22 @@ pub struct FabricConfig {
 pub struct Peer {
     pub host: HostId,
     pub destination: String,
+    #[serde(default)]
+    pub remote_executable: Option<std::path::PathBuf>,
+    #[serde(default = "default_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+}
+fn default_connect_timeout_seconds() -> u64 {
+    10
+}
+fn deserialize_ssh_executable<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::path::PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<std::path::PathBuf>::deserialize(deserializer)?
+        .filter(|path| !path.as_os_str().is_empty()))
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +93,23 @@ impl DomainConfig for FabricConfig {
             {
                 reject(format!("peers.{name}"));
             }
+            if peer
+                .remote_executable
+                .as_deref()
+                .is_some_and(|path| !valid_executable_override(path))
+            {
+                reject(format!("peers.{name}.remote_executable"));
+            }
+            if !(1..=30).contains(&peer.connect_timeout_seconds) {
+                reject(format!("peers.{name}.connect_timeout_seconds"));
+            }
+        }
+        if self
+            .ssh_executable
+            .as_deref()
+            .is_some_and(|path| !valid_executable_override(path))
+        {
+            reject("ssh_executable".into());
         }
         for key in self.home_hosts.keys() {
             if key.len() != 64
@@ -108,11 +143,95 @@ impl DomainConfig for FabricConfig {
         errors
     }
 }
-fn defaults(profile: Profile) -> &'static str {
-    match profile {
-        Profile::Balanced => include_str!("../assets/balanced.toml"),
-        Profile::Economy => include_str!("../assets/economy.toml"),
-        Profile::Rigorous => include_str!("../assets/rigorous.toml"),
-    }
+pub(crate) fn valid_executable_override(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path.to_str().is_some_and(|value| {
+            value.len() <= 4096
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+        })
+}
+fn defaults(_profile: Profile) -> &'static str {
+    include_str!("../assets/fabric.toml")
 }
 pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn config() -> FabricConfig {
+        let host = HostId::from_bytes([1; 16]);
+        FabricConfig {
+            agent_label: "agent".into(),
+            client_label: "agent".into(),
+            home_hosts: BTreeMap::new(),
+            peers: BTreeMap::from([(
+                "worker".into(),
+                Peer {
+                    host,
+                    destination: "worker".into(),
+                    remote_executable: Some(PathBuf::from("/opt/provenant/bin/provenant")),
+                    connect_timeout_seconds: 10,
+                },
+            )]),
+            ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
+            limits: Limits {
+                body_bytes: 65536,
+                input_frame_bytes: 1048576,
+                json_depth: 64,
+                page_rows: 100,
+                output_lines: 500,
+                output_bytes: 65536,
+                result_bytes: 1048576,
+                lease_seconds: 3600,
+                peer_seconds: 30,
+                graph_timeout_ms: 14400000,
+                bundle_bytes: 67108864,
+            },
+        }
+    }
+
+    #[test]
+    fn ssh_host_overrides_require_absolute_safe_paths_and_bounded_timeout() {
+        let mut config = config();
+        assert!(config.validate().is_empty());
+
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["ssh_executable"] = serde_json::Value::String(String::new());
+        assert_eq!(
+            serde_json::from_value::<FabricConfig>(value)
+                .unwrap()
+                .ssh_executable,
+            None
+        );
+        config.ssh_executable = None;
+        let encoded = serde_json::to_vec(&config).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<FabricConfig>(&encoded).unwrap(),
+            config
+        );
+        config.ssh_executable = Some(PathBuf::from("/opt/homebrew/bin/ssh"));
+
+        config.ssh_executable = Some(PathBuf::from("ssh"));
+        assert!(!config.validate().is_empty());
+        config.ssh_executable = Some(PathBuf::from("/opt/custom dir/ssh"));
+        assert!(!config.validate().is_empty());
+        config.ssh_executable = Some(PathBuf::from("/opt/homebrew/bin/ssh"));
+
+        config.peers.get_mut("worker").unwrap().remote_executable =
+            Some(PathBuf::from("relative/provenant"));
+        assert!(!config.validate().is_empty());
+        config.peers.get_mut("worker").unwrap().remote_executable =
+            Some(PathBuf::from("/opt/provenant path/provenant"));
+        assert!(!config.validate().is_empty());
+        {
+            let peer = config.peers.get_mut("worker").unwrap();
+            peer.remote_executable = Some(PathBuf::from("/opt/provenant/bin/provenant"));
+            peer.connect_timeout_seconds = 31;
+        }
+        assert!(!config.validate().is_empty());
+    }
+}

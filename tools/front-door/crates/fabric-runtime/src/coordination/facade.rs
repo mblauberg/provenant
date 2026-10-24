@@ -114,7 +114,6 @@ bounded_input! {
 pub enum OutputPart {
     Stdout,
     Stderr,
-    Combined,
 }
 
 bounded_input! {
@@ -184,6 +183,32 @@ pub enum FacadeError {
 }
 
 impl FacadeError {
+    /// Decode a stable peer error code, retaining an operation ID for an
+    /// uncertain launch result. Unknown codes fail closed as unavailable.
+    pub fn from_code(code: &str, operation_id: Option<OperationId>) -> Self {
+        match (code, operation_id) {
+            ("owner_unavailable", _) => Self::OwnerUnavailable,
+            ("invalid_input", _) => Self::InvalidInput,
+            ("not_found", _) => Self::NotFound,
+            ("conflict", _) => Self::Conflict,
+            ("busy", _) => Self::Busy,
+            ("stale_fence", _) => Self::StaleFence,
+            ("home_unavailable", _) => Self::HomeUnavailable,
+            ("peer_version", _) => Self::PeerVersion,
+            ("launch_unknown", Some(operation_id)) => Self::LaunchUnknown { operation_id },
+            ("continuation_unsupported", _) => Self::ContinuationUnsupported,
+            ("confinement_refused", _) => Self::ConfinementRefused,
+            ("worktree_missing", _) => Self::WorktreeMissing,
+            ("output_too_large", _) => Self::OutputTooLarge,
+            ("state_corrupt", _) => Self::StateCorrupt,
+            ("publication_failed", _) => Self::PublicationFailed,
+            ("cancelled", _) => Self::Cancelled,
+            ("timeout", _) => Self::Timeout,
+            ("io", _) => Self::Io,
+            _ => Self::HomeUnavailable,
+        }
+    }
+
     pub const fn code(&self) -> &'static str {
         match self {
             Self::OwnerUnavailable => "owner_unavailable",
@@ -208,17 +233,16 @@ impl FacadeError {
     }
 }
 
-/// The F3-owned side of the service seam. Each associated response is a
-/// concrete serde record selected by the future run facade. Every method must
-/// return within its budget and observe cancellation cooperatively. Cancelling
-/// an observation must never stop a launched run; only explicit run cancel may.
-/// The shared records do not yet expose run requests, so F3 consumes these
-/// contracts directly until those owner types land.
+/// Coverage information returned when refreshing events from peer hosts.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct EventCoverage {
     pub unknown_hosts: Vec<HostId>,
     pub more_events: bool,
 }
+
+/// Typed runtime seam shared by the F3 facade and MCP. The run owner is
+/// composed in `src/fabric.rs`; calls are bounded and cancellable, while only
+/// the explicit run-cancel operation can stop a launched run.
 pub trait F3Facade {
     fn refresh_events(
         &mut self,

@@ -670,7 +670,8 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
     ));
     let tasks = store
         .tasks(project(), None, None, 100, &f.request())
-        .unwrap();
+        .unwrap()
+        .items;
     assert!(
         tasks
             .iter()
@@ -822,17 +823,15 @@ fn input_bounds_and_malformed_persisted_records_fail_without_panics() {
         store.read_mail(project(), actor(3), Some(0), 100, &f.request()),
         Err(Error::Decode(_))
     ));
-    for (old, state) in [
-        ("open", TaskState::Open),
-        ("blocked", TaskState::Open),
-        ("claimed", TaskState::Active),
-        ("active", TaskState::Active),
-        ("done", TaskState::Done),
-        ("cancelled", TaskState::Cancelled),
-    ] {
-        assert_eq!(TaskState::from_old(old).unwrap(), state);
+}
+
+#[test]
+fn historical_task_states_only_map_importable_rows() {
+    assert_eq!(TaskState::from_old("open").unwrap(), TaskState::Open);
+    assert_eq!(TaskState::from_old("blocked").unwrap(), TaskState::Open);
+    for state in ["claimed", "active", "done", "cancelled", "unknown"] {
+        assert!(TaskState::from_old(state).is_err(), "accepted {state}");
     }
-    assert!(TaskState::from_old("unknown").is_err());
 }
 
 #[test]
@@ -912,7 +911,8 @@ fn import_keeps_old_open_work_but_excludes_future_tasks_and_requests() {
     assert_eq!(
         store
             .tasks(project(), None, None, 100, &f.request())
-            .unwrap()[0]
+            .unwrap()
+            .items[0]
             .legacy
             .as_ref()
             .unwrap()
@@ -1062,6 +1062,44 @@ fn byte_bounded_pages_report_truncation_and_resume_without_loss() {
         .unwrap();
     assert!(!next.truncated);
     assert_eq!(events.items.len() + next.items.len(), 40);
+}
+
+#[test]
+fn task_pages_report_byte_truncation_and_resume_without_loss() {
+    let f = Fixture::new();
+    let store = f.open();
+    for n in 1..=20 {
+        let mut record = task(&f);
+        record.id = TaskId::from_bytes([n; 16]);
+        record.objective = "x".repeat(MAX_BODY_BYTES);
+        store.create_task(&record, &f.request()).unwrap();
+    }
+
+    let first = store
+        .tasks(project(), None, None, 100, &f.request())
+        .unwrap();
+    let first = serde_json::to_value(first).unwrap();
+    assert_eq!(
+        first.get("truncated").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let first_items: Vec<Task> = serde_json::from_value(first["items"].clone()).unwrap();
+    let next = store
+        .tasks(
+            project(),
+            None,
+            first_items.last().map(|record| record.id),
+            100,
+            &f.request(),
+        )
+        .unwrap();
+    let next = serde_json::to_value(next).unwrap();
+    assert_eq!(
+        next.get("truncated").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    let next_items: Vec<Task> = serde_json::from_value(next["items"].clone()).unwrap();
+    assert_eq!(first_items.len() + next_items.len(), 20);
 }
 
 #[test]

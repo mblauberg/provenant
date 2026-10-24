@@ -54,8 +54,8 @@ pub(crate) fn append(
     if let Some(key) = dedup
         && let Some((seq, previous)) = tx
             .query_row(
-                "SELECT seq,substr(record,1,262145) FROM events WHERE project=? AND dedup=?",
-                params![record.project.to_string(), key],
+                "SELECT seq,substr(record,1,?3) FROM events WHERE project=?1 AND dedup=?2",
+                params![record.project.to_string(), key, MAX_RECORD_READ_BYTES],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
             )
             .optional()?
@@ -112,16 +112,21 @@ impl Store {
         let limit = page(after, limit)?;
         request.retry(|| {
             let mut statement = self.db.prepare(
-                "SELECT seq,substr(record,1,262145) FROM events WHERE project=? AND seq>? ORDER BY seq LIMIT ?",
+                "SELECT seq,substr(record,1,?4) FROM events WHERE project=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
             )?;
-            let mut rows = statement.query(params![project.to_string(), after, limit])?;
+            let mut rows = statement.query(params![
+                project.to_string(),
+                after,
+                limit,
+                MAX_RECORD_READ_BYTES
+            ])?;
             let mut output = Vec::new();
             let mut total = 0;
             let mut truncated = false;
             while let Some(row) = rows.next()? {
                 let bytes: Vec<u8> = row.get(1)?;
                 total += bytes.len();
-                if total > 1_048_576 {
+                if total > MAX_PAGE_BYTES {
                     truncated = true;
                     break;
                 }

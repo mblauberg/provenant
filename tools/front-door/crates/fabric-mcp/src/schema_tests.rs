@@ -620,6 +620,25 @@ fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
 }
 
 #[test]
+fn output_schema_lists_only_supported_parts() {
+    let output = catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_output")
+        .expect("output tool");
+    let read = output["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("output operations")
+        .iter()
+        .find(|operation| operation["properties"]["op"]["const"] == "read")
+        .expect("read operation");
+
+    assert_eq!(
+        read["properties"]["part"]["enum"],
+        json!(["stdout", "stderr"])
+    );
+}
+
+#[test]
 fn text_byte_limit_is_enforced_even_when_codepoint_length_is_smaller() {
     let at_limit = "😀".repeat(16_384);
     assert_eq!(at_limit.len(), 65_536);

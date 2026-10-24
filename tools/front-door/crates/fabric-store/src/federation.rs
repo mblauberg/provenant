@@ -176,6 +176,32 @@ impl Store {
         request.retry(|| load_peer(&self.db, project, actor, id))
     }
 
+    /// Return a sent request to Prepared after a known transient owner refusal.
+    /// The frozen request and digest stay bound to the same operation ID.
+    pub fn retry_peer(
+        &self,
+        project: ProjectId,
+        actor: ActorId,
+        id: &OperationId,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        self.write(request, |tx| {
+            let operation = load_peer(tx, project, actor, id)?.ok_or(Error::NotFound)?;
+            if operation.phase != PeerPhase::Sent {
+                return Err(Error::Conflict);
+            }
+            let updated = tx.execute(
+                "UPDATE peer_operations SET phase='prepared',response=NULL \
+                 WHERE project=?1 AND id=?2 AND actor=?3 AND phase='sent'",
+                params![project.to_string(), id.as_str(), actor.to_string()],
+            )?;
+            if updated != 1 {
+                return Err(Error::Conflict);
+            }
+            Ok(())
+        })
+    }
+
     /// Advance the journal after transport or reconciliation. `unknown` is
     /// terminal for sending; it can become committed only after owner proof.
     pub fn peer_phase(
@@ -290,8 +316,8 @@ impl Store {
                 let dedup = format!("run:{}:{sequence}", host);
                 let previous_record: Option<Vec<u8>> = tx
                     .query_row(
-                        "SELECT substr(record,1,262145) FROM events WHERE project=?1 AND dedup=?2",
-                        params![project.to_string(), dedup],
+                        "SELECT substr(record,1,?3) FROM events WHERE project=?1 AND dedup=?2",
+                        params![project.to_string(), dedup, MAX_RECORD_READ_BYTES],
                         |row| row.get(0),
                     )
                     .optional()?;

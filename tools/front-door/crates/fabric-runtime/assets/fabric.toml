@@ -1,5 +1,6 @@
 agent_label = ""
 client_label = "agent"
+ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
 [limits]
