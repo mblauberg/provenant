@@ -1,12 +1,12 @@
 //! Typed tool inputs and the single service boundary used by the transport.
 use crate::{render, schema};
-use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget, WaitTransport};
+use provenant_core::{CancelToken, Clock, DurationMicros, OperationId, WaitBudget, WaitTransport};
 use provenant_fabric_runtime::config::Limits;
 pub use provenant_fabric_runtime::coordination::facade::*;
 use provenant_fabric_runtime::coordination::input::{InputError, ValidateInput};
 pub use provenant_fabric_runtime::coordination::{
     ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, LandingInput,
-    MailInput, TaskInput,
+    MailInput, Mutation, TaskInput,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -16,11 +16,11 @@ use thiserror::Error;
 /// contracts; the execution facade contracts also live in runtime for F3.
 pub enum ToolCall {
     Identity(IdentityInput),
-    Mail(MailInput),
-    Task(TaskInput),
-    Events(EventsInput),
-    Claim(ClaimInput),
-    Landing(LandingInput),
+    Mail(MailInput, Option<OperationId>),
+    Task(TaskInput, Option<OperationId>),
+    Events(EventsInput, Option<OperationId>),
+    Claim(ClaimInput, Option<OperationId>),
+    Landing(LandingInput, Option<OperationId>),
     Submit(SubmitInput),
     Run(RunInput),
     Output(OutputInput),
@@ -44,11 +44,11 @@ impl ToolCall {
     fn kind(&self) -> schema::ToolKind {
         match self {
             Self::Identity(_) => schema::ToolKind::Identity,
-            Self::Mail(_) => schema::ToolKind::Mail,
-            Self::Task(_) => schema::ToolKind::Task,
-            Self::Events(_) => schema::ToolKind::Events,
-            Self::Claim(_) => schema::ToolKind::Claim,
-            Self::Landing(_) => schema::ToolKind::Landing,
+            Self::Mail(..) => schema::ToolKind::Mail,
+            Self::Task(..) => schema::ToolKind::Task,
+            Self::Events(..) => schema::ToolKind::Events,
+            Self::Claim(..) => schema::ToolKind::Claim,
+            Self::Landing(..) => schema::ToolKind::Landing,
             Self::Submit(_) => schema::ToolKind::Submit,
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
@@ -102,27 +102,30 @@ impl ToolCall {
         };
 
         match self {
-            Self::Mail(MailInput::Send { body: value, .. }) => body(value, "body"),
-            Self::Mail(MailInput::Read { limit, .. }) => page(*limit),
-            Self::Task(TaskInput::Create { objective, note })
-            | Self::Task(TaskInput::Update {
-                objective, note, ..
-            }) => {
+            Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
+            Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
+            Self::Task(TaskInput::Create { objective, note }, _)
+            | Self::Task(
+                TaskInput::Update {
+                    objective, note, ..
+                },
+                _,
+            ) => {
                 body(objective, "objective")?;
                 if let Some(note) = note {
                     body(note, "note")?;
                 }
                 Ok(())
             }
-            Self::Task(TaskInput::List { limit, .. }) => page(*limit),
-            Self::Task(TaskInput::Claim { lease_ms, .. }) => lease(*lease_ms),
-            Self::Events(EventsInput::Read { limit, .. }) => page(*limit),
-            Self::Events(EventsInput::Note { note, .. }) => body(note, "note"),
-            Self::Claim(ClaimInput::List { limit, .. }) => page(*limit),
-            Self::Claim(ClaimInput::Acquire { lease_ms, .. })
-            | Self::Claim(ClaimInput::Renew { lease_ms, .. }) => lease(*lease_ms),
-            Self::Landing(LandingInput::Acquire { lease_ms, .. })
-            | Self::Landing(LandingInput::Renew { lease_ms, .. }) => lease(*lease_ms),
+            Self::Task(TaskInput::List { limit, .. }, _) => page(*limit),
+            Self::Task(TaskInput::Claim { lease_ms, .. }, _) => lease(*lease_ms),
+            Self::Events(EventsInput::Read { limit, .. }, _) => page(*limit),
+            Self::Events(EventsInput::Note { note, .. }, _) => body(note, "note"),
+            Self::Claim(ClaimInput::List { limit, .. }, _) => page(*limit),
+            Self::Claim(ClaimInput::Acquire { lease_ms, .. }, _)
+            | Self::Claim(ClaimInput::Renew { lease_ms, .. }, _) => lease(*lease_ms),
+            Self::Landing(LandingInput::Acquire { lease_ms, .. }, _)
+            | Self::Landing(LandingInput::Renew { lease_ms, .. }, _) => lease(*lease_ms),
             Self::Submit(SubmitInput::Submission { tasks, .. }) => {
                 for (index, task) in tasks.iter().enumerate() {
                     body(&task.prompt, &format!("tasks[{index}].prompt"))?;
@@ -141,24 +144,27 @@ impl ToolCall {
     fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Mail(MailInput::Send { .. } | MailInput::MarkRead { .. })
+            Self::Mail(MailInput::Send { .. } | MailInput::MarkRead { .. }, _)
                 | Self::Task(
                     TaskInput::Create { .. }
                         | TaskInput::Claim { .. }
                         | TaskInput::Update { .. }
                         | TaskInput::Finish { .. }
-                        | TaskInput::Release { .. }
+                        | TaskInput::Release { .. },
+                    _
                 )
-                | Self::Events(EventsInput::Note { .. })
+                | Self::Events(EventsInput::Note { .. }, _)
                 | Self::Claim(
                     ClaimInput::Acquire { .. }
                         | ClaimInput::Renew { .. }
-                        | ClaimInput::Release { .. }
+                        | ClaimInput::Release { .. },
+                    _
                 )
                 | Self::Landing(
                     LandingInput::Acquire { .. }
                         | LandingInput::Renew { .. }
-                        | LandingInput::Release { .. }
+                        | LandingInput::Release { .. },
+                    _
                 )
                 | Self::Graph(
                     GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
@@ -171,14 +177,41 @@ impl ToolCall {
     /// Strict runtime serde contracts own argument validation. The catalogue
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        let mut arguments = arguments;
+        let operation_id =
+            match schema::tool_kind(name) {
+                Some(
+                    schema::ToolKind::Mail
+                    | schema::ToolKind::Task
+                    | schema::ToolKind::Events
+                    | schema::ToolKind::Claim
+                    | schema::ToolKind::Landing,
+                ) => match arguments
+                    .as_object_mut()
+                    .and_then(|object| object.remove("operation_id"))
+                {
+                    Some(Value::String(value)) => Some(OperationId::parse(&value).map_err(
+                        |_| InvalidInput::Arguments {
+                            path: "arguments.operation_id".to_owned(),
+                        },
+                    )?),
+                    Some(_) => {
+                        return Err(InvalidInput::Arguments {
+                            path: "arguments.operation_id".to_owned(),
+                        });
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
         macro_rules! parse {
-            ($ty:ty, $variant:ident) => {
+            ($ty:ty, $variant:ident $(, $metadata:expr)?) => {
                 serde_json::from_value::<$ty>(arguments.clone())
                     .and_then(|input| {
                         input
                             .validate_input(WaitTransport::Mcp)
                             .map_err(serde::de::Error::custom)?;
-                        Ok(Self::$variant(input))
+                        Ok(Self::$variant(input $(, $metadata)?))
                     })
                     .map_err(|error| InvalidInput::Arguments {
                         path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
@@ -192,20 +225,28 @@ impl ToolCall {
                     })
             };
         }
-        match schema::tool_kind(name) {
+        let call = match schema::tool_kind(name) {
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
-            Some(schema::ToolKind::Mail) => parse!(MailInput, Mail),
-            Some(schema::ToolKind::Task) => parse!(TaskInput, Task),
-            Some(schema::ToolKind::Events) => parse!(EventsInput, Events),
-            Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim),
-            Some(schema::ToolKind::Landing) => parse!(LandingInput, Landing),
+            Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
+            Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
+            Some(schema::ToolKind::Events) => parse!(EventsInput, Events, operation_id.clone()),
+            Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
+            Some(schema::ToolKind::Landing) => {
+                parse!(LandingInput, Landing, operation_id.clone())
+            }
             Some(schema::ToolKind::Submit) => parse!(SubmitInput, Submit),
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
             Some(schema::ToolKind::Hosts) => parse!(HostsInput, Hosts),
             Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
             _ => Err(InvalidInput::UnknownTool),
+        }?;
+        if operation_id.is_some() && !call.is_mutation() {
+            return Err(InvalidInput::Arguments {
+                path: "arguments.operation_id".to_owned(),
+            });
         }
+        Ok(call)
     }
 
     /// A single match composes the runtime and the F3 seam. Cancellation only
@@ -219,11 +260,11 @@ impl ToolCall {
         // same transport cap before any coordination or facade side effects.
         match &self {
             Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Mail(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Task(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Events(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Claim(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Landing(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
+            Self::Task(input, _) => input.validate_input(WaitTransport::Mcp),
+            Self::Events(input, _) => input.validate_input(WaitTransport::Mcp),
+            Self::Claim(input, _) => input.validate_input(WaitTransport::Mcp),
+            Self::Landing(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Submit(input) => input.validate_input(WaitTransport::Mcp),
             Self::Run(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
@@ -240,10 +281,13 @@ impl ToolCall {
         let tool_name = self.name();
         let budget = service.budget(match &self {
             Self::Run(RunInput::Wait { wait_ms, .. }) => *wait_ms,
-            Self::Events(EventsInput::Read {
-                wait_ms: Some(wait_ms),
-                ..
-            }) => *wait_ms,
+            Self::Events(
+                EventsInput::Read {
+                    wait_ms: Some(wait_ms),
+                    ..
+                },
+                _,
+            ) => *wait_ms,
             _ => crate::MAX_WAIT_MS,
         })?;
         macro_rules! call {
@@ -251,17 +295,46 @@ impl ToolCall {
         }
         let result = match self {
             Self::Identity(input) => call!(facade, identity, input),
-            Self::Mail(input) => {
-                response(tool_name, service.coordination.mail(input, budget, cancel)?)
+            Self::Mail(input, operation_id) => {
+                if matches!(&input, MailInput::Send { .. } | MailInput::MarkRead { .. }) {
+                    response(
+                        tool_name,
+                        CoordinationApi::mutate(
+                            &service.coordination,
+                            Mutation::Mail(input),
+                            operation_id,
+                            budget,
+                            cancel,
+                        )?,
+                    )
+                } else {
+                    response(tool_name, service.coordination.mail(input, budget, cancel)?)
+                }
             }
-            Self::Task(input) => {
-                response(tool_name, service.coordination.task(input, budget, cancel)?)
+            Self::Task(input, operation_id) => {
+                if !matches!(&input, TaskInput::List { .. }) {
+                    response(
+                        tool_name,
+                        CoordinationApi::mutate(
+                            &service.coordination,
+                            Mutation::Task(input),
+                            operation_id,
+                            budget,
+                            cancel,
+                        )?,
+                    )
+                } else {
+                    response(tool_name, service.coordination.task(input, budget, cancel)?)
+                }
             }
-            Self::Events(EventsInput::Read {
-                after,
-                limit,
-                wait_ms,
-            }) => {
+            Self::Events(
+                EventsInput::Read {
+                    after,
+                    limit,
+                    wait_ms,
+                },
+                _,
+            ) => {
                 let mut last_good_coverage = None;
                 loop {
                     let coverage = if budget.remaining(service.clock.mono_now()).as_micros() > 0 {
@@ -338,18 +411,57 @@ impl ToolCall {
                     service.coordination.pause_observation(budget, cancel);
                 }
             }
-            Self::Events(input) => response(
+            Self::Events(input @ EventsInput::Note { .. }, operation_id) => response(
                 tool_name,
-                service.coordination.events(input, budget, cancel)?,
+                CoordinationApi::mutate(
+                    &service.coordination,
+                    Mutation::Events(input),
+                    operation_id,
+                    budget,
+                    cancel,
+                )?,
             ),
-            Self::Claim(input) => response(
-                tool_name,
-                service.coordination.claim(input, budget, cancel)?,
-            ),
-            Self::Landing(input) => response(
-                tool_name,
-                service.coordination.landing(input, budget, cancel)?,
-            ),
+            Self::Claim(input, operation_id) => {
+                if matches!(&input, ClaimInput::Verify { .. } | ClaimInput::List { .. }) {
+                    response(
+                        tool_name,
+                        service.coordination.claim(input, budget, cancel)?,
+                    )
+                } else {
+                    response(
+                        tool_name,
+                        CoordinationApi::mutate(
+                            &service.coordination,
+                            Mutation::Claim(input),
+                            operation_id,
+                            budget,
+                            cancel,
+                        )?,
+                    )
+                }
+            }
+            Self::Landing(input, operation_id) => {
+                if matches!(
+                    &input,
+                    LandingInput::Verify { .. } | LandingInput::Wait { .. }
+                ) {
+                    response(
+                        tool_name,
+                        service.coordination.landing(input, budget, cancel)?,
+                    )
+                } else {
+                    response(
+                        tool_name,
+                        CoordinationApi::mutate(
+                            &service.coordination,
+                            Mutation::Landing(input),
+                            operation_id,
+                            budget,
+                            cancel,
+                        )?,
+                    )
+                }
+            }
             Self::Submit(input) => call!(facade, submit, input),
             Self::Run(input) => call!(facade, run, input),
             Self::Output(input) => call!(facade, output, input),

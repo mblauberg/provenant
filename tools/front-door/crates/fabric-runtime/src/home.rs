@@ -271,6 +271,14 @@ macro_rules! route {
             budget: WaitBudget,
             cancel: &CancelToken,
         ) -> Result<$result, CoordinationError> {
+            if CoordinationInput::$variant(input.clone())
+                .mutation()
+                .is_some()
+            {
+                return Err(CoordinationError::InvalidInput(
+                    "mutation requires an operation id",
+                ));
+            }
             match self {
                 Self::Local(service) => service.$method(input, budget, cancel),
                 Self::Remote(remote) => {
@@ -284,6 +292,23 @@ macro_rules! route {
     };
 }
 impl CoordinationApi for CoordinationService<'_> {
+    fn mutate(
+        &self,
+        input: Mutation,
+        operation_id: Option<OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError> {
+        let operation_id = match operation_id {
+            Some(operation_id) => operation_id,
+            None => OperationId::parse(&provenant_core::hex(
+                &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+            ))
+            .map_err(|_| CoordinationError::EntropyEncoding)?,
+        };
+        CoordinationService::mutate(self, input, &operation_id, budget, cancel)
+    }
+
     route!(mail, MailInput, MailResult, Mail);
     route!(task, TaskInput, TaskResult, Task);
     route!(events, EventsInput, EventsResult, Events);

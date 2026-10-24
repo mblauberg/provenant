@@ -988,6 +988,9 @@
             "op": {
               "const": "mark_read"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "through": {
               "maximum": 9223372036854775807,
               "minimum": 0,
@@ -1058,6 +1061,9 @@
             },
             "op": {
               "const": "send"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             },
             "recipients": {
               "items": {
@@ -1615,6 +1621,9 @@
             },
             "op": {
               "const": "claim"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             }
           },
           "required": [
@@ -1650,6 +1659,9 @@
             },
             "op": {
               "const": "create"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             }
           },
           "required": [
@@ -1663,6 +1675,9 @@
           "properties": {
             "op": {
               "const": "finish"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             },
             "proof": {
               "$ref": "#/$defs/TaskProof"
@@ -1731,6 +1746,9 @@
             "op": {
               "const": "release"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "proof": {
               "$ref": "#/$defs/TaskProof"
             }
@@ -1767,6 +1785,9 @@
             },
             "op": {
               "const": "update"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             },
             "proof": {
               "$ref": "#/$defs/TaskProof"
@@ -2353,6 +2374,9 @@
             },
             "op": {
               "const": "note"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             }
           },
           "required": [
@@ -2919,6 +2943,9 @@
             "op": {
               "const": "acquire"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "scope": {
               "$ref": "#/$defs/Scope"
             }
@@ -2964,6 +2991,9 @@
             "op": {
               "const": "release"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "proof": {
               "$ref": "#/$defs/ClaimProof"
             }
@@ -2984,6 +3014,9 @@
             },
             "op": {
               "const": "renew"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             },
             "proof": {
               "$ref": "#/$defs/ClaimProof"
@@ -3565,6 +3598,9 @@
             "op": {
               "const": "acquire"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "reference": {
               "maxLength": 1024,
               "minLength": 1,
@@ -3588,6 +3624,9 @@
             "op": {
               "const": "release"
             },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
             "proof": {
               "$ref": "#/$defs/LandingProof"
             }
@@ -3608,6 +3647,9 @@
             },
             "op": {
               "const": "renew"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
             },
             "proof": {
               "$ref": "#/$defs/LandingProof"

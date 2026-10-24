@@ -326,6 +326,13 @@ pub enum LandingResult {
 /// Narrow seam consumed by MCP and implemented by the runtime composition.
 /// The service is worker-local because each `Store` owns one SQLite connection.
 pub trait CoordinationApi {
+    fn mutate(
+        &self,
+        input: Mutation,
+        operation_id: Option<provenant_core::OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError>;
     fn mail(
         &self,
         input: MailInput,
@@ -512,6 +519,22 @@ impl<'a> LocalCoordination<'a> {
 }
 
 impl CoordinationApi for LocalCoordination<'_> {
+    fn mutate(
+        &self,
+        input: Mutation,
+        operation_id: Option<provenant_core::OperationId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<MutationResult, CoordinationError> {
+        let operation_id = operation_id.unwrap_or(
+            provenant_core::OperationId::parse(&provenant_core::hex(
+                &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+            ))
+            .map_err(|_| CoordinationError::EntropyEncoding)?,
+        );
+        LocalCoordination::mutate(self, input, &operation_id, budget, cancel)
+    }
+
     fn mail(
         &self,
         input: MailInput,

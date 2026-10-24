@@ -331,6 +331,24 @@ fn build_catalogue() -> Vec<Value> {
         .zip(tools)
         .map(|((kind, name), (description, operations))| {
             let mut input = tagged("op", operations);
+            if matches!(
+                kind,
+                ToolKind::Mail | ToolKind::Task | ToolKind::Events | ToolKind::Claim | ToolKind::Landing
+            ) && let Some(variants) = input["oneOf"].as_array_mut()
+            {
+                    for variant in variants {
+                        let operation = variant.pointer("/properties/op/const").and_then(Value::as_str);
+                        let is_mutation = matches!((*kind, operation),
+                            (ToolKind::Mail, Some("send" | "mark_read"))
+                            | (ToolKind::Task, Some("create" | "claim" | "update" | "finish" | "release"))
+                            | (ToolKind::Events, Some("note"))
+                            | (ToolKind::Claim, Some("acquire" | "renew" | "release"))
+                            | (ToolKind::Landing, Some("acquire" | "renew" | "release")));
+                        if is_mutation {
+                            variant["properties"]["operation_id"] = reference("OperationId");
+                        }
+                    }
+            }
             input["type"] = json!("object");
             input["$defs"] = definitions();
             json!({"name":name,"description":description,"inputSchema":input,"outputSchema":output_schema(*kind)})

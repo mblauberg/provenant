@@ -443,6 +443,14 @@ to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion
 
 All inputs use `op` to select one typed operation.
 
+Mutating operations in `fabric_mail`, `fabric_task`, `fabric_events`,
+`fabric_claim` and `fabric_landing` accept an optional top-level
+`operation_id`, validated as the shared `OperationId`. MCP passes a supplied
+ID to the coordination mutation receipt path so a caller can safely retry
+after a lost reply. If omitted, coordination generates a random ID; existing
+clients remain compatible. Observation operations reject this field. Run and
+submission operations keep their separately specified operation IDs.
+
 | Tool | Operations |
 |---|---|
 | `fabric_identity` | inspect |
