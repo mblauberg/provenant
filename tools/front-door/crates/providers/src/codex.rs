@@ -103,6 +103,7 @@ fn prepare(
         &mut env,
         &mut setup,
     );
+    crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
     // Git may inspect global config even for status. Keep host hooks,
     // includes and credential helpers outside the lane's environment.
     env.extend([

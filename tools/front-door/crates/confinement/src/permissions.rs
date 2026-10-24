@@ -670,7 +670,7 @@ struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
-    head: [PathGrant; 7],
+    head: [PathGrant; 12],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
 }
@@ -696,7 +696,8 @@ impl WorktreeWriteGrants {
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
             next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
             common_exclude: exact(common.join("info/exclude")),
-            // `git commit` writes its message buffer and clears AUTO_MERGE here.
+            // `git commit` writes its message buffer and clears AUTO_MERGE here;
+            // a local `git merge` records its state and ORIG_HEAD here too.
             head: [
                 "HEAD",
                 "HEAD.lock",
@@ -705,6 +706,11 @@ impl WorktreeWriteGrants {
                 "COMMIT_EDITMSG",
                 "AUTO_MERGE",
                 "AUTO_MERGE.lock",
+                "MERGE_HEAD",
+                "MERGE_MSG",
+                "MERGE_MODE",
+                "ORIG_HEAD",
+                "ORIG_HEAD.lock",
             ]
             .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
@@ -731,7 +737,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v5\0");
+        digest.update(b"provenant-worktree-git-grants-v6\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -2968,6 +2974,7 @@ mod tests {
             linked.path().to_owned(),
             private.clone(),
             common.clone(),
+            common.join("info"),
             common.join("objects"),
             authority.cargo_cache.path.clone(),
             private_logs.clone(),
@@ -3297,6 +3304,7 @@ mod tests {
             linked.path().to_owned(),
             private.clone(),
             common.clone(),
+            common.join("info"),
             grants.objects.path.clone(),
             private_logs,
             common_heads,

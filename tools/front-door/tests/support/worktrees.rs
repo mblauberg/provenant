@@ -756,7 +756,7 @@ impl provenant_run::Providers for WriterProvider {
             &self.home,
             paths,
             &writer,
-            &self.project,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
         let profile = provenant_confinement::permissions::ProviderProfile {
             spec: provenant_confinement::permissions::ProviderProfileSpec {
@@ -1389,10 +1389,11 @@ fn lane_prepare_isolates_nested_state() -> Result {
         } else {
             &paths.temporary
         };
-        // The Claude primary fails on its settings file; a Codex fallback must
+        // Setup repairs partial files in place (#1461), so a non-empty directory
+        // fails the Claude primary on its settings path; a Codex fallback must
         // also not collide with a partial candidate-0 auth entry.
         for poison in [
-            staging.join("candidate-0/provenant-settings.json"),
+            staging.join("candidate-0/provenant-settings.json/partial"),
             paths.provider_state.join("candidate-0/auth.json"),
         ] {
             fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;

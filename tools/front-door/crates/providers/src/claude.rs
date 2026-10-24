@@ -542,6 +542,7 @@ fn prepare(
             &mut env,
             &mut setup,
         );
+        crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
     }
     let mut spec = LaunchSpec {
         argv,

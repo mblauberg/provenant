@@ -531,8 +531,14 @@ immutable. The lane's working directory (the worktree, or a read-only lane's rea
 also gains exec, so repository scripts such as a Cargo rustc wrapper run
 directly. Children inherit the profile, so this widens no read, write or
 credential access. Writers also get exact write access to the linked worktree's
-private `COMMIT_EDITMSG`, `AUTO_MERGE` and `AUTO_MERGE.lock`, so `git commit`
-completes; the common `.git` stays read-only apart from the listed ref grants.
+private `COMMIT_EDITMSG`, `AUTO_MERGE`, `AUTO_MERGE.lock`, `MERGE_HEAD`,
+`MERGE_MSG`, `MERGE_MODE`, `ORIG_HEAD` and `ORIG_HEAD.lock`, so `git commit` and a
+local `git merge` complete; the common `.git` stays read-only apart from the
+listed ref grants, so fetches stay host-side. When a Homebrew prefix
+(`/opt/homebrew`, else `/usr/local`) has `bin/node`, shell-capable lanes also
+read and exec its `bin`, `Cellar`, `opt` and `lib`, and its `bin` ends `PATH`;
+the prefix's `etc/` and `var/` stay unreadable and nothing under it is
+writable.
 
 OpenCode's discovery recipe grants literal directory reads of `.agents`,
 `.claude` and `.codex` along cwd ancestry. These reads never grant their child

@@ -319,6 +319,39 @@ pub(crate) fn rust_tools(
     tool_exec_roots.push(subtree(input.cwd));
 }
 
+/// A Homebrew Node toolchain (node, npm, pnpm through corepack) for every
+/// shell-capable lane. The prefix's `bin`, `Cellar`, `opt` and `lib` become
+/// readable and executable, and its `bin` joins the end of `PATH`. Its `etc/`
+/// and `var/` stay unreadable, and nothing under the prefix becomes writable.
+pub(crate) fn node_tools(
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut [(OsString, OsString)],
+) {
+    for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
+        if prefix.join("bin/node").exists() {
+            homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
+            return;
+        }
+    }
+}
+
+pub(crate) fn homebrew_tools(
+    prefix: &Path,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut [(OsString, OsString)],
+) {
+    for directory in ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name)) {
+        runtime_reads.push(subtree(&directory));
+        tool_exec_roots.push(subtree(directory));
+    }
+    if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
+        path.push(":");
+        path.push(prefix.join("bin"));
+    }
+}
+
 /// The CLI's own install directory: the parent of a `bin/` directory, or the
 /// executable's directory. A shared prefix (`/opt/homebrew`, `/usr/local`,
 /// `/usr`) is refused: its `etc/` and `var/` must never become readable.

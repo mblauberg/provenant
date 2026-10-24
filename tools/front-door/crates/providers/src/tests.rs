@@ -854,8 +854,17 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             Err(ProviderError::InvalidPath)
         ));
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
+        // Host-detected Homebrew Node toolchain directories (launch::node_tools).
+        let homebrew_node = |path: &Path| {
+            ["/opt/homebrew", "/usr/local"].iter().any(|prefix| {
+                ["bin", "Cellar", "opt", "lib"]
+                    .iter()
+                    .any(|name| path == Path::new(prefix).join(name))
+            })
+        };
         assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
             grant.path == package
+                || homebrew_node(&grant.path)
                 || (id == "codex"
                     && (grant.path.starts_with("/fixture/home")
                         || grant.path == Path::new("/Library/Developer/CommandLineTools")
@@ -878,7 +887,9 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 .spec
                 .tool_exec_roots
                 .iter()
-                .all(|grant| grant.path == package || !grant.path.starts_with("/opt"))
+                .all(|grant| grant.path == package
+                    || homebrew_node(&grant.path)
+                    || !grant.path.starts_with("/opt"))
         );
         // A read-only launch may only start inside a declared read root.
         assert!(matches!(
@@ -1902,4 +1913,27 @@ fn rust_tools_exec_repository_scripts_in_the_working_directory() {
         && g.scope == provenant_confinement::permissions::PathScope::Subtree));
     // Exec does not widen reads: the worktree was already readable.
     assert!(!exec.iter().any(|g| g.path == Path::new("/fixture/home")));
+}
+
+#[test]
+fn homebrew_node_tools_grant_toolchain_directories_but_not_etc_or_var() {
+    let prefix = std::path::Path::new("/opt/homebrew");
+    let (mut reads, mut exec) = (Vec::new(), Vec::new());
+    let mut env = vec![(
+        std::ffi::OsString::from("PATH"),
+        std::ffi::OsString::from("/usr/bin:/bin"),
+    )];
+    crate::launch::homebrew_tools(prefix, &mut reads, &mut exec, &mut env);
+    let paths: Vec<_> = reads.iter().map(|grant| grant.path.clone()).collect();
+    assert_eq!(
+        paths,
+        ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name))
+    );
+    assert_eq!(reads, exec);
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.ends_with("etc") || path.ends_with("var"))
+    );
+    assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
 }
