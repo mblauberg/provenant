@@ -580,13 +580,32 @@ fn argv_prompt_limit_counts_utf8_bytes() {
 
 #[test]
 fn prepare_refuses_unrecorded_launches() -> Result<(), ProviderError> {
-    use provenant_confinement::permissions::{ConfinedLaunch, Enforcement};
-    let confined = ConfinedLaunch {
-        enforcement: Enforcement::MacOsSandboxExec,
-        profile: Vec::new(),
-        profile_digest: [0; 32],
-        native_controls: Vec::new(),
-    };
+    use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_core::{ProjectId, WorkScope};
+    let confined = ConfinedPlan::new(PlanRequest {
+        scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+        permissions: PlanPermissions {
+            mode: AccessMode::ReadOnly,
+            scratch: PathGrant {
+                path: "/tmp/fixture-scratch".into(),
+                scope: PathScope::Subtree,
+            },
+            private_state: None,
+            read_roots: vec![],
+            protected_roots: vec![],
+            secret_roots: vec![],
+            selected_authentication: None,
+            include_continuation: false,
+            network: vec![],
+            capabilities: vec![],
+            nested_confinement: false,
+        },
+    })
+    .unwrap();
     let prompt = Prompt::new("fixture prompt".into());
     for entry in REGISTRY {
         let route = route(entry.adapter.id(), "fixture");
