@@ -1,0 +1,119 @@
+diff --git a/tools/front-door/crates/routing/src/tests.rs b/tools/front-door/crates/routing/src/tests.rs
+index 39b61fe5..1c0d09da 100644
+--- a/tools/front-door/crates/routing/src/tests.rs
++++ b/tools/front-door/crates/routing/src/tests.rs
+@@ -197 +197,15 @@ fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
+-    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
++    match resolve(&request, &context(&catalogue, &config, now()?)).unwrap_err() {
++        RoutingError::NoEligiblePoolMember { exclusions } => {
++            assert!(
++                exclusions
++                    .iter()
++                    .any(|reason| reason == "confidential model")
++            );
++            assert!(
++                exclusions
++                    .iter()
++                    .any(|reason| reason == "free model disabled")
++            );
++        }
++        error => panic!("unexpected pool error: {error}"),
++    }
+@@ -278,0 +293,35 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
++#[test]
++fn pool_skips_a_member_without_the_requested_effort() -> Result<(), Box<dyn std::error::Error>> {
++    let mut catalogue = Catalogue::bundled()?;
++    let mut members = Vec::new();
++    for (name, efforts) in [
++        ("fixture-low", vec!["low"]),
++        ("fixture-high", vec!["low", "high"]),
++    ] {
++        let model = ModelId::parse(&format!("codex/{name}"))?;
++        catalogue.models.push(ModelEntry {
++            model: model.clone(),
++            efforts: efforts.into_iter().map(Into::into).collect(),
++            evidence_ref: "synthetic-controls".into(),
++            family: None,
++            trains_on_prompts: None,
++        });
++        members.push(RoutePoolMember {
++            model,
++            effort: None,
++            free: false,
++        });
++    }
++    catalogue.pools.insert("mixed".into(), members);
++    let config = RoutingConfig::default();
++    let query = RouteRequest {
++        choice: RouteChoice::NamedRoute("mixed".into()),
++        effort: Some("high".into()),
++        confidential: false,
++        allow_free: false,
++        fallback: Fallback::None,
++    };
++    let route = resolve(&query, &context(&catalogue, &config, now()?))?;
++    assert_eq!(route.model, "fixture-high");
++    Ok(())
++}
+@@ -759,0 +809,43 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
++    let newer_unknown = [
++        quota(
++            "codex/test",
++            "opaque-account",
++            QuotaStatus::Exhausted,
++            1,
++            80,
++            120,
++        )?,
++        quota(
++            "codex/test",
++            "opaque-account",
++            QuotaStatus::Unknown,
++            2,
++            90,
++            120,
++        )?,
++    ];
++    context.quota = &newer_unknown;
++    assert!(reason(&resolve(&query, &context)?).is_none());
++    let expired_newest = [
++        quota(
++            "codex/test",
++            "opaque-account",
++            QuotaStatus::Exhausted,
++            1,
++            80,
++            120,
++        )?,
++        quota(
++            "codex/test",
++            "opaque-account",
++            QuotaStatus::Exhausted,
++            2,
++            90,
++            99,
++        )?,
++    ];
++    context.quota = &expired_newest;
++    assert_eq!(
++        reason(&resolve(&query, &context)?),
++        Some(&RouteExclusionReason::Exhausted)
++    );
+diff --git a/tools/front-door/crates/workflow/src/writing/tests.rs b/tools/front-door/crates/workflow/src/writing/tests.rs
+index 4c09fef0..39e6f5d9 100644
+--- a/tools/front-door/crates/workflow/src/writing/tests.rs
++++ b/tools/front-door/crates/workflow/src/writing/tests.rs
+@@ -159,0 +160,13 @@ fn legal_quoted_examples_exclude_fenced_structural_checks() {
++#[test]
++fn quoted_example_path_prefix_requires_a_path_component_boundary() {
++    let mut m = matcher(RuleSet::Legal);
++    m.quoted_paths = vec!["docs/ex".into()];
++    let source = "<!-- /Users/example/private -->";
++    assert!(
++        m.scan(Path::new("docs/examples-x/draft.md"), source)
++            .unwrap()
++            .iter()
++            .any(|finding| finding.rule == "legal.comment.3")
++    );
++}
++

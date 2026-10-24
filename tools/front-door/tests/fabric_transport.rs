@@ -512,6 +512,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         authority_digest: Digest::from_bytes([94; 32]),
                         provider_timeout_seconds: 60,
                         delivery_id: None,
+                        deliver: None,
                     })
                     .collect(),
                 concurrency: 1,

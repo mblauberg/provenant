@@ -181,7 +181,7 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     assert!(cache.starts_with(rig.home.join("Library/Caches/provenant-lane-cargo")));
     assert!(
         fs::read(cache.join(".provenant-worktree-owner"))?
-            .starts_with(b"provenant-lane-cargo-owner-v1\n")
+            .starts_with(b"provenant-lane-cargo-owner-v2\n")
     );
     assert_eq!(fs::read(cache.join("target/compose-target"))?, b"target");
     assert_eq!(fs::read(cache.join("cargo-home/compose-home"))?, b"cargo");

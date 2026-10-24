@@ -705,6 +705,7 @@ fn writer_run(
                 writer: Some(writer),
                 provider_timeout_seconds: 20,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,
@@ -864,6 +865,7 @@ fn holder_context<'a>(
             actor_id: context.actor_id,
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
+            host_delivery: None,
         }
         .encode()
     }
@@ -1055,12 +1057,12 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     let cache = cache_root.join("d".repeat(64));
     fs::create_dir(&cache)?;
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?;
-    let mut owner_marker = b"provenant-lane-cargo-owner-v1\n".to_vec();
-    owner_marker.extend_from_slice(
-        fs::canonicalize(rig.project.join(".worktrees/feature-topic"))?
-            .as_os_str()
-            .as_encoded_bytes(),
-    );
+    let owner = fs::canonicalize(rig.project.join(".worktrees/feature-topic"))?;
+    let identity = fs::metadata(&owner)?;
+    let mut owner_marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
+    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::dev(&identity).to_le_bytes());
+    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::ino(&identity).to_le_bytes());
+    owner_marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
     fs::write(cache.join(".provenant-worktree-owner"), owner_marker)?;
     let removed = ok(&rig, &["worktree", "remove", "feature/topic", "--json"])?;
     assert_eq!(
