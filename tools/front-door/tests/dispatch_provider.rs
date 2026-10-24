@@ -91,6 +91,11 @@ fn fixture() -> Result {
 fn codex_dispatch_observes_rollout() -> Result {
     for (index, prompt) in ["reply OK", "missing", "mismatch"].iter().enumerate() {
         let mut rig = TestRig::new()?;
+        // The production read-only profile anchors the host Rust runtime roots.
+        for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+            fs::create_dir_all(rig.home.join(path))?;
+        }
+        fs::write(rig.home.join(".rustup/settings.toml"), "")?;
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         fs::copy(std::env::current_exe()?, bin.join("codex"))?;

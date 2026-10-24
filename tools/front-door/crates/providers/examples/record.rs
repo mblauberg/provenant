@@ -887,7 +887,9 @@ fn main() -> Result<()> {
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);
-            Some(refresh_if_expiring(&executor, &login, &now, deadline)?)
+            Some(refresh_if_expiring(
+                &executor, &login, &now, deadline, None,
+            )?)
         }
         _ => None,
     };
