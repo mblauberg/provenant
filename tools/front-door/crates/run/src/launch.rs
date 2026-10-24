@@ -48,6 +48,8 @@ pub struct Decoded {
     pub complete: bool,
     pub observed_route: Option<RouteRecord>,
     pub usage: UsageRecord,
+    /// Provider session handle decoded from the stream, if any.
+    pub session: Option<String>,
     pub reason: Option<String>,
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.

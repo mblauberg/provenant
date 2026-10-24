@@ -869,9 +869,16 @@ scheduler daemon. Within that, the lane decided:
   copied from it. Each terminal attempt can be continued once: a
   `continuations` table enforces it and the CLI sends expected generation 0.
   The provider seam receives the prior attempt and must continue its exact
-  session. No provider exposes sessions yet, so the CLI refuses `resume` as
-  unsupported before it spends the continuation, and production `prepare`
-  refuses any continuation that still reaches it. A replay compares the
+  session. Settlement records the provider session handle on the attempt
+  (`AttemptRecord.session`: Codex `thread.started` thread ID, Claude
+  `session_id`); older records carry none. `prepare` accepts a continuation
+  only on the prior attempt's own provider, model and account, builds it from
+  the recorded handle, and copies the prior attempt's retained private
+  provider state into the new attempt's own, so settled history is never
+  written. Codex launches `codex exec resume ID` and Claude `claude --resume
+  ID` where the activation matrix enables resume. `resume` refuses as
+  `UNSUPPORTED` before it spends the continuation when the adapter has no
+  enabled recipe or the attempt recorded no handle. A replay compares the
   rebuilt request digest, so a changed prompt under the same operation ID is
   an operation conflict.
 - **Reconcile** observes each nonterminal attempt through supervisor custody.
