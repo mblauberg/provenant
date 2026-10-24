@@ -2,14 +2,14 @@
 use crate::git_evidence::{
     FileSnapshot, Git, GitEvidenceError, IndexFingerprint, MAX_DISCLOSURE_BYTES,
     MAX_DISCLOSURE_FILES, TrackedFingerprint, canonical_paths, open_parent, read_index_fingerprint,
-    read_optional_file, read_tracked_file, refuse_index_lock,
+    read_optional_protected_entry, read_protected_entry, read_tracked_file, refuse_index_lock,
 };
 use crate::plan::read_only::RESERVED;
 use crate::repo::RepoPath;
 use crate::status::{
     StatusError, StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z,
 };
-use crate::utility::GitRead;
+use crate::utility::{GitObjectKind, GitRead};
 use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::custody::{Recovery, RecoveryState, Scope};
@@ -183,7 +183,7 @@ pub enum QuarantineError {
     InvalidPath,
     #[error("quarantine must be a private same-device directory bound before launch")]
     ArchiveBinding,
-    #[error("protected path is not a tracked ordinary file")]
+    #[error("protected path is not a tracked ordinary file or symlink")]
     NotTracked,
     #[error("quarantine requires the matching, confirmed quiescence receipt")]
     QuiescenceUnconfirmed,
@@ -211,6 +211,7 @@ pub enum QuarantineError {
 struct TreeRecord {
     path: RepoPath,
     mode: String,
+    oid: GitOid,
 }
 
 #[derive(Debug)]
@@ -428,9 +429,11 @@ fn capture_instruction_snapshot(
             .iter()
             .find(|entry| path_bytes(&entry.path) == path_bytes(&path.path))
             .ok_or(QuarantineError::NotTracked)?;
-        if !matches!(tree_entry.mode.as_str(), "100644" | "100755") {
-            return Err(QuarantineError::NotTracked);
-        }
+        let tracked_link = match tree_entry.mode.as_str() {
+            "100644" | "100755" => false,
+            "120000" => true,
+            _ => return Err(QuarantineError::NotTracked),
+        };
         let index_matches = index_by_path
             .iter()
             .filter(|entry| entry.path == path_bytes(&path.path))
@@ -439,14 +442,33 @@ fn capture_instruction_snapshot(
             return Err(QuarantineError::NotTracked);
         }
         let index_entry = index_matches.first().ok_or(QuarantineError::NotTracked)?;
-        if index_entry.stage != 0 || !matches!(index_entry.mode, 0o100644 | 0o100755) {
+        let index_mode_ok = if tracked_link {
+            index_entry.mode == 0o120000
+        } else {
+            matches!(index_entry.mode, 0o100644 | 0o100755)
+        };
+        if index_entry.stage != 0 || !index_mode_ok {
             return Err(QuarantineError::NotTracked);
         }
-        let file = read_tracked_file(repo.root_dir(), &path.path, MAX_DISCLOSURE_BYTES)?;
+        let file = read_protected_entry(repo.root_dir(), &path.path, MAX_DISCLOSURE_BYTES)?;
         if file.fingerprint.device != Some(repo.root_identity().device)
             || file.fingerprint.links != Some(1)
+            || is_link_mode(file.fingerprint.mode) != tracked_link
         {
             return Err(QuarantineError::NotTracked);
+        }
+        if tracked_link {
+            // Evidence is the link target; it must equal the committed blob.
+            let blob = git
+                .read(GitRead::RawObject {
+                    kind: GitObjectKind::Blob,
+                    oid: tree_entry.oid,
+                })?
+                .stdout
+                .bytes;
+            if blob != file.bytes {
+                return Err(QuarantineError::NotTracked);
+            }
         }
         total = total
             .checked_add(file.bytes.len() as u64)
@@ -634,8 +656,11 @@ fn quarantine_instruction_changes(
     let mut current_unreadable = Vec::with_capacity(snapshot.files.len());
     let mut total = 0_u64;
     for file in &snapshot.files {
-        let observed =
-            read_optional_file(repo.root_dir(), &file.protected.path, MAX_DISCLOSURE_BYTES);
+        let observed = read_optional_protected_entry(
+            repo.root_dir(),
+            &file.protected.path,
+            MAX_DISCLOSURE_BYTES,
+        );
         match observed {
             Ok(observed) => {
                 if let Some(observed) = &observed {
@@ -694,11 +719,14 @@ fn quarantine_instruction_changes(
                 .any(|path| path_bytes(path) == raw_path.as_slice());
             if !selected_path {
                 review = true;
-                let (observed, unreadable) =
-                    match read_optional_file(repo.root_dir(), &path, MAX_DISCLOSURE_BYTES) {
-                        Ok(observed) => (observed, false),
-                        Err(_) => (None, true),
-                    };
+                let (observed, unreadable) = match read_optional_protected_entry(
+                    repo.root_dir(),
+                    &path,
+                    MAX_DISCLOSURE_BYTES,
+                ) {
+                    Ok(observed) => (observed, false),
+                    Err(_) => (None, true),
+                };
                 if let Some(observed) = &observed {
                     total = total
                         .checked_add(observed.bytes.len() as u64)
@@ -839,7 +867,10 @@ fn quarantine_instruction_changes(
                 record.path.as_slice() == path_bytes(&file.protected.path)
                     && record.kind == StatusKind::Changed
             });
-            if !has_simple_status {
+            // Restoring a link would need a symlink write; leave it for review.
+            let involves_link = is_link_mode(file.fingerprint.mode)
+                || observed.is_some_and(|item| is_link_mode(item.fingerprint.mode));
+            if !has_simple_status || involves_link {
                 review = true;
             }
         }
@@ -914,8 +945,11 @@ fn quarantine_instruction_changes(
         if recovery.observe() != RecoveryState::Absent {
             return Err(QuarantineError::QuiescenceUnconfirmed);
         }
-        let latest =
-            read_optional_file(repo.root_dir(), &file.protected.path, MAX_DISCLOSURE_BYTES)?;
+        let latest = read_optional_protected_entry(
+            repo.root_dir(),
+            &file.protected.path,
+            MAX_DISCLOSURE_BYTES,
+        )?;
         if latest.as_ref().map(|item| &item.fingerprint) != observed.map(|item| &item.fingerprint) {
             return Err(QuarantineError::ConcurrentChange);
         }
@@ -1087,6 +1121,10 @@ fn put_bounded(
 /// Preserve the old inode in quarantine before publishing a baseline. No
 /// operation replaces a concurrently created destination. The retained name is
 /// recorded before mutation and never unlinked: an open writer can still use it.
+fn is_link_mode(mode: Option<u32>) -> bool {
+    mode.is_some_and(|mode| mode & 0o170_000 == 0o120_000)
+}
+
 fn retained_name(index: usize) -> String {
     format!("{index:08}.retained")
 }
@@ -1175,10 +1213,10 @@ fn parse_tree_entries(raw: &[u8]) -> Result<Vec<TreeRecord>, QuarantineError> {
         }
         let oid_text = std::str::from_utf8(fields.get(2).ok_or(QuarantineError::Incomplete)?)
             .map_err(|_| QuarantineError::Incomplete)?;
-        GitOid::parse(oid_text).map_err(|_| QuarantineError::Incomplete)?;
+        let oid = GitOid::parse(oid_text).map_err(|_| QuarantineError::Incomplete)?;
         let path = RepoPath::new(PathBuf::from(OsString::from_vec(path.to_vec())))
             .map_err(|_| QuarantineError::InvalidPath)?;
-        records.push(TreeRecord { path, mode });
+        records.push(TreeRecord { path, mode, oid });
         if records.len() > MAX_DISCLOSURE_FILES {
             return Err(QuarantineError::Incomplete);
         }
@@ -1737,6 +1775,68 @@ mod custody_integration_tests {
                 .join("policy-archive/quarantine-result.json")
                 .is_file()
         );
+        Ok(())
+    }
+
+    fn seed_tracked_link(fixture: &Fixture) -> Result<(), Box<dyn Error>> {
+        seed_protected(fixture)?;
+        std::os::unix::fs::symlink("AGENTS.md", fixture.root.join("CLAUDE.md"))?;
+        fixture.run(&["add", "--", "CLAUDE.md"])?;
+        fixture.run(&["commit", "-m", "tracked control link"])?;
+        Ok(())
+    }
+
+    #[test]
+    fn tracked_symlink_control_file_snapshots_its_target_bytes() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        seed_tracked_link(&fixture)?;
+        let token = CancelToken::new();
+        let git = evidence_git(&fixture, &token)?;
+        let archive = archive_dir(&fixture, "link-snapshot")?;
+        let protected = [ProtectedPath::policy_control("CLAUDE.md")?];
+
+        let snapshot = git.snapshot_instructions(scope(), &protected, &archive)?;
+
+        let file = snapshot.files.first().ok_or("link was not snapshotted")?;
+        assert_eq!(file.bytes, b"AGENTS.md");
+        assert!(super::is_link_mode(file.fingerprint.mode));
+        Ok(())
+    }
+
+    #[test]
+    fn retargeted_and_retyped_control_links_are_archived_without_following()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        seed_tracked_link(&fixture)?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = evidence_git(&fixture, &token)?;
+        let scope = scope();
+        let archive = archive_dir(&fixture, "link-archive")?;
+        let protected = [ProtectedPath::policy_control("CLAUDE.md")?];
+        let snapshot = git.snapshot_instructions(scope, &protected, &archive)?;
+        let recovery = acquire_absent_recovery(&fixture, scope, base)?;
+        let link = fixture.root.join("CLAUDE.md");
+        fs::remove_file(&link)?;
+        std::os::unix::fs::symlink("unrelated.txt", &link)?;
+
+        let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
+
+        assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
+        assert_eq!(fs::read_link(&link)?, std::path::Path::new("unrelated.txt"));
+        let blobs = fixture._temp.path().join("link-archive/blobs");
+        assert_eq!(fs::read(blobs.join("00000000.before"))?, b"AGENTS.md");
+        assert_eq!(fs::read(blobs.join("00000000.after"))?, b"unrelated.txt");
+
+        // Link to regular file with the same bytes is still a retype.
+        let archive = archive_dir(&fixture, "retype-archive")?;
+        fs::remove_file(&link)?;
+        std::os::unix::fs::symlink("AGENTS.md", &link)?;
+        let snapshot = git.snapshot_instructions(scope, &protected, &archive)?;
+        fs::remove_file(&link)?;
+        fs::write(&link, b"AGENTS.md")?;
+        let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
+        assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         Ok(())
     }
 

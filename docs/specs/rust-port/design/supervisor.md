@@ -356,7 +356,11 @@ protected disk/index/HEAD patches, blobs and digests before restoration.
 Automatically restore only attributable ordinary `.agents/` edits. Policy or
 control-file changes, concurrent edits or unaccountable history require review;
 retain evidence and publish a terminal failure, without resetting unrelated
-work or rewriting history. Protected-tip verification returns a pinned SHA;
+work or rewriting history. A tracked symlink at a protected path (mode 120000,
+such as `CLAUDE.md -> AGENTS.md`) is protected evidence whose bytes are the link
+target, read with readlink and checked against the committed blob; it is never
+followed, and a retargeted, removed or retyped link is archived and reviewed
+like any changed control file. Protected-tip verification returns a pinned SHA;
 workflow/chair authority separately releases that exact tip.
 
 Safe Git uses a trusted executable, typed operations, literal pathspecs after
