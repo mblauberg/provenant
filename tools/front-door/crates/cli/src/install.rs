@@ -81,9 +81,10 @@ pub fn execute_install(
     smoke: &dyn ReleaseSmoke,
     target: &str,
 ) -> Result<InstallOutcome, InstallError> {
-    if matches!(args.hooks, Switch::On) {
-        return Err(InstallError::HooksUnavailable);
-    }
+    targets.hook_specs = crate::hooks::HOOK_SPECS
+        .iter()
+        .map(|spec| spec.registration)
+        .collect();
     targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
     targets.adopt_existing = args.adopt_existing;
     targets.hooks = matches!(args.hooks, Switch::On);

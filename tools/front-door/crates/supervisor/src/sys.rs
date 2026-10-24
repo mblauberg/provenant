@@ -464,3 +464,5 @@ pub(crate) fn monotonic_now() -> provenant_core::MonoTime {
         .as_micros();
     provenant_core::MonoTime::from_micros(u64::try_from(elapsed).unwrap_or(u64::MAX))
 }
+
+pub mod hook_io;

@@ -172,6 +172,27 @@ fn is_staging_record(name: &OsStr) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Lookup only: hooks never allocate identities or create state.
+pub fn lookup_project(
+    roots: &Roots,
+    location: &ProjectLocation,
+    fs: &dyn SafeFs,
+) -> Result<Option<ProjectBinding>, ConfigError> {
+    let state = match fs.open_anchor(roots.state.as_path()) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&*state, true)?;
+    let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
+        Ok(projects) => projects,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&*projects, true)?;
+    find_binding(&*projects, location.common_dir())
+}
+
 fn find_binding(
     projects: &dyn SafeDir,
     target: &Path,

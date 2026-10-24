@@ -126,6 +126,16 @@ pub struct HarnessTarget {
     pub hook_file: Option<PathBuf>,
     pub instruction: Option<PathBuf>,
 }
+/// Fixture-backed registration supplied by the CLI composition root.
+/// `None` harness denotes Git, whose launcher is installed in verified hooks.
+#[derive(Debug, Clone, Copy)]
+pub struct HookRegistration {
+    pub harness: Option<Harness>,
+    pub event: &'static str,
+    pub matcher: Option<&'static str>,
+    pub timeout: Option<u64>,
+    pub command: &'static [&'static str],
+}
 #[derive(Debug, Clone)]
 pub struct Targets {
     pub roots: Roots,
@@ -134,6 +144,7 @@ pub struct Targets {
     pub harnesses: Vec<HarnessTarget>,
     pub adopt_existing: bool,
     pub hooks: bool,
+    pub hook_specs: Vec<HookRegistration>,
     pub legacy_checkout: Option<PathBuf>,
     pub git_hooks_dir: Option<PathBuf>,
     pub protected_roots: Vec<PathBuf>,
@@ -171,6 +182,7 @@ impl Targets {
             harnesses: targets,
             adopt_existing: false,
             hooks: false,
+            hook_specs: Vec::new(),
             legacy_checkout: None,
             git_hooks_dir: None,
             protected_roots: Vec::new(),
@@ -234,7 +246,15 @@ impl Targets {
         {
             return Err(InstallError::HarnessSelection);
         }
-        if self.hooks {
+        if self.hooks
+            && (self.hook_specs.is_empty()
+                || self.harnesses.iter().any(|target| {
+                    !self
+                        .hook_specs
+                        .iter()
+                        .any(|spec| spec.harness == Some(target.harness))
+                }))
+        {
             return Err(InstallError::HooksUnavailable);
         }
         normal_absolute(&self.home)?;
@@ -682,18 +702,42 @@ pub fn plan_install(
     let mut desired = desired(&release, &targets)?;
     for (path, value) in &snapshots.harness.files {
         normal_absolute(path)?;
+        // The only write inside the explicitly selected legacy checkout is
+        // replacement of its exact compiled pre-push link. The Git directory
+        // was resolved at the process edge, independently of --project.
+        let git_hook = if let (
+            Some(checkout),
+            Some(directory),
+            Some(Some(Snapshot {
+                value: Value::Link(actual),
+                ..
+            })),
+        ) = (
+            &targets.legacy_checkout,
+            &targets.git_hooks_dir,
+            snapshots.entries.get(path),
+        ) {
+            targets.hooks
+                && snapshots.harness.authorised.contains(path)
+                && crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
+                    link.retained && path == &directory.join(&link.name) && actual == &link.target
+                })
+        } else {
+            false
+        };
         if desired.contains_key(path)
             || path.starts_with(targets.roots.state.as_path())
             || path.starts_with(&release.source)
             || release.source.starts_with(path)
-            || targets
-                .protected_roots
-                .iter()
-                .any(|root| path.starts_with(root))
-            || targets
-                .legacy_checkout
-                .as_ref()
-                .is_some_and(|checkout| path.starts_with(checkout))
+            || (!git_hook
+                && (targets
+                    .protected_roots
+                    .iter()
+                    .any(|root| path.starts_with(root))
+                    || targets
+                        .legacy_checkout
+                        .as_ref()
+                        .is_some_and(|checkout| path.starts_with(checkout))))
         {
             return Err(InstallError::Conflict(path.clone()));
         }
@@ -1567,6 +1611,17 @@ fn permitted_entry(
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
+        if entry.selector == "git-hook:pre-push" {
+            return Ok(receipt
+                .legacy
+                .as_ref()
+                .and_then(|legacy| legacy.git_hooks_dir.as_ref())
+                .is_some_and(|dir| {
+                    dir.to_path_buf()
+                        .is_ok_and(|dir| path == dir.join("pre-push"))
+                })
+                && matches!(entry.expected, OwnedValue::File { mode: 0o755, .. }));
+        }
         let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
         let expected_target = release_root(state_root, receipt.source_digest).join("bin/provenant");
         return Ok(entry.selector == "binary"
@@ -1849,6 +1904,7 @@ pub fn uninstall(
         if !entry
             .harness
             .is_some_and(|harness| selected.contains(&harness))
+            && !(entry.selector == "git-hook:pre-push" && selected == registered)
         {
             continue;
         }
@@ -1915,6 +1971,7 @@ pub fn uninstall(
         !entry
             .harness
             .is_some_and(|harness| selected.contains(&harness))
+            && !(entry.selector == "git-hook:pre-push" && selected == registered)
     });
     receipt
         .harnesses
