@@ -788,26 +788,22 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     {
         return unsupported("network, capability or read-root access");
     }
-    // A writer needs its worktree on this machine, so naming this host is
-    // ordinary local placement; only a peer is refused.
-    if matches!(access.mode, Mode::WorktreeWrite)
-        && command
-            .host
-            .as_deref()
-            .map(|host| remote::names_local_host(edge, host))
-            .transpose()?
-            == Some(true)
-    {
-        command.host = None;
-    }
-    let access = &command.access;
-    if command.host.is_some() && matches!(access.mode, Mode::WorktreeWrite) {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "worktree-write dispatch to a peer host is not available in this build (#1457); \
-             use --mode read-only",
-        ));
+    // Naming this host is ordinary local placement in any mode; a writer
+    // needs its worktree on this machine, so only a peer is refused.
+    if let Some(host) = command.host.as_deref() {
+        if remote::names_local_host(edge, host)? {
+            command.host = None;
+        } else if matches!(command.access.mode, Mode::WorktreeWrite) {
+            if !remote::names_peer(edge, host)? {
+                return Err(remote::unknown_host(host));
+            }
+            return Err(Fail::new(
+                Status::Refused,
+                "UNSUPPORTED",
+                "worktree-write dispatch to a peer host is not available in this build (#1457); \
+                 use --mode read-only",
+            ));
+        }
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
