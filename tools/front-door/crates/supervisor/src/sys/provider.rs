@@ -799,10 +799,6 @@ impl ProviderGroup {
             unresolved: self.ownership_uncertain || !census.is_complete(),
         };
         for identity in identities {
-            if self.spared_descendants.contains(&identity) {
-                result.unresolved = true;
-                continue;
-            }
             let row = match census.process(identity.pid) {
                 ProcessLookup::Present(fact) if fact.identity == identity => fact,
                 ProcessLookup::Present(_) | ProcessLookup::Absent => {
@@ -815,6 +811,15 @@ impl ProviderGroup {
                     continue;
                 }
             };
+            // A spared owner is never signalled, but once it has exited and
+            // this guardian adopted it, reaping the zombie is safe and keeps a
+            // long-lived fenced guardian from pinning it.
+            if self.spared_descendants.contains(&identity)
+                && !(row.zombie && row.parent_pid == guardian_pid)
+            {
+                result.unresolved = true;
+                continue;
+            }
             if row.parent_pid != guardian_pid {
                 // Still running below the provider, escaped, or not yet
                 // adopted. It cannot be reaped by this guardian as a child.
