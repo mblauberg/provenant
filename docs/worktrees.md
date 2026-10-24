@@ -50,8 +50,13 @@ operation. The clean/reap engines, retention plans and Node dependency cloning
 are retired. Guardian settlement owns classified scratch cleanup; retained
 history stays on disk.
 
-Never share `CARGO_TARGET_DIR` across worktrees; use a separate target directory for each worktree.
-
+Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
+`$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
+worktree and common Git paths and held directory identities. Same-named and
+recreated worktrees get separate caches. Setup requires the cache and lane-only
+parent to belong to the effective user with mode 0700, and refuses mismatches.
+Host builds must use separate target directories outside this lane namespace;
+see the [release build example](runbooks/front-door.md#build-a-staged-release).
 
 ## Writer dispatch
 

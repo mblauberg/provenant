@@ -11,7 +11,7 @@ pub use hooks::*;
 pub const CHECKPOINT_LIMIT: u64 = 32 * 1024;
 pub const HOST_SESSION_ID_LIMIT: usize = 128;
 
-/// Host IDs are not core's 32-hex SessionId. Restrict to command-safe components.
+/// Host-provided IDs use command-safe components, independently of core IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct HostSessionId(String);
@@ -58,7 +58,7 @@ pub enum SessionError {
     #[error("checkpoint exceeds 32 KiB")]
     TooLarge,
     #[error("checkpoint is not UTF-8")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    Utf8(#[from] std::str::Utf8Error),
     #[error("filesystem failure while accessing checkpoint")]
     Filesystem(#[from] FsError),
     #[error("checkpoint is visible but directory sync failed; reread before retrying")]
@@ -110,7 +110,7 @@ impl SessionStore {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        let _ = String::from_utf8(text.to_vec())?;
+        std::str::from_utf8(text)?;
         let dir = self.directory(true)?;
         let _lock = dir.lock(
             OsStr::new("checkpoint.lock"),
@@ -142,7 +142,8 @@ impl SessionStore {
         let read = || -> Result<Checkpoint, SessionError> {
             let dir = self.directory(false)?;
             let mut file = dir.open_read(OsStr::new("checkpoint.md"))?;
-            let markdown = String::from_utf8(file.read_bounded(CHECKPOINT_LIMIT)?)?;
+            let text = file.read_bounded(CHECKPOINT_LIMIT)?;
+            let markdown = std::str::from_utf8(&text)?.to_owned();
             let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
                 .map_err(|_| provenant_core::TimeError::WallRange)?;
             Ok(Checkpoint {

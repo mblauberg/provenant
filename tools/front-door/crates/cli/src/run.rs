@@ -1448,6 +1448,49 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     Ok((data, human))
 }
 
+/// A switch handoff is a snapshot of active lane IDs, never a parallel queue.
+pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec<String>), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 1)
+            .map_err(|e| Fail::new(Status::Error, "TIME", e.to_string()))?,
+    };
+    let session = open(edge, &call)?;
+    let mut lanes = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = session.store.lanes(
+            &run::LaneQuery {
+                targets: vec![],
+                all: false,
+                limit: 100,
+                after,
+            },
+            &call,
+        )?;
+        lanes.extend(
+            page.lanes
+                .iter()
+                .map(|lane| format!("{}/{}/{}", lane.run_id, lane.task_id, lane.attempt_id)),
+        );
+        if lanes.len() > 1024 {
+            return Err(Fail::new(
+                Status::Error,
+                "LIMIT",
+                "too many active lanes for a handoff",
+            ));
+        }
+        match page.next {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    Ok((session.context.project_id, lanes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
