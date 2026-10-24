@@ -173,8 +173,10 @@ joins the tracked set, so cleanup cannot settle while it lives, and receives
 TERM then KILL after the descendant grace, each time after re-observing its
 full identity. This needs only a readable nested-child registry, or, where none is wired
 (production), the host reporting that the attempt's nested child store
-(`children/<attempt id>` under the state root) is absent or empty; records
-there, or a failed read, mean no signal and the escapee stays unresolved.
+(`children/<attempt id>` under the state root) holds no nested run (the lane's
+MCP creates the store at startup, so its existing proves nothing: no `runs/`
+entries and no row in its read-only `runs` table); a run there, or a failed
+read, mean no signal and the escapee stays unresolved.
 macOS cannot prove a registered owner's custody, so that owner stays protected
 (as do its descendants) while other escapees are still ended. A signal to a provider that
 is already gone (ESRCH) is neither recorded nor warned about. A survivor is published in `unresolved_pids`. An unconfined

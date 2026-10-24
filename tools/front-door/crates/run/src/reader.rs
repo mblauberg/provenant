@@ -269,6 +269,14 @@ impl RunStore {
             .transpose()
         })
     }
+    /// Whether the store holds any run record.
+    pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
+        call.retry(|| {
+            Ok(self
+                .db
+                .query_row("SELECT EXISTS(SELECT 1 FROM runs)", [], |row| row.get(0))?)
+        })
+    }
     pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
         call.retry(|| self.run_on(&self.db, id))
     }

@@ -303,7 +303,7 @@ impl Driver<'_> {
             || (self.registry.is_none()
                 && self
                     .nested_children
-                    .is_some_and(|store| store.is_empty(&self.holder_context)));
+                    .is_some_and(|store| store.has_no_nested_runs(&self.holder_context)));
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }

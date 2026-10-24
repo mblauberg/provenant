@@ -157,6 +157,20 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     Ok(())
 }
 #[test]
+fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or("initialised store missing")?;
+    assert!(!reader.has_runs(&call)?);
+    writer.create(&input(), &call)?;
+    assert!(reader.has_runs(&call)?);
+    Ok(())
+}
+#[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

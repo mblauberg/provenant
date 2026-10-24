@@ -928,10 +928,10 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     Ok(())
 }
 /// The production shape: no registry is wired, so the host's child store
-/// decides. An empty store ends the escapee; a store with records, which could
-/// hold a nested owner, leaves it alive and reported.
+/// decides. A store with no nested run ends the escapee; one with a run, which
+/// could hold a nested owner, leaves it alive and reported.
 #[cfg(target_os = "macos")]
-fn escapee_is_ended_only_when_the_host_reports_no_nested_children(root: &Path) -> Result<()> {
+fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -958,10 +958,13 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_children(root: &Path) -
         let exit = exited(&handle)?;
         Ok((exit, escapee, stream))
     };
+    // The lane's MCP creates its store at startup, with no nested run.
+    std::fs::create_dir_all(home.join("children/attempt/tmp"))?;
+    std::fs::write(home.join("children/attempt/run.sqlite3"), b"")?;
     let (exit, escapee, _stream) = case("empty")?;
     assert!(!exit.unresolved_cleanup, "{exit:?}");
     wait_for_identity_absence(&escapee)?;
-    std::fs::create_dir_all(home.join("children/nested-lane"))?;
+    std::fs::create_dir_all(home.join("children/attempt/runs/nested-run"))?;
     let (exit, escapee, stream) = case("records")?;
     assert!(exit.unresolved_cleanup, "{exit:?}");
     assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
@@ -1120,8 +1123,8 @@ struct FileNestedChildren {
     home: PathBuf,
 }
 impl NestedChildStore for FileNestedChildren {
-    fn is_empty(&self, _: &[u8]) -> bool {
-        match std::fs::read_dir(self.home.join("children")) {
+    fn has_no_nested_runs(&self, _: &[u8]) -> bool {
+        match std::fs::read_dir(self.home.join("children/attempt/runs")) {
             Ok(mut entries) => entries.next().is_none(),
             Err(error) => error.kind() == io::ErrorKind::NotFound,
         }
@@ -1729,8 +1732,8 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
-        "escapee_is_ended_only_when_the_host_reports_no_nested_children",
-        escapee_is_ended_only_when_the_host_reports_no_nested_children,
+        "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
+        escapee_is_ended_only_when_the_host_reports_no_nested_runs,
     ),
     #[cfg(target_os = "macos")]
     (

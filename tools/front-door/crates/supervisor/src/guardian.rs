@@ -142,11 +142,11 @@ pub(crate) fn handoff(
     Ok(())
 }
 
-/// The host's nested child lane records for one attempt, read through its
-/// opaque holder context. Only a definite "empty" counts: an unreadable store
-/// or an unknown context answers `false`, never `true`.
+/// The host's nested child lane runs for one attempt, read through its opaque
+/// holder context. Only a definite "none" counts: an unreadable store or an
+/// unknown context answers `false`, never `true`.
 pub trait NestedChildStore {
-    fn is_empty(&self, context: &[u8]) -> bool;
+    fn has_no_nested_runs(&self, context: &[u8]) -> bool;
 }
 
 /// Composition seam for Run's bounded provider decoder and confinement filter.

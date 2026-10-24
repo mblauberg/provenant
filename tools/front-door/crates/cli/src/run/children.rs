@@ -55,23 +55,55 @@ impl Drop for HostHolder<'_> {
     }
 }
 impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
-    /// No nested child lane can exist while the attempt's child store is
-    /// absent or has no entries. Any other state, or a failed read, is not empty.
-    fn is_empty(&self, raw: &[u8]) -> bool {
+    /// The lane's MCP creates its child store at startup, so the store existing
+    /// proves nothing. No nested lane can exist while the store holds no `runs`
+    /// entry and its database has no run row. Any failed read is not "none".
+    fn has_no_nested_runs(&self, raw: &[u8]) -> bool {
         let Ok(context) = serde_json::from_slice::<run::HolderContext>(raw) else {
             return false;
         };
-        let store = context
+        let state = context
             .roots
             .state_root
             .join("children")
             .join(context.attempt_id.to_string());
-        match std::fs::symlink_metadata(&store) {
-            Ok(meta) if meta.is_dir() => {
-                std::fs::read_dir(&store).is_ok_and(|mut entries| entries.next().is_none())
+        match std::fs::read_dir(state.join("runs")) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return false;
+                }
             }
-            Ok(_) => false,
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        let mut inputs = provenant_core::RootInputs::new(
+            context.roots.home.clone(),
+            context.roots.checkout.clone(),
+        );
+        inputs.state_dir = Some(state);
+        let Ok(roots) = inputs.resolve(&provenant_supervisor::fs::LocalFs) else {
+            return false;
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let Ok(budget) = provenant_core::WaitBudget::cli(clock.mono_now(), 1) else {
+            return false;
+        };
+        let call = run::Request {
+            clock: &clock,
+            budget,
+            cancel: &cancel,
+        };
+        let execution = run::ExecutionContext {
+            state_root: roots.state,
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            read_prompts: false,
+        };
+        match run::RunStore::open_read_only(&execution, &call) {
+            Ok(None) => true,
+            Ok(Some(store)) => store.has_runs(&call).is_ok_and(|any| !any),
+            Err(_) => false,
         }
     }
 }
