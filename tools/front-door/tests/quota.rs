@@ -407,7 +407,9 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         for key in keys {
             assert!(key.starts_with(&format!("{provider}-")));
         }
-        use provenant_quota::{AccountScope, Admission, ProbeCapture, QuotaProbeInput, Refusal};
+        use provenant_quota::{
+            AccountRecord, AccountScope, Admission, ProbeCapture, QuotaProbeInput, Refusal,
+        };
         use provenant_records::{
             ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
         };
@@ -439,17 +441,18 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             )?;
             assert_eq!(&snapshot.account, account);
         }
-        let refusals = [Refusal {
+        let mut record = AccountRecord::empty(known[0].clone());
+        record.refusals.push(Refusal {
             account: known[0].clone(),
             model: "fixture-model".into(),
             pool: None,
             observed_unix_seconds: at,
             resets_unix_seconds: Some(at + 300),
-        }];
+        });
+        let records = [record];
         let admission = Admission {
             now_unix_seconds: at,
-            records: &[],
-            refusals: &refusals,
+            records: &records,
             pools: &[],
         };
         let mut route = ResolvedRoute {
@@ -471,10 +474,9 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             },
             pool_selection: None,
         };
-        let operation = provenant_core::OperationId::parse("fixture")?;
         for (account, allowed) in [(&known[0], false), (&known[1], true), (&known[0], false)] {
             route.account_key = Some(account.account_key.clone());
-            assert_eq!(admission.admit(&route, &operation).is_ok(), allowed);
+            assert_eq!(admission.check(&route).is_ok(), allowed);
         }
     }
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("fixture-account"));

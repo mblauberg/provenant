@@ -493,7 +493,6 @@ fn opencode_free_pool_cools_second_model() -> Result {
         provenant_quota::Admission {
             now_unix_seconds: now,
             records: std::slice::from_ref(&quota_record),
-            refusals: &[],
             pools: &pools,
         }
         .check(&second),

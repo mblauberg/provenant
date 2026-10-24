@@ -286,9 +286,9 @@ impl QuotaEffects for LiveQuota {
         let account = self
             .accounts
             .iter()
-            .find(|a| a.scope == *plan.account())
+            .find(|a| a.scope == plan.account)
             .ok_or(ProbeFailure::Auth)?;
-        let deadline = plan.input().deadline_unix_seconds;
+        let deadline = plan.input.deadline_unix_seconds;
         let check_identity = || {
             if matches!(account.scope.adapter.as_str(), "codex" | "cursor")
                 && signin_key(&account.scope.adapter, &account.identity_dir)
