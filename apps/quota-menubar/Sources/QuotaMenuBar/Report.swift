@@ -65,7 +65,7 @@ struct QuotaReport {
             plan = details?.plan
             planLabel = nil
             active = nil
-            priority = details?.priority.map(Double.init)
+            priority = details?.priority.map { Double($0) }
             fingerprint = details?.fingerprint
             creditBalance = details?.creditBalance
             note = details?.note
