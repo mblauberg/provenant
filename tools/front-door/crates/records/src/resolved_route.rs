@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 #[serde(deny_unknown_fields)]
 pub struct ResolvedRoute {
     pub adapter: String,
-    /// Full provider/model path; never split beyond the adapter separator.
+    /// Provider-native model identifier, retaining all segments after the adapter separator.
     pub model: String,
     pub effort: Option<String>,
     pub catalogue_revision: String,

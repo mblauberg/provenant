@@ -1,5 +1,5 @@
 #[path = "mod.rs"]
-mod support;
+pub(super) mod support;
 use provenant_core::Clock;
 use provenant_supervisor::exec::ExecOutcome;
 use serde_json::Value;
@@ -35,6 +35,8 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
+            "read_only_dispatch_applies_bound_git_and_project_writes",
+            "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
@@ -46,6 +48,13 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
         ],
         |name| {
             let result = match name {
+                "read_only_dispatch_applies_bound_git_and_project_writes" => {
+                    crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
+                }
+                "writer_dispatch_uses_lane_cache_and_narrow_provider_state" => {
+                    crate::compose_tests::writer_dispatch_uses_lane_cache_and_narrow_provider_state(
+                    )
+                }
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
                 }
@@ -83,7 +92,7 @@ fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
     rig.execute_os(&std::env::current_exe()?, &argv, None)
 }
 
-fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
+pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
     let output = rig.execute(Path::new("/usr/bin/git"), args, None)?;
     assert_eq!(
         code(&output),
@@ -94,7 +103,7 @@ fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
 }
 
-fn repository() -> Result<TestRig> {
+pub(super) fn repository() -> Result<TestRig> {
     let rig = TestRig::new()?;
     git(&rig, &["config", "user.name", "Fixture"])?;
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
@@ -115,7 +124,7 @@ fn repository() -> Result<TestRig> {
     Ok(rig)
 }
 
-fn writer_backend_available() -> Result<bool> {
+pub(super) fn writer_backend_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
@@ -585,7 +594,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     Ok(())
 }
 
-fn writer_process_cleanup(
+pub(super) fn writer_process_cleanup(
     context: &provenant_run::ExecutionContext,
 ) -> provenant_supervisor::fixture::ProcessCleanupGuard {
     let root = context
@@ -621,7 +630,7 @@ fn start_writer(
     )?)
 }
 
-fn writer_context(
+pub(super) fn writer_context(
     rig: &TestRig,
 ) -> Result<(provenant_core::Roots, provenant_run::ExecutionContext)> {
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -650,7 +659,9 @@ fn writer_call<'a>(
     })
 }
 
-fn open_writer_store(context: &provenant_run::ExecutionContext) -> Result<provenant_run::RunStore> {
+pub(super) fn open_writer_store(
+    context: &provenant_run::ExecutionContext,
+) -> Result<provenant_run::RunStore> {
     let clock = provenant_supervisor::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
@@ -880,7 +891,7 @@ fn assert_terminal_outcome(
     Ok(())
 }
 
-fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
+pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !store.writer_fences()?.is_empty() {
         if Instant::now() >= deadline {
@@ -990,7 +1001,7 @@ fn json(output: &ExecOutcome) -> Result<Value> {
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
 }
 
-fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
+pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
     let output = command(rig, args)?;
     assert_eq!(
         code(&output),

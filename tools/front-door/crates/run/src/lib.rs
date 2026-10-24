@@ -20,6 +20,7 @@ pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,
 };
+pub use plan::read_only_plan;
 pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
 
 pub use db::{ExecutionContext, Request, RunStore};

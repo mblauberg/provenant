@@ -1,6 +1,9 @@
 // The process edge composes typed owners and owns ordinary result delivery.
 mod chair;
 mod checks;
+#[cfg(test)]
+#[path = "../tests/support/compose.rs"]
+mod compose_tests;
 mod fabric;
 mod hooks;
 mod hosts;
@@ -430,6 +433,16 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
 }
 fn main() -> ExitCode {
+    #[cfg(test)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("exec")) {
+        return match compose_tests::provider() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "compose provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(test)]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--writer-provider")) {
         return match worktree_tests::provider(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
