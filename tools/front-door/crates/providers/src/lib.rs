@@ -45,7 +45,7 @@ pub static REGISTRY: &[Registration] = &[
 // All invocation forms in step 0's activation.json are disabled. Keep shared
 // refusal mechanics here, rather than speculative per-provider launch builders.
 macro_rules! adapter {
-    ($ty:ty, $id:literal, $argv:literal) => {
+    ($ty:ty, $id:literal) => {
         impl crate::Adapter for $ty {
             fn id(&self) -> &'static str {
                 $id
@@ -76,17 +76,8 @@ macro_rules! adapter {
             }
             fn prepare(
                 &self,
-                input: crate::PrepareInput<'_>,
+                _: crate::PrepareInput<'_>,
             ) -> Result<crate::AdapterLaunchSpec, crate::ProviderError> {
-                if input.route.adapter != $id {
-                    return Err(crate::ProviderError::IdentityMismatch);
-                }
-                if $argv {
-                    input.prompt.check_argv()?;
-                }
-                if let Some(continuation) = input.continuation {
-                    continuation.validate(input.route, input.grant_digest)?;
-                }
                 Err(crate::ProviderError::Disabled { adapter: $id })
             }
             fn stream(

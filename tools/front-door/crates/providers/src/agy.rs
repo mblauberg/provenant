@@ -1,23 +1,19 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Agy;
-crate::adapter!(Agy, "agy", true);
+crate::adapter!(Agy, "agy");
 crate::quota_source!(Agy, "agy");
 #[derive(Deserialize)]
 #[serde(tag = "event")]
 enum Event {
     #[serde(rename = "init")]
-    Init { conversation_id: String, init: Init },
+    Init { conversation_id: String },
     #[serde(rename = "step_update")]
     Step { step_update: Step },
     #[serde(rename = "result")]
     Result { result: ResultWire },
     #[serde(other)]
     Other,
-}
-#[derive(Deserialize)]
-struct Init {
-    model: String,
 }
 #[derive(Deserialize)]
 struct Step {
@@ -40,13 +36,7 @@ struct Usage {
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
-        Event::Init {
-            conversation_id,
-            init,
-        } => {
-            drop(init.model);
-            vec![E::Session(conversation_id)]
-        }
+        Event::Init { conversation_id } => vec![E::Session(conversation_id)],
         Event::Step { step_update } => {
             let mut events = vec![E::Session(step_update.conversation_id)];
             if step_update.step_type == "agent_response"

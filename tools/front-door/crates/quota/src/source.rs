@@ -10,8 +10,7 @@ pub struct AccountScope {
     pub label: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuotaProbeInput {
     pub now_unix_seconds: i64,
     pub deadline_unix_seconds: i64,

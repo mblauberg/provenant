@@ -71,10 +71,6 @@ pub mod time;
 pub enum QuotaError {
     #[error("quota source has no qualifying recording")]
     Disabled,
-    #[error("quota probe deadline is invalid")]
-    InvalidDeadline,
-    #[error("quota credential authority is absent or expired")]
-    AuthorityRequired,
     #[error("quota number is out of range")]
     NumberOutOfRange,
     #[error("invalid quota record")]

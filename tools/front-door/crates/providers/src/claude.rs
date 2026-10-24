@@ -1,17 +1,13 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Claude;
-crate::adapter!(Claude, "claude", false);
+crate::adapter!(Claude, "claude");
 crate::quota_source!(Claude, "claude");
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {
     #[serde(rename = "system")]
-    System {
-        subtype: String,
-        session_id: String,
-        model: String,
-    },
+    System { subtype: String, session_id: String },
     #[serde(rename = "assistant")]
     Assistant {
         message: Message,
@@ -26,7 +22,7 @@ enum Event {
         session_id: String,
         subtype: String,
         is_error: bool,
-        result: String,
+        result: Option<String>,
     },
     #[serde(other)]
     Other,
@@ -57,9 +53,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         Event::System {
             subtype,
             session_id,
-            model,
         } => {
-            drop(model);
             if subtype == "init" {
                 vec![E::Session(session_id)]
             } else {
@@ -73,10 +67,13 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             error,
             is_api_error_message,
         } if message.role == "assistant" => {
-            let mut events = vec![E::Session(session_id), E::Model(message.model)];
+            let mut events = vec![E::Session(session_id)];
+            if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
+                events.push(E::Model(message.model));
+            }
             if let Some(error) = error {
                 events.push(if error == "authentication_failed" {
-                    E::Refusal
+                    E::AuthRequired
                 } else {
                     E::Error
                 });
@@ -106,7 +103,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if is_error || subtype != "success" {
                 events.push(E::Error);
             } else {
-                events.push(E::Text(result));
+                if let Some(result) = result {
+                    events.push(E::Text(result));
+                }
                 events.push(E::Terminal);
             }
             events

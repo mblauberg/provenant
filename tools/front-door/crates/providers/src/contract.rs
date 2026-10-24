@@ -209,6 +209,8 @@ pub trait Adapter: Sync {
     ) -> Result<AvailabilityRecord, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<AdapterLaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
+    /// If a later line fails, events from earlier lines in that call are
+    /// retained in `finish().final_events()` alongside the malformed outcome.
     fn observe(
         &self,
         state: &mut StreamState,

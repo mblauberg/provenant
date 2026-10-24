@@ -43,5 +43,5 @@ pub use command_result::{
 mod resolved_route;
 pub use resolved_route::{
     ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
-    RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionError, TooManyAlternatives,
+    RouteExclusion, RouteExclusionReason, RouteReadiness, TooManyAlternatives,
 };

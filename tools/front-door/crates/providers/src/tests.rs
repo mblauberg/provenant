@@ -29,6 +29,156 @@ fn replay(
     Ok((events, adapter.finish(state, exit)?))
 }
 #[test]
+fn system_notifications_without_models_do_not_poison_streams() -> Result<(), ProviderError> {
+    for adapter in [&claude::Claude as &dyn Adapter, &cursor::Cursor] {
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"api_retry\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"hook_response\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"inputTokens\":1,\"outputTokens\":2}}\n",
+        );
+        assert_eq!(
+            replay(adapter, stream, EXIT)?.1.status(),
+            OutcomeStatus::Success
+        );
+    }
+    Ok(())
+}
+#[test]
+fn error_results_need_neither_answer_nor_usage() -> Result<(), ProviderError> {
+    for adapter in [&claude::Claude as &dyn Adapter, &cursor::Cursor] {
+        for subtype in ["error_max_turns", "error_during_execution"] {
+            let raw = format!(
+                "{{\"type\":\"result\",\"subtype\":\"{subtype}\",\"is_error\":true,\"session_id\":\"s\"}}\n"
+            );
+            let (events, outcome) = replay(adapter, &raw, EXIT)?;
+            assert!(events.contains(&ProviderEvent::Error));
+            assert_eq!(outcome.status(), OutcomeStatus::Failed);
+        }
+    }
+    Ok(())
+}
+#[test]
+fn synthetic_and_api_error_messages_cannot_change_answering_identity() -> Result<(), ProviderError>
+{
+    let adapter = claude::Claude;
+    let raw = fixture!("claude/direct-model.jsonl");
+    let route = route("claude", "claude-haiku-4-5-20251001");
+    let continuation = adapter.continuation(&replay(&adapter, raw, EXIT)?.1, &route, "grants")?;
+    for (model, error, api_error) in [
+        ("<synthetic>", "\"authentication_failed\"", false),
+        ("error-model", "\"authentication_failed\"", false),
+        ("error-model", "null", true),
+        ("<synthetic>", "null", false),
+    ] {
+        let message = format!(
+            "{{\"type\":\"assistant\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"error\":{error},\"is_api_error_message\":{api_error},\"message\":{{\"role\":\"assistant\",\"model\":\"{model}\",\"content\":[]}}}}\n"
+        );
+        let mut resumed = adapter.stream(Some(&continuation))?;
+        let events = adapter.observe(&mut resumed, message.as_bytes())?;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Model(_)))
+        );
+        if error != "null" {
+            assert_eq!(adapter.account(&resumed)?, AccountDetection::AuthRequired);
+        }
+        assert_ne!(
+            adapter.finish(resumed, EXIT)?.status(),
+            OutcomeStatus::Malformed
+        );
+        let (_, fresh) = replay(&adapter, &(message + raw), EXIT)?;
+        assert_eq!(fresh.model(), Some(route.model.as_str()));
+    }
+    Ok(())
+}
+#[test]
+fn recovered_transport_retry_succeeds_but_turn_failure_stays_failed() -> Result<(), ProviderError> {
+    // Synthetic R9 replay: records recovery semantics, not CLI activation.
+    for (message, failure, expected) in [
+        ("Reconnecting… 1/5", "", OutcomeStatus::Success),
+        (
+            "Reconnecting… 1/5",
+            "{\"type\":\"turn.failed\",\"error\":{\"message\":\"permanent\"}}\n",
+            OutcomeStatus::Failed,
+        ),
+        ("invalid request", "", OutcomeStatus::Failed),
+    ] {
+        let raw = format!(
+            "{{\"type\":\"error\",\"message\":\"{message}\"}}\n{failure}{}",
+            fixture!("codex/success.jsonl")
+        );
+        assert_eq!(replay(&codex::Codex, &raw, EXIT)?.1.status(), expected);
+    }
+    Ok(())
+}
+#[test]
+fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
+{
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    for (raw, terminal) in [(fixture!("codex/success.jsonl"), true), ("", false)] {
+        let outcome = replay(&codex::Codex, raw, exit)?.1;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed);
+        assert_eq!(outcome.terminal(), terminal);
+        assert_eq!(outcome.exit(), exit);
+        let record = serde_json::to_value(&outcome)?;
+        assert_eq!(
+            record.get("terminal"),
+            Some(&serde_json::Value::Bool(terminal))
+        );
+        assert_eq!(record.get("exit"), Some(&serde_json::to_value(exit)?));
+    }
+    Ok(())
+}
+#[test]
+fn refusal_does_not_claim_authentication_required() -> Result<(), ProviderError> {
+    let mut stream = StreamState::new("claude", |_| Ok(vec![ProviderEvent::Refusal]));
+    claude::Claude.observe(&mut stream, b"refusal\n")?;
+    assert_eq!(claude::Claude.account(&stream)?, AccountDetection::Unknown);
+    assert_eq!(
+        claude::Claude.finish(stream, EXIT)?.status(),
+        OutcomeStatus::Refused
+    );
+    Ok(())
+}
+#[test]
+fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), ProviderError> {
+    let mut stream = codex::Codex.stream(None)?;
+    let raw = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"kept\"}}\ninvalid\n";
+    assert!(matches!(
+        codex::Codex.observe(&mut stream, raw),
+        Err(ProviderError::Malformed)
+    ));
+    let outcome = codex::Codex.finish(stream, EXIT)?;
+    assert_eq!(
+        outcome.final_events(),
+        &[ProviderEvent::Text("kept".into())]
+    );
+    assert_eq!(outcome.status(), OutcomeStatus::Malformed);
+    Ok(())
+}
+#[test]
+fn observe_bounds_pending_lines_instead_of_whole_chunks() -> Result<(), ProviderError> {
+    let mut stream = codex::Codex.stream(None)?;
+    let raw = "{\"type\":\"turn.started\"}\n".repeat(50_000);
+    assert!(raw.len() > 1_048_576);
+    assert!(
+        codex::Codex
+            .observe(&mut stream, raw.as_bytes())?
+            .is_empty()
+    );
+    assert_eq!(
+        codex::Codex.finish(stream, EXIT)?.status(),
+        OutcomeStatus::Partial
+    );
+    Ok(())
+}
+#[test]
 fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), ProviderError> {
     let cases: &[(&dyn Adapter, &str, ExitObservation, OutcomeStatus)] = &[
         (
@@ -387,71 +537,31 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 }
 
 #[test]
-fn registry_refuses_every_disabled_mode_and_quota_source() -> Result<(), Box<dyn std::error::Error>>
-{
+fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Deserialize)]
     struct Matrix {
-        execution_modes: Vec<Mode>,
-        quota_sources: Vec<Source>,
+        execution_modes: Vec<Entry>,
+        quota_sources: Vec<Entry>,
     }
     #[derive(Deserialize)]
-    struct Mode {
+    struct Entry {
         adapter: String,
-        enabled: bool,
-    }
-    #[derive(Deserialize)]
-    struct Source {
-        adapter: String,
-        enabled: bool,
     }
     let matrix: Matrix = serde_json::from_str(fixture!("activation.json"))?;
-    assert_eq!(
-        REGISTRY
-            .iter()
-            .map(|r| r.adapter.id())
-            .collect::<std::collections::BTreeSet<_>>(),
-        ["codex", "claude", "cursor", "agy", "opencode"]
-            .into_iter()
-            .collect()
-    );
-    for mode in matrix.execution_modes {
-        let entry = REGISTRY
-            .iter()
-            .find(|r| r.adapter.id() == mode.adapter)
-            .ok_or("missing registration")?;
-        assert!(!mode.enabled);
-        assert!(matches!(
-            entry.adapter.preflight(&PreflightInput {
-                route: route(&mode.adapter, "fixture"),
-                observed_unix_seconds: 0
-            }),
-            Err(ProviderError::Disabled { .. })
-        ));
+    let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
+    assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
+    for entries in [matrix.execution_modes, matrix.quota_sources] {
+        assert_eq!(
+            entries
+                .iter()
+                .map(|r| r.adapter.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ids
+        );
     }
-    for source in matrix.quota_sources {
-        assert!(!source.enabled);
-        let entry = REGISTRY
-            .iter()
-            .find(|r| r.adapter.id() == source.adapter)
-            .ok_or("missing registration")?;
+    for entry in REGISTRY {
         if let Some(source) = entry.quota_source {
-            assert_eq!(entry.adapter.id(), source.adapter_id());
-            let account = provenant_quota::AccountScope {
-                adapter: source.adapter_id().into(),
-                account_key: "opaque".into(),
-                label: "fixture".into(),
-            };
-            assert!(matches!(
-                source.probe(
-                    &account,
-                    &provenant_quota::QuotaProbeInput {
-                        now_unix_seconds: 0,
-                        deadline_unix_seconds: 1,
-                        authority_ref: None
-                    }
-                ),
-                Err(provenant_quota::QuotaError::Disabled)
-            ));
+            assert_eq!(source.adapter_id(), entry.adapter.id());
         } else {
             assert_eq!(entry.adapter.id(), "opencode");
         }
@@ -469,7 +579,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
 }
 
 #[test]
-fn prepare_refuses_unrecorded_launches_and_checks_argv_bound() -> Result<(), ProviderError> {
+fn prepare_refuses_unrecorded_launches() -> Result<(), ProviderError> {
     use provenant_confinement::permissions::{ConfinedLaunch, Enforcement};
     let confined = ConfinedLaunch {
         enforcement: Enforcement::MacOsSandboxExec,
@@ -490,20 +600,12 @@ fn prepare_refuses_unrecorded_launches_and_checks_argv_bound() -> Result<(), Pro
             }),
             Err(ProviderError::Disabled { .. })
         ));
-        let oversized = Prompt::new("a".repeat(65_537));
-        let result = entry.adapter.prepare(PrepareInput {
-            route: &route,
-            confined: &confined,
-            prompt: &oversized,
-            continuation: None,
-            grant_digest: "fixture",
-        });
-        if matches!(entry.adapter.id(), "cursor" | "agy" | "opencode") {
-            assert!(matches!(result, Err(ProviderError::PromptTooLarge)));
-        } else {
-            assert!(matches!(result, Err(ProviderError::Disabled { .. })));
-        }
     }
+    Ok(())
+}
+
+#[test]
+fn finish_decodes_the_last_unterminated_line() -> Result<(), ProviderError> {
     let (events, outcome) = replay(
         &codex::Codex,
         "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final line\"}}",

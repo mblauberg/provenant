@@ -1,17 +1,13 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Cursor;
-crate::adapter!(Cursor, "cursor", true);
+crate::adapter!(Cursor, "cursor");
 crate::quota_source!(Cursor, "cursor");
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {
     #[serde(rename = "system")]
-    System {
-        subtype: String,
-        session_id: String,
-        model: String,
-    },
+    System { subtype: String, session_id: String },
     #[serde(rename = "assistant")]
     Assistant {
         message: Message,
@@ -22,8 +18,8 @@ enum Event {
         session_id: String,
         subtype: String,
         is_error: bool,
-        result: String,
-        usage: Usage,
+        result: Option<String>,
+        usage: Option<Usage>,
     },
     #[serde(other)]
     Other,
@@ -55,9 +51,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         Event::System {
             subtype,
             session_id,
-            model,
         } => {
-            drop(model);
             if subtype == "init" {
                 vec![E::Session(session_id)]
             } else {
@@ -83,17 +77,19 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             result,
             usage,
         } => {
-            let mut events = vec![
-                E::Session(session_id),
-                E::Usage {
+            let mut events = vec![E::Session(session_id)];
+            if let Some(usage) = usage {
+                events.push(E::Usage {
                     input: usage.input,
                     output: usage.output,
-                },
-            ];
+                });
+            }
             if is_error || subtype != "success" {
                 events.push(E::Error);
             } else {
-                events.push(E::Text(result));
+                if let Some(result) = result {
+                    events.push(E::Text(result));
+                }
                 events.push(E::Terminal);
             }
             events

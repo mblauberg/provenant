@@ -1,7 +1,7 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct OpenCode;
-crate::adapter!(OpenCode, "opencode", true);
+crate::adapter!(OpenCode, "opencode");
 // The recordings do not establish v2. Decode their evidence, never activate v2
 // or the exit-after-output exception from an unversioned stream.
 #[derive(Deserialize)]
@@ -17,9 +17,7 @@ enum Event {
         session: String,
         part: Finish,
     },
-    Error {
-        error: ErrorWire,
-    },
+    Error,
     #[serde(other)]
     Other,
 }
@@ -31,10 +29,6 @@ struct Text {
 struct Finish {
     reason: String,
 }
-#[derive(Deserialize)]
-struct ErrorWire {
-    message: String,
-}
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::Text { session, part } => vec![E::Session(session), E::Text(part.text)],
@@ -45,10 +39,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
-        Event::Error { error } => {
-            drop(error.message);
-            vec![E::Error]
-        }
+        Event::Error => vec![E::Error],
         _ => vec![],
     })
 }

@@ -7,7 +7,9 @@ pub enum ProviderEvent {
     Model(String),
     Usage { input: u64, output: u64 },
     Refusal,
+    AuthRequired,
     Error,
+    TransientError,
     Terminal,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,6 +31,7 @@ pub struct ProviderOutcome {
     session: Option<String>,
     model: Option<String>,
     status: OutcomeStatus,
+    terminal: bool,
     exit: ExitObservation,
     final_events: Vec<ProviderEvent>,
 }
@@ -48,6 +51,12 @@ impl ProviderOutcome {
     pub fn status(&self) -> OutcomeStatus {
         self.status
     }
+    pub fn terminal(&self) -> bool {
+        self.terminal
+    }
+    pub fn exit(&self) -> ExitObservation {
+        self.exit
+    }
 }
 pub(crate) type Decoder = fn(&[u8]) -> Result<Vec<ProviderEvent>, ProviderError>;
 const MAX_LINE_BYTES: usize = 1_048_576;
@@ -57,13 +66,16 @@ pub struct StreamState {
     adapter: &'static str,
     decoder: Decoder,
     pending: Vec<u8>,
+    retained_events: Vec<ProviderEvent>,
     session: Option<String>,
     model: Option<String>,
     model_conflict: bool,
     expected_model: Option<String>,
     terminal: bool,
     error: bool,
+    transient_error: bool,
     refusal: bool,
+    auth_required: bool,
     malformed: bool,
 }
 impl StreamState {
@@ -72,13 +84,16 @@ impl StreamState {
             adapter,
             decoder,
             pending: Vec::new(),
+            retained_events: Vec::new(),
             session: None,
             model: None,
             model_conflict: false,
             expected_model: None,
             terminal: false,
             error: false,
+            transient_error: false,
             refusal: false,
+            auth_required: false,
             malformed: false,
         }
     }
@@ -94,18 +109,13 @@ impl StreamState {
         }
     }
     pub(crate) fn authentication_required(&self) -> bool {
-        self.refusal
+        self.auth_required
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         if self.malformed {
             return Err(ProviderError::Malformed);
         }
         let mut events = Vec::new();
-        // Per-call output and each retained line are bounded independently.
-        if bytes.len() > MAX_LINE_BYTES {
-            self.malformed = true;
-            return Err(ProviderError::Overflow);
-        }
         for byte in bytes {
             if *byte == b'\n' {
                 let line = std::mem::take(&mut self.pending);
@@ -116,6 +126,7 @@ impl StreamState {
                     Ok(decoded) => events.extend(decoded),
                     Err(error) => {
                         self.malformed = true;
+                        self.retained_events = events;
                         return Err(error);
                     }
                 }
@@ -123,6 +134,7 @@ impl StreamState {
                 if self.pending.len() == MAX_LINE_BYTES {
                     self.malformed = true;
                     self.pending.clear();
+                    self.retained_events = events;
                     return Err(ProviderError::Overflow);
                 }
                 self.pending.push(*byte);
@@ -157,9 +169,14 @@ impl StreamState {
                     }
                     self.model = Some(model.clone());
                 }
-                ProviderEvent::Terminal => self.terminal = true,
+                ProviderEvent::Terminal => {
+                    self.terminal = true;
+                    self.transient_error = false;
+                }
                 ProviderEvent::Error => self.error = true,
+                ProviderEvent::TransientError => self.transient_error = true,
                 ProviderEvent::Refusal => self.refusal = true,
+                ProviderEvent::AuthRequired => self.auth_required = true,
                 _ => {}
             }
         }
@@ -169,19 +186,19 @@ impl StreamState {
         mut self,
         exit: ExitObservation,
     ) -> Result<ProviderOutcome, ProviderError> {
-        let mut final_events = Vec::new();
+        let mut final_events = std::mem::take(&mut self.retained_events);
         if !self.pending.is_empty() && !self.malformed {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {
-                Ok(events) => final_events = events,
+                Ok(events) => final_events.extend(events),
                 Err(_) => self.malformed = true,
             }
         }
         let status = if self.malformed {
             OutcomeStatus::Malformed
-        } else if self.refusal {
+        } else if self.refusal || self.auth_required {
             OutcomeStatus::Refused
-        } else if self.error {
+        } else if self.error || self.transient_error {
             OutcomeStatus::Failed
         } else if exit.timed_out {
             OutcomeStatus::Partial
@@ -201,6 +218,7 @@ impl StreamState {
                 self.model
             },
             status,
+            terminal: self.terminal,
             exit,
             final_events,
         })

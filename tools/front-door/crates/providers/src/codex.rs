@@ -1,7 +1,7 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Codex;
-crate::adapter!(Codex, "codex", false);
+crate::adapter!(Codex, "codex");
 crate::quota_source!(Codex, "codex");
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -17,13 +17,9 @@ enum Event {
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "turn.failed")]
-    Failed { error: Failure },
+    Failed,
     #[serde(other)]
     Other,
-}
-#[derive(Deserialize)]
-struct Failure {
-    message: String,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -51,13 +47,14 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             },
             E::Terminal,
         ],
-        Event::Error { message }
-        | Event::Failed {
-            error: Failure { message },
-        } => {
-            drop(message);
-            vec![E::Error]
+        Event::Error { message } => {
+            vec![if message.to_ascii_lowercase().contains("reconnecting") {
+                E::TransientError
+            } else {
+                E::Error
+            }]
         }
+        Event::Failed => vec![E::Error],
         _ => vec![],
     })
 }

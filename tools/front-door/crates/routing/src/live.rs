@@ -16,8 +16,6 @@ pub struct LiveModel {
 
 /// Cache freshness matches model_route_live._cached_live_models.
 pub const CAPABILITY_MAX_AGE_SECONDS: i64 = 86400;
-pub const OPENCODE_DISCOVERY_BUDGET: f64 = 12.0;
-pub const OPENCODE_REFRESH_MIN_REMAINING: f64 = 4.0;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitySnapshot {
