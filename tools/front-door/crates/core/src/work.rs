@@ -1,3 +1,5 @@
+use crate::{ProjectId, RunId, WorkspaceId};
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -16,6 +18,26 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+}
+
+/// Domain owners validate project membership before acting on a scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "scope",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WorkScope {
+    Project(ProjectId),
+    Workspace {
+        project: ProjectId,
+        workspace: WorkspaceId,
+    },
+    Run {
+        project: ProjectId,
+        run: RunId,
+    },
 }
 
 #[cfg(test)]
