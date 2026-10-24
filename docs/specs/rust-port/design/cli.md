@@ -731,6 +731,10 @@ to `~/.local/bin/provenant`, the default stable remote Rust front door.
 A custom remote bin directory is not resolved by this diagnostic. Do not silently fall back to local
 results when a remote host cannot answer.
 
+Registration reads the same status. A negative login bit refuses with a message that
+names the step (log in once interactively, or unlock the login keychain over SSH)
+rather than reporting an unknown identity; a locked keychain reports the same bit.
+
 Doctor runs `claude auth status --json`, never a prompt. It emits only identity
 labels and typed states: `signed_in`, `signed_out`,
 `credential_store_present`, `keychain_unavailable`, or `unknown`. A negative

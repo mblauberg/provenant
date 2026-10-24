@@ -18,6 +18,11 @@ pub enum ProviderError {
     IdentityMismatch,
     #[error("provider continuation identity is unknown")]
     UnknownIdentity,
+    #[error(
+        "claude reports no login for this config directory; run `claude auth login` there once \
+         interactively, or over SSH unlock the login keychain first (`security unlock-keychain`)"
+    )]
+    LoginRequired,
     #[error("launch path is not absolute or lies outside the plan's roots")]
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
