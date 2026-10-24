@@ -9,6 +9,7 @@ mod domains;
 mod harness;
 mod hooks;
 mod inspection;
+mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
@@ -23,6 +24,7 @@ pub mod test_support;
 mod tests;
 
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
+pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
@@ -72,6 +74,12 @@ pub enum ConfigError {
         #[source]
         source: SectionError,
     },
+    #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
+    UnknownKnob { name: String, close: Vec<String> },
+    #[error("invalid value for knob {name} ({rule})")]
+    KnobValue { name: String, rule: &'static str },
+    #[error("knob registry or config text is malformed")]
+    KnobRegistry,
     #[error("project location must be an absolute canonical directory path")]
     InvalidProjectLocation,
     #[error("project binding state is invalid")]
@@ -143,6 +151,8 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub profile: Profile,
     pub domains: D,
     pub install: InstallSettings,
+    /// Effective knobs with the layer that set each; not part of `origins`.
+    pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,
 }
 
