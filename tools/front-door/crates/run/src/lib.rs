@@ -15,7 +15,7 @@ pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
-pub use holder::{HolderContext, RootSeed, RunHolder};
+pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,

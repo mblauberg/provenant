@@ -264,7 +264,6 @@ fn account_placement() -> Result {
                 child_state: &rig.state.join(format!("children/{key}")),
                 home: &rig.home,
                 depth: 1,
-                nests: false,
                 attempt: provenant_core::AttemptId::from_bytes([1; 16]),
                 assets: &rig.project,
             },

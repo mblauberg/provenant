@@ -687,7 +687,6 @@ pub(super) fn fixture_input<'a>(
             child_state: std::path::Path::new("/fixture/state/children/attempt"),
             home: std::path::Path::new("/fixture/home"),
             depth: 1,
-            nests: true,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
         },
@@ -1606,10 +1605,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 .unwrap()
                 .adapter
                 .prepare(input)?;
-            assert_eq!(
-                spec.profile.spec.child_setup_links,
-                vec![crate::launch::subtree("/fixture/state/children/attempt")]
-            );
+
             if adapter == "claude" {
                 let mut unattributed_route = route.clone();
                 unattributed_route.account_key = None;
@@ -1818,29 +1814,4 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     let turn = observed.unwrap();
     assert_eq!(turn.model, "gpt-6-luna");
     assert_eq!(turn.effort.as_deref(), Some("low"));
-}
-
-#[test]
-fn only_a_lane_below_the_depth_limit_may_create_child_setup_links() {
-    for nests in [false, true] {
-        let runtime = crate::LaneRuntime {
-            executable: Path::new("/fixture/provenant/bin/provenant"),
-            git: Path::new("/fixture/git/bin/git"),
-            state: Path::new("/fixture/state"),
-            child_state: Path::new("/fixture/state/children/attempt"),
-            home: Path::new("/fixture/home"),
-            depth: 2,
-            nests,
-            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
-            assets: Path::new("/fixture/provenant"),
-        };
-        let mut profile = provenant_confinement::permissions::ProviderProfileSpec::default();
-        runtime.grant(&mut profile, &mut Vec::new(), false);
-        assert!(
-            profile
-                .state_writes
-                .contains(&crate::launch::subtree("/fixture/state/children/attempt"))
-        );
-        assert_eq!(profile.child_setup_links.is_empty(), !nests);
-    }
 }

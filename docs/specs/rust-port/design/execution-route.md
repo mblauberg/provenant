@@ -403,21 +403,21 @@ store; host recovery selects it with `PROVENANT_RUN_STATE_DIR` while keeping the
 original `--state-dir` for identity/config.
 Parent custody/quarantine and other lanes' Run stores receive no write grant.
 The macOS state-write overlap check remains unchanged.
-A lane prepared below `lanes.max_depth` may also create symlinks in its child
-store, but only where a child's provider setup links them:
-`runs/<RunId>/attempts/<AttemptId>/provider-state/candidate-N/auth.json` and
-`.../tmp/candidate-N/cargo-home/registry`. The child links the registered
-Codex `auth.json` rather than copying it, so token refresh keeps one source of
-truth. Link targets are not expressible in Seatbelt; setup fixes them, and an
-existing entry makes setup fail rather than reuse it.
+Provider setup runs on the host, so lanes receive no child-setup symlink grant.
+Codex setup still links the registered `auth.json` on the host, preserving one
+source of truth for rotating credentials.
 
-This chooses narrow shared grants and isolated child storage. Fabric's existing
-`RunOwner` is an in-process composition seam, not a parent-host broker; reusing
-it as a broker would require a new IPC owner. Rust Fabric remains stdio/SQLite,
-with no daemon socket. Child storage is writable by its submitting lane and is
-not independent evidence against that lane. The submitting lane's own custody,
-quarantine and terminal publication stay with its host guardian under the
-parent Run root.
+The parent guardian hosts a child-launch worker through CLI's `HostHolder`
+composition. Fabric's `RunOwner` remains an in-process facade: it seals queued
+submissions in the child store and observes their state. The worker owns its
+SQLite connection and consumes that store without introducing a daemon or a
+second IPC transport. It uses the original config root, selected cwd, provider
+executables and Git from the host-only custody handoff. These inputs and all
+credential resolution stay outside the submitting lane. Each child receives
+its own confinement plan, provider credential grants and guardian custody.
+Child storage remains writable by the submitting lane and is not independent
+evidence against that lane. Parent custody, quarantine and terminal publication
+stay under the parent Run root.
 
 Run supplies the allocated attempt ID and depth before provider preparation.
 The adapter writes `PROVENANT_LANE_DEPTH` (root lanes are 1),
@@ -435,15 +435,33 @@ Nested parent metadata remains separate from continuation ancestry and
 grants no cancellation authority. This is a recursion limit, not an authority
 boundary.
 
-The MCP `fabric_submit` path seals child records and calls the shared launch
-owner, which attempts provider preparation and guardian handoff. The confined
-fixture proves child-store admission and, for a Codex lane, Codex child setup
-inside the lane. No nested provider runs yet: macOS refuses `sandbox_apply`
-inside a sandbox, so the child's own profile cannot be applied in the lane and
-its backend probe refuses. A Claude lane also cannot observe the Codex account,
-whose `auth.json` it cannot read. Nested profile execution and cross-provider
-credential access remain unresolved, subject to the activation gates below.
-Host recovery selects the child store explicitly.
+The MCP `fabric_submit` path seals queued child records without preparing or
+launching providers. The host worker rechecks the request's parent AttemptId and
+depth against its own parent run's sealed request and the current
+`lanes.max_depth`; invalid proposals terminate as rejected before provider
+preparation. Environment and path checks provide early feedback but do not
+supply host launch authority.
+
+The guardian stops and joins its worker on observed provider exit, before
+cleanup, with a final bounded scan of queued submissions. Children already
+handed off retain independent custody. Host-launched guardians are siblings of
+the parent provider, so they do not enter its provider-descendant sparing
+registry. Explicit parent cancellation,
+wall deadline or supervisor signal sends cooperative cancel requests to only
+those child scopes accepted by this host worker. Normal parent completion
+leaves their independent custody intact. Worker failure records a guardian
+warning and cannot construct a provider stop reason. A provider-written parent
+ID or child journal confers no cancellation authority.
+
+The macOS fixture runs the configured MCP inside the parent's compiled profile
+and requires a launched fake Codex child and a marker written by that child,
+for read-only and writer parents from both Codex and Claude. Writer parents
+submit a writer child on another registered worktree. Registration validation
+and writer custody use the original host state root; the lane only resolves
+its requested project/worktree paths and queues the proposal. Synthetic
+state-write evidence is confined to fixture builds. Live provider execution
+remains subject to the activation gates below; the fixture does not establish
+live-provider acceptance. Host recovery selects the child store explicitly.
 
 `STAGING` is `ATTEMPT/scratch/candidate-N/` for writers and
 `ATTEMPT/tmp/candidate-N/` for read-only tasks, following the attempt's temporary
@@ -455,7 +473,8 @@ replaced. Behaviour tests drive CLI preparation for read-only and writer tasks,
 including generated Claude files, poisoned first-candidate setup and a fake
 provider that clears inherited MCP environment. Required macOS CI compiles the
 real plan/profile with synthetic fake-provider state-write evidence and probes
-custody/quarantine denial and child-store admission below the depth limit.
+custody/quarantine denial and host-supervised child execution below the depth
+limit.
 Setup opens existing shared ancestors before attempting creation, so it does
 not request writes to read-only anchors. Claude transcript setup is restricted
 to its existing `.claude` config subtree, separately from Run state; generated

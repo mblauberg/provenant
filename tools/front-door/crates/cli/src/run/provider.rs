@@ -25,7 +25,14 @@ pub(super) fn prepare(
         prompt_text,
         paths,
         resume,
-        resolve_executable,
+        |name| match registry.host {
+            Some(host) => host
+                .executables
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("{name} executable is unavailable on the host")),
+            None => resolve_executable(name),
+        },
         None,
     )
 }
@@ -56,13 +63,16 @@ fn prepare_with(
     let assets = registry.assets.ok_or("product assets are unavailable")?;
     let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let provenant_executable = canonical(&provenant_executable)?;
-    let git = canonical(&crate::git::git_binary().ok_or("Git unavailable")?)?;
+    let git = canonical(&match registry.host {
+        Some(host) => host.git.clone(),
+        None => crate::git::git_binary().ok_or("Git unavailable")?,
+    })?;
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
     let writer = match &task.writer {
         Some(request) => Some(
-            run::prepare_writer(request, state_root, project_id)
+            run::prepare_writer(request, roots.state.as_path(), project_id)
                 .map_err(|error| error.to_string())?,
         ),
         None => None,
@@ -85,29 +95,14 @@ fn prepare_with(
         &crate::domains::SECTIONS,
     )
     .map_err(|e| e.to_string())?;
-    // Only a lane that may still dispatch children gets their setup links.
-    let nests = config
-        .knobs
-        .get("lanes.max_depth")
-        .and_then(|knob| knob.value.as_u64())
-        .is_some_and(|max_depth| paths.lane_depth < max_depth);
     let settings = config.domains.accounts;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     if !entries.iter().any(|e| e.adapter == "codex") {
-        let directory = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
+        let directory = registry
+            .host
+            .and_then(|host| host.codex_home.clone())
+            .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
             .unwrap_or_else(|| home.join(".codex"));
-        // Inside a lane CODEX_HOME is the attempt's private state, whose
-        // auth.json links the parent's registered login. Carry that original
-        // account directory so a nested dispatch links the same credential.
-        let directory = if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
-            canonical(&directory.join("auth.json"))
-                .ok()
-                .and_then(|credential| credential.parent().map(Path::to_path_buf))
-                .unwrap_or(directory)
-        } else {
-            directory
-        };
         if let Ok(directory) = canonical(&directory)
             && let Ok(executable) = locate("codex")
             && let Ok(key) = provenant_providers::accounts::detect(
@@ -377,7 +372,6 @@ fn prepare_with(
                 child_state: &child_state,
                 home: &home,
                 depth: paths.lane_depth,
-                nests,
                 attempt: paths.attempt_id,
                 assets,
             },

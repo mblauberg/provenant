@@ -22,7 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod children;
 mod provider;
+pub use children::HostHolder;
 pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
@@ -124,6 +126,7 @@ pub struct Registry<'a> {
     pub cwd: Option<&'a Path>,
     pub state_root: Option<&'a Path>,
     pub project_id: Option<provenant_core::ProjectId>,
+    pub host: Option<&'a run::HostLaunchContext>,
 }
 impl Registry<'_> {
     /// Whether providers can continue an exact prior session. None can yet,
@@ -140,7 +143,21 @@ impl run::Providers for Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        provider::prepare(self, task, prompt, paths, resume)
+        let prepared = provider::prepare(self, task, prompt, paths, resume)?;
+        #[cfg(feature = "fixture")]
+        let prepared = {
+            let mut prepared = prepared;
+            if self.host.is_some_and(|host| host.fixture_state_write)
+                && let Some(confinement) = &mut prepared.confinement
+            {
+                confinement.profile.observations.insert(
+                    provenant_confinement::permissions::FixtureOperation::StateWrite,
+                    provenant_confinement::permissions::FixtureOutcome::Allowed,
+                );
+            }
+            prepared
+        };
+        Ok(prepared)
     }
 
     fn decode(
@@ -391,7 +408,8 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
         read_prompts: true,
     };
     Ok(Session {
-        store: run::RunStore::open(&context, call)?,
+        store: run::RunStore::open(&context, call)?
+            .with_writer_registry(edge.roots.state.as_path()),
         context,
     })
 }
@@ -610,11 +628,13 @@ pub fn submit(
             .map(|path| {
                 let writer =
                     run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?;
-                run::prepare_writer(
-                    &writer,
-                    session.context.state_root.as_path(),
-                    session.context.project_id,
-                )?;
+                if parent_attempt.is_none() {
+                    run::prepare_writer(
+                        &writer,
+                        edge.roots.state.as_path(),
+                        session.context.project_id,
+                    )?;
+                }
                 Ok::<_, run::RunError>(writer)
             })
             .transpose()?;
@@ -668,7 +688,11 @@ pub fn submit(
         created_at: now(call.clock)?,
     };
     let record = session.store.create(&prepared, call)?;
-    let started = launch(session, record.run_id, edge, call)?;
+    let started = if parent_attempt.is_some() {
+        Vec::new()
+    } else {
+        launch(session, record.run_id, edge, call)?
+    };
     Ok((record, started))
 }
 
@@ -966,19 +990,65 @@ pub fn launch(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
+    // Every lane-facing launch path is submission-only. Only its host holder
+    // prepares providers, including credentials and the child's OS profile.
+    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+        return Ok(Vec::new());
+    }
+    launch_on_host(session, run, edge, call, None)
+}
+fn launch_on_host(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    inherited: Option<&run::HostLaunchContext>,
+) -> Result<Vec<run::Started>, Fail> {
+    let host = match inherited {
+        Some(host) => host.clone(),
+        None => run::HostLaunchContext {
+            configuration_root: edge.roots.state.as_path().into(),
+            cwd: edge.cwd.into(),
+            executables: ["codex", "claude", "opencode"]
+                .into_iter()
+                .filter_map(|name| {
+                    provider::resolve_executable(name)
+                        .ok()
+                        .map(|path| (name.into(), path))
+                })
+                .collect(),
+            git: crate::git::git_binary()
+                .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        },
+    };
+    let submission = session.store.request(run, call)?;
+    let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord| {
+        let mut host = host.clone();
+        if let Some(writer) = submission
+            .tasks
+            .iter()
+            .find(|task| task.task_id == attempt.task_id)
+            .and_then(|task| task.writer.as_ref())
+        {
+            host.cwd = writer.worktree.clone();
+        }
         run::HolderContext {
             schema_version: 1,
             roots: seed.clone(),
             project_id: attempt.project_id,
-            actor_id: session.context.actor_id,
+            actor_id: requester,
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
+            launch: Some(host),
         }
         .encode()
     };
@@ -989,6 +1059,7 @@ pub fn launch(
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
+        host: Some(&host),
     };
     Ok(session.store.start(run, &registry, &holder, call)?)
 }
@@ -1525,6 +1596,7 @@ fn reconcile_inner(
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
+        host: None,
     };
     let mut rows = Vec::new();
     let mut human = String::new();
@@ -1814,6 +1886,7 @@ mod tests {
             cwd: None,
             state_root: None,
             project_id: None,
+            host: None,
         };
         for (message, expected) in [
             (
@@ -1892,6 +1965,7 @@ mod tests {
             cwd: None,
             state_root: None,
             project_id: None,
+            host: None,
         };
         let stream = [
             json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),

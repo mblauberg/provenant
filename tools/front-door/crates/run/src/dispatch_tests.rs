@@ -24,22 +24,44 @@ fn nested_lane_depth_stops_at_the_configured_maximum() {
 }
 
 #[test]
-fn nested_dispatch_records_its_parent_attempt_and_depth() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
-    let mut nested = input();
-    nested.request.lane_depth = Some(2);
-    nested.request.parent_attempt = Some(parent);
-    let record = store.create(&nested, &call)?;
-    assert_eq!(record.parent, None);
-    assert_eq!(record.parent_attempt, Some(parent));
-    assert_eq!(store.run(record.run_id, &call)?, record);
-    let saved = store.request(record.run_id, &call)?;
-    assert_eq!(saved.lane_depth, Some(2));
-    assert_eq!(saved.parent_attempt, Some(parent));
+    for (depth, proposed_parent, valid) in [
+        (Some(2), Some(parent), true),
+        (Some(1), Some(parent), false),
+        (None, Some(parent), false),
+        (Some(2), Some(AttemptId::from_bytes([8; 16])), false),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = depth;
+        nested.request.parent_attempt = proposed_parent;
+        let record = store.create(&nested, &call)?;
+        assert_eq!(record.parent, None);
+        assert_eq!(record.parent_attempt, proposed_parent);
+        assert_eq!(store.run(record.run_id, &call)?, record);
+        assert_eq!(store.queued_runs(&call)?, vec![record.run_id]);
+        assert_eq!(
+            store
+                .validate_child(record.run_id, parent, 1, 2, &call)
+                .is_ok(),
+            valid
+        );
+        if !valid {
+            store.refuse_queued(record.run_id, "host refused child metadata", &call)?;
+            assert!(store.queued_runs(&call)?.is_empty());
+            assert!(matches!(
+                store.record(nested.attempts[0].attempt_id, &call)?.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected,
+                    ..
+                }
+            ));
+        }
+    }
     Ok(())
 }
 

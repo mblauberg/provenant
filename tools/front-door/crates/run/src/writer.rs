@@ -205,9 +205,7 @@ impl crate::RunStore {
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
         let path = self
-            .context
-            .state_root
-            .as_path()
+            .writer_registry
             .join("worktrees")
             .join(self.context.project_id.to_string());
         let directory = match Directory::open_anchor(&path) {

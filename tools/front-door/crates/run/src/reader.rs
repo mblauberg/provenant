@@ -263,6 +263,22 @@ impl RunStore {
         }
         Ok(run)
     }
+    /// Snapshot nonterminal refs before a host accepts a child's launch. The
+    /// refs survive partial handoff errors and authorise only that child scope.
+    pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
+        let ids: Vec<String> = call.retry(|| {
+            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence")?;
+            let rows = query.query_map(params![run.to_string(), self.context.project_id.to_string()], |row| row.get(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        ids.into_iter()
+            .map(|id| {
+                let id =
+                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+                self.record(id, call)
+            })
+            .collect()
+    }
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         call.retry(|| {
             let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;

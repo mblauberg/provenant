@@ -1016,7 +1016,6 @@ fn main() -> Result<()> {
                 child_state: &args.root.join("provenant-state/children/recording"),
                 home: &home,
                 depth: 1,
-                nests: false,
                 attempt: provenant_core::AttemptId::from_bytes(nonce),
                 assets: &args.assets,
             },
