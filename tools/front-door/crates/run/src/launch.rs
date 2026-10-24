@@ -110,11 +110,15 @@ pub enum RefusalKind {
 }
 
 impl RunStore {
-    /// Validate lane-writable ingress against the host's recorded parent.
+    /// Validate lane-writable ingress against the host's recorded parent and
+    /// its sealed task. A child never gains authority its parent lacks: a
+    /// read-only parent cannot propose a writer, and delivery must already be
+    /// granted to the parent for the same remote, branch and pull request.
     pub fn validate_child(
         &self,
         run: RunId,
         parent: AttemptId,
+        parent_task: &TaskRequest,
         parent_depth: u64,
         maximum: u64,
         call: &Request<'_>,
@@ -125,6 +129,25 @@ impl RunStore {
             return Err(RunError::Validation(
                 "child request does not match host parent record",
             ));
+        }
+        for task in &request.tasks {
+            if task.writer.is_some() && parent_task.writer.is_none() {
+                return Err(RunError::Validation(
+                    "read-only parent cannot launch a writer child",
+                ));
+            }
+            if let Some(deliver) = &task.deliver {
+                let granted = parent_task.deliver.as_ref().is_some_and(|parent| {
+                    parent.remote == deliver.remote
+                        && parent.branch == deliver.branch
+                        && (parent.open_pr || !deliver.open_pr)
+                });
+                if !granted {
+                    return Err(RunError::Validation(
+                        "child delivery exceeds parent delivery authority",
+                    ));
+                }
+            }
         }
         Ok(())
     }

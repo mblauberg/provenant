@@ -46,7 +46,14 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
         assert_eq!(store.queued_runs(&call)?, vec![record.run_id]);
         assert_eq!(
             store
-                .validate_child(record.run_id, parent, 1, 2, &call)
+                .validate_child(
+                    record.run_id,
+                    parent,
+                    &input().request.tasks[0],
+                    1,
+                    2,
+                    &call
+                )
                 .is_ok(),
             valid
         );
@@ -61,6 +68,91 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
                 }
             ));
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let writer = || WriterRequest {
+        project: "/project".into(),
+        worktree: "/project/.worktrees/sibling".into(),
+    };
+    let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: branch.into(),
+        open_pr,
+    };
+    let read_only = input().request.tasks[0].clone();
+    let mut writing = read_only.clone();
+    writing.writer = Some(writer());
+    let mut delivering = writing.clone();
+    delivering.deliver = Some(deliver("feature", false));
+    for (parent_task, writer_child, child_delivery, valid, case) in [
+        (
+            &read_only,
+            false,
+            None,
+            true,
+            "read-only child of read-only parent",
+        ),
+        (
+            &read_only,
+            true,
+            None,
+            false,
+            "writer child of read-only parent",
+        ),
+        (
+            &read_only,
+            true,
+            Some(deliver("feature", false)),
+            false,
+            "delivery child of read-only parent",
+        ),
+        (&writing, true, None, true, "writer child of writer parent"),
+        (
+            &writing,
+            true,
+            Some(deliver("feature", false)),
+            false,
+            "delivery child of non-delivering parent",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("feature", false)),
+            true,
+            "delivery within parent grant",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("other", false)),
+            false,
+            "delivery to another branch",
+        ),
+        (
+            &delivering,
+            true,
+            Some(deliver("feature", true)),
+            false,
+            "pull request beyond parent grant",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        nested.request.tasks[0].writer = writer_child.then(writer);
+        nested.request.tasks[0].deliver = child_delivery;
+        let record = store.create(&nested, &call)?;
+        let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
+        assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
     }
     Ok(())
 }
