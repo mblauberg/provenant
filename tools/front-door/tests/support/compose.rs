@@ -70,7 +70,11 @@ fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::V
             ".worktrees/compose".into(),
         ]);
     }
-    let output = rig.execute_os(&std::env::current_exe()?, &args, Some(mode.as_bytes()))?;
+    // The production binary keeps both acquisition and its same-binary
+    // guardian on the native boot observer. Only Codex is the test executable.
+    let executable = option_env!("CARGO_BIN_EXE_provenant")
+        .ok_or("production binary path is only available to integration targets")?;
+    let output = rig.execute_os(Path::new(executable), &args, Some(mode.as_bytes()))?;
     assert_eq!(
         code(&output),
         0,
@@ -103,6 +107,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     // Separate state roots avoid the production host startup-spacing window.
     for configured in [false, true] {
         let rig = fixture()?;
+        let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;
         let policy = rig
             .state
@@ -137,6 +142,14 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         if configured {
             assert_eq!(fs::read(locks.join("compose-lock"))?, b"lock");
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while attempt.join("reservation.json").exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err("reader reservation did not settle".into());
+            }
+            std::thread::yield_now();
+        }
+        cleanup.disarm();
     }
     Ok(())
 }
