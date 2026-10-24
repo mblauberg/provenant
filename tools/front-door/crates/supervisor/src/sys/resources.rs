@@ -54,10 +54,18 @@ pub fn memory() -> io::Result<MemorySample> {
             &mut count,
         )
     };
-    if status != libc::KERN_SUCCESS || count != libc::HOST_VM_INFO64_COUNT {
-        return Err(io::Error::other("host_statistics64 failed"));
+    // Kernels fill fewer words than the libc record on some releases; the
+    // counters used here sit at its start, and the rest stays zeroed.
+    let needed = (std::mem::offset_of!(libc::vm_statistics64, speculative_count)
+        + std::mem::size_of::<libc::natural_t>())
+    .div_ceil(std::mem::size_of::<libc::integer_t>());
+    if status != libc::KERN_SUCCESS || (count as usize) < needed {
+        return Err(io::Error::other(format!(
+            "host_statistics64 failed: status {status}, {count} words"
+        )));
     }
-    // SAFETY: a successful call with the full count initialised the record.
+    // SAFETY: the buffer was zero-initialised and the kernel wrote at least
+    // the counters read below; every field is a plain integer.
     let stats = unsafe { stats.assume_init() };
     // SAFETY: sysconf reads a constant configuration value.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
