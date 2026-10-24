@@ -103,6 +103,10 @@ run_dir_finalize = "run_dir_finalize"
 "unrecognized" = "unrecognized"
 "visualizes" = "visualizes"
 
+[type.json.extend-words]
+# Icon Composer schema key image-name-specializations.
+specializations = "specializations"
+
 [type.json.extend-identifiers]
 # Anthropic usage response field.
 "utilization" = "utilization"
