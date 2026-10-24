@@ -6,6 +6,30 @@ for the full contract. A staged release contains a verified manifest and
 immutable assets; installation publishes its receipt last. Exact desired bytes
 and links are no-ops, including after a crash before receipt publication.
 
+## Build a staged release
+
+From the Rust workspace, build the binary and run the build-only Cargo example.
+Choose a fresh absolute output directory outside every repository checkout. The
+output's parent directory must already exist. The example copies the exact asset
+inventory digested by `build.rs`, reads the binary's `--version --json` identity,
+and runs the install path's bounded version/help smoke before publishing
+`release.json` last. It refuses existing output directories and asset drift.
+Cargo does not install this example.
+
+```sh
+cd tools/front-door
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_TARGET_DIR="$HOME/Library/Caches/provenant-cargo-target-package"
+RELEASE="$(mktemp -d)/release"
+cargo build --release --locked --bin provenant
+cargo run --locked --example package-release -- --out "$RELEASE"
+```
+
+The binary defaults to `$CARGO_TARGET_DIR/release/provenant` (or the workspace's
+`target/release/provenant` without that variable). Pass `--binary PATH` to package
+another release build, for example one built with an explicit target triple.
+Build and package from the same checkout before changing product assets.
+
 ## Install
 
 Bootstrap from the binary in the staged release and use an explicit,
@@ -35,7 +59,7 @@ run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes
 only unchanged owned entries and keeps the state and release assets. Reapply
 `install` after resolving a partial-write error.
 
-`build.rs` stamps the source digest, and the release build packages typed
-`release.json` with the binary and product assets. The CLI grammar is frozen in
+`build.rs` stamps the source and asset digests; the packaging example produces
+typed `release.json` with the binary and product assets. The CLI grammar is frozen in
 [cli.md](../specs/rust-port/design/cli.md); `help --json` describes the command
 surface without resolving roots or creating state.
