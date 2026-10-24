@@ -19,6 +19,26 @@ pub(super) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
 ) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        resolve_executable,
+        None,
+    )
+}
+
+fn prepare_with(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    executable: impl Fn(&str) -> Result<PathBuf, String>,
+    token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
     if resume.is_some() {
         return Err(
             "continuation needs a provider session; providers do not expose sessions yet".into(),
@@ -53,7 +73,7 @@ pub(super) fn prepare(
 
     let resolved = crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
     let mut reasons = Vec::new();
-    for route in candidates(resolved) {
+    for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let Some(registration) = REGISTRY
             .iter()
@@ -67,34 +87,40 @@ pub(super) fn prepare(
             reasons.push(format!("{label}: provider execution is disabled"));
             continue;
         }
-        if adapter.id() == "claude" {
+        if adapter.id() == "claude" && token.is_none() {
             reasons.push(format!(
                 "{label}: Claude credential authority is not available in this revision"
             ));
             continue;
         }
-        if adapter.id() != "codex" {
+        if !matches!(adapter.id(), "codex" | "claude") {
             reasons.push(format!("{label}: provider launch is not supported here"));
             continue;
         }
-        let executable = match resolve_executable("codex") {
+        let executable = match executable(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
                 continue;
             }
         };
-        let provider_route = match adapter_route(&route) {
-            Ok(route) => route,
-            Err(error) => {
-                reasons.push(format!("{label}: {error}"));
-                continue;
-            }
-        };
-        let scratch = &paths.scratch;
-        let private_state = &paths.provider_state;
-        let plan = match confinement_plan(project_id, &cwd, scratch, private_state, writer.as_ref())
-        {
+        // A failed setup never poisons the next explicit fallback candidate.
+        let scratch = paths.scratch.join(format!("candidate-{candidate}"));
+        let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
+        create_directory(&paths.scratch, &scratch)?;
+        create_directory(&paths.provider_state, &private_state)?;
+        let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let child_state = state_root
+            .join("children")
+            .join(paths.attempt_id.to_string());
+        let plan = match confinement_plan(
+            project_id,
+            &cwd,
+            scratch,
+            private_state,
+            writer.as_ref(),
+            (adapter.id() == "codex").then_some("login"),
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
@@ -104,7 +130,7 @@ pub(super) fn prepare(
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
-            route: &provider_route,
+            route: &route,
             confined: &plan,
             prompt: &prompt,
             continuation: None,
@@ -113,12 +139,16 @@ pub(super) fn prepare(
             home: &home,
             user: &user,
             account: None,
-            token: None,
+            token,
             cwd: &cwd,
             nonce,
             provenant: LaneRuntime {
                 executable: &provenant_executable,
-                state: state_root,
+                state: roots.state.as_path(),
+                child_state: &child_state,
+                home: &home,
+                depth: paths.lane_depth,
+                attempt: paths.attempt_id,
                 assets,
             },
         }) {
@@ -128,13 +158,14 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        if let Err(error) = apply_setup(&spec.setup, scratch, private_state, state_root) {
+        if let Err(error) = apply_setup(&spec.setup, scratch, private_state, roots.state.as_path())
+        {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
         let provider = RouteRecord {
+            model: Some(format!("{}/{}", route.adapter, route.model)),
             provider: Some(route.adapter),
-            model: Some(route.model),
             effort: route.effort,
             account_label: None,
         };
@@ -186,24 +217,13 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
     }
 }
 
-fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
-    let prefix = format!("{}/", route.adapter);
-    let model = route
-        .model
-        .strip_prefix(&prefix)
-        .ok_or("resolved model does not match its provider")?;
-    let mut provider_route = route.clone();
-    provider_route.model = model.to_owned();
-    provider_route.alternatives = Default::default();
-    Ok(provider_route)
-}
-
 fn confinement_plan(
     project_id: ProjectId,
     cwd: &Path,
     scratch: &Path,
     private_state: &Path,
     writer: Option<&run::WriterLaunch>,
+    authentication: Option<&str>,
 ) -> Result<ConfinedPlan, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
@@ -232,7 +252,7 @@ fn confinement_plan(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: Some("login".into()),
+            selected_authentication: authentication.map(str::to_owned),
             include_continuation: false,
             network: Vec::new(),
             capabilities: Vec::new(),
@@ -359,5 +379,27 @@ pub fn writer_fixture_plan(
         &paths.scratch,
         &paths.provider_state,
         Some(writer),
+        Some("login"),
+    )
+}
+
+/// Exercise production preparation against a fake external provider executable.
+#[cfg(feature = "fixture")]
+pub fn prepare_fixture(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt: &str,
+    paths: &run::LaunchPaths,
+    executable: &Path,
+    token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt,
+        paths,
+        None,
+        |_| canonical(executable),
+        token,
     )
 }

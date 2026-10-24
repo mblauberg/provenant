@@ -326,8 +326,8 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL` plus dispatch lineage, `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config ATTEMPT/provenant-mcp.json --settings ATTEMPT/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` plus dispatch lineage; default config directory, with the access token read by the host and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={...} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL` plus dispatch lineage, `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config ATTEMPT/scratch/candidate-N/provenant-mcp.json --settings ATTEMPT/scratch/candidate-N/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` plus dispatch lineage; default config directory, with the access token read by the host and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
@@ -347,19 +347,54 @@ can read applicable skill instructions supplied in their workspace or brief. Cod
 `-c`; no Codex hooks are currently registered by the installer. OpenCode and Agy
 remain disabled in `activation.json`, so their launch controls are unchanged.
 
-The profile grants execution/read access to the exact Provenant binary, and
-write access to Fabric, project bindings, run records, artifacts, the host
-binding lock and Fabric's temporary Git/results directories beneath the selected
-state root. The existing host ID and config are read-only. Claude also gets its workflow checkpoint state and exact
-shell/Git hook helpers. Config remains read-only. Rust Fabric is stdio/SQLite,
-with no daemon socket to grant. All inherited sandbox bounds still apply.
-Generated file setup creates mode-0600 files without replacing existing entries.
+The profile grants execution/read access to the exact Provenant binary. Shared
+Fabric writes are exact `fabric/fabric.sqlite3` and its WAL/SHM/journal paths,
+`fabric/locks/` for landing locks, and the exact host binding lock. Project
+bindings, config, host ID and routing observations are read-only; a lane looks
+up its parent's existing project binding rather than allocating another.
+Claude also gets its workflow checkpoint state and exact shell/Git hook helpers.
 
-Dispatch sets `PROVENANT_LANE_DEPTH` (root lanes are 1) and
-`PROVENANT_PARENT_ATTEMPT_ID`. The shared CLI/Fabric submission path refuses a
-child above `lanes.max_depth`, default 2, before creating its records. Nested
-runs record their submitting parent separately from continuation ancestry.
-This is a lightweight recursion limit, not a new authority boundary.
+Each attempt gets a dedicated child Run store at
+`RUN_STATE/children/<AttemptId>/`. The launch layer creates this directory and
+grants its subtree, never `STATE/runs/` or the parent Run database. The MCP
+keeps the original `--state-dir` for shared Fabric identity/config, while
+`PROVENANT_RUN_STATE_DIR` selects this separate Run database and `runs/` tree
+for both CLI Run commands and the MCP Run owner. Utility Git/results scratch
+also lives there. Descendants allocate another `children/<AttemptId>/` beneath
+their own Run state. Queries and controls from that MCP address its child
+store; host recovery selects it with `PROVENANT_RUN_STATE_DIR` while keeping the
+original `--state-dir` for identity/config.
+Parent custody/quarantine and other lanes' Run stores receive no write grant.
+The macOS state-write overlap check remains unchanged.
+
+This chooses narrow shared grants and isolated child storage. Fabric's existing
+`RunOwner` is an in-process composition seam, not a parent-host broker; reusing
+it as a broker would require a new IPC owner. Rust Fabric remains stdio/SQLite,
+with no daemon socket. Child storage is writable by its submitting lane and is
+not independent evidence against that lane. The submitting lane's own custody,
+quarantine and terminal publication stay with its host guardian under the
+parent Run root.
+
+Run supplies the allocated attempt ID and depth before provider preparation.
+The adapter writes `PROVENANT_LANE_DEPTH` (root lanes are 1),
+`PROVENANT_PARENT_ATTEMPT_ID` and `PROVENANT_RUN_STATE_DIR` into both the provider
+environment and the generated MCP entry's explicit environment. MCP setup also
+pins `HOME` and `PROVENANT_ROOT`; lineage does not depend on the provider
+forwarding arbitrary environment variables. The shared CLI/Fabric submission
+path refuses a child above `lanes.max_depth`, default 2, before creating its
+records. Nested parent metadata remains separate from continuation ancestry and
+grants no cancellation authority. This is a recursion limit, not an authority
+boundary.
+
+Generated mode-0600 JSON files stay in `ATTEMPT/scratch/candidate-N/`; private
+provider setup stays in `ATTEMPT/provider-state/candidate-N/`. Each explicit
+fallback has its own numbered subdirectory, so partially applied setup cannot
+make the next candidate fail on an existing file. Existing entries are never
+replaced. Behaviour tests drive CLI preparation for read-only and writer tasks,
+including generated Claude files, poisoned first-candidate setup and a fake
+provider that clears inherited MCP environment. Required macOS CI compiles the
+real plan/profile with synthetic fake-provider state-write evidence and probes
+custody/quarantine denial. That synthetic evidence does not activate Codex.
 
 The CLI production `Registry::prepare` now calls `provider::prepare`, and Run
 passes attempt scratch and provider-state paths into that preparation for both

@@ -257,6 +257,10 @@ fn account_placement() -> Result {
             provenant: provenant_providers::LaneRuntime {
                 executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
                 state: std::path::Path::new("/fixture/state"),
+                child_state: std::path::Path::new("/fixture/state/children/attempt"),
+                home: &rig.home,
+                depth: 1,
+                attempt: provenant_core::AttemptId::from_bytes([1; 16]),
                 assets: std::path::Path::new("/fixture/provenant"),
             },
         })?;

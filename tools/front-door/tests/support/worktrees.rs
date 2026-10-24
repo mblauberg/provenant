@@ -1,7 +1,7 @@
 #[path = "mod.rs"]
 mod support;
 use provenant_core::Clock;
-use provenant_supervisor::exec::ExecOutcome;
+use provenant_supervisor::exec::{ExecOutcome, Executor};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -35,6 +35,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
+            "lane_prepare_isolates_nested_state",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
@@ -46,6 +47,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
         ],
         |name| {
             let result = match name {
+                "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
                 }
@@ -1109,4 +1111,489 @@ fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> 
     assert!(!rig.project.join(".worktrees").exists());
     assert_eq!(git(&rig, &["branch", "--format=%(refname:short)"])?, "main");
     rig.assert_legacy_unchanged()
+}
+
+fn lane_prepare_isolates_nested_state() -> Result {
+    use provenant_confinement::permissions::PathScope;
+    let rig = repository()?;
+    ok(
+        &rig,
+        &["worktree", "create", "writer", "--base", "HEAD", "--json"],
+    )?;
+    let worktree = rig.project.join(".worktrees/writer");
+    let (roots, context) = writer_context(&rig)?;
+    let identity = command(&rig, &["fabric", "identity", "--json"])?;
+    assert_eq!(
+        code(&identity),
+        0,
+        "{}",
+        String::from_utf8_lossy(&identity.stderr.bytes)
+    );
+    let home = rig.state.join("fixture-home");
+    fs::create_dir_all(home.join(".codex"))?;
+    fs::write(home.join(".codex/auth.json"), b"fixture credential")?;
+    let executable = rig.root.join("provider/bin/codex");
+    fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
+    fs::copy(std::env::current_exe()?, &executable)?;
+    for (adapter, writer) in [
+        ("codex", false),
+        ("codex", true),
+        ("claude", false),
+        ("claude", true),
+    ] {
+        let request =
+            provenant_run::resolve_writer(roots.state.as_path(), &rig.project, &worktree)?;
+        let mut prepared = writer_run(
+            request,
+            "lane-prepare",
+            match (adapter, writer) {
+                ("codex", false) => 91,
+                ("codex", true) => 92,
+                ("claude", false) => 93,
+                _ => 94,
+            },
+            "fixture prompt",
+        )?;
+        let task = &mut prepared.request.tasks[0];
+        if !writer {
+            task.writer = None;
+        }
+        task.route = provenant_run::RequestedRoute::Model {
+            provider: adapter.into(),
+            model: format!("{adapter}/fixture-model"),
+            effort: None,
+        };
+        let attempt = roots.state.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            prepared.run_id, prepared.attempts[0].attempt_id
+        ));
+        let paths = provenant_run::LaunchPaths {
+            attempt_id: prepared.attempts[0].attempt_id,
+            lane_depth: 2,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+        };
+        for path in [&paths.scratch, &paths.provider_state] {
+            fs::create_dir_all(path)?;
+        }
+        let registry = provenant_cli::run::Registry {
+            roots: Some(&roots),
+            home: Some(&home),
+            assets: Some(&rig.project),
+            cwd: Some(&rig.project),
+            state_root: Some(roots.state.as_path()),
+            project_id: Some(context.project_id),
+        };
+        // Simulate a partially written first candidate. Fallback must have
+        // independent setup paths rather than failing on the same auth entry.
+        task.fallback.push(provenant_run::RouteRecord {
+            provider: Some(adapter.into()),
+            model: Some(format!("{adapter}/fixture-fallback")),
+            ..Default::default()
+        });
+        let poison = if adapter == "codex" {
+            paths.provider_state.join("candidate-0/auth.json")
+        } else {
+            paths.scratch.join("candidate-0/provenant-settings.json")
+        };
+        fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
+        fs::write(&poison, b"partial setup")?;
+        let token = provenant_providers::claude::refresh_if_expiring(
+            &FixtureCredential,
+            &provenant_providers::claude::Login {
+                executable: &executable,
+                home: &home,
+                user: "fixture".as_ref(),
+                config_dir: &home.join(".claude"),
+                scratch: &paths.scratch,
+            },
+            &|| 1000,
+            2000,
+        )?;
+        let mut launch = provenant_cli::run::prepare_fixture(
+            &registry,
+            task,
+            "fixture prompt",
+            &paths,
+            &executable,
+            (adapter == "claude").then_some(&token),
+        )?;
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "2")
+        );
+        let confinement = launch.confinement.as_ref().ok_or("confinement")?;
+        let permissions = confinement.plan.permissions();
+        assert_eq!(permissions.scratch.path, paths.scratch.join("candidate-1"));
+        if adapter == "codex" {
+            assert!(
+                fs::symlink_metadata(
+                    permissions
+                        .private_state
+                        .as_ref()
+                        .ok_or("private state")?
+                        .path
+                        .join("auth.json")
+                )?
+                .file_type()
+                .is_symlink()
+            );
+        } else {
+            let generated = permissions.scratch.path.join("provenant-mcp.json");
+            let mcp: Value = serde_json::from_slice(&fs::read(generated)?)?;
+            assert_eq!(
+                mcp["mcpServers"]["fabric"]["env"][provenant_run::LANE_DEPTH_ENV],
+                "2"
+            );
+            let settings: Value = serde_json::from_slice(&fs::read(
+                permissions.scratch.path.join("provenant-settings.json"),
+            )?)?;
+            assert!(
+                settings["hooks"]
+                    .as_object()
+                    .is_some_and(|hooks| !hooks.is_empty())
+            );
+        }
+        for grant in &confinement.profile.spec.state_writes {
+            assert!(
+                !grant.overlaps(&permissions.scratch),
+                "scratch overlaps {grant:?}"
+            );
+            assert!(
+                !grant.overlaps(permissions.private_state.as_ref().ok_or("private state")?),
+                "private state overlaps {grant:?}"
+            );
+            for denied in [
+                attempt.join("quarantine"),
+                attempt.join("quarantine-result.json"),
+                attempt.join("custody.lock"),
+                roots
+                    .state
+                    .as_path()
+                    .join("runs/other/attempts/other/custody.json"),
+            ] {
+                assert!(
+                    !(grant.path == denied
+                        || (grant.scope == PathScope::Subtree && denied.starts_with(&grant.path))),
+                    "custody writable through {grant:?}"
+                );
+            }
+        }
+        let frames = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6.1-sol\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
+        );
+        let mut options = provenant_supervisor::exec::ExecOptions::new(
+            &launch.argv,
+            &launch.cwd,
+            Duration::from_secs(10),
+        );
+        options.env = Some(&launch.environment);
+        options.stdin = Some(frames.as_bytes());
+        options.stdout = provenant_supervisor::exec::StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = provenant_supervisor::exec::StreamPolicy::Capture { limit: 64 * 1024 };
+        let output = provenant_supervisor::exec::SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let replies = output
+            .stdout
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let result = &replies
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("MCP reply")?["result"];
+        assert_eq!(
+            result["structuredContent"]["code"], "lane_depth",
+            "{result}"
+        );
+        assert!(!roots.state.as_path().join("run.sqlite3").exists());
+        assert!(!roots.state.as_path().join("tmp/results").exists());
+        assert!(
+            rig.state
+                .join("children")
+                .join(paths.attempt_id.to_string())
+                .join("tmp/results")
+                .is_dir()
+        );
+        assert!(!worktree.join("provenant-mcp.json").exists());
+        assert!(!worktree.join("provenant-settings.json").exists());
+        assert_eq!(
+            git(
+                &rig,
+                &[
+                    "-C",
+                    worktree.to_str().ok_or("worktree path")?,
+                    "status",
+                    "--porcelain"
+                ]
+            )?,
+            ""
+        );
+        // Raise the host limit only for a second call. It must create records
+        // in the configured child store while leaving the parent store absent.
+        if adapter == "codex" && !writer {
+            fs::write(
+                rig.state.join("config.toml"),
+                "schema_version=1\n[knobs]\n'lanes.max_depth'=3\n",
+            )?;
+            let mut options = provenant_supervisor::exec::ExecOptions::new(
+                &launch.argv,
+                &launch.cwd,
+                Duration::from_secs(10),
+            );
+            options.env = Some(&launch.environment);
+            options.stdin = Some(frames.as_bytes());
+            let output = provenant_supervisor::exec::SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(
+                code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            assert!(
+                rig.state
+                    .join("children")
+                    .join(paths.attempt_id.to_string())
+                    .join("run.sqlite3")
+                    .exists()
+            );
+            assert!(!rig.state.join("run.sqlite3").exists());
+            fs::remove_file(rig.state.join("config.toml"))?;
+        }
+        verify_lane_profile(
+            &mut launch,
+            &attempt,
+            roots.state.as_path(),
+            frames.as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Fake provider deliberately forwards no provider environment to its MCP child.
+pub(crate) fn lane_provider() -> Result {
+    use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    let mut entry = serde_json::Map::new();
+    for arg in std::env::args().filter(|arg| arg.starts_with("mcp_servers.fabric.")) {
+        let value: Value = toml_edit::de::from_str(&arg)?;
+        entry.extend(
+            value["mcp_servers"]["fabric"]
+                .as_object()
+                .ok_or("MCP config")?
+                .clone(),
+        );
+    }
+    if entry.is_empty() {
+        let args: Vec<_> = std::env::args_os().collect();
+        let index = args
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .ok_or("MCP config flag")?;
+        let config: Value =
+            serde_json::from_slice(&fs::read(args.get(index + 1).ok_or("MCP config path")?)?)?;
+        entry = config["mcpServers"]["fabric"]
+            .as_object()
+            .ok_or("MCP entry")?
+            .clone();
+    }
+    let mut argv = vec![OsString::from(
+        entry["command"].as_str().ok_or("MCP command")?,
+    )];
+    argv.extend(
+        entry["args"]
+            .as_array()
+            .ok_or("MCP args")?
+            .iter()
+            .map(|arg| arg.as_str().map(OsString::from).ok_or("MCP arg"))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    );
+    let env = entry["env"]
+        .as_object()
+        .ok_or("MCP env")?
+        .iter()
+        .map(|(key, value)| {
+            Ok((
+                OsString::from(key),
+                OsString::from(value.as_str().ok_or("MCP env value")?),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)?;
+    let cwd = std::env::current_dir()?;
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
+    options.env = Some(&env);
+    options.stdin = Some(&input);
+    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    std::io::stdout().write_all(&output.stdout.bytes)?;
+    std::io::stderr().write_all(&output.stderr.bytes)?;
+    if code(&output) != 0 {
+        return Err("configured MCP child failed".into());
+    }
+    // Exercise the same publisher used by CLI overflow under confinement.
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
+    let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
+    let mut inputs = provenant_core::RootInputs::new(home, assets);
+    inputs.state_dir = Some(PathBuf::from(entry["args"][1].as_str().ok_or("state arg")?));
+    let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+    provenant_cli::fabric::publish(
+        &provenant_records::CommandResult::new(
+            "fixture",
+            provenant_records::Outcome::Ok,
+            "overflow",
+        ),
+        &roots,
+    )?;
+    Ok(())
+}
+
+fn verify_lane_profile(
+    launch: &mut provenant_run::PreparedLaunch,
+    attempt: &Path,
+    state: &Path,
+    frames: &[u8],
+) -> Result {
+    use provenant_confinement::permissions::{
+        AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
+        required_anchors, system_backend,
+    };
+    use provenant_supervisor::{
+        exec::{ExecOptions, StreamPolicy, SystemExecutor},
+        fs::LocalFs,
+    };
+    let executor = SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let backend = match system_backend(&BackendContext {
+        safe_fs: &LocalFs,
+        executor: &executor,
+        cancel: &cancel,
+        #[cfg(target_os = "macos")]
+        env: &[],
+    }) {
+        Ok(backend) => backend,
+        Err(error) if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none() => {
+            writeln!(std::io::stderr(), "lane profile execution skipped: {error}")?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let confinement = launch.confinement.as_mut().ok_or("confinement")?;
+    // Synthetic fake-provider evidence exercises the compiler only. This does
+    // not activate Codex or replace its missing live state-write recording.
+    let profile = &mut confinement.profile;
+    profile
+        .observations
+        .insert(FixtureOperation::StateWrite, FixtureOutcome::Allowed);
+    let writer = confinement
+        .writer
+        .as_ref()
+        .map(|w| (&w.worktree, &w.branch));
+    let directories = required_anchors(confinement.plan.permissions(), profile, writer)
+        .iter()
+        .map(|path| AnchoredDirectory::open_canonical(&LocalFs, path))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let anchors = Anchors {
+        directories: &directories,
+        safe_fs: &LocalFs,
+        worktree: writer,
+    };
+    let compiled = confinement
+        .plan
+        .compile(backend.as_ref(), profile, &anchors)?;
+    // Start the configured MCP inside the compiled profile too: an
+    // unconfined fake provider cannot detect ungranted startup writes.
+    let mcp_argv = compiled.command(&launch.argv)?;
+    let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
+    options.env = Some(&launch.environment);
+    options.stdin = Some(frames);
+    let output = executor.execute(options)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let replies = output
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        replies
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("confined MCP reply")?["result"]["structuredContent"]["code"],
+        "lane_depth"
+    );
+    let denied = [
+        attempt.join("custody.lock"),
+        attempt.join("reserve"),
+        attempt.join("quarantine/probe"),
+        attempt.join("quarantine-result.json"),
+        attempt.join("process.json"),
+        state.join("runs/other/attempts/other/process.json"),
+    ];
+    for path in &denied {
+        fs::create_dir_all(path.parent().ok_or("custody parent")?)?;
+        fs::write(path, b"sealed custody")?;
+    }
+    let marker = confinement
+        .plan
+        .permissions()
+        .scratch
+        .path
+        .join("allowed-write");
+    let mut argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(),
+        "printf allowed > \"$1\" || exit 10; shift; for target in \"$@\"; do if printf changed > \"$target\"; then exit 20; fi; done".into(), "probe".into(), marker.as_os_str().to_owned()];
+    argv.extend(denied.iter().map(|path| path.as_os_str().to_owned()));
+    argv = compiled.command(&argv)?;
+    let mut options = ExecOptions::new(&argv, &launch.cwd, Duration::from_secs(5));
+    options.env = Some(&launch.environment);
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let output = executor.execute(options)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert_eq!(fs::read(marker)?, b"allowed");
+    for path in denied {
+        assert_eq!(fs::read(path)?, b"sealed custody");
+    }
+    Ok(())
+}
+
+/// The credential process boundary returns synthetic bytes and runs nothing.
+struct FixtureCredential;
+impl Executor for FixtureCredential {
+    fn execute(
+        &self,
+        _: provenant_supervisor::exec::ExecOptions<'_>,
+    ) -> std::result::Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+        Ok(ExecOutcome {
+            termination: provenant_supervisor::exec::Termination::Exit(0),
+            stdout: provenant_supervisor::exec::CapturedStream {
+                bytes: br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#.to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(), timed_out: false, drain_truncated: false,
+            overflow_stopped: false, cancelled: false, elapsed_micros: 0,
+        })
+    }
 }

@@ -116,10 +116,13 @@ impl RunStore {
         let mut root = Directory::root(true)?;
         for component in context.state_root.as_path().components() {
             if let Component::Normal(name) = component {
-                match root.mkdir(name, 0o700) {
-                    Ok(()) => root.sync()?,
-                    Err(e) if e.is_exists() => {}
-                    Err(e) => return Err(e.into()),
+                match root.metadata_at(name, false) {
+                    Ok(_) => {}
+                    Err(error) if error.is_not_found() => {
+                        root.mkdir(name, 0o700)?;
+                        root.sync()?;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
                 let before = root.metadata_at(name, false)?;
                 let opened = root.open_directory(name)?;

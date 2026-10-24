@@ -188,6 +188,17 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     scratch/                   # disposable launch staging only
 ```
 
+For nested submission, the Run root is the submitting attempt's dedicated
+`<parent-run-state>/children/<AttemptId>/` store. Its database and the layout
+above are separate from the parent's database and attempt custody. The MCP
+retains shared Fabric identity/config on the original state root. Its explicit
+`PROVENANT_RUN_STATE_DIR` environment selects the child store for CLI/MCP Run
+queries and controls; host recovery sets that variable while retaining the original `--state-dir`
+for identity/config.
+The confinement grant covers only this child subtree, shared Fabric SQLite
+files and required lock/helper state. It never covers the parent `runs/` tree.
+See [lane MCP and nesting](execution-route.md#lane-mcp-hooks-and-nesting-2026-10-24).
+
 This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no
 `control.json`, `supervisor.json` or second events capture. Provider parsing
@@ -783,8 +794,9 @@ scheduler daemon. Within that, the lane decided:
   exact credential source, purpose and expiry before the host token loader
   can run. The task request currently carries no such record.
 - **Launch storage** is allocated once per attempt before route fallback, under
-  its canonical `scratch/` and `provider-state/` paths. No candidate creates
-  random `tmp/` trees. Settlement removes empty scratch; provider history and
+  its canonical `scratch/` and `provider-state/` paths. Each fallback uses
+  `candidate-N/` beneath those roots so partial setup cannot poison a later
+  candidate. No candidate creates random `tmp/` trees. Settlement removes empty scratch; provider history and
   unclassified contents remain retained. Supervisor owns reservation listing:
   malformed entries are reported and remain fenced while valid entries can
   reconcile. Such diagnostics make the reconcile command non-successful.

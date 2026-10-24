@@ -865,7 +865,12 @@ impl BinaryRunOwner<'_> {
     ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: ctx.roots.state.clone(),
+            state_root: provenant_cli::run::execution_state(
+                &ctx.roots,
+                &self.factory.home,
+                &crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?,
+            )
+            .map_err(fail_error)?,
             project_id: ctx.identity.project,
             actor_id: ctx.identity.inbox.actor,
             read_prompts: false,

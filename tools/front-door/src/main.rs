@@ -428,6 +428,20 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
 }
 fn main() -> ExitCode {
     #[cfg(test)]
+    if std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|arg| arg == "exec" || arg == "-p")
+    {
+        return match worktree_tests::lane_provider() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "lane provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(test)]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--writer-provider")) {
         return match worktree_tests::provider(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
             Ok(()) => ExitCode::SUCCESS,

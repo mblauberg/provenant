@@ -1,6 +1,7 @@
 //! The single fixture-backed hook catalogue supplied to config by composition.
 use crate::{ClaudeHook, GitHook, Hook};
 use provenant_config::HookRegistration;
+use provenant_records::Harness;
 
 pub const PRE_TOOL_USE: &str = "pre-tool-use";
 pub const PRE_COMPACT: &str = "pre-compact";

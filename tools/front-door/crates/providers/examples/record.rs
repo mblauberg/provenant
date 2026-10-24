@@ -833,17 +833,13 @@ fn main() -> Result<()> {
             provenant: provenant_providers::LaneRuntime {
                 executable: &args.provenant,
                 state: &args.root.join("provenant-state"),
+                child_state: &args.root.join("provenant-state/children/recording"),
+                home: &home,
+                depth: 1,
+                attempt: provenant_core::AttemptId::from_bytes(nonce),
                 assets: &args.assets,
             },
         })?;
-        // Match the launch facts Run supplies after adapter preparation.
-        spec.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
-        spec.env.push((
-            "PROVENANT_PARENT_ATTEMPT_ID".into(),
-            provenant_core::AttemptId::from_bytes(nonce)
-                .to_string()
-                .into(),
-        ));
         spec.profile.observations = expected(&spec.profile, args.writer);
         if args.skip_live {
             // Probe debugging only: compile and probe without calling the CLI.

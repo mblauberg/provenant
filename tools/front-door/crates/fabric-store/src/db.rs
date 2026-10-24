@@ -118,9 +118,12 @@ impl Store {
         let mut directory = Directory::root(true)?;
         for part in root.as_path().components() {
             if let Component::Normal(name) = part {
-                match directory.mkdir(name, 0o700) {
-                    Ok(()) => directory.sync()?,
-                    Err(error) if error.is_exists() => {}
+                match directory.metadata_at(name, false) {
+                    Ok(_) => {}
+                    Err(error) if error.is_not_found() => {
+                        directory.mkdir(name, 0o700)?;
+                        directory.sync()?;
+                    }
                     Err(error) => return Err(error.into()),
                 }
                 directory = checked_directory(&directory, name, None)?;
@@ -131,9 +134,12 @@ impl Store {
         // state root. Pin supervisor's device policy to this validated handle,
         // without reopening ancestors or relaxing descendant checks.
         let directory = directory.into_anchor()?;
-        match directory.mkdir(OsStr::new("fabric"), 0o700) {
-            Ok(()) => directory.sync()?,
-            Err(error) if error.is_exists() => {}
+        match directory.metadata_at(OsStr::new("fabric"), false) {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => {
+                directory.mkdir(OsStr::new("fabric"), 0o700)?;
+                directory.sync()?;
+            }
             Err(error) => return Err(error.into()),
         }
         let fabric = checked_directory(

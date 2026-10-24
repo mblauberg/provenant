@@ -48,6 +48,8 @@ pub struct Decoded {
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
+    pub attempt_id: AttemptId,
+    pub lane_depth: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
 }
@@ -218,6 +220,8 @@ impl RunStore {
                 .join("attempts")
                 .join(id.to_string());
             let paths = LaunchPaths {
+                attempt_id: id,
+                lane_depth: request.lane_depth,
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
             };

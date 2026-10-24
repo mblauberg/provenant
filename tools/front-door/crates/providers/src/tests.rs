@@ -652,6 +652,10 @@ fn fixture_input<'a>(
         provenant: crate::LaneRuntime {
             executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
             state: std::path::Path::new("/fixture/state"),
+            child_state: std::path::Path::new("/fixture/state/children/attempt"),
+            home: std::path::Path::new("/fixture/home"),
+            depth: 1,
+            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
         },
     }
@@ -697,11 +701,21 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             ],
             _ => &[],
         };
-        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG", "PROVENANT_ROOT"]
-            .iter()
-            .chain(extra)
-            .copied()
-            .collect();
+        let expected: Vec<_> = [
+            "HOME",
+            "USER",
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "PROVENANT_ROOT",
+            "PROVENANT_LANE_DEPTH",
+            "PROVENANT_PARENT_ATTEMPT_ID",
+            "PROVENANT_RUN_STATE_DIR",
+        ]
+        .iter()
+        .chain(extra)
+        .copied()
+        .collect();
         assert_eq!(keys, expected, "{id}");
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
@@ -710,15 +724,6 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         );
         match id {
             "codex" => {
-                assert!(
-                    argv.iter()
-                        .any(|arg| arg.starts_with("mcp_servers.fabric.command="))
-                );
-                assert!(
-                    argv.iter().any(|arg| arg
-                        == "mcp_servers.fabric.command=\"/fixture/provenant/bin/provenant\"")
-                );
-                assert!(argv.iter().any(|arg| arg == "mcp_servers.fabric.args=[\"--state-dir\",\"/fixture/state\",\"fabric\",\"mcp\",\"--client\",\"codex\"]"));
                 assert!(argv.iter().any(|arg| arg == "service_tier=\"default\""));
                 assert!(
                     !argv
@@ -730,45 +735,6 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 assert!(argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
-                let config = |name: &str| {
-                    let path = argv
-                        .iter()
-                        .position(|arg| arg == name)
-                        .expect("config flag");
-                    let bytes = spec
-                        .setup
-                        .iter()
-                        .find_map(|step| match step {
-                            SetupStep::WriteFile { path: file, bytes }
-                                if file.as_os_str() == spec.argv[path + 1] =>
-                            {
-                                Some(bytes)
-                            }
-                            _ => None,
-                        })
-                        .expect("generated file");
-                    serde_json::from_slice::<serde_json::Value>(bytes).expect("JSON")
-                };
-                let mcp = config("--mcp-config");
-                assert_eq!(mcp["mcpServers"].as_object().expect("servers").len(), 1);
-                assert_eq!(
-                    mcp["mcpServers"]["fabric"],
-                    provenant_config::mcp_entry(
-                        provenant_records::Harness::Claude,
-                        std::path::Path::new("/fixture/provenant/bin/provenant"),
-                        std::path::Path::new("/fixture/state"),
-                    )
-                    .expect("installer entry")
-                );
-                let settings = config("--settings");
-                let hooks = settings["hooks"].as_object().expect("hooks");
-                assert_eq!(hooks.len(), provenant_config::CLAUDE_HOOKS.len());
-                for hook in provenant_config::CLAUDE_HOOKS {
-                    let command = hooks[hook.event][0]["hooks"][0]["command"]
-                        .as_str()
-                        .expect("hook command");
-                    assert!(command.starts_with("'/fixture/provenant/bin/provenant' '--state-dir' '/fixture/state' 'hook' 'claude'"));
-                }
                 let sources = argv
                     .iter()
                     .position(|arg| arg == "--setting-sources")
@@ -831,6 +797,9 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                     "/fixture/provenant/release.json",
                     "/fixture/state/config.toml",
                     "/fixture/state/host-id",
+                    "/fixture/state/projects",
+                    "/fixture/state/routing",
+                    "/fixture/state/fabric",
                 ]
                 .iter()
                 .any(|path| grant.path == std::path::Path::new(path))

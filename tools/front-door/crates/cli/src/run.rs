@@ -24,7 +24,7 @@ use std::{
 
 mod provider;
 #[cfg(feature = "fixture")]
-pub use provider::writer_fixture_plan;
+pub use provider::{prepare_fixture, writer_fixture_plan};
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -295,12 +295,40 @@ fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::R
         cancel,
     })
 }
+/// Shared Fabric identity/config, isolated Run custody for a lane's children.
+pub fn execution_state(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+) -> Result<provenant_core::StateRoot, Fail> {
+    let Some(path) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) else {
+        return Ok(roots.state.clone());
+    };
+    let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
+    inputs.state_dir = Some(path.into());
+    let state = inputs
+        .resolve(&provenant_supervisor::fs::LocalFs)
+        .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
+        .state;
+    if !state
+        .as_path()
+        .starts_with(roots.state.as_path().join("children"))
+    {
+        return Err(Fail::new(
+            Status::Refused,
+            "LANE_CONTEXT",
+            "child Run store is outside the lane namespace",
+        ));
+    }
+    Ok(state)
+}
+
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
@@ -318,7 +346,7 @@ fn open_read_only(
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
