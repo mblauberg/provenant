@@ -7,6 +7,17 @@ Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
 below. The [cross-area decisions](README.md#cross-area-decisions) bind state,
 layout, commands, waits, records and hooks; cli owns the exact flag freeze.
 
+## Audit implementation notes
+
+The supervisor audit captures provider identity before exec with a bounded
+child/observer handshake, retries transient cleanup census failures and feeds
+cleanup/publication outcomes into the machine. CPU/cancellation and safety
+census observations stay at 100 ms; durable process checkpoints are 1 s with
+unchanged-byte writes skipped. Terminal grace uses `root_flush_ms`; the unused private `terminal_ms`
+field is removed. See the crate's [port notes](../../../../tools/front-door/crates/supervisor/PORT.md#supervisor-audit-corrections)
+for the remaining consumer wiring and platform limits. `PathIo`, strict utility
+text decoding and typed reconcile remain required APIs despite missing callers.
+
 ## Purpose
 
 `provenant-supervisor` holds processes, output and kernel locks from launch
