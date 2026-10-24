@@ -1211,5 +1211,17 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
             }));
         }
     }
+    for response in [
+        serde_json::json!({}),
+        serde_json::json!({"body":{"error":{"code":429,"message":"provider quota message"}}}),
+    ] {
+        let event = serde_json::json!({"type":"provider.quota","message":"provider quota message","response":response});
+        let (events, outcome) = replay(&opencode::OpenCode, &(event.to_string() + "\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(events.contains(&ProviderEvent::QuotaLimited {
+            message: "provider quota message".into(),
+            pool: None
+        }));
+    }
     Ok(())
 }

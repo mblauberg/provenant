@@ -841,7 +841,8 @@ policy above wins over the historical issue's Python `tmp/` pruning rules:
 classified staging is deleted, unknown files remain outside that classification.
 
 OpenCode quota events use the provider's message as the terminal reason,
-filtering known secret shapes before persistence,
+filtering known secret shapes and bounding the reason to a UTF-8-safe 8 KiB
+excerpt before persistence,
 with the existing typed `quota_limited` outcome rather than the retired
 `usage_limited` string. `FreeUsageLimitError` identifies the `opencode-free`
 allowance pool. Admission refuses another model only when its supplied pool

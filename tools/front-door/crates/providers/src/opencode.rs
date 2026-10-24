@@ -142,14 +142,17 @@ struct Failure {
     response: Option<Response>,
 }
 #[derive(Deserialize)]
-struct Response {
-    body: Body,
+#[serde(untagged)]
+enum Response {
+    Body { body: Option<Body> },
+    Other(serde::de::IgnoredAny),
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Body {
     Json(ErrorBody),
     Text(String),
+    Other(serde::de::IgnoredAny),
 }
 #[derive(Deserialize)]
 struct ErrorBody {
@@ -157,15 +160,21 @@ struct ErrorBody {
 }
 #[derive(Deserialize)]
 struct LimitError {
-    #[serde(rename = "type", alias = "name")]
+    #[serde(default, rename = "type", alias = "name")]
     kind: String,
     message: Option<String>,
 }
 fn quota(message: Option<String>, response: Option<Response>) -> E {
-    let body = response.and_then(|response| match response.body {
-        Body::Json(body) => Some(body),
-        Body::Text(text) => wire::<ErrorBody>(text.as_bytes()).ok(),
-    });
+    let body = response
+        .and_then(|response| match response {
+            Response::Body { body } => body,
+            Response::Other(_) => None,
+        })
+        .and_then(|body| match body {
+            Body::Json(body) => Some(body),
+            Body::Text(text) => wire::<ErrorBody>(text.as_bytes()).ok(),
+            Body::Other(_) => None,
+        });
     let pool = body
         .as_ref()
         .filter(|body| body.error.kind == "FreeUsageLimitError")

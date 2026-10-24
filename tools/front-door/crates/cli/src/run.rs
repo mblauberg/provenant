@@ -251,14 +251,18 @@ impl run::Providers for Registry<'_> {
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
             decoded.outcome = run::Outcome::QuotaLimited;
-            decoded.reason = Some(
-                provenant_confinement::redact::known_shapes(message.as_bytes())
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .unwrap_or_else(|| {
-                        "provider quota exhausted (message redaction unavailable)".into()
-                    }),
-            );
+            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| {
+                    "provider quota exhausted (message redaction unavailable)".into()
+                });
+            let mut end = reason.len().min(8192);
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason.truncate(end);
+            decoded.reason = Some(reason);
         }
         decoded
     }
@@ -1430,5 +1434,14 @@ mod tests {
             assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
             assert_eq!(decoded.reason.as_deref(), Some(expected));
         }
+        let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
+        let decoded = Registry { roots: None }.decode(&route, event.to_string().as_bytes(), &exit);
+        assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        let reason = decoded.reason.unwrap();
+        assert!(
+            reason.len() <= 8192,
+            "reason must leave room in the terminal record"
+        );
+        assert!(reason.ends_with('☀'));
     }
 }

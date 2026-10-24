@@ -132,7 +132,10 @@ impl Admission<'_> {
                 });
             if expires > self.now_unix_seconds
                 && !comparable_newer
-                && refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p))
+                && ((route.adapter == "opencode"
+                    && refusal.pool.as_deref() == Some("opencode-free")
+                    && refusal.model == route.model)
+                    || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
                 return Err(QuotaError::Refused("scoped provider refusal"));
             }
@@ -275,6 +278,18 @@ mod admission_tests {
                 blocked
             );
         }
+        route.account_key = Some("opaque".into());
+        route.model.clone_from(&refusal.model);
+        assert!(
+            Admission {
+                now_unix_seconds: 1000,
+                records: &[],
+                refusals: &[refusal],
+                pools: &[]
+            }
+            .admit(&route, &"same-free-limit".parse().unwrap())
+            .is_err()
+        );
     }
     #[test]
     fn failed_probe_preserves_recent_exhaustion() {
