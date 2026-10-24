@@ -239,6 +239,7 @@ fn account_placement() -> Result {
             confidentiality: RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;

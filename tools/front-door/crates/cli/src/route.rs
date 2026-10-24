@@ -1,12 +1,12 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::{Adapter, Globals, RenderMode};
-use clap::{Args, Subcommand};
+use crate::{Globals, RenderMode};
+use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Roots, WallTime};
 use provenant_providers::{AvailabilityRecord, REGISTRY};
 use provenant_records::{CommandError, CommandResult, Limits, Outcome, RouteReadiness};
 use provenant_routing::{
-    AccessContext, BoundedModels, Catalogue, Fallback, ModelId, QuotaObservation, RouteChoice,
-    RoutingContext, RoutingError,
+    AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
+    RouteChoice, RoutePoolMember, RoutingContext, RoutingError,
 };
 use provenant_supervisor::fs::{Directory, FsError, LocalFs};
 use serde::Serialize;
@@ -14,8 +14,77 @@ use std::{collections::BTreeSet, ffi::OsStr, io, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
-    List(Adapter),
+    /// Show effective models, pools, pacing and readiness.
+    List(RouteListRequest),
+    /// Resolve a named route or exact model for preview.
     Resolve(RouteRequest),
+    /// Add or update a model in a user-configured pool.
+    Set(RouteSet),
+    /// Remove a model from a user-configured pool.
+    Remove(RouteRemove),
+    /// Restore one bundled pool and clear its override.
+    Reset(RouteReset),
+    /// Set one provider's routing pacing policy.
+    Pacing(RoutePacing),
+}
+#[derive(Debug, Args)]
+pub struct RouteListRequest {
+    /// Limit pool members and provider readiness to this adapter.
+    #[arg(long)]
+    pub adapter: Option<String>,
+    /// Show only this effective pool.
+    #[arg(long)]
+    pub pool: Option<String>,
+}
+#[derive(Debug, Args)]
+pub struct RouteSet {
+    /// Pool name to update or create.
+    pub pool: String,
+    /// Exact catalogue model in ADAPTER/ID form.
+    pub model: Model,
+    /// Selection weight from 0 (fallback only) to 100.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub weight: Option<u8>,
+    /// Default effort for this member.
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Allowed caller effort values, comma separated.
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
+    pub efforts: Vec<String>,
+}
+#[derive(Debug, Args)]
+pub struct RouteRemove {
+    /// Pool name to update.
+    pub pool: String,
+    /// Exact catalogue model to remove.
+    pub model: Model,
+}
+#[derive(Debug, Args)]
+pub struct RouteReset {
+    /// Bundled pool whose user override should be cleared.
+    pub pool: String,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PacingChoice {
+    Pace,
+    Spend,
+    Max,
+}
+impl From<PacingChoice> for PacingPolicy {
+    fn from(value: PacingChoice) -> Self {
+        match value {
+            PacingChoice::Pace => Self::Pace,
+            PacingChoice::Spend => Self::Spend,
+            PacingChoice::Max => Self::Max,
+        }
+    }
+}
+#[derive(Debug, Args)]
+pub struct RoutePacing {
+    /// Registered provider ID.
+    pub provider: String,
+    /// Provider pacing policy.
+    pub policy: PacingChoice,
 }
 #[derive(Debug, Args)]
 pub struct RouteRequest {
@@ -228,6 +297,7 @@ pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
     account: Option<&str>,
+    seed: (&str, u64),
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
@@ -238,7 +308,9 @@ pub(crate) fn resolve_dispatch(
         access,
         host,
         |context, records| {
-            let resolved = provenant_routing::resolve_for_account(request, context, account)?;
+            let resolved = provenant_routing::resolve_for_account_with_seed(
+                request, context, account, seed.0, seed.1,
+            )?;
             if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
                 let pools = free_pools(&resolved.adapter, || {
@@ -258,10 +330,14 @@ pub(crate) fn resolve_dispatch(
                     if can_skip_free {
                         let mut without_free = request.clone();
                         without_free.allow_free = false;
-                        if let Ok(alternative) =
-                            provenant_routing::resolve_for_account(&without_free, context, account)
-                            && (alternative.adapter != resolved.adapter
-                                || alternative.model != resolved.model)
+                        if let Ok(alternative) = provenant_routing::resolve_for_account_with_seed(
+                            &without_free,
+                            context,
+                            account,
+                            seed.0,
+                            seed.1,
+                        ) && (alternative.adapter != resolved.adapter
+                            || alternative.model != resolved.model)
                             && matches!(&alternative.readiness, RouteReadiness::Ready { .. })
                         {
                             let alternative_model = ModelId::parse(&format!(
@@ -317,20 +393,270 @@ pub(crate) fn check_dispatch_candidate(
     .map_err(|e| e.to_string())
 }
 
-fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
+fn list_data(
+    roots: &Roots,
+    query: &RouteListRequest,
+) -> Result<provenant_routing::RouteList, EdgeError> {
     with_context(roots, None, &[], "local-preview", |context, _| {
-        Ok(match command {
-            Route::List(query) => Data::List(provenant_routing::list(
-                &provenant_routing::RouteListQuery {
-                    adapter: query.adapter.clone(),
-                },
-                context,
-            )?),
-            Route::Resolve(query) => {
-                Data::Resolved(provenant_routing::resolve(&query.to_domain()?, context)?)
-            }
-        })
+        Ok(provenant_routing::list(
+            &provenant_routing::RouteListQuery {
+                adapter: query.adapter.clone(),
+                pool: query.pool.clone(),
+            },
+            context,
+        )?)
     })
+}
+
+fn effective_members(roots: &Roots, pool: &str) -> Result<Vec<RoutePoolMember>, EdgeError> {
+    let query = RouteListRequest {
+        adapter: None,
+        pool: Some(pool.to_owned()),
+    };
+    let listed = list_data(roots, &query)?;
+    let members = listed.pools.get(pool).ok_or(RoutingError::UnknownRoute)?;
+    Ok(members
+        .iter()
+        .map(|member| RoutePoolMember {
+            model: member.model.clone(),
+            weight: member.weight,
+            effort: member.effort.clone(),
+            efforts: member.efforts.clone(),
+            free: member.free,
+        })
+        .collect())
+}
+
+fn write_pool(
+    document: &mut toml_edit::DocumentMut,
+    pool: &str,
+    members: &[RoutePoolMember],
+) -> Result<(), &'static str> {
+    let routing = root_routing_table(document)?;
+    let pools = routing
+        .entry("pools")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("routing.pools must be a table")?;
+    let mut values = toml_edit::Array::new();
+    for member in members {
+        let mut row = toml_edit::InlineTable::new();
+        row.insert("model", toml_edit::Value::from(member.model.as_str()));
+        row.insert("weight", toml_edit::Value::from(i64::from(member.weight)));
+        if let Some(effort) = &member.effort {
+            row.insert("effort", toml_edit::Value::from(effort.as_str()));
+        }
+        let mut efforts = toml_edit::Array::new();
+        for effort in &member.efforts {
+            efforts.push(effort.as_str());
+        }
+        row.insert("efforts", toml_edit::Value::Array(efforts));
+        row.insert("free", toml_edit::Value::from(member.free));
+        values.push(toml_edit::Value::InlineTable(row));
+    }
+    pools.insert(
+        pool,
+        toml_edit::Item::Value(toml_edit::Value::Array(values)),
+    );
+    Ok(())
+}
+
+fn root_routing_table(
+    document: &mut toml_edit::DocumentMut,
+) -> Result<&mut toml_edit::Table, &'static str> {
+    if !document.contains_key("routing") {
+        document["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    document
+        .get_mut("routing")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or("routing must be a TOML table")
+}
+
+fn edit_config(
+    roots: &Roots,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), &'static str>,
+) -> Result<(), EdgeError> {
+    let _ = provenant_config::edit_config_document::<crate::domains::Domains>(
+        roots,
+        &LocalFs,
+        &crate::domains::SECTIONS,
+        edit,
+    )?;
+    Ok(())
+}
+
+fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeError> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse(&request.model.0)?;
+    let entry = catalogue.model(&model).ok_or(RoutingError::InvalidModel)?;
+    if !REGISTRY
+        .iter()
+        .any(|provider| provider.adapter.id() == model.adapter())
+    {
+        return Err(RoutingError::UnknownAdapter.into());
+    }
+    let mut members = match effective_members(roots, &request.pool) {
+        Ok(members) => members,
+        Err(EdgeError::Routing(RoutingError::UnknownRoute)) => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let existing = members.iter().position(|member| member.model == model);
+    let old = existing.map(|index| &members[index]);
+    let efforts = if request.efforts.is_empty() {
+        old.map_or_else(|| entry.efforts.clone(), |member| member.efforts.clone())
+    } else {
+        request.efforts.clone()
+    };
+    let member = RoutePoolMember {
+        model: model.clone(),
+        weight: request
+            .weight
+            .or_else(|| old.map(|member| member.weight))
+            .unwrap_or(1),
+        effort: request
+            .effort
+            .clone()
+            .or_else(|| old.and_then(|member| member.effort.clone())),
+        efforts,
+        free: old.map_or_else(|| catalogue.is_free_model(&model), |member| member.free),
+    };
+    if let Some(index) = existing {
+        members[index] = member;
+    } else {
+        members.push(member);
+    }
+    edit_config(roots, |document| {
+        write_pool(document, &request.pool, &members)
+    })
+}
+
+fn remove_pool_member(roots: &Roots, request: &RouteRemove) -> Result<(), EdgeError> {
+    let model = ModelId::parse(&request.model.0)?;
+    let mut members = effective_members(roots, &request.pool)?;
+    let before = members.len();
+    members.retain(|member| member.model != model);
+    if members.len() == before {
+        return Err(RoutingError::UnknownRoute.into());
+    }
+    edit_config(roots, |document| {
+        write_pool(document, &request.pool, &members)
+    })
+}
+
+fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
+    let catalogue = Catalogue::bundled()?;
+    if !catalogue.has_pool(&request.pool) {
+        return Err(RoutingError::UnknownRoute.into());
+    }
+    edit_config(roots, |document| {
+        if let Some(routing) = document
+            .get_mut("routing")
+            .and_then(toml_edit::Item::as_table_mut)
+            && let Some(pools) = routing
+                .get_mut("pools")
+                .and_then(toml_edit::Item::as_table_mut)
+        {
+            pools.remove(&request.pool);
+            if pools.is_empty() {
+                routing.remove("pools");
+            }
+        }
+        if let Some(domains) = document
+            .get_mut("domains")
+            .and_then(toml_edit::Item::as_table_mut)
+            && let Some(routing) = domains
+                .get_mut("routing")
+                .and_then(toml_edit::Item::as_table_mut)
+            && let Some(pools) = routing
+                .get_mut("pools")
+                .and_then(toml_edit::Item::as_table_mut)
+        {
+            pools.remove(&request.pool);
+            if pools.is_empty() {
+                routing.remove("pools");
+            }
+        }
+        Ok(())
+    })
+}
+
+fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
+    if !REGISTRY
+        .iter()
+        .any(|provider| provider.adapter.id() == request.provider)
+    {
+        return Err(RoutingError::UnknownAdapter.into());
+    }
+    edit_config(roots, |document| {
+        let routing = root_routing_table(document)?;
+        let pacing = routing
+            .entry("pacing")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or("routing.pacing must be a table")?;
+        pacing.insert(
+            &request.provider,
+            toml_edit::value(match request.policy {
+                PacingChoice::Pace => "pace",
+                PacingChoice::Spend => "spend",
+                PacingChoice::Max => "max",
+            }),
+        );
+        Ok(())
+    })
+}
+
+fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
+    match command {
+        Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
+        Route::Resolve(query) => with_context(roots, None, &[], "local-preview", |context, _| {
+            Ok(Data::Resolved(provenant_routing::resolve(
+                &query.to_domain()?,
+                context,
+            )?))
+        }),
+        Route::Set(request) => {
+            set_pool(roots, request)?;
+            Ok(Data::List(list_data(
+                roots,
+                &RouteListRequest {
+                    adapter: None,
+                    pool: Some(request.pool.clone()),
+                },
+            )?))
+        }
+        Route::Remove(request) => {
+            remove_pool_member(roots, request)?;
+            Ok(Data::List(list_data(
+                roots,
+                &RouteListRequest {
+                    adapter: None,
+                    pool: Some(request.pool.clone()),
+                },
+            )?))
+        }
+        Route::Reset(request) => {
+            reset_pool(roots, request)?;
+            Ok(Data::List(list_data(
+                roots,
+                &RouteListRequest {
+                    adapter: None,
+                    pool: Some(request.pool.clone()),
+                },
+            )?))
+        }
+        Route::Pacing(request) => {
+            set_pacing(roots, request)?;
+            Ok(Data::List(list_data(
+                roots,
+                &RouteListRequest {
+                    adapter: None,
+                    pool: None,
+                },
+            )?))
+        }
+    }
 }
 pub fn run(
     command: Route,
@@ -338,9 +664,13 @@ pub fn run(
     roots: &Roots,
     publish: impl FnOnce(&CommandResult<Option<Data>>) -> io::Result<provenant_records::AbsolutePath>,
 ) -> u8 {
-    let name = match command {
+    let name = match &command {
         Route::List(_) => "route list",
         Route::Resolve(_) => "route resolve",
+        Route::Set(_) => "route set",
+        Route::Remove(_) => "route remove",
+        Route::Reset(_) => "route reset",
+        Route::Pacing(_) => "route pacing",
     };
     let result = match execute(&command, roots) {
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
@@ -370,61 +700,77 @@ pub fn run(
             result
         }
     };
-    let human =
-        if let Some(error) = &result.error {
-            format!("provenant: {}: {}\n", error.code, error.message)
-        } else {
-            match &result.data {
-                Some(Data::List(list)) => {
-                    let mut lines = vec![format!("catalogue {}", list.catalogue_revision)];
-                    lines.extend(list.models.iter().map(|m| {
-                        format!("{} efforts=[{}]", m.model.as_str(), m.efforts.join(","))
-                    }));
-                    lines.extend(
-                        list.named_routes
-                            .iter()
-                            .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
-                    );
-                    lines.extend(list.pools.iter().map(|(name, members)| {
-                        let models = members
-                            .iter()
-                            .map(|member| {
-                                member.effort.as_ref().map_or_else(
-                                    || member.model.as_str().to_owned(),
-                                    |effort| format!("{}@{effort}", member.model.as_str()),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("route pool {name} = {models}")
-                    }));
-                    lines.extend(list.availability.iter().map(|a| {
-                        format!(
-                            "{} {:?} age={}s",
-                            a.adapter,
-                            a.reason,
-                            a.age_seconds
-                                .map_or_else(|| "unknown".into(), |s| s.to_string())
-                        )
-                    }));
-                    format!("{}\n", lines.join("\n"))
-                }
-                Some(Data::Resolved(route)) => format!(
-                    "{}/{} effort={} {:?}\n",
-                    route.adapter,
-                    route.model,
-                    route.effort.as_deref().unwrap_or("unspecified"),
-                    route.readiness
-                ),
-                None => String::new(),
+    let human = if let Some(error) = &result.error {
+        format!("provenant: {}: {}\n", error.code, error.message)
+    } else {
+        match &result.data {
+            Some(Data::List(list)) => {
+                let mut lines = vec![format!("catalogue {}", list.catalogue_revision)];
+                lines.extend(
+                    list.models
+                        .iter()
+                        .map(|m| format!("{} efforts=[{}]", m.model.as_str(), m.efforts.join(","))),
+                );
+                lines.extend(
+                    list.named_routes
+                        .iter()
+                        .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
+                );
+                lines.extend(list.pools.iter().map(|(name, members)| {
+                    let models = members
+                        .iter()
+                        .map(|member| {
+                            format!(
+                                "{} weight={} factor={:.2} pacing={:?} readiness={:?}{}",
+                                member.model.as_str(),
+                                member.weight,
+                                f64::from(member.factor_basis_points) / 10_000.0,
+                                member.pacing,
+                                member.readiness,
+                                member
+                                    .effort
+                                    .as_ref()
+                                    .map_or(String::new(), |effort| format!(" effort={effort}")),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("route pool {name} = {models}")
+                }));
+                lines.extend(list.availability.iter().map(|a| {
+                    format!(
+                        "{} {:?} age={}s",
+                        a.adapter,
+                        a.reason,
+                        a.age_seconds
+                            .map_or_else(|| "unknown".into(), |s| s.to_string())
+                    )
+                }));
+                format!("{}\n", lines.join("\n"))
             }
-        };
+            Some(Data::Resolved(route)) => format!(
+                "{}/{} effort={} {:?}{}\n",
+                route.adapter,
+                route.model,
+                route.effort.as_deref().unwrap_or("unspecified"),
+                route.readiness,
+                route
+                    .pool_selection
+                    .as_ref()
+                    .map_or_else(String::new, |receipt| format!(
+                        " pool={} roll={} pick={}",
+                        receipt.pool, receipt.roll, receipt.pick
+                    ))
+            ),
+            None => String::new(),
+        }
+    };
     let mode = if globals.json {
         RenderMode::Json
     } else {
         RenderMode::Human {
             text: &human,
-            read_only: true,
+            read_only: matches!(command, Route::List(_) | Route::Resolve(_)),
         }
     };
     let outcome = crate::render_or_publish(

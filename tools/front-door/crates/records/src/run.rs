@@ -119,6 +119,8 @@ pub struct RouteRecord {
     pub account_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_selection: Option<crate::RouteSelectionReceipt>,
 }
 impl From<RouteRecord> for crate::RouteFact {
     fn from(r: RouteRecord) -> Self {

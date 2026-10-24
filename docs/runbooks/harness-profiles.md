@@ -22,6 +22,15 @@ do not alter Rust runtime behaviour. Use `config show` to see each knob's
 status and source. Install registrations with `provenant install --dry-run`
 before applying an authorised install.
 
+## Routing pools
+
+Routing changes are stored per state root and apply on the next route command.
+To change routing, run `provenant route set` or `provenant route pacing`.
+Inspect effective weights, pacing factors and readiness with
+`provenant route list --pool NAME`. Remove a member with
+`provenant route remove POOL MODEL`; restore the bundled pool with
+`provenant route reset POOL`.
+
 ## Chair account switching
 
 Claude chair switching is opt-in and has no daemon. Register each account with

@@ -22,18 +22,33 @@ routing capacity; a reviewer must meet the author's required tier.
 ```sh
 provenant route list
 provenant route list --adapter codex
-provenant route resolve --route senior
+provenant route resolve --route junior
 provenant route resolve --route utility
 provenant route resolve --model ADAPTER/ID --effort LEVEL
 ```
 
-The `utility` pool sits below junior for mechanical work, trying low-cost
-non-training Haiku at low effort and Luna before free DeepSeek and GLM. Free
-pool members require `--allow-free` (default false). Use `--route utility`
-for Rust route resolution; `--confidential` excludes training or unclassified
-members and fallbacks. There is no classifier or synonym inference. The
-bundled Rust catalogue owns the pool. Fabric submissions and the CLI share
-the run owner's route and confinement path.
+The bundled catalogue defines weighted `utility`, `junior`, `senior`,
+`principal`, `writing` and `design` pools. The resolver draws among ready
+positive-weight members by weight multiplied by provider pacing. Pacing policy
+and factor reporting are wired, but the factor is currently 1.0 pending
+quota-aware pacing. Zero-weight members are ordered fallbacks. Operation ID
+and task index seed the draw so retries repeat the same choice. The utility pool uses Claude Haiku@low at
+weight 4, Codex Luna@low at weight 2, then the two OpenCode `*-free` models at
+weight 1 each. Free members require `--allow-free` (default false); Agy Gemini
+Flash is a paid subscription model and is never marked free.
+`--confidential` excludes training or unclassified members and fallbacks. The
+Rust Fabric task schema has no per-task `confidential` field. For an explicit
+eligibility check, use `provenant route resolve --route NAME --confidential`.
+
+Named route and exact model selectors are mutually exclusive. An exact effort
+is accepted only when the catalogue records that control; unsupported effort
+is refused. An unknown exact model remains unverified until a current provider
+observation and the activation, disclosure and confinement checks permit it.
+There is no classifier or synonym inference. The bundled Rust catalogue owns
+default pool membership and weights; `[routing]` in the state root's
+`config.toml` overrides pools and provider pacing. To change routing, run
+`provenant route set` or `provenant route pacing`. A Fabric submission carries one route preference;
+the task schema rejects unknown fields.
 
 Run `provenant help route` for flags. Named routes and
 exact model selectors are mutually exclusive. Explicit fallbacks use
@@ -41,12 +56,16 @@ exact model selectors are mutually exclusive. Explicit fallbacks use
 The resolved attempt record owns route provenance. Never claim an unavailable
 or substituted provider supplied a missing review leg.
 
-## Adapter alias tiers (relative, family-agnostic)
+## Task metadata and councils
 
-The catalogue supplies named route members; an alias is not a permanent vendor
-job. Spread independent work across eligible families when review or coverage
-benefits. Ordinary workspace disclosure follows the configured authority;
-credentials, secrets and denied paths stay outside prompts and outputs.
+Rust Fabric accepts one route choice per task. Its `task_class` may select a
+configured knob preset, but it does not resolve a route name or synonym; `role`
+does not select a pool. For a council, submit one task per distinct exact model
+and have the chair compare and synthesise the results. The CLI's explicit
+fallback models are recovery candidates, not extra council seats. Choose exact
+models from the current pool listing when family diversity matters. Ordinary
+workspace disclosure follows the configured authority; credentials, secrets
+and denied paths stay outside prompts and outputs.
 
 ## Version-free family names
 
