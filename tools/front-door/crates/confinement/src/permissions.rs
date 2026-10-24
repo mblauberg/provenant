@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-#[cfg(target_os = "macos")]
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -20,7 +20,7 @@ use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termina
 use provenant_supervisor::fs::Metadata;
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, SafeFs};
+use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -28,6 +28,8 @@ use thiserror::Error;
 use crate::repo::{GitRefName, VerifiedWorktree};
 
 const MAX_PATH_BYTES: usize = 4096;
+const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
+const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
 #[cfg(any(target_os = "macos", test))]
 const MAX_PATH_GRANTS: usize = 128;
 #[cfg(any(target_os = "macos", test))]
@@ -192,6 +194,8 @@ pub enum PermissionError {
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
     HeadRead(#[source] std::io::Error),
+    #[error("lane cache sweep could not inspect the cache root")]
+    CacheSweepIo(#[source] std::io::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -370,6 +374,127 @@ pub fn worktree_cargo_cache(
     Ok(grant)
 }
 
+/// Remove only marked lane caches whose recorded worktree path is known to be
+/// absent. Missing, malformed, live, or inaccessible owners are retained.
+pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, PermissionError> {
+    use provenant_supervisor::fs::LocalFs;
+    use std::io;
+
+    validate_absolute(home)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    match std::fs::symlink_metadata(&cache_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    }
+    let root = LocalFs
+        .open_anchor(&cache_root)
+        .map_err(PermissionError::Filesystem)?;
+    let mut removed = 0;
+    for entry in root.entries().map_err(PermissionError::Filesystem)? {
+        let name = entry.map_err(PermissionError::Filesystem)?;
+        let Some(digest) = name.to_str() else {
+            continue;
+        };
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let metadata = match root.metadata_at(&name, false) {
+            Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+            Ok(_) => continue,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        if metadata.uid != provenant_supervisor::fs::effective_uid()
+            || metadata.mode & 0o7777 != 0o700
+        {
+            continue;
+        }
+        let cache = match root.open_verified_directory(&name) {
+            Ok(cache) => cache,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        let marker_name = OsStr::new(CARGO_CACHE_OWNER);
+        let marker_meta = match cache.metadata_at(marker_name, false) {
+            Ok(metadata)
+                if metadata.kind == FileKind::Regular
+                    && metadata.links == 1
+                    && metadata.uid == provenant_supervisor::fs::effective_uid() =>
+            {
+                metadata
+            }
+            Ok(_) => continue,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        if marker_meta.size > 8192 {
+            continue;
+        }
+        let mut marker = Vec::with_capacity(marker_meta.size as usize);
+        let file = match cache.open_read(marker_name) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        if file.take(8193).read_to_end(&mut marker).is_err()
+            || marker.len() > 8192
+            || !marker.starts_with(CARGO_CACHE_OWNER_PREFIX)
+        {
+            continue;
+        }
+        let owner_bytes = &marker[CARGO_CACHE_OWNER_PREFIX.len()..];
+        if owner_bytes.is_empty() {
+            continue;
+        }
+        let owner = PathBuf::from(OsString::from_vec(owner_bytes.to_vec()));
+        if !owner.is_absolute()
+            || owner
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+        {
+            continue;
+        }
+        match std::fs::symlink_metadata(&owner) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => continue,
+        }
+        remove_cache_contents(cache.as_ref())?;
+        drop(cache);
+        root.rmdir(&name).map_err(PermissionError::Filesystem)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn remove_cache_contents(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+) -> Result<(), PermissionError> {
+    for entry in directory.entries().map_err(PermissionError::Filesystem)? {
+        let name = entry.map_err(PermissionError::Filesystem)?;
+        let metadata = directory
+            .metadata_at(&name, false)
+            .map_err(PermissionError::Filesystem)?;
+        if metadata.kind == FileKind::Directory {
+            let child = directory
+                .open_verified_directory(&name)
+                .map_err(PermissionError::Filesystem)?;
+            remove_cache_contents(child.as_ref())?;
+            drop(child);
+            directory
+                .rmdir(&name)
+                .map_err(PermissionError::Filesystem)?;
+        } else {
+            directory
+                .unlink(&name)
+                .map_err(PermissionError::Filesystem)?;
+        }
+    }
+    Ok(())
+}
+
 fn verify_cache_metadata(
     metadata: &provenant_supervisor::fs::Metadata,
 ) -> Result<(), PermissionError> {
@@ -435,6 +560,19 @@ pub fn prepare_writer_directories(
                 || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
             {
                 verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+            }
+            if traversed == authority.cargo_cache.path {
+                let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+                marker.extend_from_slice(worktree.path().as_os_str().as_encoded_bytes());
+                directory
+                    .atomic_write(
+                        OsStr::new(CARGO_CACHE_OWNER),
+                        ".provenant-owner-",
+                        &marker,
+                        0o600,
+                        PublishMode::Replace,
+                    )
+                    .map_err(PermissionError::Filesystem)?;
             }
         }
     }
@@ -2935,6 +3073,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -3063,6 +3202,7 @@ mod tests {
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
         assert!(sbpl.contains("(deny file-link)"));
+        assert!(sbpl.contains("(allow sysctl-read)"));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -3113,6 +3253,17 @@ mod tests {
             "shell: {:?}; {}",
             shell_outcome.termination,
             String::from_utf8_lossy(&shell_outcome.stderr.bytes)
+        );
+        let memory_outcome = run(&executables[5], &[Path::new("-n"), Path::new("hw.memsize")]);
+        assert!(
+            successful_probe(&memory_outcome)
+                && String::from_utf8_lossy(&memory_outcome.stdout.bytes)
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|bytes| bytes > 0),
+            "hw.memsize sysctl-read failed under the compiled provider profile: {:?}; {}",
+            memory_outcome.termination,
+            String::from_utf8_lossy(&memory_outcome.stderr.bytes)
         );
         assert!(successful_probe(&run(
             &executables[0],
@@ -3389,5 +3540,41 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn lane_cache_sweep_removes_only_marked_caches_for_missing_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let orphan = cache_root.join("a".repeat(64));
+        let live = cache_root.join("b".repeat(64));
+        let unknown = cache_root.join("c".repeat(64));
+        for cache in [&orphan, &live, &unknown] {
+            std::fs::create_dir(cache)?;
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let existing_worktree = home.join("worktree");
+        std::fs::create_dir(&existing_worktree)?;
+        for (cache, owner) in [
+            (&orphan, home.join("removed-worktree")),
+            (&live, existing_worktree),
+        ] {
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
+        }
+        std::fs::create_dir(orphan.join("release"))?;
+        std::fs::write(orphan.join("release/provenant"), b"lane artifact")?;
+
+        assert_eq!(prune_orphaned_worktree_cargo_caches(home)?, 1);
+        assert!(!orphan.exists());
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        Ok(())
     }
 }

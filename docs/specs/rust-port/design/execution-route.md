@@ -11,7 +11,8 @@ current product does. A qualifying activation recording must establish that
 stderr/exit/answer combination and the finalisation input before Agy activation;
 no timeout inference is implemented from exit status alone.
 
-`routing` resolves explicit model choices and named routes; `providers` prepares
+`routing` resolves exact model choices, named routes and ordered catalogue
+pools; `providers` prepares
 CLI invocations and interprets provider evidence; `quota` schedules current
 allowance reads and supplies admission advice. Run owns the registry, atomic
 admission/operation insertion, attempts, retries and publication. Supervisor owns
@@ -30,9 +31,9 @@ Transcripts and run recordings are research inputs only, never runtime state.
 
 | Evidence | Decision |
 | --- | --- |
-| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council is a caller-supplied list of distinct exact models, expanded into ordinary tasks by run/Fabric; no council selector or filling algorithm. |
-| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`); no tier aliases. Named routes are one small TOML table. |
-| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Drop pools, weights, rotation, the selection store, `--commit-selection`, preferences and inferred class/size policy. Keep pure `route list\|resolve`. |
+| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, legacy pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council remains caller-side: submit distinct exact model tasks through run/Fabric and synthesise in the chair; no council selector or filling algorithm. |
+| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`). Add named catalogue pools `junior`, `senior`, `principal`, `writing` and `design`; they are exact route names, not adapter aliases or synonyms. Personal named routes still select one exact model. |
+| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Keep bounded ordered catalogue pools as fixed candidate lists. Drop weighted or rotating pools, the selection store, `--commit-selection`, preferences and inferred class/size routing. Keep pure `route list\|resolve`; pool choices use `--route NAME`, with no separate `--pool` or `--council` flag. |
 | Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
 | Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
 | Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
@@ -52,11 +53,13 @@ Confinement retains only a bounded safe Agy home recipe.
 
 `RouteRequest` has exactly one `Model(ADAPTER/ID)` or `NamedRoute(NAME)`,
 optional effort and `Fallback::None | Models(BoundedModels<2>)`, default none.
-IDs retain the full provider/model path after the first adapter separator.
-A route name expands to one exact model and optional effort from TOML; it does
-not choose a tier, pool, account or native seat. No inferred adapter, model
-upgrade or hidden downgrade. An explicit unknown ID remains unverified and can
-run only if activation, disclosure and confinement are independently established.
+IDs retain the full provider/model path after the first adapter separator. A
+named route in the user config expands to one exact model and optional effort;
+a bundled pool route tries its ordered members and selects the first ready
+candidate, or reports the first eligible candidate with its readiness blocker
+when none is ready. No inferred adapter, model upgrade or hidden downgrade. An
+explicit unknown ID remains unverified and can run only if activation,
+disclosure and confinement are independently established.
 
 Resolve once against immutable catalogue, provider availability and quota
 snapshots. Validate activation/executable and access, filter confidentiality and
@@ -183,8 +186,13 @@ quota cache to resolution. Catalogue-backed exact model controls need no
 invented model-bearing preflight event; unlisted models still need a current
 provider observation. Applied argv and observed answering identity remain
 separate. Preview remains read-only and does not manufacture a task grant.
-Luna and Sonnet low effort are the explicit chair-authorised smoke controls.
-No fast or priority service is enabled.
+Codex Luna `low` is the only effort control in the bundled route catalogue with
+an exact accepted invocation recording (`tools/front-door/tests/fixtures/providers/codex/recordings.json`).
+Claude recordings establish Haiku model identity but not an effort control;
+the previous Sonnet `low` smoke note has no matching invocation recording.
+Other requested efforts stay unset until their exact controls are recorded.
+Only OpenCode `*-free` models are marked free; Agy Gemini Flash is a paid
+subscription model. No fast or priority service is enabled.
 
 Claude's validated registration is durable credential authority. Each attempt
 records actor (dispatch run ID), exact `.credentials.json` or Keychain service
@@ -593,42 +601,54 @@ provider profile to confinement compilation. A CLI-dispatch integration fixture
 probes the host config/hook/extension/npm write denials and provider-state
 symlink denial through that path; this is a fake-provider confinement test,
 not a new live provider smoke row. #927 remains open for the live rows.
-A macOS CI probe also found that Apple's `/usr/bin/git` shim cannot load
-Xcode's `libxcrun.dylib` under the current runtime grants. The read-only
-integration case proves common Git file reads and write denial directly; it
-does not claim working Xcode-backed Git tools. A narrow immutable Git runtime
-recipe needs separate confinement acceptance before a live shell smoke can
-claim those tools work. No Xcode directory grant is added here.
+Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
+installation, so granting that shim alone does not make shell Git work.
+Host selection now prefers package-manager Git, then the real CLT executable
+at `/Library/Developer/CommandLineTools/usr/bin/git`, before the system
+fallback. Each Codex/Claude preparation creates `scratch/bin/git` pointing
+to the host-selected canonical executable and prepends that directory to
+`PATH`; `PROVENANT_GIT` pins MCP and hook Git independently. Existing exact
+executable/library read grants apply. No Xcode app directory is granted.
+The required macOS `lane_prepare_isolates_nested_state` case runs `git
+--version`, linked-worktree `git status --porcelain` and a real one-test
+`cargo test --lib --offline` through the compiled Claude writer profile.
+These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude has a writer-shell candidate under the recorder only. It keeps the
-host-read `CLAUDE_CODE_OAUTH_TOKEN` in memory and puts `CLAUDE_CONFIG_DIR`
-inside retained private state; no credential file is written (R7 takes
-precedence over #1414's file-backed suggestion). It uses `bypassPermissions`
-with `Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, allows system
-tool execution, and explicitly denies `/usr/bin/security` and keychain IPC
-(`SecurityServer`, `securityd`, `securityd.xpc`). User keychain files have no
-read grant. The recorder requires a matching successful Bash tool result with the exact
-probe output,
-denied keychain-tool execution and denied zero-byte keychain-file opening,
-plus the existing confinement probes, for fresh and resume launches.
-Keychain IPC denial is currently a compiled policy rule only: neither the
-denied executable nor the file-open probe reaches that IPC call. Until an
-allowed-client IPC probe is implemented and recorded, the recorder marks this
-candidate ineligible for activation (`keychain_ipc_proof: false`). The shell
-can see its selected provider token in the inherited environment; no token
-scrubbing is claimed, and other credentials must remain inaccessible.
+Claude writer Bash defaults on for fresh and resume modes through the existing
+activation matrix's `shell_enabled` knob. Setting that knob false restores
+file tools only. This explicit CLAUDE-SHELL decision supersedes the earlier
+recorder-only shell gate in #1425/#1428; access/session activation still uses
+its original live captures, which do not acquire shell-proof claims.
+The host-read `CLAUDE_CODE_OAUTH_TOKEN` stays in memory, with
+`CLAUDE_CONFIG_DIR` in retained private state. R7 takes precedence over
+#1414's credential-file suggestion. Writers use `bypassPermissions` and
+`Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, denying
+`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`.
+Keychain files have no read grant. The shell observation rows describe the
+native profile contract exercised in macOS CI, not new live CLI captures.
 
-Claude recording requires `--account pro` and always selects the host's
-default `.claude` identity; it has no alternate-account fallback.
-Before enabling the activation matrix's `shell_enabled`, narrow Claude's
-current any-host TCP 443 rule (`claude.rs`, `provider_api`) to the required
-provider endpoints, or remove `CLAUDE_CODE_OAUTH_TOKEN` from the shell's
-environment. The current combination lets shell commands send that token to
-any HTTPS host. This is an activation prerequisite alongside a chair-approved
-pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
-both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
-any shell activation; no old file-edit capture enables Bash. The pro quota
+Writer launches set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. The
+[Claude environment reference](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
+documents credential scrubbing for Bash, hooks and stdio MCP servers, with
+broader name/value filtering from version 2.1.251. The inspected host install
+is 2.1.310; the native regression does not execute that CLI or prove its scrub.
+Host acceptance must check the actual Bash child has no selected OAuth token,
+without printing it, and record the CLI version. An old CLI may ignore or
+incompletely implement this control. It is defence in depth, not OS-level
+isolation of the parent credential: macOS process-environment inspection is
+not excluded by this profile's `sysctl-read` allowance. The parent still holds
+the selected token and HTTPS egress remains any-host TCP 443. Token theft and
+exfiltration therefore remain residual risks. Other credentials stay outside
+the grants. This authorised default remains behind `shell_enabled`; no
+allowed-client keychain IPC proof or perfect shell-token isolation is claimed.
+
+The native regression checks actual security-tool execution and synthetic
+keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume
+and allowed-client IPC recordings remain a chair gate. The recorder continues
+to mark unproved IPC captures ineligible; historical captures are unchanged.
+Claude recording requires `--account pro`, selects only the host's default
+`.claude` identity and needs chair-approved throwaway-worktree authority. The pro quota
 and account gate applies before running this recorder, including retries;
 never use the anese identity. The Rust writer launcher consumes confinement's
 host-prepared directories and per-worktree cargo cache described in
@@ -854,7 +874,8 @@ confinement or custody acceptance.
    alternatives, family/availability facts and route CLI. Delete routing Rust
    emulation, old golden judges and only leaves/config/schemas/help/docs whose
    importers/callers are all retired in this area. Shared routing Python waits
-   for the matrix gate. No preferences, rotation or pool engine.
+   for the matrix gate. No preferences or selection transaction. Routing
+   resolves fixed ordered catalogue pools without weighting or rotation.
    Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
    in step 3, which removes `task_classifier`'s utility calls, gated on their last
    importer. This includes CLI removing utility verbs and the output-digest hook.
@@ -935,7 +956,8 @@ The utility execution owner must consume an ordered, explicit cross-adapter
 candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:
 Claude utility model, Codex `gpt-6-luna` at low effort, an eligible recorded
 OpenCode free model for non-confidential input, then a recorded Agy Gemini Flash
-model. Do not retry the same Claude route as a junior fallback. Each candidate
+model (a paid subscription model). Do not retry the same Claude route as a
+junior fallback. Each candidate
 needs its own disclosure, availability and confinement checks; confidential
 input must never reach a free model without an explicit non-training guarantee.
 A sandboxed 401 takes this route-around path rather than receiving wider auth

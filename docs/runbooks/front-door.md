@@ -33,7 +33,9 @@ build.
 The binary defaults to `$CARGO_TARGET_DIR/release/provenant` (or the workspace's
 `target/release/provenant` without that variable). Pass `--binary PATH` to package
 another release build, for example one built with an explicit target triple.
-Build and package from the same checkout before changing product assets.
+Run `cargo build --release --locked --bin provenant` after source changes and
+before packaging. The packager refuses a binary whose embedded source digest
+does not match the current build's source digest.
 
 ## Install
 

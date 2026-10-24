@@ -56,7 +56,7 @@ fn prepare_with(
     let assets = registry.assets.ok_or("product assets are unavailable")?;
     let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let provenant_executable = canonical(&provenant_executable)?;
-    let git = canonical(&crate::git::git_binary().ok_or("Git unavailable")?)?;
+    let git = canonical(&provenant_supervisor::git::git_executable().ok_or("Git unavailable")?)?;
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
@@ -209,6 +209,7 @@ fn prepare_with(
         &route_request(task)?,
         roots,
         selected,
+        (paths.operation_id.as_str(), paths.task_index),
         &availability,
         &access,
         &host,
@@ -397,6 +398,7 @@ fn prepare_with(
             effort: route.effort,
             account_label: entry.map(|e| e.label.clone()),
             account_key: route.account_key,
+            pool_selection: route.pool_selection.clone(),
             ..Default::default()
         };
         let stdin = match spec.stdin {
@@ -574,6 +576,7 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
         eligibility: alternative.eligibility.clone(),
         readiness: alternative.readiness.clone(),
         confidentiality: alternative.confidentiality.clone(),
+        pool_selection: base.pool_selection.clone(),
     }
 }
 

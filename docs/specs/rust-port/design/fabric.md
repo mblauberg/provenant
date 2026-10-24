@@ -23,6 +23,7 @@ protocols, Agent Skills format, MCP and Git survive as external contracts.
 Our verbs, tools, records and layouts change together. The installed product
 root stays frozen until cut-over under F0. Delete each old owner and its tests
 when its replacement and retained callers land; install once after integration.
+Fabric events stay mappable to ACP events; this design includes no adapter.
 Do not build selectors, adapters, recorded old-runtime judges or differential
 oracles. Native verification below replaces old parity gates. Leave old
 state stores and transcripts untouched; cut-over only reads the import source.

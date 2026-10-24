@@ -463,6 +463,7 @@ pub(crate) fn capture(
                 });
             }
             if updated != old {
+                updated = crate::splice::pretty_json(&updated)?;
                 plan.files.insert(
                     hook.clone(),
                     Value::File {

@@ -4,7 +4,6 @@ pub mod accounts;
 pub mod check;
 pub mod domains;
 pub mod fabric;
-pub mod git;
 pub mod quota;
 pub mod route;
 pub mod run;
@@ -226,7 +225,12 @@ pub fn command_model() -> clap::Command {
     build_model(false)
 }
 fn build_model(passive: bool) -> clap::Command {
-    fn configure(mut command: clap::Command, globals: &[Arg]) -> clap::Command {
+    fn configure(mut command: clap::Command, globals: &[Arg], parent: &str) -> clap::Command {
+        let path = if parent.is_empty() {
+            command.get_name().to_owned()
+        } else {
+            format!("{parent} {}", command.get_name())
+        };
         for global in globals {
             if command
                 .get_arguments()
@@ -270,7 +274,7 @@ fn build_model(passive: bool) -> clap::Command {
                     ])
                 });
         }
-        if command.get_name() == "remove" {
+        if path == "provenant worktree remove" {
             command = command.group(
                 ArgGroup::new("remove_scope")
                     .args(["branch", "since"])
@@ -280,7 +284,7 @@ fn build_model(passive: bool) -> clap::Command {
         let children: Vec<_> = command
             .get_subcommands()
             .cloned()
-            .map(|child| configure(child, globals))
+            .map(|child| configure(child, globals, &path))
             .collect();
         for child in children {
             let name = child.get_name();
@@ -295,7 +299,7 @@ fn build_model(passive: bool) -> clap::Command {
         .cloned()
         .map(|arg| arg.global(false))
         .collect();
-    let mut command = configure(base, &globals)
+    let mut command = configure(base, &globals, "")
         .arg(
             Arg::new("help")
                 .long("help")

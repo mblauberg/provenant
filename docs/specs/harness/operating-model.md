@@ -86,7 +86,7 @@ web research until R9 gives it a working network path.
 
    | Work | First writer | Escalates to |
    |---|---|---|
-   | Bounded, objective gate, about 3 files or fewer, no new interface, routine risk | DeepSeek V4.1 Flash free; on rate limit another free non-training model, then Luna, Haiku or Gemini Flash; Go paid last | senior |
+   | Bounded, objective gate, about 3 files or fewer, no new interface, routine risk | DeepSeek V4.1 Flash free; on rate limit another free non-training model, then Luna, Haiku or Agy Gemini 3.8 Flash on its paid subscription; OpenCode Go paid last | senior |
    | Multi-file, ambiguous, new interface, or judgement | senior | principal |
    | Cross-cutting, crucial or terminal risk, UI direction or taste | principal | user |
    | Scouting, mining, lens review, mechanical edits, test scaffolds | junior | senior |

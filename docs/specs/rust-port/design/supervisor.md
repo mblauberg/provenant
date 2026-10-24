@@ -272,6 +272,22 @@ with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
 
+Shell-capable Claude writers use the same Rust recipe as Codex: immutable
+`~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and
+`~/.rustup/settings.toml`, with `CARGO_HOME` and `CARGO_TARGET_DIR` inside the
+exact lane cache. Host Cargo configuration and credentials receive no grant.
+On macOS with CLT installed, the recipe selects
+`/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
+with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
+is executable. This lets the compiler/linker load `libxcrun.dylib` and SDK
+resources without a read or write grant to Xcode apps or CLT's parent.
+Without CLT, this recipe promises no macOS Rust build support. Shell Git is
+host-selected and linked at `scratch/bin/git`; the exact selected executable
+and non-system linked libraries remain immutable. The required macOS lane
+preparation regression checks Git and builds/runs a test crate through the
+compiled Claude writer profile using a cloned immutable toolchain and isolated
+home. It does not prove a live provider's Bash or environment scrubbing.
+
 For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every
 packed branch, and common `config`/`config.lock` cannot be narrowed to one
