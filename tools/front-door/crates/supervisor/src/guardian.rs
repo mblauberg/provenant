@@ -360,6 +360,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         history: std::collections::BTreeSet::new(),
         history_complete: true,
         last_tracking: None,
+        journal_warning_active: false,
         protected_commands: message.protected_commands,
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -415,6 +416,7 @@ struct Driver<'a> {
     history: std::collections::BTreeSet<ProcessIdentity>,
     history_complete: bool,
     last_tracking: Option<Vec<u8>>,
+    journal_warning_active: bool,
     protected_commands: Vec<String>,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
@@ -488,7 +490,15 @@ impl Driver<'_> {
         };
         self.reservation.launch_state = LaunchState::Spawned;
         self.reservation.provider = child.identity().cloned();
-        if !self.persist_reservation() {
+        if write_record(
+            &self.writer_dir,
+            "reservation.json",
+            &self.reservation,
+            PublishMode::Replace,
+        )
+        .and_then(require_durable)
+        .is_err()
+        {
             warn(
                 &mut warnings,
                 &mut omitted_warnings,
@@ -531,7 +541,7 @@ impl Driver<'_> {
         let mut killed = false;
         let mut terminal = false;
         let mut last_checkpoint = None;
-        let mut last_observation_ms = 0;
+        let mut last_observation_ms: Option<u64> = None;
         let mut last_cpu_observation_ms = 0;
         let mut last_cancel_ms = None;
         let mut signal_pending = false;
@@ -808,16 +818,10 @@ impl Driver<'_> {
                 } else {
                     census_warning_active = false;
                 }
-                if !self.persist_tracking() {
-                    push_warning(
-                        &mut warnings,
-                        &mut omitted_warnings,
-                        "descendant journal publication failed",
-                    );
-                }
+                self.persist_tracking(&mut warnings, &mut omitted_warnings);
             }
             // Process checkpoint durability is independent of census cadence.
-            if now.saturating_sub(last_observation_ms) >= 1_000 {
+            if last_observation_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000) {
                 #[derive(Serialize)]
                 struct Observed<'a> {
                     schema_version: u64,
@@ -869,7 +873,7 @@ impl Driver<'_> {
                         last_checkpoint = Some(checkpoint);
                     }
                 }
-                last_observation_ms = now;
+                last_observation_ms = Some(now);
             }
             let watches = child.watches();
             match self.reactor.wait(&watches, Duration::from_millis(5)) {

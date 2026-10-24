@@ -67,14 +67,43 @@ impl ProcessObserver for CensusGateObserver {
     }
 
     fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
-        if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR")
-            && std::fs::remove_file(PathBuf::from(root).join("s2-census-error-once")).is_ok()
-        {
-            return Err(CensusError::ProcessList(io::Error::other(
-                "transient census failure",
-            )));
+        if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
+            let counter = PathBuf::from(root).join("s2-census-errors-left");
+            if let Ok(bytes) = std::fs::read(&counter) {
+                let left: u32 = serde_json::from_slice(&bytes)
+                    .map_err(|error| CensusError::ProcessList(io::Error::other(error)))?;
+                if left > 0 {
+                    std::fs::write(&counter, (left - 1).to_string())
+                        .map_err(CensusError::ProcessList)?;
+                    return Err(CensusError::ProcessList(io::Error::other(
+                        "transient census failure",
+                    )));
+                }
+            }
         }
         let census = fixture::RecordedBootObserver.census(max_entries)?;
+        let census = if std::env::var_os("PROVENANT_STATE_DIR")
+            .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
+        {
+            // Omit the provider's row even when Linux lists its zombie, so
+            // refresh_census must obtain the explicit Absent observation.
+            Census::from_observations(
+                census
+                    .facts()
+                    .filter(|fact| fact.parent_pid != i64::from(std::process::id()))
+                    .cloned(),
+                census
+                    .unknown_pids()
+                    .iter()
+                    .map(|(pid, issue)| (*pid, *issue)),
+                [],
+                census.is_complete(),
+                false,
+                max_entries,
+            )?
+        } else {
+            census
+        };
         if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
             && std::fs::remove_file(state.join("s2-tracking-failure")).is_ok()
         {
@@ -94,6 +123,20 @@ impl ProcessObserver for CensusGateObserver {
         let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from) else {
             return Ok(census);
         };
+        if let Some(root) = state_dir.parent()
+            && root.join("tracking-writer/reservation.json").is_dir()
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(state_dir.join("s2-tracking-failures"))
+                .and_then(|mut file| file.write_all(b"x"))
+                .map_err(CensusError::ProcessList)?;
+        }
+        if std::fs::remove_file(state_dir.join("s2-census-skip-gate-once")).is_ok() {
+            return Ok(census);
+        }
         let gate = state_dir.join(S2_CENSUS_GATE_ONCE);
         match std::fs::remove_file(&gate) {
             Ok(()) => {}
@@ -410,17 +453,21 @@ fn immediate_exit_identity_survives_absent_observation(root: &Path) -> Result<()
 fn cleanup_retries_a_transient_census_failure(root: &Path) -> Result<()> {
     std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
     std::fs::write(
-        root.join("PROVENANT_STATE_DIR/s2-census-error-once"),
-        b"fail once",
+        root.join("PROVENANT_STATE_DIR/s2-census-errors-left"),
+        b"30",
     )?;
     let (_writer, handle) = start(root, "transient", "bytes", &[], CapturePlan::default())?;
     let exit = exited(&handle)?;
     assert!(!exit.unresolved_cleanup, "{exit:?}");
-    assert!(
+    assert_eq!(
         exit.warnings
             .iter()
-            .any(|warning| warning == "cleanup census unavailable; retrying")
+            .filter(|warning| *warning == "cleanup census unavailable; retrying")
+            .count(),
+        1,
+        "{exit:?}"
     );
+    assert_eq!(exit.omitted_warnings, 0);
     Ok(())
 }
 fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
@@ -440,7 +487,16 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
-    wait_for_file(&root.join("tracking-attempt/process.json"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read(root.join("PROVENANT_STATE_DIR/s2-tracking-failures"))
+        .map_or(true, |bytes| bytes.len() < 4)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "journal failures were not retried"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     std::fs::remove_dir(root.join("tracking-writer/reservation.json"))?;
     std::fs::rename(
         root.join("tracking-writer/reservation.saved"),
@@ -449,12 +505,44 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
     drop(held);
     let exit = exited(&handle)?;
     assert_eq!(exit.stop_reason, None);
-    assert!(
+    assert_eq!(
         exit.warnings
             .iter()
-            .any(|warning| warning == "descendant journal publication failed"),
+            .filter(|warning| *warning == "descendant journal publication failed")
+            .count(),
+        1,
         "{exit:?}"
     );
+    Ok(())
+}
+fn live_provider_publishes_initial_checkpoint(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-census-skip-gate-once"), b"skip first census")?;
+    std::fs::write(state.join(S2_CENSUS_GATE_ONCE), b"hold second live census")?;
+    let socket = root.join("initial.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "initial",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state.join(S2_CENSUS_PAUSED))?;
+    // Allow one loop turn even if spawning took more than the census interval.
+    // Pause the second census before the periodic checkpoint; Run must already
+    // have an initial observation of the healthy provider.
+    let checkpoint = std::fs::read(root.join("initial-attempt/process.json"));
+    std::fs::write(state.join(S2_CENSUS_RELEASE), b"resume")?;
+    drop(held);
+    let exit = exited(&handle)?;
+    let checkpoint: serde_json::Value = serde_json::from_slice(&checkpoint?)?;
+    assert!(checkpoint["provider"].is_object());
+    assert_eq!(checkpoint["phase"], "running");
+    assert_eq!(exit.stop_reason, None);
     Ok(())
 }
 fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
@@ -1324,6 +1412,10 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
 
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
+    (
+        "live_provider_publishes_initial_checkpoint",
+        live_provider_publishes_initial_checkpoint,
+    ),
     (
         "descendant_journal_failure_is_reported",
         descendant_journal_failure_is_reported,

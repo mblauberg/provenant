@@ -103,11 +103,17 @@ continues cleanup after a reaped leader and retries unavailable censuses until
 the existing cleanup deadline, recording a warning rather than giving up once.
 
 Pipe pumping polls at 5 ms. CPU, cancellation and safety census observations
-run at 100 ms; durable process checkpoints run at 1 s. Unchanged
+run at 100 ms; process checkpoints publish on the first loop turn and then
+at 1 s intervals. Unchanged
 checkpoint/reservation bytes skip durable replacement. Full census still runs
 on the pipe thread: moving or slowing safety tracking needs a validated design
 and remains deferred. Descendant-journal write
-failures warn and mark census evidence incomplete. Cleanup and publication feed
+failures warn once per failure episode and mark the current census evidence
+incomplete. A subsequent successful census replaces that flag with its own
+completeness; the bounded exit warnings retain the journal-failure history.
+Cleanup census failures likewise warn once per episode. Routine identity and
+tracking updates use atomic replacement; the final reservation commit alone uses
+the exit publisher's commit hook. Cleanup and publication feed
 actual outcomes into the pure machine, including budget-exhausted unresolved
 cleanup; unresolved facts publish an exit but never release the writer fence.
 Durable reservation/exit retry loops intentionally retain custody without a time

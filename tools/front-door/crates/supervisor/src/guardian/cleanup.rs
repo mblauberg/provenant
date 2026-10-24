@@ -2,23 +2,30 @@
 use super::*;
 
 impl Driver<'_> {
-    pub(super) fn persist_tracking(&mut self) -> bool {
+    pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
         self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;
-        let Ok(bytes) = serde_json::to_vec(&self.reservation) else {
+        let result = serde_json::to_vec(&self.reservation)
+            .map_err(|_| CustodyError::InvalidRecord)
+            .and_then(|bytes| {
+                if self.last_tracking.as_ref() != Some(&bytes) {
+                    require_durable(write_record(
+                        &self.writer_dir,
+                        "reservation.json",
+                        &self.reservation,
+                        PublishMode::Replace,
+                    )?)?;
+                    self.last_tracking = Some(bytes);
+                }
+                Ok(())
+            });
+        if result.is_err() {
             self.reservation.census_incomplete = true;
-            return false;
-        };
-        if self.last_tracking.as_ref() == Some(&bytes) {
-            return true;
+            if !self.journal_warning_active {
+                push_warning(warnings, omitted, "descendant journal publication failed");
+            }
         }
-        if self.persist_reservation() {
-            self.last_tracking = Some(bytes);
-            true
-        } else {
-            self.reservation.census_incomplete = true;
-            false
-        }
+        self.journal_warning_active = result.is_err();
     }
     pub(super) fn persist_reservation(&mut self) -> bool {
         let Ok(bytes) = serde_json::to_vec(&self.reservation) else {
@@ -256,19 +263,24 @@ impl Driver<'_> {
                     .saturating_add(100),
             );
         let began = Instant::now();
+        let mut census_warning_active = false;
         #[cfg(target_os = "macos")]
         {
             let _ = child.cleanup(true)?;
         }
         loop {
             let Some(census) = self.refresh_census(child) else {
-                push_warning(warnings, omitted, "cleanup census unavailable; retrying");
+                if !census_warning_active {
+                    push_warning(warnings, omitted, "cleanup census unavailable; retrying");
+                    census_warning_active = true;
+                }
                 if Instant::now() >= deadline {
                     return Ok(false);
                 }
                 let _ = self.reactor.wait(&[], Duration::from_millis(20));
                 continue;
             };
+            census_warning_active = false;
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
@@ -311,9 +323,7 @@ impl Driver<'_> {
                     self.settlement_evidence = SettlementEvidence::LinuxKernelChildren;
                 }
                 let _ = child.cleanup(true)?;
-                if !self.persist_tracking() {
-                    push_warning(warnings, omitted, "descendant journal publication failed");
-                }
+                self.persist_tracking(warnings, omitted);
                 return Ok(true);
             }
             // Root exit does not authorise an arbitrary PID. Only the pinned
@@ -346,9 +356,7 @@ impl Driver<'_> {
                     Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
                 }
             }
-            if !self.persist_tracking() {
-                push_warning(warnings, omitted, "descendant journal publication failed");
-            }
+            self.persist_tracking(warnings, omitted);
             if Instant::now() >= deadline {
                 return Ok(false);
             }
