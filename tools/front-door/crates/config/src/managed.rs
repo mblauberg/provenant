@@ -248,14 +248,14 @@ impl Targets {
         {
             return Err(InstallError::HarnessSelection);
         }
+        // Hooks apply to the selected harnesses that have specs; refuse only
+        // when none does, so one install can cover every client.
         if self.hooks
-            && (self.hook_specs.is_empty()
-                || self.harnesses.iter().any(|target| {
-                    !self
-                        .hook_specs
-                        .iter()
-                        .any(|spec| spec.harness == Some(target.harness))
-                }))
+            && !self.harnesses.iter().any(|target| {
+                self.hook_specs
+                    .iter()
+                    .any(|spec| spec.harness == Some(target.harness))
+            })
         {
             return Err(InstallError::HooksUnavailable);
         }

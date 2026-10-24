@@ -27,7 +27,9 @@ fn limits(harness: Harness) -> Limits {
 
 pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
     match h {
-        Harness::Claude => home.join(".claude.json"),
+        // Claude Code keeps `.claude.json` beside `CLAUDE_CONFIG_DIR` when set.
+        Harness::Claude if base == home.join(".claude") => home.join(".claude.json"),
+        Harness::Claude => base.join(".claude.json"),
         Harness::Codex => base.join("config.toml"),
         Harness::Cursor => base.join("mcp.json"),
         Harness::Agy => base.join("config/mcp_config.json"),

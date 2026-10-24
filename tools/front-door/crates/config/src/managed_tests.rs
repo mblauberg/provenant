@@ -2167,6 +2167,20 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
 }
 
 #[test]
+fn claude_config_dir_moves_its_mcp_registration() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    assert_eq!(f.targets.harnesses[0].mcp_file, f.home.join(".claude.json"));
+    let alternate = f.home.join(".claude-alt");
+    f.targets.apply_environment(Some(&alternate), None).unwrap();
+    assert_eq!(
+        f.targets.harnesses[0].mcp_file,
+        alternate.join(".claude.json")
+    );
+    assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
+}
+
+#[test]
 fn only_manifest_matched_utility_hooks_refuse_and_check_reports_findings() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);

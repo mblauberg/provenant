@@ -53,16 +53,19 @@ PROVENANT="$RELEASE/bin/provenant"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
 ```
 
-Review every planned change and unresolved entry before applying it; a
-failed preview prevents writes. Hooks default off. `--hooks on` requires a
-fixture-backed `HookSpec` for each handler. An exact legacy entry marked `replace` is replaced
-only when that handler is available. Otherwise the installer preserves it
-byte-for-byte and reports it as unresolved. `check install` reports unresolved
-legacy entries as findings with exit 1 and compares the installed binary,
-assets, receipt and owned selectors without repair. To remove an installation,
-run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes
-only unchanged owned entries and keeps the state and release assets. Reapply
-`install` after resolving a partial-write error.
+Review every planned change and unresolved entry before applying it; a failed
+preview prevents writes. Hooks default off. `--hooks on` registers hooks for
+each selected harness that has a fixture-backed `HookSpec` (Claude today) and
+refuses only when none does. To install into a further Claude config directory,
+rerun `install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry
+then goes to that directory's `.claude.json`. An exact legacy entry marked
+`replace` is replaced only when that handler is available. Otherwise the
+installer preserves it byte-for-byte and reports it as unresolved. `check
+install` reports unresolved legacy entries as findings with exit 1 and compares
+the installed binary, assets, receipt and owned selectors without repair. To
+remove an installation, run `provenant --state-dir "$STATE" uninstall --harness
+claude`; it removes only unchanged owned entries and keeps the state and
+release assets. Reapply `install` after resolving a partial-write error.
 
 `build.rs` stamps the source and asset digests; the packaging example produces
 typed `release.json` with the binary and product assets. The CLI grammar is frozen in
