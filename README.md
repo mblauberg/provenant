@@ -33,7 +33,8 @@ reviewable path from a writer lane back to a remote branch.
   recorded. Agy, Cursor, and OpenCode adapters are catalogued but stay
   execution-disabled until a live confinement capture proves each mode.
 - **Fabric messaging and dispatch.** The CLI and Fabric MCP surface provide
-  messages, tasks, agent identity, host links, and local or peer-host dispatch.
+  messages, tasks, agent identity, host links, and local dispatch. Peer-host
+  dispatch (`dispatch --host`) is not available in this build.
 - **Weighted, paced routes.** Named pools select among eligible models by
   configured weight and provider pacing. Inspect routes with
   `provenant route list`; edit pools with `provenant route set` and provider
@@ -186,7 +187,7 @@ optional menu bar app.
 | [Release and install runbook](docs/runbooks/front-door.md) | Build, package, install, and recover a release |
 | [Model routing](docs/runbooks/model-routing.md) | Pools, weights, provider pacing, and quota eligibility |
 | [Fabric MCP registration](docs/runbooks/fabric-mcp-registration.md) | Register Fabric with supported clients |
-| [Fabric hosts](docs/runbooks/fabric-hosts.md) | Configure peer hosts and remote dispatch |
+| [Fabric hosts](docs/runbooks/fabric-hosts.md) | Configure peer hosts and the peer protocol |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the optional macOS app |
 | [Benchmark runbook](docs/runbooks/bench.md) | Mine, verify, and replay benchmark tasks |
 

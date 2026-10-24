@@ -248,7 +248,7 @@ pub struct Dispatch {
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]
     pub knobs: Vec<String>,
-    /// Run on this remote host alias
+    /// Reserved for peer placement; refused in this build
     #[arg(long)]
     pub host: Option<String>,
     /// Wait up to this many seconds for the lane to settle

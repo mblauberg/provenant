@@ -14,16 +14,16 @@ provenant help
 provenant fabric host list
 provenant hosts doctor
 provenant fabric peer
-provenant dispatch --host workshop --help
 ```
 
 `fabric host list` reads local and configured peer health. `hosts doctor`
 probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. Remote doctor uses
-`~/.local/bin/provenant` on the peer. Remote dispatch runs `provenant fabric
-peer` through the peer's non-interactive `PATH`. The hidden `fabric peer`
-command is the fixed SSH protocol entrypoint. Remote dispatch uses top-level
-`dispatch --host`. The Rust CLI grammar lives in
+`~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
+through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
+the fixed SSH protocol entrypoint. Remote dispatch is not available in this
+build: `dispatch --host` refuses with `UNSUPPORTED`. The Rust CLI grammar lives
+in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -94,7 +94,13 @@ the retired `{protocol_version, verb, params}` envelope.
 ## Dispatch and recovery
 
 The CLI grammar uses `provenant dispatch` for one prompt or a batch
-manifest; `--host` names explicit placement. `provenant help dispatch`
+manifest. The `--host` flag is reserved for explicit peer placement, but this
+build refuses it and the Fabric MCP `fabric_dispatch` tool has no host field,
+so every lane runs on the calling host. The peer protocol can already forward
+status, wait, output and cancel for an attempt owned by another host. Remote
+submission, a local record of remote runs and peer writer worktrees are still
+missing ([#1457](https://github.com/mblauberg/provenant/issues/1457)).
+`provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and
 `reconcile`. Targets follow the
