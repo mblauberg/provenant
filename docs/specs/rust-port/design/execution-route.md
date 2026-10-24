@@ -33,7 +33,7 @@ Transcripts and run recordings are research inputs only, never runtime state.
 | --- | --- |
 | 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, legacy pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council remains caller-side: submit distinct exact model tasks through run/Fabric and synthesise in the chair; no council selector or filling algorithm. |
 | `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`). Add named catalogue pools `junior`, `senior`, `principal`, `writing` and `design`; they are exact route names, not adapter aliases or synonyms. Personal named routes still select one exact model. |
-| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Keep bounded ordered catalogue pools as fixed candidate lists. Drop weighted or rotating pools, the selection store, `--commit-selection`, preferences and inferred class/size routing. Keep pure `route list\|resolve`; pool choices use `--route NAME`, with no separate `--pool` or `--council` flag. |
+| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Keep catalogue pools with weighted, paced selection seeded by the operation (user decision, 25 October 2026; see Resolution). Drop rotating pools, the selection store, `--commit-selection`, preferences and inferred class/size routing. Keep pure `route list\|resolve`; pool choices use `--route NAME`, with no separate `--pool` or `--council` flag. |
 | Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
 | Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
 | Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
@@ -55,9 +55,15 @@ Confinement retains only a bounded safe Agy home recipe.
 optional effort and `Fallback::None | Models(BoundedModels<2>)`, default none.
 IDs retain the full provider/model path after the first adapter separator. A
 named route in the user config expands to one exact model and optional effort;
-a bundled pool route tries its ordered members and selects the first ready
-candidate, or reports the first eligible candidate with its readiness blocker
-when none is ready. No inferred adapter, model upgrade or hidden downgrade. An
+a pool route draws among ready members that allow the effective effort, by
+weight times the provider's pacing factor (`pace` clamps quota headroom over
+remaining window to 0.25..2.0; `spend` and `max` stay at 1.0), with the RNG
+seeded from the operation ID and task index so retries pick the same model.
+Weight-0 members are fallback only, in list order. The receipt records each
+candidate's weight, factor, readiness, the roll and the pick. `config.toml`
+`[routing]` replaces bundled pools; `provenant route set|remove|reset|pacing`
+edit it. When none is ready it reports the first eligible candidate with its
+readiness blocker. No inferred adapter, model upgrade or hidden downgrade. An
 explicit unknown ID remains unverified and can run only if activation,
 disclosure and confinement are independently established.
 
@@ -875,7 +881,7 @@ confinement or custody acceptance.
    emulation, old golden judges and only leaves/config/schemas/help/docs whose
    importers/callers are all retired in this area. Shared routing Python waits
    for the matrix gate. No preferences or selection transaction. Routing
-   resolves fixed ordered catalogue pools without weighting or rotation.
+   resolves catalogue pools by seeded weighted draw, without rotation.
    Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
    in step 3, which removes `task_classifier`'s utility calls, gated on their last
    importer. This includes CLI removing utility verbs and the output-digest hook.

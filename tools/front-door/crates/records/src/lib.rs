@@ -43,7 +43,7 @@ mod resolved_route;
 pub use resolved_route::{
     ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
     RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
-    RouteSelectionReceipt, TooManyAlternatives,
+    RouteSelectionReceipt, RouteSelectionRedraw, TooManyAlternatives,
 };
 
 pub mod run;
