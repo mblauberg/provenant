@@ -593,42 +593,54 @@ provider profile to confinement compilation. A CLI-dispatch integration fixture
 probes the host config/hook/extension/npm write denials and provider-state
 symlink denial through that path; this is a fake-provider confinement test,
 not a new live provider smoke row. #927 remains open for the live rows.
-A macOS CI probe also found that Apple's `/usr/bin/git` shim cannot load
-Xcode's `libxcrun.dylib` under the current runtime grants. The read-only
-integration case proves common Git file reads and write denial directly; it
-does not claim working Xcode-backed Git tools. A narrow immutable Git runtime
-recipe needs separate confinement acceptance before a live shell smoke can
-claim those tools work. No Xcode directory grant is added here.
+Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
+installation, so granting that shim alone does not make shell Git work.
+Host selection now prefers package-manager Git, then the real CLT executable
+at `/Library/Developer/CommandLineTools/usr/bin/git`, before the system
+fallback. Each Codex/Claude preparation creates `scratch/bin/git` pointing
+to the host-selected canonical executable and prepends that directory to
+`PATH`; `PROVENANT_GIT` pins MCP and hook Git independently. Existing exact
+executable/library read grants apply. No Xcode app directory is granted.
+The required macOS `lane_prepare_isolates_nested_state` case runs `git
+--version`, linked-worktree `git status --porcelain` and a real one-test
+`cargo test --lib --offline` through the compiled Claude writer profile.
+These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude has a writer-shell candidate under the recorder only. It keeps the
-host-read `CLAUDE_CODE_OAUTH_TOKEN` in memory and puts `CLAUDE_CONFIG_DIR`
-inside retained private state; no credential file is written (R7 takes
-precedence over #1414's file-backed suggestion). It uses `bypassPermissions`
-with `Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, allows system
-tool execution, and explicitly denies `/usr/bin/security` and keychain IPC
-(`SecurityServer`, `securityd`, `securityd.xpc`). User keychain files have no
-read grant. The recorder requires a matching successful Bash tool result with the exact
-probe output,
-denied keychain-tool execution and denied zero-byte keychain-file opening,
-plus the existing confinement probes, for fresh and resume launches.
-Keychain IPC denial is currently a compiled policy rule only: neither the
-denied executable nor the file-open probe reaches that IPC call. Until an
-allowed-client IPC probe is implemented and recorded, the recorder marks this
-candidate ineligible for activation (`keychain_ipc_proof: false`). The shell
-can see its selected provider token in the inherited environment; no token
-scrubbing is claimed, and other credentials must remain inaccessible.
+Claude writer Bash defaults on for fresh and resume modes through the existing
+activation matrix's `shell_enabled` knob. Setting that knob false restores
+file tools only. This explicit CLAUDE-SHELL decision supersedes the earlier
+recorder-only shell gate in #1425/#1428; access/session activation still uses
+its original live captures, which do not acquire shell-proof claims.
+The host-read `CLAUDE_CODE_OAUTH_TOKEN` stays in memory, with
+`CLAUDE_CONFIG_DIR` in retained private state. R7 takes precedence over
+#1414's credential-file suggestion. Writers use `bypassPermissions` and
+`Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, denying
+`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`.
+Keychain files have no read grant. The shell observation rows describe the
+native profile contract exercised in macOS CI, not new live CLI captures.
 
-Claude recording requires `--account pro` and always selects the host's
-default `.claude` identity; it has no alternate-account fallback.
-Before enabling the activation matrix's `shell_enabled`, narrow Claude's
-current any-host TCP 443 rule (`claude.rs`, `provider_api`) to the required
-provider endpoints, or remove `CLAUDE_CODE_OAUTH_TOKEN` from the shell's
-environment. The current combination lets shell commands send that token to
-any HTTPS host. This is an activation prerequisite alongside a chair-approved
-pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
-both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
-any shell activation; no old file-edit capture enables Bash. The pro quota
+Writer launches set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. The
+[Claude environment reference](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
+documents credential scrubbing for Bash, hooks and stdio MCP servers, with
+broader name/value filtering from version 2.1.251. The inspected host install
+is 2.1.310; the native regression does not execute that CLI or prove its scrub.
+Host acceptance must check the actual Bash child has no selected OAuth token,
+without printing it, and record the CLI version. An old CLI may ignore or
+incompletely implement this control. It is defence in depth, not OS-level
+isolation of the parent credential: macOS process-environment inspection is
+not excluded by this profile's `sysctl-read` allowance. The parent still holds
+the selected token and HTTPS egress remains any-host TCP 443. Token theft and
+exfiltration therefore remain residual risks. Other credentials stay outside
+the grants. This authorised default remains behind `shell_enabled`; no
+allowed-client keychain IPC proof or perfect shell-token isolation is claimed.
+
+The native regression checks actual security-tool execution and synthetic
+keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume
+and allowed-client IPC recordings remain a chair gate. The recorder continues
+to mark unproved IPC captures ineligible; historical captures are unchanged.
+Claude recording requires `--account pro`, selects only the host's default
+`.claude` identity and needs chair-approved throwaway-worktree authority. The pro quota
 and account gate applies before running this recorder, including retries;
 never use the anese identity. The Rust writer launcher consumes confinement's
 host-prepared directories and per-worktree cargo cache described in
