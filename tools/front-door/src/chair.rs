@@ -241,7 +241,7 @@ fn switch(
     let allowed = knob("chair.switch_accounts")
         .and_then(Value::as_array)
         .ok_or("invalid switch allow-list")?;
-    let accounts = crate::quota_live::registered_claude()?;
+    let accounts = crate::quota_live::registered_claude(&context.roots)?;
     let current = current(&accounts, &context.home)?;
     let snapshot = cached(&context.roots, current.key());
     let mut rotating_target = false;
@@ -382,7 +382,7 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
         {
             return Err("handoff target is no longer allowed".into());
         }
-        let accounts = crate::quota_live::registered_claude()?;
+        let accounts = crate::quota_live::registered_claude(&context.roots)?;
         let target = accounts
             .iter()
             .find(|a| a.key() == label)
@@ -501,7 +501,7 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
             if context.store().pending(now())?.is_none() {
                 return Ok(None);
             }
-            let accounts = crate::quota_live::registered_claude()?;
+            let accounts = crate::quota_live::registered_claude(&context.roots)?;
             let target = current(&accounts, &context.home)?;
             check_time(Some(deadline))?;
             let Some(handoff) = context

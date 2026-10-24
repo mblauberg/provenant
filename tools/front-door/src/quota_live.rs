@@ -2,6 +2,7 @@
 mod claude;
 mod opencode;
 
+use provenant_core::Roots;
 use provenant_providers::identity::{base64url, codex_account, cursor_account};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
@@ -101,112 +102,41 @@ fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
     }
 }
 
-fn expand(home: &Path, path: &str) -> PathBuf {
-    if path == "~" {
-        home.to_path_buf()
-    } else if let Some(path) = path.strip_prefix("~/") {
-        home.join(path)
-    } else {
-        PathBuf::from(path)
-    }
-}
-fn default_dir(home: &Path, adapter: &str) -> PathBuf {
-    match adapter {
-        "claude" => home.join(".claude"),
-        "codex" => std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex")),
-        "cursor" if cfg!(target_os = "macos") => {
-            home.join("Library/Application Support/Cursor/User/globalStorage")
-        }
-        "cursor" => home.join(".config/Cursor/User/globalStorage"),
-        "agy" => home.join(".gemini/antigravity-cli"),
-        _ => home.join(".local/share/opencode"),
-    }
-}
 impl LiveQuota {
-    pub(crate) fn new(state: &Path) -> Result<Self, QuotaError> {
+    pub(crate) fn new(roots: &Roots) -> Result<Self, QuotaError> {
         let home = PathBuf::from(std::env::var_os("HOME").ok_or(QuotaError::Invalid("home"))?);
-        let config_root = std::env::var_os("AGENT_FABRIC_INSTANCE_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".agents"));
-        let config_file = config_root.join("config/telemetry.json");
-        let config = match value(&config_file) {
-            Ok(v) if v.is_object() => v,
-            Err(_) if !config_file.exists() => json!({}),
-            _ => return Err(QuotaError::Invalid("accounts configuration")),
-        };
+        let config = provenant_config::read_with_domains(
+            roots,
+            &provenant_supervisor::fs::LocalFs,
+            &provenant_cli::domains::SECTIONS,
+        )
+        .map_err(|_| QuotaError::Invalid("accounts configuration"))?;
         let mut accounts = Vec::new();
-        if config.pointer("/quota/enabled").and_then(Value::as_bool) != Some(false) {
-            let configured = config.get("accounts").and_then(Value::as_object);
-            if config.get("accounts").is_some() && configured.is_none() {
-                return Err(QuotaError::Invalid("accounts configuration"));
+        for registration in config.domains.accounts.entries.values() {
+            let dir = &registration.directory;
+            if !dir.is_absolute()
+                || dir
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(QuotaError::Invalid("absolute identity directory"));
             }
-            for adapter in ["claude", "codex", "agy", "cursor", "opencode"] {
-                if let Some(entries) = configured.and_then(|a| a.get(adapter)) {
-                    let entries = entries
-                        .as_object()
-                        .ok_or(QuotaError::Invalid("account entries"))?;
-                    for (label, options) in entries {
-                        if !options.is_object() {
-                            return Err(QuotaError::Invalid("account options"));
-                        }
-                        if options.get("enabled").and_then(Value::as_bool) == Some(false) {
-                            continue;
-                        }
-                        let dir = options
-                            .get("identity_dir")
-                            .and_then(Value::as_str)
-                            .map(|s| expand(&home, s))
-                            .unwrap_or_else(|| default_dir(&home, adapter));
-                        if !dir.is_absolute()
-                            || dir
-                                .components()
-                                .any(|c| matches!(c, std::path::Component::ParentDir))
-                        {
-                            return Err(QuotaError::Invalid("absolute identity directory"));
-                        }
-                        let detected = matches!(adapter, "codex" | "cursor")
-                            .then(|| signin_key(adapter, &dir).unwrap_or_else(|| "unknown".into()));
-                        let key = detected.as_deref().unwrap_or(label);
-                        let scope = AccountScope {
-                            adapter: adapter.into(),
-                            account_key: key.into(),
-                            label: if key == "unknown" || label == "default" {
-                                key.into()
-                            } else {
-                                label.clone()
-                            },
-                        };
-                        scope.validate()?;
-                        accounts.push(Account {
-                            scope,
-                            identity_dir: dir,
-                            options: options.clone(),
-                        });
-                    }
-                } else {
-                    let dir = default_dir(&home, adapter);
-                    if dir.exists() {
-                        let label = if adapter == "agy" {
-                            agy_identity(&dir).unwrap_or_else(|| "default".into())
-                        } else if matches!(adapter, "codex" | "cursor") {
-                            signin_key(adapter, &dir).unwrap_or_else(|| "unknown".into())
-                        } else {
-                            "default".into()
-                        };
-                        accounts.push(Account {
-                            scope: AccountScope {
-                                adapter: adapter.into(),
-                                account_key: label.clone(),
-                                label,
-                            },
-                            identity_dir: dir,
-                            options: json!({}),
-                        });
-                    }
-                }
-            }
+            let scope = AccountScope {
+                adapter: registration.adapter.clone(),
+                account_key: registration.key.clone(),
+                label: registration.label.clone(),
+            };
+            scope.validate()?;
+            accounts.push(Account {
+                scope,
+                identity_dir: dir.clone(),
+                options: json!({
+                    "plan": &registration.plan,
+                    "priority": registration.priority,
+                    "billing_anchor": &registration.billing_anchor,
+                    "limits": &registration.limits,
+                }),
+            });
         }
         let mut seen = std::collections::BTreeSet::new();
         accounts.retain(|a| seen.insert((a.scope.adapter.clone(), a.scope.account_key.clone())));
@@ -215,12 +145,9 @@ impl LiveQuota {
         }
         Ok(Self {
             home,
-            state: state.into(),
+            state: roots.state.as_path().into(),
             accounts,
-            refresh_expired: config
-                .pointer("/quota/claude_refresh_expired")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
+            refresh_expired: true,
             claude_default: RefCell::new(None),
         })
     }
@@ -381,6 +308,11 @@ impl QuotaEffects for LiveQuota {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             priority: account.options.get("priority").and_then(Value::as_u64),
+            billing_anchor: account
+                .options
+                .get("billing_anchor")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             ..QuotaDetails::default()
         };
         let payload = match account.scope.adapter.as_str() {
@@ -541,66 +473,31 @@ fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
     let email = tail.split_whitespace().next().filter(|s| s.contains('@'))?;
     Some(format!("google-{}", fingerprint(email, 12)))
 }
-fn agy_identity(dir: &Path) -> Option<String> {
-    let mut logs: Vec<_> = fs::read_dir(dir.join("log"))
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("cli-") && n.ends_with(".log"))
-        })
-        .collect();
-    logs.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
-    logs.iter().take(20).find_map(|e| {
-        use std::io::{Seek, SeekFrom};
-        let mut f = fs::File::open(e.path()).ok()?;
-        let len = f.metadata().ok()?.len();
-        f.seek(SeekFrom::Start(len.saturating_sub(LIMIT as u64)))
-            .ok()?;
-        let mut bytes = Vec::new();
-        f.take(LIMIT as u64).read_to_end(&mut bytes).ok()?;
-        agy_fingerprint(&bytes)
-    })
-}
-
 /// Explicit Claude registrations only. No auth stores, identity probes or
 /// implicit default directory discovery are involved in chair switching.
-pub(crate) fn registered_claude()
--> Result<Vec<provenant_providers::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
+pub(crate) fn registered_claude(
+    roots: &Roots,
+) -> Result<Vec<provenant_providers::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
     use provenant_providers::identity::{Accounts, RegisteredAccount};
-    let home = crate::roots::home()?;
-    let root = std::env::var_os("AGENT_FABRIC_INSTANCE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".agents"));
-    let file = root.join("config/telemetry.json");
-    if !file.exists() {
-        return Ok(vec![]);
-    }
-    let config = value(&file).map_err(|_| "invalid account registrations")?;
-    let Some(entries) = config.pointer("/accounts/claude") else {
-        return Ok(vec![]);
-    };
-    let entries = entries
-        .as_object()
-        .ok_or("invalid Claude account registrations")?;
+    let config = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &provenant_cli::domains::SECTIONS,
+    )?;
     let mut accounts = Vec::new();
-    for (label, options) in entries {
-        if options.get("enabled").and_then(Value::as_bool) == Some(false) {
+    for registration in config.domains.accounts.entries.values() {
+        if registration.adapter != "claude" {
             continue;
         }
-        let Some(path) = options.get("identity_dir").and_then(Value::as_str) else {
-            continue;
-        };
-        let path = expand(&home, path);
+        let path = &registration.directory;
         if !path.is_absolute() {
             return Err("registered Claude directory must be absolute".into());
         }
-        let path = fs::canonicalize(&path)?;
+        let path = fs::canonicalize(path)?;
         if !path.is_dir() {
             return Err("registered Claude directory is unavailable".into());
         }
-        accounts.push(RegisteredAccount::new("claude", label, path)?);
+        accounts.push(RegisteredAccount::new("claude", &registration.key, path)?);
     }
     Accounts::new(accounts.clone())?;
     Ok(accounts)

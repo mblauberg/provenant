@@ -415,7 +415,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 roots::roots(globals, &assets, &project)
             })();
             match resolved {
-                Ok(roots) => match quota_live::LiveQuota::new(roots.state.as_path()) {
+                Ok(roots) => match quota_live::LiveQuota::new(&roots) {
                     Ok(effects) => provenant_cli::quota::run(
                         cmd,
                         globals,

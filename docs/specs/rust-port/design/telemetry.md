@@ -253,10 +253,10 @@ model names.
 ### Live quota and Claude identity
 
 The binary edge interprets three non-secret probe plans: account-scoped HTTP,
-bounded commands and a read-only local ledger. `~/.agents/config/telemetry.json`
-(or `$AGENT_FABRIC_INSTANCE_ROOT/config/telemetry.json`) remains the account
-configuration because Rust config has no account schema yet. Configured plans
-and priorities override provider defaults. Codex uses app-server rate limits,
+bounded commands and a read-only local ledger. Registered accounts and their
+quota options come from `[domains.accounts.entries.<adapter>-<label>]` in the
+selected state's `config.toml`; quota observation and chair switching do not
+read the legacy `telemetry.json`. Configured plans and priorities override provider defaults. Codex uses app-server rate limits,
 with a read-only OAuth usage request when that service is unavailable; both
 include credit balances and banked resets. Cursor reports its billing cycle;
 agy reports independent Gemini and Claude pools. OpenCode Go sums the local

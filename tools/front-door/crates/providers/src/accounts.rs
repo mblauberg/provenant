@@ -23,6 +23,24 @@ pub struct Registration {
     pub label: String,
     pub key: String,
     pub directory: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_anchor: Option<String>,
 }
 impl Registration {
     pub fn registered(&self) -> Result<RegisteredAccount, ProviderError> {
@@ -34,7 +52,7 @@ impl DomainConfig for Settings {
         let bad =
             self.entries.len() > 128
                 || self.entries.values().enumerate().any(|(i, e)| {
-                    e.registered().is_err()
+                    !valid_entry(e)
                         || !label(&e.label)
                         || self.entries.values().take(i).any(|a| {
                             a.adapter == e.adapter && (a.label == e.label || a.key == e.key)
@@ -49,6 +67,25 @@ impl DomainConfig for Settings {
             Vec::new()
         }
     }
+}
+fn valid_entry(entry: &Registration) -> bool {
+    matches!(
+        entry.adapter.as_str(),
+        "claude" | "codex" | "agy" | "cursor" | "opencode"
+    ) && entry.key != "unknown"
+        && !entry.key.is_empty()
+        && entry.key.len() <= 64
+        && entry
+            .key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && entry.directory.is_absolute()
+        && !entry.directory.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
 }
 pub fn label(s: &str) -> bool {
     !s.is_empty()

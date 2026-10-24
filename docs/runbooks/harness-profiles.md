@@ -36,11 +36,12 @@ Inspect effective weights, pacing factors and readiness with
 ## Chair account switching
 
 Claude chair switching is opt-in and has no daemon. Register each account with
-an explicit `identity_dir` in `accounts.claude` in
-`$AGENT_FABRIC_INSTANCE_ROOT/config/telemetry.json` (default
-`~/.agents/config/telemetry.json`). Each directory must already exist and be
-signed in separately. Labels and directories must be distinct, with no nested
-account directories. The current `CLAUDE_CONFIG_DIR` must match a registration;
+`provenant accounts register <label> --adapter claude --directory <dir>`.
+Registrations live in the selected state directory's `config.toml`, alongside
+optional quota metadata such as `--plan`, `--priority` and `--billing-anchor`.
+Each directory must already exist and be signed in separately. Labels and
+directories must be distinct, with no nested account directories. The current
+`CLAUDE_CONFIG_DIR` must match a registration;
 when unset, `~/.claude` may be registered as the source only. Targets must use
 fixed identities such as `~/.claude-<label>`; the rotating `~/.claude` directory
 is refused as a target. Credentials and settings are never copied between directories.
