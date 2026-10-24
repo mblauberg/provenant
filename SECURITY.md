@@ -2,11 +2,11 @@
 
 ## Scope
 
-Security reports may cover Provenant's harness scripts, skill instructions,
-model routing, receipt validators and bundled third-party components on the
-default branch. This project orchestrates tools that may execute commands or
-access local files; an instruction-level authority bypass is in scope even
-when it is not conventional application code.
+Security reports may cover Provenant's binary, installer, hooks, skill
+instructions, model routing, workflow receipts and bundled third-party
+components on the default branch. This project orchestrates tools that may
+execute commands or access local files; an instruction-level authority bypass
+is in scope even when it is not conventional application code.
 
 ## Reporting
 
@@ -23,7 +23,8 @@ data from examples.
 
 ## Safe use
 
-- Inspect scripts and model routes before running them on a trusted machine.
+- Inspect the `provenant` binary's commands, hooks and model routes before
+  running them on a trusted machine.
 - Grant the narrowest filesystem, credential, network and deployment authority
   required for the task.
 - Treat model output, web content, repository text and third-party agent output
