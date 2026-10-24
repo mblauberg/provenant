@@ -1017,3 +1017,26 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     }
     assert!(!dir.path().join("config.toml").exists());
 }
+#[test]
+fn set_creates_a_missing_private_state_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let roots = state_roots(&state);
+    edit_config(
+        &roots,
+        &provenant_supervisor::fs::LocalFs,
+        KnobEdit::Profile("rigorous"),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        read(&roots, &provenant_supervisor::fs::LocalFs)
+            .unwrap()
+            .profile,
+        Profile::Rigorous
+    );
+}

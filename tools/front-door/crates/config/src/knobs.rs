@@ -242,7 +242,25 @@ pub fn edit_config(
         .map(|reader| crate::loader::bounded_text(reader, &path))
         .transpose()?;
     let updated = apply(text.as_deref(), edit)?;
-    let state = fs.open_anchor(roots.state.as_path())?;
+    let state = match fs.open_anchor(roots.state.as_path()) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => {
+            // Create only the state directory itself, private. Its parent must
+            // exist; a symlinked final component is refused by the anchor.
+            let target = roots.state.as_path();
+            let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+                return Err(error.into());
+            };
+            let parent = fs.open_anchor(parent)?;
+            match parent.mkdir(name, 0o700) {
+                Ok(()) => parent.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            fs.open_anchor(target)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     state.atomic_write(
         std::ffi::OsStr::new("config.toml"),
         ".config-",
