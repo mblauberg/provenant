@@ -63,6 +63,8 @@ pub enum Command {
     #[command(subcommand)]
     Quota(crate::quota::Quota),
     #[command(subcommand)]
+    Chair(Chair),
+    #[command(subcommand)]
     Worktree(Worktree),
     #[command(subcommand)]
     Workflow(crate::workflow::Workflow),
@@ -72,6 +74,19 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+#[derive(Debug, Subcommand)]
+pub enum Chair {
+    /// Checkpoint and continue under an allowed registered Claude account.
+    Switch {
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Source session; required for real runs unless CLAUDE_SESSION_ID is set.
+        #[arg(long)]
+        session_id: Option<String>,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Hosts {
@@ -371,6 +386,10 @@ pub enum Hook {
 }
 #[derive(Debug, Subcommand)]
 pub enum ClaudeHook {
+    #[command(name = crate::hooks::CHAIR_PROMPT)]
+    ChairPrompt,
+    #[command(name = crate::hooks::CHAIR_START)]
+    ChairStart,
     #[command(name = crate::hooks::PRE_TOOL_USE)]
     PreToolUse,
     #[command(name = crate::hooks::PRE_COMPACT)]

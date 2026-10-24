@@ -158,6 +158,19 @@ fn legal_quoted_examples_exclude_fenced_structural_checks() {
 }
 
 #[test]
+fn quoted_example_path_prefix_requires_a_path_component_boundary() {
+    let mut m = matcher(RuleSet::Legal);
+    m.quoted_paths = vec!["docs/ex".into()];
+    let source = "<!-- /Users/example/private -->";
+    assert!(
+        m.scan(Path::new("docs/examples-x/draft.md"), source)
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "legal.comment.3")
+    );
+}
+
+#[test]
 fn declared_minted_delimiters_exclude_the_payload_and_keep_following_prose() {
     let m = matcher(RuleSet::Academic);
     for source in [

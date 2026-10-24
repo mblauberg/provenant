@@ -139,6 +139,12 @@ jobs:
       - name: Run workspace tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --workspace --locked
+      - name: Run provider recording policy tests
+        working-directory: tools/front-door
+        run: |
+          cargo test --locked -p provenant-providers --features recording --lib provider_recipes_cannot_write_user_configuration
+          cargo test --locked -p provenant-providers --features recording --lib claude_writer_shell_candidate_has_private_config_and_no_keychain_grant
+          cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

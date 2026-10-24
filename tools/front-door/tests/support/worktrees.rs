@@ -163,6 +163,7 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let first_record = store.create(&first, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -232,6 +233,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     let _ = fs::remove_file(&ready);
     let first_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
     };
@@ -248,6 +250,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     let second_record = store.create(&second, &call)?;
     let second_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -312,6 +315,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "control",
     };
@@ -372,6 +376,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
     };
@@ -423,6 +428,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "negative",
     };
@@ -512,6 +518,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -700,6 +707,7 @@ fn writer_run(
 
 struct WriterProvider {
     state: PathBuf,
+    home: PathBuf,
     project: provenant_core::ProjectId,
     mode: &'static str,
 }
@@ -729,6 +737,7 @@ impl provenant_run::Providers for WriterProvider {
         let plan = provenant_cli::run::writer_fixture_plan(
             self.project,
             writer.worktree.path(),
+            &self.home,
             paths,
             &writer,
         )?;
@@ -763,6 +772,7 @@ impl provenant_run::Providers for WriterProvider {
                 plan,
                 profile,
                 writer: Some(writer),
+                home: self.home.clone(),
             }),
         })
     }

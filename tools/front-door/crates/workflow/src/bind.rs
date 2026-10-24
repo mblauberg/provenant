@@ -24,6 +24,10 @@ pub enum BindError {
     NoReviewer,
     #[error("review attempt retained no output")]
     NoOutput,
+    #[error("review attempt retained more than one output")]
+    MultipleOutputs,
+    #[error("review attempt has no observed route")]
+    NoObservedRoute,
     #[error("review attempt belongs to a different delivery")]
     Delivery,
     #[error("review attempt reviewed a different head than the subject")]
@@ -42,10 +46,13 @@ pub fn review_fact(
     if attempt.terminal_state != AttemptOutcome::Succeeded {
         return Err(BindError::NotSucceeded);
     }
-    if attempt.delivery_id.is_some_and(|id| id != delivery) {
+    if attempt.delivery_id != Some(delivery) {
         return Err(BindError::Delivery);
     }
     let reviewer = attempt.reviewer.as_ref().ok_or(BindError::NoReviewer)?;
+    if attempt.output_refs.len() > 1 {
+        return Err(BindError::MultipleOutputs);
+    }
     let output = attempt.output_refs.first().ok_or(BindError::NoOutput)?;
     match subject {
         Subject::Pr { head, .. } if attempt.head.as_ref() != Some(head) => {
@@ -71,21 +78,34 @@ pub fn review_fact(
         })
         .unwrap_or_else(|| "unknown".into());
     let (provenance, verified_model_family) = match reviewer.provenance {
-        ReviewerProvenance::Observed => (
-            RouteProvenance::Observed {
-                route,
-                tier: claim.tier,
-                adapter: attempt
-                    .observed_route
-                    .as_ref()
-                    .and_then(|r| r.provider.clone())
-                    .unwrap_or_default(),
-                endpoint_provider: None,
-                model_family: reviewer.family.clone(),
-                evidence: evidence.clone(),
-            },
-            reviewer.family.clone(),
-        ),
+        ReviewerProvenance::Observed => {
+            let observed = attempt
+                .observed_route
+                .as_ref()
+                .ok_or(BindError::NoObservedRoute)?;
+            let adapter = observed
+                .provider
+                .clone()
+                .filter(|provider| !provider.is_empty())
+                .ok_or(BindError::NoObservedRoute)?;
+            let route = format!(
+                "{}/{}@{}",
+                adapter,
+                observed.model.as_deref().unwrap_or("unknown"),
+                observed.effort.as_deref().unwrap_or("default")
+            );
+            (
+                RouteProvenance::Observed {
+                    route,
+                    tier: claim.tier,
+                    adapter,
+                    endpoint_provider: None,
+                    model_family: reviewer.family.clone(),
+                    evidence: evidence.clone(),
+                },
+                reviewer.family.clone(),
+            )
+        }
         ReviewerProvenance::ChairAttested => (
             RouteProvenance::ChairAttested {
                 route,
@@ -146,7 +166,7 @@ mod tests {
                 model: None,
                 outcome: None,
             }),
-            delivery_id: None,
+            delivery_id: Some(DeliveryId::from_bytes([9; 16])),
             subject: None,
             head: Some(GitOid::Sha1([6; 20])),
             output_refs: vec![OutputRef {
@@ -218,5 +238,28 @@ mod tests {
         let mut a = attempt();
         a.delivery_id = Some(DeliveryId::from_bytes([1; 16]));
         assert_eq!(bind(&a, &subject()), Err(BindError::Delivery));
+        let mut a = attempt();
+        a.delivery_id = None;
+        assert_eq!(bind(&a, &subject()), Err(BindError::Delivery));
+    }
+
+    #[test]
+    fn observed_provenance_requires_the_actual_observed_route() {
+        let mut a = attempt();
+        a.observed_route = None;
+        assert_eq!(
+            bind(&a, &subject()).unwrap_err().to_string(),
+            "review attempt has no observed route"
+        );
+    }
+
+    #[test]
+    fn review_attempt_with_multiple_outputs_is_rejected() {
+        let mut a = attempt();
+        a.output_refs.push(a.output_refs[0].clone());
+        assert_eq!(
+            bind(&a, &subject()).unwrap_err().to_string(),
+            "review attempt retained more than one output"
+        );
     }
 }
