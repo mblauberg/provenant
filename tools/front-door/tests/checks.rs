@@ -26,6 +26,14 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
     assert_eq!(json(&config)?["data"]["count"], 1);
     assert_eq!(code(&rig.command(&["check", "install", "--json"])?), 1);
 
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/exact'\n",
+    )?;
+    let routing = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&routing), 0);
+    assert_eq!(json(&routing)?["data"]["count"], 0);
+
     fs::write(rig.state.join("config.toml"), "schema_version = [")?;
     assert_eq!(code(&rig.command(&["check", "config", "--json"])?), 1);
     fs::write(rig.state.join("install/receipt.json"), "{")?;
