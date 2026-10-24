@@ -184,7 +184,6 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
             .starts_with(b"provenant-lane-cargo-owner-v2\n")
     );
     assert_eq!(fs::read(cache.join("target/compose-target"))?, b"target");
-    assert_eq!(fs::read(cache.join("cargo-home/compose-home"))?, b"cargo");
     // Shared config remains immutable until the host delivery owner composes #1255.
     assert_eq!(git(&rig, &["config", "--get", "user.name"])?, "Fixture");
     let store = super::worktree_tests::open_writer_store(&context)?;
@@ -216,7 +215,11 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        assert_eq!(cargo, cache.join("cargo-home"));
+        // Cargo home is attempt scratch; only the target directory is the shared lane cache.
+        assert!(
+            cargo.ends_with("cargo-home")
+                && cargo.components().any(|part| part.as_os_str() == "scratch")
+        );
         fs::create_dir_all(&target)?;
         fs::create_dir_all(&cargo)?;
         fs::write(target.join("compose-target"), b"target")?;
