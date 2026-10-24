@@ -54,8 +54,9 @@ pub(crate) fn resolve_git_binary(
     override_path: Option<&Path>,
     path_directories: &[PathBuf],
 ) -> Option<PathBuf> {
-    let executable =
-        |path: PathBuf| path.is_absolute() && provenant_supervisor::sys::is_executable(&path);
+    let executable = |path: PathBuf| {
+        path.is_absolute() && path.is_file() && provenant_supervisor::sys::is_executable(&path)
+    };
     if let Some(path) = override_path {
         let path = path.to_path_buf();
         return executable(path.clone()).then_some(path);

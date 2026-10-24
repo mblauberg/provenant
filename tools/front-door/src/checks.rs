@@ -223,7 +223,14 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             let cancel = CancelToken::new();
             let release = source
                 .as_deref()
-                .map(|path| Release::read(path, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs))
+                .map(|path| {
+                    // Resolve aliased ancestors (macOS /tmp, /var) as install does; the
+                    // release tree itself still refuses symlinks.
+                    let path =
+                        provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, path)
+                            .unwrap_or_else(|_| path.to_path_buf());
+                    Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs)
+                })
                 .transpose()?;
             let inspection = provenant_config::inspect_install(
                 &Targets::new(roots.clone(), &home, &[]),

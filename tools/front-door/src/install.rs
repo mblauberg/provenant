@@ -335,13 +335,20 @@ fn output_install(
                 counts[1],
                 counts[2]
             );
-            for action in &outcome.actions {
+            const LISTED: usize = 20;
+            for action in outcome.actions.iter().take(LISTED) {
                 let path = action
                     .path
                     .to_path_buf()
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
                 human.push_str(&format!("{:?}: {path}\n", action.disposition));
+            }
+            if outcome.actions.len() > LISTED {
+                human.push_str(&format!(
+                    "... and {} more (use --json for the full list)\n",
+                    outcome.actions.len() - LISTED
+                ));
             }
             for manual in &outcome.manual_includes {
                 let path = manual
