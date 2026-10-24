@@ -84,7 +84,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         ("worktree-write", "missing-worktree", "WORKTREE_MISSING"),
     ] {
         let mut flags = args.to_vec();
-        flags.extend(["--host", "workshop", "--mode", mode, "--worktree", worktree]);
+        flags.extend(["--mode", mode, "--worktree", worktree]);
         let out = rig.execute(binary, &flags, Some(b"hello"))?;
         let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
         assert_eq!(value["error"]["code"], expected, "{value}");

@@ -7,7 +7,7 @@ explicit user acceptance applies only to `terminal` work or approved scope.
 A project may name its landing gate as acceptance. External-action gates remain.
 
 Date: 10 July 2026
-Dataset: `evals/lifecycle-routing.yaml`
+Dataset: `lifecycle-routing.yaml` in this directory.
 Base revision: `d864ca3d8c6144cab2e0a632f2cb877b9baa4c50`
 
 ## Decision

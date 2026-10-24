@@ -86,3 +86,5 @@ execution handoff is digest-bound; any change creates a new revision and gate.
 ## Portable artifact
 
 Keep the criteria, evidence and outcome in the existing project document or PR.
+
+Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).

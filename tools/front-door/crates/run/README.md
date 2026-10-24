@@ -84,8 +84,13 @@ and waits in `RunStore::admit` until host, project and run concurrency, 20 s
 host start spacing and the memory and disk floors allow a start, or until the
 admission deadline refuses it. `terminal` runs after the sealed exit is
 durable: `finish` decodes the sealed stdout capture, commits the terminal
-record idempotently, and supervisor's `publish_release` writes the settlement
-attestations so custody can clear. The holder context carries a `RootSeed`
+record idempotently. Writers seal an instruction baseline before launch and
+quarantine protected changes under the held writer lease before committing an
+outcome. Terminal checks also enforce base ancestry and refuse unfinished Git
+operations. Incomplete quarantine stays retryable; review-required changes fail
+with retained evidence. Run seals the real quarantine manifest, and supervisor's
+`publish_release` binds its digest into the settlement receipt so custody can
+clear. The holder context carries a `RootSeed`
 because the guardian's environment is cleared. The design's "Decisions taken
 in steps 2+3" lists the limits and deferrals.
 
@@ -99,16 +104,22 @@ launches that provably never reached a guardian, and reports anything else as
 held or uncertain without touching it. `open_runs` lists runs with
 nonterminal work for a recovery scan.
 
+Provider preparation receives canonical per-attempt scratch and provider-state
+paths once, shared by explicit fallback candidates. Empty scratch is removed at
+settlement; history and unclassified contents remain retained. Supervisor lists
+writer reservations and reports malformed entries without hiding valid ones;
+the CLI includes those diagnostics and returns a non-success reconcile status.
+
 Tests use fake providers and resources at this boundary. The CLI composes the
 production provider registry and the `dispatch`, `lanes`, `output`, `cancel`,
 `resume`, `reconcile` and `telemetry stats` leaves.
 
-`temporary_paths` creates private attempt-owned `tmp/` directories and passes
-them to provider preparation. Terminal commit and withdrawal remove `tmp/`
-best-effort through held directories, without following symlinks. Cleanup
-failure does not change the committed attempt. `read_only_plan` loads the
-bound project's `read-only.json`, applies the host Git binding and selects
-that temporary root.
-`PreparedLaunch` carries the resolved read-only grant object; start records its
-relative write exceptions before custody handoff. Production Registry launch
-composition is still pending, so this does not yet enable dispatch.
+Start creates a private attempt-owned `tmp/` and passes it to provider
+preparation as `LaunchPaths::temporary`; a read-only lane uses it as scratch.
+Terminal commit and withdrawal remove `tmp/` best-effort through held
+directories, without following symlinks. Cleanup failure does not change the
+committed attempt. `read_only_plan` loads the bound project's `read-only.json`,
+applies the host Git binding and selects that temporary root. Start records
+the launching plan's relative write exceptions before custody handoff.
+Production `Registry::prepare` does not yet build its read-only plan through
+`read_only_plan`, so those grants are not yet applied to dispatch.

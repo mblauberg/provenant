@@ -81,8 +81,8 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Operating system, Python version, Node version, and client versions.
-      placeholder: "macOS 15.3, Python 3.12.4, Node 24.2.0, Claude Code 2.1.0"
+      description: macOS version, Rust toolchain version if relevant, `provenant --version`, and client versions.
+      placeholder: "macOS 15.3, Rust 1.99.1, provenant 0.1.0, Claude Code 2.1.0"
     validations:
       required: false
 

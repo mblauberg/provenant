@@ -32,8 +32,8 @@ non-training Haiku at low effort and Luna before free DeepSeek and GLM. Free
 pool members require `--allow-free` (default false). Use `--route utility`
 for Rust route resolution; `--confidential` excludes training or unclassified
 members and fallbacks. There is no classifier or synonym inference. The
-bundled Rust catalogue owns the pool. Fabric accepts a route preference but
-its submission owner remains unavailable.
+bundled Rust catalogue owns the pool. Fabric submissions and the CLI share
+the run owner's route and confinement path.
 
 Run `provenant help route` for flags. Named routes and
 exact model selectors are mutually exclusive. Explicit fallbacks use
@@ -50,15 +50,13 @@ credentials, secrets and denied paths stay outside prompts and outputs.
 
 ## Version-free family names
 
-Use exact `ADAPTER/ID` identifiers from the current catalogue. The Python
-latest-version discovery, overlay editing and refresh wrapper are retired.
-Never guess the actual model behind a provider name.
+Use exact `ADAPTER/ID` identifiers from the current catalogue. Never guess the
+actual model behind a provider name.
 
 ## Cooldowns
 
 `provenant quota show` reads cached observations and `provenant quota tick`
-refreshes due accounts. Rust owners decide eligibility; the Python account
-reset and cooldown-file commands are retired.
+refreshes due accounts. Rust owners decide eligibility.
 
 ## Choosing among admissible routes
 
@@ -83,7 +81,7 @@ explicit access settings. A writer needs a registered linked worktree and
 one active writer. Do not launch providers directly to bypass confinement.
 Consult `provenant help dispatch` for current flags and bounded timeout limits.
 Rust run owns retries, admission and terminal publication; providers owns wire
-mechanics. The Python direct adapter and scaffold contracts are retired.
+mechanics.
 
 ## Adaptive review topology
 

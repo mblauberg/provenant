@@ -4,28 +4,23 @@ use provenant_confinement::{ConfinedPlan, PlanRequest, ReadOnlyRepo, plan::ReadO
 use provenant_core::{AttemptId, WorkScope};
 use std::{ffi::OsStr, path::PathBuf};
 
-pub struct AttemptPaths {
+impl RunStore {
+    /// The read-only lane's private temporary directory, `LaunchPaths::temporary`.
     /// Provider scratch and build output live below this attempt, never in a
     /// shared system temporary directory. Settlement removes it best-effort.
-    pub temporary: PathBuf,
-}
-
-impl RunStore {
-    pub fn temporary_paths(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptPaths> {
+    pub fn temporary_path(&self, id: AttemptId, call: &Request<'_>) -> Result<PathBuf> {
         let record = self.record(id, call)?;
         let directory = self.attempt_dir(record.run_id, id, false)?;
         subdir(&directory, OsStr::new("tmp"), true)?;
-        Ok(AttemptPaths {
-            temporary: self
-                .context
-                .state_root
-                .as_path()
-                .join("runs")
-                .join(record.run_id.to_string())
-                .join("attempts")
-                .join(id.to_string())
-                .join("tmp"),
-        })
+        Ok(self
+            .context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(record.run_id.to_string())
+            .join("attempts")
+            .join(id.to_string())
+            .join("tmp"))
     }
 
     /// The run-plan edge reads policy from host state and resolves all grants
@@ -58,9 +53,9 @@ impl RunStore {
             .as_ref()
             .map(|project| ReadOnlyPolicy::read(project))
             .transpose()
-            .map_err(RunError::Permission)?
+            .map_err(RunError::Confinement)?
             .unwrap_or_default();
-        request.permissions.scratch.path = self.temporary_paths(id, call)?.temporary;
+        request.permissions.scratch.path = self.temporary_path(id, call)?;
         let request = request
             .with_read_only_repo(repo, binding, &policy)
             .map_err(RunError::Plan)?;
@@ -191,7 +186,7 @@ mod tests {
         );
         assert_eq!(
             plan.permissions().scratch.path,
-            store.temporary_paths(id, &call)?.temporary
+            store.temporary_path(id, &call)?
         );
         std::fs::write(&policy_path, r#"{"readOnlyWritable":[".git"]}"#)?;
         assert!(

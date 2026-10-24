@@ -7,16 +7,20 @@ mod db;
 mod holder;
 mod launch;
 mod plan;
-pub use plan::AttemptPaths;
 mod reader;
 mod store;
+mod writer;
 
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use holder::{HolderContext, RootSeed, RunHolder};
-pub use launch::{Decoded, PreparedLaunch, Providers, Started, capture_plan, concurrency};
+pub use launch::{
+    Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
+    concurrency,
+};
+pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
@@ -29,8 +33,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RunError {
-    #[error(transparent)]
-    Permission(#[from] provenant_confinement::permissions::PermissionError),
+    #[error("confinement refused: {0}")]
+    Confinement(#[from] provenant_confinement::permissions::PermissionError),
+    #[error("writer scope refused: {0}")]
+    Writer(#[from] provenant_confinement::worktrees::WorktreeError),
+    #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
+    WorktreeMissing(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]

@@ -53,6 +53,13 @@ with `provenant worktree remove --merged --integration OID --branch NAME`. Remov
 and explicitly authorised; never delete unknown, user-owned, or pre-existing files. Do not
 migrate old state roots as part of a fresh session.
 
+For more detail, see the [chair continuity reference](references/chair-state.md),
+[context hygiene reference](references/context-hygiene.md), the
+[checkpoint template](templates/STATE.template.md), and the
+[portable handoff schema](portable-workflow.v1.json).
+
 After changed work, run the checks assigned to this role or cite the owning
 role's result when project policy assigns them elsewhere. Report the exact
 diff, remaining work, and any gate that still needs the user.
+
+Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).

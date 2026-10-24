@@ -70,3 +70,5 @@ What the route is intended to deliver. Link the owning specification.
 
 When the declared tracker is unavailable, use the named project-docs home or a
 link-only fallback; never invent rolling project state.
+
+Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).

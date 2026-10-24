@@ -37,7 +37,7 @@ impl Providers for Fake {
         &self,
         _: &TaskRequest,
         prompt: &str,
-        paths: &AttemptPaths,
+        paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
         assert!(paths.temporary.ends_with("tmp"));
@@ -296,7 +296,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     std::fs::write(&outside, "keep")?;
 
     let withdrawn = run.attempts[0].attempt_id;
-    let withdrawn_tmp = store.temporary_paths(withdrawn, &call)?.temporary;
+    let withdrawn_tmp = store.temporary_path(withdrawn, &call)?;
     std::fs::write(withdrawn_tmp.join("provider.tmp"), "discard")?;
     symlink(&outside, withdrawn_tmp.join("outside-link"))?;
     store.withdraw(
@@ -310,7 +310,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     assert!(!withdrawn_tmp.exists());
 
     let terminal = run.attempts[1].attempt_id;
-    let terminal_tmp = store.temporary_paths(terminal, &call)?.temporary;
+    let terminal_tmp = store.temporary_path(terminal, &call)?;
     std::fs::write(terminal_tmp.join("provider.tmp"), "discard")?;
     symlink(&outside, terminal_tmp.join("outside-link"))?;
     let mut observed = exit();
@@ -514,7 +514,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         attempt: orphan,
         generation: 1,
     };
-    drop(provenant_supervisor::custody::acquire_reader(
+    drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
         call.budget,
@@ -569,8 +569,8 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     store.create(&prepared, &call)?;
     let first = prepared.attempts[0].attempt_id;
     let second = prepared.attempts[1].attempt_id;
-    let first_tmp = store.temporary_paths(first, &call)?.temporary;
-    let second_tmp = store.temporary_paths(second, &call)?.temporary;
+    let first_tmp = store.temporary_path(first, &call)?;
+    let second_tmp = store.temporary_path(second, &call)?;
     assert_ne!(first_tmp, second_tmp);
     assert!(
         first_tmp.starts_with(

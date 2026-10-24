@@ -55,7 +55,7 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | User config | `<state>/config.toml`; optional, user-owned global configuration |
 | Host identity | `<state>/state.json` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
-| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/,runtime/}` |
+| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Read-only write exceptions | `<state>/projects/<ProjectId>/read-only.json`; confinement-owned, explicit `readOnlyWritable` list (default empty), authorised in #1343. Not a project config overlay and never loaded from old `.agents/fabric-policy.json`. |

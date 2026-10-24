@@ -36,3 +36,5 @@ branch needs unavailable owner authority. Return the resolved register to
 
 Keep the scoped criteria, evidence and outcome in the existing project document
 or PR.
+
+Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).

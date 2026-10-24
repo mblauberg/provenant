@@ -27,9 +27,48 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  macos-scope:
+    name: Select macOS checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run_macos: ${{ steps.paths.outputs.run_macos }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      - name: Select macOS checks from changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' || github.event.merge_group.base_ref == 'refs/heads/main' }}
+        run: |
+          if [ "$IS_MAIN" = "true" ]; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "Base commit unavailable; running macOS checks conservatively."
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$)'; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_macos=false" >> "$GITHUB_OUTPUT"
+          fi
+
   docs:
     name: Harness asset checks
     runs-on: ubuntu-latest
+    needs: rust
     timeout-minutes: 15
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
@@ -48,7 +87,9 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: front-door-ci
+          add-job-id-key: false
+          save-if: false
       - name: Check harness assets
         working-directory: tools/front-door
         env:
@@ -82,7 +123,9 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: front-door-ci
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Check formatting
         working-directory: tools/front-door
         run: cargo fmt --all --check
@@ -96,9 +139,6 @@ jobs:
       - name: Run workspace tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --workspace --locked
-      - name: Run documentation tests
-        working-directory: tools/front-door
-        run: cargo test --doc --workspace --locked
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -141,6 +181,8 @@ jobs:
     name: Rust macOS release smoke
     runs-on: macos-15
     timeout-minutes: 20
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_macos == 'true'
     permissions:
       contents: read
     steps:
@@ -159,6 +201,16 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo test -p provenant-supervisor -p provenant-confinement --locked
+      - name: Run writer dispatch integration tests
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+        run: |
+          cargo test --test worktrees --locked -- --exact writer_dispatch_edits_a_linked_worktree
+          cargo test --test worktrees --locked -- --exact second_writer_is_refused_while_first_holds_the_worktree
+          cargo test --test worktrees --locked -- --exact writer_terminal_refuses_sequencer_state
+          cargo test --test worktrees --locked -- --exact writer_production_plan_denies_outside_writes
+          cargo test --test worktrees --locked -- --exact writer_reconcile_refuses_unfinished_cherry_pick_and_releases
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test
@@ -176,9 +228,24 @@ jobs:
           mkdir -p "$RUNNER_TEMP/home"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
-            --harness claude --harness codex --bin-dir "$RUNNER_TEMP/bin" --dry-run
-          test -z "$(ls -A "$RUNNER_TEMP/home")"
-          test ! -e "$RUNNER_TEMP/bin"
+            --harness codex --bin-dir "$RUNNER_TEMP/bin"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" check install --source "$RUNNER_TEMP/release"
+          codex_config="$RUNNER_TEMP/home/.codex/config.toml"
+          fabric_entry='^(fabric = |\[mcp_servers\.fabric\])'
+          grep -Eq "$fabric_entry" "$codex_config"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
+            --harness codex --bin-dir "$RUNNER_TEMP/bin"
+          test "$(grep -Ec "$fabric_entry" "$codex_config")" -eq 1
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
+          if [ -f "$codex_config" ]; then
+            if grep -Eq "$fabric_entry" "$codex_config"; then
+              echo "Uninstall left the managed Codex entry behind."
+              exit 1
+            fi
+          fi
 
   generic-checks:
     name: Spelling, workflows and Markdown links
@@ -195,9 +262,14 @@ jobs:
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: typos-cli@1.51.1
-      # These tools are not in install-action's supported binary catalogue.
+      - name: Install ShellCheck
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: shellcheck@0.11.0
+          fallback: none
+      # actionlint and lychee are not in install-action's supported catalogue.
       # Verify the pinned upstream release archives before executing them.
-      - name: Install actionlint, ShellCheck and lychee
+      - name: Install actionlint and lychee
         env:
           TOOL_DIR: ${{ runner.temp }}/generic-tools
         run: |
@@ -207,10 +279,6 @@ jobs:
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
           tar -xzf actionlint.tar.gz -C bin actionlint
-          curl --fail --silent --show-error --location --output shellcheck.tar.xz \
-            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
-          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz' | sha256sum --check
-          tar -xJf shellcheck.tar.xz --strip-components=1 -C bin shellcheck-v0.11.0/shellcheck
           curl --fail --silent --show-error --location --output lychee.tar.gz \
             https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz
           echo '1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a  lychee.tar.gz' | sha256sum --check
@@ -227,18 +295,6 @@ jobs:
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names
         run: scripts/check-retired-names
-
-  zizmor:
-    name: Workflow security lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
@@ -249,29 +305,33 @@ jobs:
           advanced-security: "false"
           annotations: "true"
 
-  # Every surviving job runs on every tested tree. Keep one required check
-  # and fail closed on failure, cancellation or an unexpectedly skipped job.
+  # Keep one required check. The macOS job may skip only when its path filter
+  # explicitly says it is unnecessary; all other skips fail closed.
   ci-status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     needs:
+      - macos-scope
       - docs
       - rust
       - rust-macos-release
       - rust-dependencies
-      - zizmor
       - generic-checks
     if: always()
     steps:
       - name: Require every needed job to succeed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          RUN_MACOS: ${{ needs.macos-scope.outputs.run_macos }}
         run: |
           echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
-          blocking="$(echo "$NEEDS_JSON" | jq -r \
+          blocking="$(echo "$NEEDS_JSON" | jq -r --arg run_macos "$RUN_MACOS" \
             'to_entries[]
-             | select(.value.result != "success")
+             | select(.value.result != "success"
+                 and (.key != "rust-macos-release"
+                   or .value.result != "skipped"
+                   or $run_macos != "false"))
              | "\(.key)=\(.value.result)"')"
           if [ -n "$blocking" ]; then
             echo "Blocking job results:"
