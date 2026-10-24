@@ -41,6 +41,8 @@ pub enum Command {
     },
     Root,
     #[command(subcommand)]
+    Hosts(Hosts),
+    #[command(subcommand)]
     Config(Config),
     #[command(subcommand)]
     Fabric(crate::fabric::Fabric),
@@ -68,6 +70,26 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+#[derive(Debug, Subcommand)]
+pub enum Hosts {
+    /// Probe sign-in without inference or credential access.
+    Doctor {
+        #[arg(value_parser = host_alias)]
+        host: Option<String>,
+    },
+}
+fn host_alias(value: &str) -> Result<String, &'static str> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return Err("host must be a bounded SSH alias");
+    }
+    Ok(value.into())
 }
 #[derive(Debug, Subcommand)]
 pub enum Config {
