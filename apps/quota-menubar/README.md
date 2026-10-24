@@ -66,3 +66,5 @@ The supported way to start the app at login is a LaunchAgent. Adding the bare ex
 ```
 
 Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.provenant.quota-menubar.plist`. To stop it, run `launchctl bootout gui/$(id -u)/dev.provenant.quota-menubar` and delete the file. With `KeepAlive` false, quitting from the panel keeps the app closed until the next login.
+
+The status item uses the Provenant glyph for loading and healthy quota states, with the existing gauge and error symbols retained for warnings and failures. The panel summary includes the glyph.

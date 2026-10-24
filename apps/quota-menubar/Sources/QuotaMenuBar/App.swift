@@ -28,7 +28,15 @@ struct MenuBarLabel: View {
     var body: some View {
         let label = model.label
         HStack(spacing: 4) {
-            Image(systemName: label.symbol)
+            if label.usesBrandGlyph {
+                Image("ProvenantGlyph", bundle: .module)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
+            } else {
+                Image(systemName: label.symbol)
+            }
             if let text = label.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
@@ -40,6 +48,7 @@ struct MenuBarLabel: View {
 /// differs.
 struct MenuLabel: Equatable {
     var symbol = "gauge.with.dots.needle.0percent", text: String? = "–", spoken = "Provider quota"
+    var usesBrandGlyph = true
 
     init() {}
 
@@ -47,6 +56,7 @@ struct MenuLabel: Equatable {
         let featured = report?.featured(now: now), used = featured?.window.usedPercent ?? report?.headline(now: now)
         let level = ["0", "33", "50", "67", "100"][[20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4]
         symbol = failed ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(level)percent"
+        usesBrandGlyph = !failed && (used == nil || used < (report?.alertPercent ?? 90))
         text = report.map { report in
             featured.map { Fmt.percent($0.window.usedPercent ?? 0) }
                 ?? (report.iconOnly ? nil : report.headline(now: now).map(Fmt.percent) ?? "–")
@@ -194,7 +204,14 @@ struct Summary: View {
                  size: 40)
                 .overlay { Text(value.map(Fmt.percent) ?? "–").font(.system(size: 11, weight: .semibold)).monospacedDigit() }
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline)
+                HStack(spacing: 6) {
+                    Image("ProvenantGlyph", bundle: .module)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                    Text(title).font(.headline)
+                }
                 if !detail.isEmpty {
                     Text(detail).font(.subheadline).foregroundStyle(.secondary).monospacedDigit().lineLimit(3).textSelection(.enabled)
                 }
