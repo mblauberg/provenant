@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, seal},
+    artifacts::{artifact_path, read_sealed, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -24,6 +24,7 @@ pub struct PreparedRun {
 }
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
+#[derive(Clone)]
 pub struct TerminalPublication<'a> {
     pub outcome: Outcome,
     pub finished_at: WallTime,
@@ -39,6 +40,92 @@ pub struct TerminalPublication<'a> {
     pub usage: UsageRecord,
 }
 impl RunStore {
+    /// A result-only orphan predates durable terminal intent. The trusted
+    /// provider/confinement edge must revalidate its terminal facts; the file's
+    /// presence alone never establishes success, route identity or completeness.
+    /// The supplied result rendering is ignored in favour of the sealed bytes.
+    pub fn recover_result_only(
+        &self,
+        id: AttemptId,
+        facts: &TerminalPublication<'_>,
+        exit: &ExitObservation,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let old = self.record(id, call)?;
+        let dir = self.attempt_dir(old.run_id, id, false)?;
+        if read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
+            return Err(RunError::TerminalRecoveryRequired);
+        }
+        let raw = read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or(RunError::Nonterminal)?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| RunError::Validation("sealed result is not UTF-8"))?;
+        let publication = TerminalPublication {
+            result: text,
+            ..facts.clone()
+        };
+        self.publish_terminal(id, old.revision, &publication, exit, call)
+    }
+    /// Recover an interrupted terminal publication from sealed evidence.
+    pub fn recover_terminal(
+        &self,
+        id: AttemptId,
+        exit: &ExitObservation,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let old = self.record(id, call)?;
+        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let pending: AttemptRecord = decode(
+            &read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?
+                .ok_or(RunError::TerminalRecoveryRequired)?,
+        )?;
+        super::reader::validate_attempt(&pending)?;
+        if pending.attempt_id != id
+            || pending.run_id != old.run_id
+            || pending.project_id != old.project_id
+            || pending.task_id != old.task_id
+            || pending.operation_id != old.operation_id
+            || pending.generation != old.generation
+        {
+            return Err(RunError::Conflict);
+        }
+        let AttemptState::Terminal {
+            outcome,
+            finished_at,
+            ref reason,
+            ..
+        } = pending.state
+        else {
+            return Err(RunError::Validation("pending publication is not terminal"));
+        };
+        let result = pending
+            .result
+            .as_ref()
+            .ok_or(RunError::Validation("pending result missing"))?;
+        let raw = self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| RunError::Validation("pending result is not UTF-8"))?;
+        let publication = TerminalPublication {
+            outcome,
+            finished_at,
+            started_at: pending.started_at,
+            provider_ms: pending.provider_ms,
+            reason: reason.clone(),
+            result: text,
+            complete: result.complete,
+            redacted: result.redacted,
+            resolved_route: pending.resolved_route.clone(),
+            applied_route: pending.applied_route.clone(),
+            observed_route: pending.observed_route.clone(),
+            usage: pending.usage.clone(),
+        };
+        self.publish_terminal(
+            id,
+            pending.revision.checked_sub(1).ok_or(RunError::Conflict)?,
+            &publication,
+            exit,
+            call,
+        )
+    }
     /// Reserve records first, seal the exact request/prompts, then acknowledge.
     /// Repeating a prepared operation repairs a publication gap with the same
     /// request. No scheduler, admission or launch is implied by acceptance here.
@@ -243,8 +330,24 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         super::reader::validate_attempt(&next)?;
-        bytes(&next)?;
+        let intent = bytes(&next)?;
         let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
+        // Persist the exact terminal intent before sealing its result. Recovery
+        // uses these facts and sealed bytes, never newly rendered result text.
+        match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
+            Some(saved) if saved != intent => return Err(RunError::TerminalRecoveryRequired),
+            Some(_) => {}
+            None => {
+                // A result-only orphan must not acquire conflicting intent.
+                // Preserve it for a retry supplying its original result/facts.
+                if let Some(saved) = read_sealed(&attempt_dir, "result.md", RESULT_LIMIT)?
+                    && saved != publication.result.as_bytes()
+                {
+                    return Err(RunError::ArtifactMismatch);
+                }
+                seal(&attempt_dir, "terminal-pending.json", &intent, RECORD_LIMIT)?;
+            }
+        }
         seal(
             &attempt_dir,
             "result.md",

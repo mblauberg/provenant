@@ -128,6 +128,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let input = input();
     let id = input.attempts[0].attempt_id;
     let run = store.create(&input, &call)?;
+    insert_admission_fixture(&store, &input)?;
     seal_exit_fixture(&store, &input)?;
     assert_eq!(run.closure, Closure::Open);
     assert!(matches!(
@@ -164,6 +165,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         Err(RunError::Validation(_))
     ));
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    assert_eq!(admission_count(&store)?, 0);
     assert_eq!(
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
         record
@@ -360,6 +362,7 @@ fn publication_crash_worker() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
+    insert_admission_fixture(&store, &input)?;
     seal_exit_fixture(&store, &input)?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
@@ -436,7 +439,19 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         }
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
-        store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+        if matches!(phase, "sealed" | "transaction") {
+            assert_eq!(admission_count(&store)?, 1);
+            let mut recomputed = publication();
+            recomputed.result = "different text after restart";
+            assert!(matches!(
+                store.publish_terminal(id, 1, &recomputed, &exit(), &call),
+                Err(RunError::TerminalRecoveryRequired)
+            ));
+            store.recover_terminal(id, &exit(), &call)?;
+            assert_eq!(admission_count(&store)?, 0);
+        } else {
+            store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+        }
         assert_eq!(store.events(0, 64, &call)?.len(), 2);
         assert!(
             store
@@ -450,6 +465,98 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 .complete
         );
     }
+    Ok(())
+}
+
+#[test]
+fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    super::artifacts::seal(
+        &store.attempt_dir(input.run_id, id, false)?,
+        "result.md",
+        publication().result.as_bytes(),
+        RESULT_LIMIT,
+    )?;
+    let mut recomputed = publication();
+    recomputed.result = "different text after restart";
+    assert!(matches!(
+        store.publish_terminal(id, 1, &recomputed, &exit(), &call),
+        Err(RunError::ArtifactMismatch)
+    ));
+    store.recover_result_only(id, &recomputed, &exit(), &call)?;
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(
+        store
+            .read_output(
+                id,
+                ArtifactPart::Result,
+                ByteRange::default(),
+                &context,
+                &call
+            )?
+            .bytes,
+        publication().result.as_bytes()
+    );
+    Ok(())
+}
+
+#[test]
+fn full_database_retains_admission_and_recovers_original_terminal_intent() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    insert_admission_fixture(&store, &input)?;
+    seal_exit_fixture(&store, &input)?;
+    let pages: i64 = store
+        .db
+        .pragma_query_value(None, "page_count", |row| row.get(0))?;
+    store.db.pragma_update(None, "max_page_count", pages)?;
+    let mut publication = publication();
+    publication.reason = Some("x".repeat(128 * 1024));
+    assert!(matches!(
+        store.publish_terminal(id, 1, &publication, &exit(), &call),
+        Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::DiskFull
+    ));
+    assert_eq!(admission_count(&store)?, 1);
+    assert!(matches!(
+        store.attempt(id, &call),
+        Err(RunError::Nonterminal)
+    ));
+    assert_eq!(store.events(0, 64, &call)?.len(), 1);
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Open);
+    store.db.pragma_update(None, "max_page_count", 10000)?;
+    store.recover_terminal(id, &exit(), &call)?;
+    assert_eq!(admission_count(&store)?, 0);
+    assert_eq!(store.events(0, 64, &call)?.len(), 2);
+    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(
+        store
+            .read_output(
+                id,
+                ArtifactPart::Result,
+                ByteRange::default(),
+                &context,
+                &call
+            )?
+            .bytes,
+        publication.result.as_bytes()
+    );
     Ok(())
 }
 
@@ -471,4 +578,38 @@ fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
         RECORD_LIMIT,
     )?;
     Ok(())
+}
+
+fn insert_admission_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
+    let ticket = AdmissionTicket {
+        schema_version: 1,
+        operation_id: input.operation_id.clone(),
+        attempt_id: input.attempts[0].attempt_id,
+        project_id: store.context.project_id,
+        sequence: 1,
+        generation: 0,
+        holder: Some(store.context.actor_id),
+        active: true,
+        memory_floor_bytes: 1,
+        disk_floor_bytes: 500 * 1024 * 1024,
+        startup_spacing_ms: 20000,
+        quota_permit: None,
+        admission_deadline: WallTime::from_micros(1000000)?,
+    };
+    store.db.execute(
+        "INSERT OR IGNORE INTO admission VALUES (?1,?2,1,?3)",
+        rusqlite::params![
+            ticket.attempt_id.to_string(),
+            ticket.project_id.to_string(),
+            crate::db::bytes(&ticket)?
+        ],
+    )?;
+    assert_eq!(admission_count(store)?, 1);
+    Ok(())
+}
+
+fn admission_count(store: &RunStore) -> std::result::Result<i64, rusqlite::Error> {
+    store
+        .db
+        .query_row("SELECT COUNT(*) FROM admission", [], |row| row.get(0))
 }

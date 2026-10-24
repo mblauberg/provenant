@@ -33,6 +33,8 @@ pub enum RunError {
     TooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record")]
     ArtifactMismatch,
+    #[error("terminal publication is already sealed; recover its original facts and result")]
+    TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
     #[error("run store is contended or its call budget expired")]
