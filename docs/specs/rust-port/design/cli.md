@@ -47,6 +47,7 @@ completion, colour or shell-parser dependency.
 provenant
   help [COMMAND…]
   root
+  hosts doctor [SSH_ALIAS]
   config show
   config set NAME VALUE
   config unset KNOB
@@ -61,7 +62,7 @@ provenant
   reconcile
   fabric …                                [fabric-runtime clap subtree]
     mcp
-  telemetry stats
+  telemetry stats [--usage]
   quota show | tick
   worktree create BRANCH [--base REV]
   worktree list
@@ -93,12 +94,11 @@ Global options are accepted before or after subcommands:
 | `--state-dir ABS` | Fresh-state root, overriding `PROVENANT_STATE_DIR`, then `~/.local/share/provenant/v1`. Refuse a root inside any legacy root. |
 | `--project PATH` | Select a canonical verified project instead of cwd; no process chdir or product-checkout selection. |
 
-Installed product environment inputs are exactly `PROVENANT_STATE_DIR` and
-`PROVENANT_AGENT_LABEL`. The latter separates inboxes for agents of one
-provider, replacing `AGENT_FABRIC_LABEL`. Provider/harness variables pass
-through as those tools define them; there are no other `PROVENANT_*` or
-`AGENT_FABRIC_*` inputs. For an uninstalled development binary only, state's explicit `PROVENANT_ROOT`
-selects asset fixtures; an installed binary ignores it.
+Installed product environment inputs include `PROVENANT_STATE_DIR`,
+`PROVENANT_AGENT_LABEL`, `PROVENANT_LANDING_TOKEN` for landing authentication,
+and `PROVENANT_USAGE_STATE_DIR` for usage-state lookup. An uninstalled
+development binary also requires absolute `PROVENANT_ROOT` to select its asset
+root. Provider/harness variables pass through as those tools define them.
 Config is one user-owned `config.toml`, optionally
 with `profile =` and a `[knobs]` override table; no overlays, layering or
 per-knob variables. `config show` renders the resolved typed config with
@@ -155,11 +155,14 @@ lane-selection defaults. Flags and bounds are in the reconciled table below.
 
 Single-prompt dispatch names its route on the command line. Routing owns
 eligibility; providers detect the account label and run records it.
-Confidentiality is always on, without a flag. Workflow owns assurance policy;
+Confidential routing is opt-in with `--confidential`; `--allow-free` permits
+free catalogue members, and `--fallback ADAPTER/ID[,ADAPTER/ID]` supplies up to
+two fallback models. The `utility` named route resolves through the utility
+pool. Workflow owns assurance policy;
 no account pin, intent, reviewer, risk-tier, orchestrator-family, native-seat
 or classification selector is exposed here. `route resolve` takes the same
 route inputs. Tick remains because the live quota-menubar LaunchAgent calls it
-(QuotaModel.swift:123). No fallback pool exists. The selected project supplies
+(QuotaModel.swift:123). The selected project supplies
 cwd. No raw provider argv or permission bypass. Confinement proves authority
 and rejects overlapping canonical writer scopes before admission. A manifest is
 strict versioned JSON with typed route/access fields per task, inline prompt
@@ -196,7 +199,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | --- | --- | --- | --- |
 | `help` | `help [COMMAND…]` | records `HelpCatalogue` | Pure; no root, SQLite, threads or probes. |
 | `root` | `root` | core `Roots` plus config installation identity | No flags. Reports asset root, state directory, selected project and installation together; state's `--kind` is dropped because `--json` already separates fields and global `--project` selects. |
-| `config show` | `config show` | config `load` → `ResolvedConfig` | No flags; secrets redacted. |
+| `config show` | `config show [--task-class NAME]` | config `load` → `ResolvedConfig` | Optional task-class preset; secrets redacted. |
 | `config set` | `config set NAME VALUE` | config `edit_config` | `NAME` is `profile` or a registry knob; `null` clears a nullable knob. Unknown knobs list close matches. Prints the config read back. |
 | `config unset` | `config unset KNOB` | config `edit_config` | Removes the `[knobs]` override. |
 | `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
@@ -205,15 +208,15 @@ satisfied as the run grammar states. Two shorthands recur:
 | `route resolve` | `route resolve ROUTE` | routing `RouteRequest` with a read-only `RoutingContext` | Pure; no admission or state write. |
 | `quota show` | `quota show [--adapter ADAPTER]` | quota `QuotaQuery { adapter }` | No refresh. `--adapter` replaces quota's `--provider`, matching `route list`: one adapter key, one spelling. |
 | `quota tick` | `quota tick [--adapter ADAPTER] [--trigger timer\|panel\|manual\|wake\|power] [--power ac\|battery\|low]` | quota `QuotaTick { adapter, trigger, power }` | Defaults manual and ac; owner wall budget at most 55 s, no wait flag. The Swift app's `quota forget` and bare `quota` calls retire at cut-over: a tick drops the snapshot of any account that detection no longer reports, so no forget verb exists. |
-| `dispatch` | `dispatch (--prompt-file PATH \| --prompt-stdin \| --manifest PATH) --operation-id ID [--task-id ID] [--delivery-id ID] [ROUTE] [ACCESS] [--provider-timeout SECONDS] [--concurrency N] [--host HOST] [--wait SECONDS]` | run `submit(Submission { tasks: [TaskRequest], concurrency }, OperationKey, …)`; `TaskRequest { id, prompt, route, access, timeout, delivery_id }`; `--host` is Fabric placement | Input at most 1 MiB. A single prompt requires `ROUTE`; manifest conflicts with `--task-id`, `--delivery-id`, `ROUTE`, `ACCESS` and `--provider-timeout`, which are per-task fields. `--concurrency` is manifest-only, 1–8, default 4. `--provider-timeout` is the provider runtime budget, 1–14400, default 3600 read-only and 10800 writer; run's `--timeout` is renamed so `timeout` never means a reader wait, and `--admission-timeout` is dropped because run's admission deadline is not caller-set. `--write-root` is dropped: confinement grants writes only to the verified worktree. Wait uses `All` over the receipt's attempts. |
+| `dispatch` | `dispatch (--prompt-file PATH \| --prompt-stdin \| --manifest PATH) --operation-id ID [--task-id ID] [--delivery-id ID] [ROUTE] [ACCESS] [--provider-timeout SECONDS] [--concurrency N] [--knob NAME=VALUE…] [--host HOST] [--wait SECONDS]` | run `submit(Submission { tasks: [TaskRequest], concurrency }, OperationKey, …)`; `TaskRequest { id, prompt, route, access, timeout, delivery_id }`; `--host` is Fabric placement | Input at most 1 MiB. A single prompt requires `ROUTE`; manifest conflicts with `--task-id`, `--delivery-id`, `ROUTE`, `ACCESS` and `--provider-timeout`, which are per-task fields. Manifest `--concurrency` is 1–8, default 4; effective lane concurrency defaults to 8 via `lanes.max_concurrency`. `--knob` applies per-dispatch harness-knob overrides. `--provider-timeout` is the provider runtime budget, 1–14400, default 3600 read-only and 10800 writer. Wait uses `All` over the receipt's attempts. |
 | `lanes` | `lanes [--id TARGET…] [--all] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | run `query(RunQuery)` or `wait(RunQuery, WaitBudget, …)`; `RunQuery { ids, states, cursor, limit, condition }` | At most 100 IDs; `--all` conflicts with `--id`. Limit 1–100, default 50. `--cursor` conflicts with `--wait`; condition defaults to any and requires wait. `--wait SECONDS` replaces `--wait --timeout` so every wait has one spelling. `--summary` and lane tails are dropped: no request field; `output` reads bytes. |
 | `output` | `output ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` | run `read_output(AttemptRef, ArtifactPart, ByteRange)`; `ByteRange { start: Offset(u64) \| TailLines(u16), max_bytes }` | Part defaults to result; offset defaults to 0; tail is 1–500 lines with no default, so a bare read starts at byte 0 rather than run's 40-line clip. Max bytes 1–65536, default 65536. |
 | `cancel` | `cancel TARGET --operation-id ID [--reason TEXT] [--wait SECONDS]` | run `cancel(AttemptRef, OperationKey, CancelReason, …)` | Reason UTF-8, at most 256 bytes. Aggregate targets expand to exact attempts. |
 | `resume` | `resume ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | run `resume(ResumeRequest { target, prompt, expected_generation: 0 }, OperationKey, …)` | Prompt required, at most 1 MiB, matching Fabric's non-optional `prompt`. No `ROUTE`/`ACCESS`: run's fresh mode is dropped for Fabric's fixed-route request. The edge sends generation 0, so an attempt continues once; resuming an already-continued attempt refuses and names the newer attempt to continue. |
 | `reconcile` | `reconcile [--id RUN…] [--abandon-uncertain]` | run `recover(ProjectId, OperationId)`; with the flag, `reconcile(ProjectId, OperationId, ReconcileDecision::AbandonUncertain)` | At most 100 IDs; the edge maps each run to its operation. `--abandon-uncertain` requires at least one `--id`. No `--operation-id` or budget flag: the owner API takes neither, and recovery is idempotent. |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | fabric-runtime and fabric-mcp requests | Fabric freezes its leaves. CLI supplies only globals, envelope, exits and help catalogue entries; the mount lands with Fabric's crate, never as a forwarding route. |
-| `fabric mcp` | `fabric mcp [--client NAME]` | fabric-mcp transport | Explicit command-tree leaf frozen in step 1; no positionals; `--client` is the selected harness from state's MCP registry. `--json` refused before stdin. Until the owner binds, returns owner-unavailable; remaining Fabric leaves mount with their owner's subtree. |
-| `telemetry stats` | `telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail]` | telemetry `stats(facts, &PriceTable, StatsWindow { since, until, detail })` | Dates mean midnight UTC; timestamps need an offset; `since < until`. |
+| `fabric mcp` | `fabric mcp [--client claude\|codex\|cursor\|agy\|opencode]` | fabric-mcp transport | The client selects the harness registration. `--json` refused before stdin. The service is bound. |
+| `telemetry stats` | `telemetry stats [--usage] [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail]` | telemetry stats or the usage-ledger reader | `--usage` selects bounded usage-ledger stats; otherwise the Rust run-record reducer is used. Dates mean midnight UTC; timestamps need an offset; `since < until`. |
 | `worktree create` | `worktree create BRANCH [--base REV]` | confinement `worktrees::create(WorktreeCreate { branch, base })` | Creates `.worktrees/<BRANCH with / as ->`. An existing branch with `--base` is invalid; a new branch's base defaults to the project's `HEAD`, pinned and returned. `--repo` is dropped for global `--project`. |
 | `worktree list` | `worktree list` | confinement `worktrees::list(VerifiedRepo)` | Unpaged bounded list; no `--repo`. |
 | `worktree remove` | `worktree remove NAME` \| `worktree remove --merged --integration REF (--branch NAME… \| --since OID)` | confinement `worktrees::remove(WorktreeRemove::Name \| Merged { integration, scope })` | NAME conflicts with `--merged`. Scope is required, as supervisor states, rather than cli's optional scope. At most 100 branches. REF is pinned once. No force. |
@@ -261,12 +264,12 @@ The following mapping is exhaustive; `error` status cannot choose two exits.
 | `refused` | 1 | Policy/authority refusal. |
 | `invalid` | 2 | Invalid input/flags, missing or ambiguous target, unsupported record/config version. |
 | `error` | 3 | Cannot proceed: setup, I/O, contention, unavailable required evidence or result too large. |
-| `unavailable` | 4 | `OWNER_UNAVAILABLE`: the leaf parsed fully, but its typed library binding has not landed in this build. No forwarding or placeholder success. |
+| `unavailable` | 4 | A required capability is unavailable, such as a sign-in probe or an unbound owner. |
 | `timeout` | 124 | Explicit reader wait deadline; run continues. |
 | `cancelled` | 130 | Invocation cancelled; owner acknowledgement precedes custody release. |
 
-Exit 4 is reserved for an unbuilt command owner; this keeps it distinct from
-operational error/3 and the retired lease wrapper's held-by-another-holder/3.
+Exit 4 reports an unavailable capability; it stays distinct from operational
+error/3 and the retired lease wrapper's held-by-another-holder/3.
 Partial data states coverage and unavailable sources;
 if required evidence prevents the operation, use `error`/3. Hook/Git protocol
 exits below and MCP's JSON-RPC errors obey their external protocols, not this
