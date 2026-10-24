@@ -772,7 +772,11 @@ scheduler daemon. Within that, the lane decided:
   reported as held or uncertain. Accepting lost custody
   (`--abandon-uncertain`) is refused as unsupported until its evidence rules
   are designed. Reader fences on terminal attempts stay, because attempt
-  directories are never reused. A per-attempt or per-run error is reported in
+  directories are never reused. A guardian that dies after the terminal
+  commit but before publishing its release leaves that settlement
+  unpublished: reconcile scans nonterminal attempts only, and the attempt
+  directory is never reused, so nothing waits on it. A release sweep is a
+  follow-up if supervisor ever needs it. A per-attempt or per-run error is reported in
   place and the scan continues; anything left uncertain, unlaunched or in
   error fails the command. The scan covers the 320 oldest open runs and says
   when more exist; `--id` reaches the rest.
