@@ -39,45 +39,35 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
+/// The Git binary: `PROVENANT_GIT` when set, otherwise the first executable in a fixed
+/// preference list. PATH is not searched: Apple's `/usr/bin/git` lacks `--attr-source`, so a
+/// newer package-manager Git must win when both exist.
 pub(crate) fn git_binary() -> Option<PathBuf> {
-    let path_directories = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
     resolve_git_binary(
         std::env::var_os("PROVENANT_GIT")
             .map(PathBuf::from)
             .as_deref(),
-        &path_directories,
+        &GIT_CANDIDATES.map(PathBuf::from),
     )
 }
+const GIT_CANDIDATES: [&str; 5] = [
+    "/opt/homebrew/bin/git",
+    "/usr/local/bin/git",
+    "/opt/local/bin/git",
+    "/usr/bin/git",
+    "/bin/git",
+];
 pub(crate) fn resolve_git_binary(
     override_path: Option<&Path>,
-    path_directories: &[PathBuf],
+    candidates: &[PathBuf],
 ) -> Option<PathBuf> {
-    let executable = |path: PathBuf| {
-        path.is_absolute() && path.is_file() && provenant_supervisor::sys::is_executable(&path)
+    let executable = |path: &Path| {
+        path.is_absolute() && path.is_file() && provenant_supervisor::sys::is_executable(path)
     };
-    if let Some(path) = override_path {
-        let path = path.to_path_buf();
-        return executable(path.clone()).then_some(path);
+    match override_path {
+        Some(path) => executable(path).then(|| path.to_path_buf()),
+        None => candidates.iter().find(|path| executable(path)).cloned(),
     }
-    if let Some(path) = path_directories
-        .iter()
-        .map(|directory| directory.join("git"))
-        .find(|path| executable(path.clone()))
-    {
-        return Some(path);
-    }
-    [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| executable(path.clone()))
 }
 
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {

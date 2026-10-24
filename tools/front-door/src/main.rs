@@ -534,7 +534,7 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
-    fn git_resolver_prefers_override_then_path_and_checks_executable() {
+    fn git_resolver_prefers_override_then_candidates_and_checks_executable() {
         let root = tempfile::tempdir().expect("temp dir");
         let override_dir = root.path().join("override");
         let path_dir = root.path().join("path");
@@ -549,11 +549,11 @@ mod tests {
         fs::set_permissions(&path_git, fs::Permissions::from_mode(0o700)).expect("path mode");
 
         assert_eq!(
-            crate::roots::resolve_git_binary(None, std::slice::from_ref(&path_dir)),
-            Some(path_git)
+            crate::roots::resolve_git_binary(None, &[path_dir.join("missing"), path_git.clone()]),
+            Some(path_git.clone())
         );
         assert_eq!(
-            crate::roots::resolve_git_binary(Some(&override_git), &[path_dir]),
+            crate::roots::resolve_git_binary(Some(&override_git), &[path_git]),
             Some(override_git)
         );
     }
