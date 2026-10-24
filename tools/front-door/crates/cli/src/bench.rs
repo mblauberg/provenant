@@ -38,13 +38,17 @@ pub enum Bench {
     /// Propose tasks from merge commits that changed Rust tests.
     Mine(Mine),
     /// Check that a frozen task's tests fail on its parent and pass on its merge.
-    Verify { task: PathBuf },
+    Verify {
+        /// Frozen task file
+        task: PathBuf,
+    },
     /// Replay tasks through the selected dispatch route.
     Run(Run),
 }
 
 #[derive(Debug, Args)]
 pub struct Mine {
+    /// Maximum tasks to propose (1 to 100)
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: Option<u64>,
 }
@@ -61,8 +65,10 @@ pub struct Run {
     /// Route name or model, optionally followed by @effort.
     #[arg(long)]
     pub route: String,
+    /// Task split to replay
     #[arg(long, value_enum, default_value = "acceptance")]
     pub split: Split,
+    /// Maximum tasks to run (1 to 100)
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: Option<u64>,
 }

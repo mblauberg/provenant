@@ -19,6 +19,7 @@ use thiserror::Error;
 
 #[derive(Debug, Args)]
 pub struct Filter {
+    /// Restrict to this adapter
     #[arg(long)]
     pub adapter: Option<String>,
 }
@@ -38,12 +39,16 @@ pub enum Power {
 }
 #[derive(Debug, Subcommand)]
 pub enum Quota {
+    /// Show recorded provider quota
     Show(Filter),
+    /// Refresh quota and record a pacing tick
     Tick {
         #[command(flatten)]
         adapter: Filter,
+        /// What caused this tick
         #[arg(long, value_enum, default_value = "manual")]
         trigger: Trigger,
+        /// Current power state
         #[arg(long, value_enum, default_value = "ac")]
         power: Power,
     },

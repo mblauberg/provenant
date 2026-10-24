@@ -12,11 +12,16 @@ use std::{
 };
 #[derive(Debug, Subcommand)]
 pub enum Accounts {
+    /// List registered accounts
     List,
+    /// Register an account for an adapter
     Register {
+        /// Account label
         label: String,
+        /// Adapter the account belongs to, such as `claude`
         #[arg(long)]
         adapter: String,
+        /// Account's configuration directory
         #[arg(long)]
         directory: PathBuf,
     },

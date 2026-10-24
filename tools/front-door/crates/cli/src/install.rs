@@ -12,24 +12,32 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, clap::Args)]
 pub struct Install {
+    /// Release directory to install from
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub source: PathBuf,
+    /// Harness to install for (repeatable)
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
+    /// Directory for the installed binary
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub bin_dir: Option<PathBuf>,
+    /// Install harness hooks
     #[arg(long, value_enum, default_value = "off")]
     pub hooks: Switch,
+    /// Adopt matching existing files instead of refusing
     #[arg(long)]
     pub adopt_existing: bool,
+    /// Legacy checkout to migrate from
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub legacy_checkout: Option<PathBuf>,
+    /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct Uninstall {
+    /// Harness to remove (repeatable)
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
 }

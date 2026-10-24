@@ -305,6 +305,7 @@ fn build_model(passive: bool) -> clap::Command {
         .arg(
             Arg::new("help")
                 .long("help")
+                .help("Print help")
                 .global(true)
                 .action(if passive {
                     ArgAction::SetTrue
@@ -315,6 +316,7 @@ fn build_model(passive: bool) -> clap::Command {
         .arg(
             Arg::new("version")
                 .long("version")
+                .help("Print version")
                 .global(true)
                 .action(if passive {
                     ArgAction::SetTrue
