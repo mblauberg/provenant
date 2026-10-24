@@ -229,7 +229,10 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         reviewer.provenance,
         provenant_records::ReviewerProvenance::Observed
     );
-    assert_eq!(reviewer.family.as_deref(), Some("fixture"));
+    // The adapter name is not a model family, and the submitter is not the reviewer.
+    assert_eq!(reviewer.family, None);
+    assert_ne!(reviewer.actor_id, context.actor_id);
+    assert_eq!(fact.verified_owner, Some(context.actor_id));
     assert_eq!(
         store
             .attempts(AttemptFilter::default(), &call)?

@@ -886,9 +886,14 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 
 - Review facts are bound at the cli edge from run's `AttemptFact` plus a chair
   `ReviewClaim` (lens, verdict, findings, tier). Routing publishes no tiers, so
-  the claim supplies them; the observed reviewer family comes from the attempt,
-  and chair-attested families never count as verified. A PR subject requires
-  the attempt head to equal the subject head. A Document subject relies on the
+  the claim supplies them. The reviewer identity is the dispatched attempt's
+  own execution identity, never the submitting chair. The cli edge takes the
+  family from the routing catalogue entry of the observed model; an adapter
+  name is not a family, and a model missing from the catalogue or listed
+  without one stays unknown. Chair-attested families never
+  count as verified. A PR subject requires the attempt head to equal the
+  subject head; a read-only lane's head is the checkout HEAD the host read at
+  dispatch, never lane output. A Document subject relies on the
   claim and output digest.
 - `LegBlocker` and `user_approval` are chair-supplied evidence references the
   CLI records but does not verify.

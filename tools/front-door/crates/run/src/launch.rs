@@ -36,6 +36,9 @@ pub struct PreparedLaunch {
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
+    /// HEAD of the checkout a read-only lane runs in, read by the host at
+    /// preparation. Writers record theirs from delivery instead.
+    pub observed_head: Option<provenant_core::GitOid>,
     pub confinement: Option<crate::LaunchConfinement>,
 }
 /// Provider-decoded facts from a completed capture.
@@ -368,12 +371,13 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
-            let record = match self.mark_starting(id, &plan.route, writable, call) {
-                Ok(record) => record,
-                // A concurrent start already took this attempt.
-                Err(RunError::Conflict) => continue,
-                Err(error) => return Err(error),
-            };
+            let record =
+                match self.mark_starting(id, &plan.route, writable, plan.observed_head, call) {
+                    Ok(record) => record,
+                    // A concurrent start already took this attempt.
+                    Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
+                };
             started.push(
                 match self.hand_off(task, plan, context, acquire_writer, &record, call) {
                     Ok(()) => Started::Launched(id),

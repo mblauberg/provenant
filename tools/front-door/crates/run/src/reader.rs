@@ -62,22 +62,39 @@ impl Iterator for Attempts<'_> {
         Some(fact)
     }
 }
-/// Reviewer attribution: the owning actor and the provider family the
-/// observed route reports, or `Unknown` without an observed provider.
-fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Option<ReviewerFact> {
-    let actor_id = owner?;
-    let family = observed
+/// Reviewer attribution. The submitter owns the attempt but is not the
+/// reviewer: each dispatched attempt is its own execution identity, derived
+/// from the attempt ID, so a chair's dispatched reviews are never its own
+/// decision-maker reviews and distinct attempts stay distinct reviewers.
+/// An observed provider is an adapter, not a model family; run holds no
+/// catalogue, so the family stays unknown here and the edge fills it from the
+/// routing catalogue.
+fn reviewer_fact(
+    attempt: AttemptId,
+    owner: Option<ActorId>,
+    observed: Option<&RouteRecord>,
+) -> Option<ReviewerFact> {
+    owner?;
+    let digest = provenant_records::CanonicalV1::file_digest(
+        &[
+            b"provenant.reviewer-execution.v1:".as_slice(),
+            attempt.as_bytes(),
+        ]
+        .concat(),
+    );
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.bytes()[..16]);
+    let observed_provider = observed
         .and_then(|r| r.provider.as_deref())
-        .filter(|p| !p.is_empty())
-        .map(str::to_ascii_lowercase);
+        .is_some_and(|p| !p.is_empty());
     Some(ReviewerFact {
-        provenance: if family.is_some() {
+        provenance: if observed_provider {
             ReviewerProvenance::Observed
         } else {
             ReviewerProvenance::Unknown
         },
-        actor_id,
-        family,
+        actor_id: ActorId::from_bytes(id),
+        family: None,
         model: observed.and_then(|r| r.model.clone()),
         outcome: None,
     })
@@ -112,7 +129,7 @@ impl AttemptReader for RunStore {
             resolved_route: r.resolved_route.map(Into::into),
             usage: r.usage.into(),
             output_paths: vec![output.path.clone()],
-            reviewer: reviewer_fact(r.verified_owner, r.observed_route.as_ref()),
+            reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
             delivery_id: r.delivery_id,
             subject: r.subject,
             head: r.head,

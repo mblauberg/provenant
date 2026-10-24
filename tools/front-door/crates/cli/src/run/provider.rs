@@ -293,7 +293,7 @@ fn prepare_with(
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
-        let plan = match confinement_request(
+        let (plan, observed_head) = match confinement_request(
             project_id,
             &cwd,
             &home,
@@ -303,10 +303,12 @@ fn prepare_with(
             adapter.id(),
         )
         .and_then(|request| match writer.as_ref() {
-            Some(_) => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+            Some(_) => ConfinedPlan::new(request)
+                .map(|plan| (plan, None))
+                .map_err(|error| error.to_string()),
             None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
         }) {
-            Ok(plan) => plan,
+            Ok(planned) => planned,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
                 continue;
@@ -412,6 +414,7 @@ fn prepare_with(
             secret_input: spec.secret_input,
             cwd: spec.cwd,
             route: provider,
+            observed_head,
             confinement: Some(run::LaunchConfinement {
                 plan,
                 profile: spec.profile,
@@ -677,8 +680,8 @@ fn read_only_plan(
     cwd: &Path,
     git: &Path,
     request: PlanRequest,
-) -> Result<ConfinedPlan, String> {
-    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+) -> Result<(ConfinedPlan, Option<provenant_core::GitOid>), String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
     // Its home lives under the run state root: inside a lane that is the
@@ -723,10 +726,28 @@ fn read_only_plan(
         return Err("repository does not match dispatch project binding".into());
     }
     match repository {
-        Some(repo) => run::read_only_plan(&roots.state, &repo, &binding, request)
-            .map_err(|error| error.to_string()),
+        Some(repo) => {
+            // The host's own read of the checkout HEAD is the only reviewed
+            // head a read-only lane can claim; an unreadable HEAD stays unproven.
+            let head = run_read_utility(
+                &executor,
+                GitRead::RevParseHead,
+                &repo,
+                &utility,
+                budget,
+                &cancel,
+            )
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
+            .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
+            run::read_only_plan(&roots.state, &repo, &binding, request)
+                .map(|plan| (plan, head))
+                .map_err(|error| error.to_string())
+        }
         // Non-Git workspaces have no Git metadata or repository exceptions.
-        None => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+        None => ConfinedPlan::new(request)
+            .map(|plan| (plan, None))
+            .map_err(|error| error.to_string()),
     }
 }
 
