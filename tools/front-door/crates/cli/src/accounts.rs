@@ -67,7 +67,7 @@ pub fn execute(
         };
         entry.registered().map_err(|e| e.to_string())?;
         // The config lock and held parent make the read/edit/replace one operation.
-        let root = ensure_directory(roots.state.as_path())?;
+        let root = ensure_state_directory(roots.state.as_path())?;
         let _lock = root
             .try_lock(
                 OsStr::new("config.lock"),
@@ -130,11 +130,16 @@ pub fn execute(
     Ok(settings)
 }
 
-pub(crate) fn ensure_directory(path: &Path) -> Result<Directory, String> {
+fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
+    if !path.is_absolute() {
+        return Err("state directory must be absolute".into());
+    }
     let mut dir = Directory::root(true).map_err(|e| e.to_string())?;
     for part in path.components() {
-        let std::path::Component::Normal(name) = part else {
-            continue;
+        let name = match part {
+            std::path::Component::Normal(name) => name,
+            std::path::Component::RootDir => continue,
+            _ => return Err("state directory must be normalised".into()),
         };
         dir = match dir.open_verified_directory(name) {
             Ok(next) => next,
@@ -143,6 +148,22 @@ pub(crate) fn ensure_directory(path: &Path) -> Result<Directory, String> {
                 dir.sync().map_err(|e| e.to_string())?;
                 dir.open_verified_directory(name)
                     .map_err(|e| e.to_string())?
+            }
+            // The configured absolute state hierarchy may cross a mount.
+            // Match worktree creation: verify a held no-follow child before
+            // establishing its new device boundary; descendants stay strict.
+            Err(e) if e.is_cross_device() => {
+                let before = dir.metadata_at(name, false).map_err(|e| e.to_string())?;
+                let child = dir.open_directory(name).map_err(|e| e.to_string())?;
+                let opened = child.metadata().map_err(|e| e.to_string())?;
+                let after = dir.metadata_at(name, false).map_err(|e| e.to_string())?;
+                if before.kind != provenant_supervisor::fs::FileKind::Directory
+                    || !before.same_identity(&opened)
+                    || !opened.same_identity(&after)
+                {
+                    return Err("state directory changed while opening".into());
+                }
+                child.into_anchor().map_err(|e| e.to_string())?
             }
             Err(e) => return Err(e.to_string()),
         };
