@@ -524,10 +524,10 @@ is `cargo-home/` in attempt scratch, as for read-only lanes, with only its
 `registry` linked to the user's existing cache, so offline resolution finds
 crates without any credential or config grant. Build output may execute within
 the granted cache, and host Cargo/rustup configuration and toolchains remain
-immutable. Where the worktree carries a `.cargo/rustc-wrapper.sh` (bounded
-search below the working directory; no symlinks, hidden directories or
-`target`), exactly that regular file gains exec. The rest of the worktree stays
-non-executable. Writers also get exact write access to the linked worktree's
+immutable. The lane's working directory (the worktree, or a read-only lane's read root)
+also gains exec, so repository scripts such as a Cargo rustc wrapper run
+directly. Children inherit the profile, so this widens no read, write or
+credential access. Writers also get exact write access to the linked worktree's
 private `COMMIT_EDITMSG`, `AUTO_MERGE` and `AUTO_MERGE.lock`, so `git commit`
 completes; the common `.git` stays read-only apart from the listed ref grants.
 

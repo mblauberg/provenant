@@ -1883,44 +1883,23 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
 }
 
 #[test]
-fn rust_tools_exec_only_the_checked_in_rustc_wrapper() {
-    let root = std::env::temp_dir().join(format!("provenant-wrapper-{}", std::process::id()));
-    let repo = root.join("repo");
-    let _ = std::fs::remove_dir_all(&root);
-    let wrapper = repo.join("tools/front-door/.cargo/rustc-wrapper.sh");
-    std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
-    std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
-    // Other scripts, hidden directories and build output are never granted.
-    std::fs::write(wrapper.with_file_name("other.sh"), "#!/bin/sh\n").unwrap();
-    std::fs::create_dir_all(repo.join(".hidden/.cargo")).unwrap();
-    std::fs::write(repo.join(".hidden/.cargo/rustc-wrapper.sh"), "").unwrap();
-    std::fs::create_dir_all(repo.join("target/.cargo")).unwrap();
-    std::fs::write(repo.join("target/.cargo/rustc-wrapper.sh"), "").unwrap();
+fn rust_tools_exec_repository_scripts_in_the_working_directory() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
-    let plan = read_only_plan(root.to_str().unwrap(), Some("login"));
+    let plan = read_only_plan("/fixture", Some("login"));
     let prompt = Prompt::new("fixture".into());
     let spec = crate::codex::Codex
-        .prepare(fixture_input(&route, &plan, &prompt, &repo, None))
+        .prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))
         .unwrap();
-    let executables: Vec<_> = spec
-        .profile
-        .spec
-        .process_executables
-        .iter()
-        .map(|grant| (grant.path.clone(), grant.scope))
-        .collect();
-    assert!(executables.contains(&(
-        wrapper,
-        provenant_confinement::permissions::PathScope::Exact
-    )));
-    assert_eq!(
-        executables
-            .iter()
-            .filter(|(path, _)| path.ends_with("rustc-wrapper.sh"))
-            .count(),
-        1,
-        "{executables:?}"
-    );
-    std::fs::remove_dir_all(&root).unwrap();
+    let exec = &spec.profile.spec.tool_exec_roots;
+    assert!(exec.iter().any(|g| g.path == Path::new("/fixture/repo")
+        && g.scope == provenant_confinement::permissions::PathScope::Subtree));
+    // Exec does not widen reads: the worktree was already readable.
+    assert!(!exec.iter().any(|g| g.path == Path::new("/fixture/home")));
 }

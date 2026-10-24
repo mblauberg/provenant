@@ -527,7 +527,6 @@ fn prepare(
     }
     let mut runtime_reads = vec![subtree(package)];
     let mut tool_exec_roots = Vec::new();
-    let mut process_executables = vec![exact(input.executable)];
     if shell {
         env.extend([
             ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
@@ -540,7 +539,6 @@ fn prepare(
             access,
             &mut runtime_reads,
             &mut tool_exec_roots,
-            &mut process_executables,
             &mut env,
             &mut setup,
         );
@@ -557,7 +555,7 @@ fn prepare(
         setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables,
+                process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
                 deny_keychain_access: shell,
                 tool_exec_roots,
