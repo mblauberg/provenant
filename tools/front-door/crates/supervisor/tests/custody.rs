@@ -906,6 +906,37 @@ fn cancel_kills_the_whole_group_and_settles(root: &Path) -> Result<()> {
     wait_for_identity_absence(&child)?;
     Ok(())
 }
+fn natural_exit_ends_same_group_leftovers_and_settles(root: &Path) -> Result<()> {
+    let ready_path = root.join("left-ready.sock");
+    let gate_path = root.join("left-gate.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let gate_listener = UnixListener::bind(&gate_path)?;
+    let (_writer, handle) = start(
+        root,
+        "left",
+        "s2-group-provider",
+        &[ready_path.into_os_string(), gate_path.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    // The child ignores TERM and shares the provider's process group.
+    let mut child_stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut child_stream, b'R')?;
+    let child = process_identity(read_pid_line(&mut child_stream)?)?;
+    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut gate, b'R')?;
+    // The provider exits on its own; cleanup must still end the leftover.
+    drop(gate);
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, None, "{exit:?}");
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.is_empty());
+    wait_for_identity_absence(&child)?;
+    Ok(())
+}
 fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Result<()> {
     let ready_path = root.join("late-ready.sock");
     let gate_path = root.join("late-gate.sock");
@@ -1553,6 +1584,10 @@ const CASES: &[Case] = &[
     (
         "cancel_kills_the_whole_group_and_settles",
         cancel_kills_the_whole_group_and_settles,
+    ),
+    (
+        "natural_exit_ends_same_group_leftovers_and_settles",
+        natural_exit_ends_same_group_leftovers_and_settles,
     ),
     (
         "cancel_after_unresolved_exit_republishes_a_settled_exit",

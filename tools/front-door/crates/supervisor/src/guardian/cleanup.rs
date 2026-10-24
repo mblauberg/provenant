@@ -103,14 +103,15 @@ impl Driver<'_> {
         }
     }
 
-    /// Cancellation of a provider that already exited: TERM then, after the
-    /// descendant grace, KILL to the provider's group while its unreaped
-    /// leader still reserves the PGID. Returns once no live member remains or
+    /// Ends the group of a provider that already exited, on cancellation or
+    /// natural exit alike: TERM then, after the descendant grace, KILL to the
+    /// provider's group while its unreaped leader still reserves the PGID. Returns once no live member remains or
     /// the bounded budget is spent; settlement is judged by the caller.
     fn terminate_group(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
         plan: CapturePlan,
+        reason: machine::StopReason,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) {
@@ -121,7 +122,13 @@ impl Driver<'_> {
         loop {
             // A group signal cannot exclude members, so never send one while a
             // spared or protected owner shares the group, or without a census.
-            if let Some(census) = self.refresh_census(child) {
+            let census = self.refresh_census(child);
+            // Cancellation retries a failed census; a natural exit leaves the
+            // retry and its warning to the cleanup loop.
+            if census.is_none() && reason != machine::StopReason::ExplicitCancellation {
+                return;
+            }
+            if let Some(census) = census {
                 let members = || {
                     census.facts().filter(|fact| {
                         fact.identity.group_id == group && fact.identity.pid != group
@@ -143,14 +150,9 @@ impl Driver<'_> {
                     libc::SIGTERM
                 };
                 let outcome = stop_delivery_outcome(child.stop_group(escalation));
-                self.record_delivery(
-                    self.reservation.provider.clone(),
-                    machine::StopReason::ExplicitCancellation,
-                    signal,
-                    outcome,
-                );
+                self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
                 if outcome != DeliveryOutcome::Delivered && !escalation {
-                    push_warning(warnings, omitted, "cancel group signal not delivered");
+                    push_warning(warnings, omitted, "group signal not delivered");
                 }
             }
             if escalation && began.elapsed() >= grace.saturating_mul(2) {
@@ -345,12 +347,15 @@ impl Driver<'_> {
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) -> Result<bool> {
-        if cancelled
+        let reason = if cancelled
             || self.read_cancel(warnings, omitted)
                 == Some(machine::StopReason::ExplicitCancellation)
         {
-            self.terminate_group(child, plan, warnings, omitted);
-        }
+            machine::StopReason::ExplicitCancellation
+        } else {
+            machine::StopReason::PostTerminalCleanup
+        };
+        self.terminate_group(child, plan, reason, warnings, omitted);
         let deadline = Instant::now()
             + Duration::from_millis(
                 plan.root_flush_ms
