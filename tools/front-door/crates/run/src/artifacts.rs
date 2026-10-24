@@ -16,6 +16,31 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
     db::private(&dir)?;
     Ok(dir)
 }
+
+pub(crate) fn remove_temporary_best_effort(attempt: &Directory) {
+    let _ = remove_entry_tree(attempt, OsStr::new("tmp"));
+}
+
+fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::fs::Result<()> {
+    let metadata = match parent.metadata_at(name, false) {
+        Ok(metadata) => metadata,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.kind != FileKind::Directory {
+        return parent.unlink(name);
+    }
+    let directory = parent.open_verified_directory(name)?;
+    directory.make_writable()?;
+    let entries = directory
+        .entries()?
+        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+    for entry in entries {
+        remove_entry_tree(&directory, &entry)?;
+    }
+    parent.rmdir(name)
+}
+
 impl RunStore {
     pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
         let runs = subdir(&self.root, OsStr::new("runs"), create)?;

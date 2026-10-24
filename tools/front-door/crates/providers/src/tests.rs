@@ -336,7 +336,7 @@ fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), Pro
     Ok(())
 }
 
-fn route(adapter: &str, model: &str) -> ResolvedRoute {
+pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
     ResolvedRoute {
         adapter: adapter.into(),
         model: model.into(),
@@ -589,7 +589,10 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     ));
 }
 
-fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confinement::ConfinedPlan {
+pub(super) fn read_only_plan(
+    root: &str,
+    authentication: Option<&str>,
+) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
@@ -603,6 +606,7 @@ fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confine
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant("scratch"),
             private_state: Some(grant("state")),
@@ -655,7 +659,7 @@ fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
-fn fixture_input<'a>(
+pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
     prompt: &'a Prompt,
@@ -710,7 +714,13 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             .map(|(key, _)| key.to_string_lossy())
             .collect();
         let extra: &[&str] = match id {
-            "codex" => &["CODEX_HOME", "SHELL"],
+            "codex" => &[
+                "CARGO_HOME",
+                "RUSTUP_HOME",
+                "CARGO_TARGET_DIR",
+                "CODEX_HOME",
+                "SHELL",
+            ],
             "claude" => &[
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
@@ -788,7 +798,8 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 .spec
                 .runtime_reads
                 .iter()
-                .all(|grant| grant.path == package)
+                .all(|grant| grant.path == package
+                    || (id == "codex" && grant.path.starts_with("/fixture/home")))
         );
         assert!(
             spec.profile
@@ -1228,6 +1239,51 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             .1
             .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
     );
+}
+
+#[test]
+fn codex_read_only_toolchain_uses_private_build_and_existing_registry() {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = read_only_plan("/fixture", Some("login"));
+    let prompt = Prompt::new("fixture".into());
+    let spec = crate::codex::Codex
+        .prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        ))
+        .unwrap();
+    let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
+    assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
+    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
+    assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
+    for dir in [
+        "/fixture/home/.cargo/bin",
+        "/fixture/home/.rustup/toolchains",
+    ] {
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|g| g.path == std::path::Path::new(dir))
+        );
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .any(|g| g.path == std::path::Path::new(dir))
+        );
+    }
+    assert!(spec.setup.contains(&crate::launch::SetupStep::Symlink {
+        link: "/fixture/scratch/cargo-home/registry".into(),
+        target: "/fixture/home/.cargo/registry".into(),
+    }));
+    assert!(!spec.profile.spec.runtime_reads.iter().any(|g| g.path.ends_with(".cargo") || g.path.to_string_lossy().contains("credentials")));
 }
 
 #[test]

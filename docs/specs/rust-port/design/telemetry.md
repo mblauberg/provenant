@@ -37,7 +37,7 @@ below; the attempt reducer remains pure.
 | Exact cost estimates and missingness | Integer arithmetic and reviewed prices; unknown measurements remain unknown. |
 | Coverage | State the selected scope and its omissions; never imply whole-account measurement. |
 | Attempt timing | Run records the timestamps and provider duration; telemetry derives wall time, admission wait and provider time. |
-| Route comparison | `stats --by` groups by route or one route field, with outcome rates, retries, p50/p90 times, usage, cost and missingness. |
+| Route comparison | The report groups by resolved route and includes outcome rates, retries, p50/p90 times, usage, cost and missingness. |
 | Cost per accepted delivery | Read-only join to workflow's `acceptance` reader at the CLI edge; no telemetry write or delivery store. |
 
 | Drop | Reason and consequence |
@@ -46,7 +46,7 @@ below; the attempt reducer remains pure.
 | Ledger import and history carry-forward | The new binary never opens, imports or deletes the old ledger. Its history stays on disk for the old install. No import command or receipt. |
 | Transcript/receipt discovery and OTel ingest/export/collector | No reader for the raw collection (about 0.5 GB a day); the comparison reader is served by run's records. OTel prompt/tool logging stays off. CLI demand counts do not imply token/cost coverage; old transcripts and collector data stay untouched. |
 | Delivery telemetry writes and the old accepted-cost report | Workflow retains acceptance evidence. No telemetry `upsert_delivery`, `delivery_report` or delivery rows; the read-only join below replaces them. |
-| Changes and retro reports | Still no product reader; `stats --by` is the comparison view. Delete both reducers `scripts/telemetry_changes.py` and `scripts/telemetry_delivery.py`; the retrospect skill keeps using evidence directly. |
+| Changes and retro reports | Still no product reader; the route comparison report is the product view. Delete both reducers `scripts/telemetry_changes.py` and `scripts/telemetry_delivery.py`; the retrospect skill keeps using evidence directly. |
 | Cross-host summaries, aliases and read-time refresh | Stats is local and read-only. No SSH telemetry operation, top-level `stats`/`retro` aliases or implicit refresh. |
 | Weekly quota history and ledger fallback | History is not carried forward. Execution-route/quota owns any future window history, reset interpretation, probes and cooldowns. |
 | Model heuristics, parent rollups and compaction telemetry | Exact recorded identity suffices. Run owns context and lineage; parent references never add another usage total. |
@@ -87,15 +87,14 @@ terminal facts nor adds an edge from run or the pure reducer to a writer.
 The sole telemetry command is:
 
 ```text
-provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--by route|adapter|model|account] [--detail] [--json]
+provenant telemetry stats [--usage] [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
 ```
 
 CLI owns clap, global root/project selection, rendering and the frozen command
 contract. Dates mean midnight UTC; timestamps require an offset. Select terminal
 times in `[since, until)`, defaulting to all available terminal records; reject
-invalid bounds or `since >= until`. `--by` defaults to `route`, the exact
-(adapter, model, effort, account label) key; the other values group by that one
-field, where adapter is the fact's resolved provider. Selection is host-local
+invalid bounds or `since >= until`. The report groups by the exact (adapter,
+model, effort, account label) route key. Selection is host-local
 and respects the CLI's project scope. No telemetry MCP tool, import, ingest or sources command remains.
 
 JSON uses CLI's envelope, with `schema_version`, `command`, `status`, `data`
@@ -142,9 +141,9 @@ an error, never silently skipped.
 Use the binding exits: **0** successful report, including partial measurement
 coverage in `data`; **1** failed/refused computation or findings; **2** invalid
 arguments, malformed input or unsupported record/config version; **3** cannot
-proceed because of setup, I/O or contention; **124** wait deadline; **130**
-cancelled. Stats does not wait for attempts and normally cannot return 124.
-There is **no exit 4**. CLI owns consistent envelope status/error mapping;
+proceed because of setup, I/O or contention; **4** unavailable capability;
+**124** wait deadline; **130** cancelled. Stats does not wait for attempts and
+does not use 4 or normally return 124. CLI owns consistent envelope status/error mapping;
 internal diagnostics are bounded, redacted stderr under R8.
 
 ## Run input and crate boundary
@@ -318,8 +317,8 @@ Weekly quota history is not reconstructed from costs or retained old rows.
 ## Evaluating configurations
 
 To compare two routes, the evaluate skill freezes its plan, dispatches both arms
-through run over the same tasks, then reads `telemetry stats --since START --by
-route --json` once for the evaluation's project and window: each arm is a route
+through run over the same tasks, then reads `telemetry stats --since START
+--json` once for the evaluation's project and window: each arm is a route
 group with outcome rates, p50/p90 wall time, usage and cost. Quality comes from
 evaluate's graders, not telemetry; quality per hour divides graded passes by the
 arm's `wall_ms.sum`, and is unavailable while `wall_ms.missing` is nonzero. For real work, the user compares routes over a period by
@@ -381,7 +380,7 @@ where useful; **no insta** dependency.
   exit 2, missing store creates nothing, corrupt store refuses, partial coverage
   exits 0 with coverage in `data`, 1 MiB cap including envelope, cancellation
   exits 130, deterministic human rows, reader failure before reduction,
-  `--by` keys, a corrupt receipt refusing and the 100,001st-fact refusal. Test isolated HOME/state/config only.
+  resolved-route grouping, a corrupt receipt refusing and the 100,001st-fact refusal. Test isolated HOME/state/config only.
   Old-root tripwires prove stats never opens old stores or transcripts.
 - Installer integration: isolated fixtures for both Macs' collector/config
   retirement plans, user-authorisation boundary, unrelated configuration

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
+provenant-config = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }
 rusqlite = { workspace = true }

@@ -6,7 +6,7 @@ dataset ([`benchmarks.json`](benchmarks.json), fields in
 
 ## What it is for
 
-- **Priors for routing and effort.** An agent tuning `config/model-routing.json`
+- **Priors for routing and effort.** An agent considering catalogue models
   or a task class's default effort reads this first to see which effort tiers
   look worth their cost and which look dominated.
 - **Stage 0 of the replay bench studies.** The spec
@@ -46,9 +46,9 @@ Terminal-Bench cost is a run total and sits in `notes`.
 
 ## Freshness
 
-Refresh the whole registry when a model joins or leaves the catalogue
-(`config/model-routing.json`, or the instance catalogue at
-`~/.agents/config/model-routing.json`) and otherwise each quarter. A record's age
+Refresh the whole registry when a model joins or leaves the Rust catalogue at
+`tools/front-door/crates/routing/assets/catalogue.toml` and otherwise each
+quarter. A record's age
 is `source_date`, or `retrieved` when the source is an undated live page. Treat
 a record older than about six months as stale: keep it, say so when citing it,
 and do not use it to override a fresher one. Next scheduled refresh: January
