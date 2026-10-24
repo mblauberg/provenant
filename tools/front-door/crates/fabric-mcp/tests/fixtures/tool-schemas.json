@@ -4340,7 +4340,7 @@
                 ],
                 "type": "object"
               },
-              "maxItems": 100,
+              "maxItems": 64,
               "minItems": 1,
               "type": "array"
             }

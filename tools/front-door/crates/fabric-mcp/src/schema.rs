@@ -295,7 +295,7 @@ fn build_catalogue() -> Vec<Value> {
         (
             "Submit one batch to the run service.",
             json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
+                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
             }),
         ),
         (
