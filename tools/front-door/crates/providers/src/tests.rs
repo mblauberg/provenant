@@ -1083,7 +1083,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         )
         .into_bytes()
     };
-    let run = |config: &str, items: Vec<Vec<u8>>| {
+    let run_by = |config: &str, items: Vec<Vec<u8>>, deadline: u64| {
         let script = KeychainScript {
             items: std::sync::Mutex::new(items.into()),
             calls: std::sync::Mutex::new(vec![]),
@@ -1095,10 +1095,16 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             config_dir: Path::new(config),
             scratch: Path::new("/scratch/empty"),
         };
-        let result = refresh_if_expiring(&script, &login, &|| now);
+        let result = refresh_if_expiring(&script, &login, &|| now, deadline);
         (result, script.calls.into_inner().unwrap())
     };
     let hour = 3_600_000;
+    let run = |config: &str, items: Vec<Vec<u8>>| run_by(config, items, now + hour);
+
+    // A spent deadline runs nothing.
+    let (token, calls) = run_by("/home/u/.claude", vec![], now);
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    assert!(calls.is_empty());
 
     // A live token is used as read: no refresh, and Debug never shows it.
     let (token, calls) = run("/home/u/.claude", vec![item("fixture-access", now + hour)]);

@@ -770,7 +770,8 @@ fn main() -> Result<()> {
                 scratch: &scratch,
             };
             let now = || now_ms().unwrap_or(u64::MAX);
-            Some(refresh_if_expiring(&executor, &login, &now)?)
+            let deadline = now().saturating_add(90_000);
+            Some(refresh_if_expiring(&executor, &login, &now, deadline)?)
         }
         _ => None,
     };

@@ -107,12 +107,20 @@ pub fn keychain_suffix(config_dir: &[u8]) -> String {
 /// then reads again and accepts a token with at least a minute left. The
 /// refresh runs with every customisation off (safe mode, no hooks, no MCP
 /// servers, no slash commands, no session file) in the empty scratch
-/// directory. The token is never logged, printed or persisted.
+/// directory. Every subprocess is capped by the caller's `deadline_ms` on the
+/// `now_ms` clock. The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
     login: &Login<'_>,
     now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
 ) -> Result<OauthToken, ProviderError> {
+    let budget = |cap: Duration| -> Result<Duration, ProviderError> {
+        match deadline_ms.saturating_sub(now_ms()) {
+            0 => Err(ProviderError::CredentialUnavailable),
+            left => Ok(cap.min(Duration::from_millis(left))),
+        }
+    };
     let default = login.config_dir == login.home.join(".claude");
     let mut service = KEYCHAIN_SERVICE.to_owned();
     let mut env: Vec<(OsString, OsString)> = vec![
@@ -137,7 +145,7 @@ pub fn refresh_if_expiring(
         ]
         .map(OsString::from)
         .to_vec();
-        let mut options = ExecOptions::new(&argv, login.scratch, Duration::from_secs(10));
+        let mut options = ExecOptions::new(&argv, login.scratch, budget(Duration::from_secs(10))?);
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
         options.stderr = StreamPolicy::Discard;
@@ -173,7 +181,7 @@ pub fn refresh_if_expiring(
     ]
     .map(OsString::from)
     .to_vec();
-    let mut options = ExecOptions::new(&argv, login.scratch, Duration::from_secs(60));
+    let mut options = ExecOptions::new(&argv, login.scratch, budget(Duration::from_secs(60))?);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
