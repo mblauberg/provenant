@@ -637,6 +637,11 @@ impl Directory {
         let name = mutable_component(name)?;
         os::symlink(target, &self.file, name).map_err(error("symlinkat", &self.path.join(name)))
     }
+    /// Read a link's stored target without following it.
+    pub fn read_link(&self, name: &OsStr) -> Result<PathBuf> {
+        let name = component(name)?;
+        os::read_link(&self.file, name).map_err(error("readlinkat", &self.path.join(name)))
+    }
     pub fn sync(&self) -> Result<()> {
         self.file
             .sync_all()

@@ -878,7 +878,11 @@ scheduler daemon. Within that, the lane decided:
   A durable exit is committed through the same `finish` path as the guardian
   and its settlement published; a starting attempt without a launch summary,
   whose reservation is provably absent and which has no exit, is withdrawn as
-  `rejected`; queued work is started; everything else stays fenced and is
+  `rejected`; queued work is started. Provider setup may be replayed after a
+  crash or by concurrent launchers: file steps reuse identical bytes and
+  replace differing entries, while link steps reuse an identical target and
+  replace differing entries. A preparation error withdraws only if the attempt
+  remains queued; a concurrent state change is left to its owner. Everything else stays fenced and is
   reported as held or uncertain. Accepting lost custody
   (`--abandon-uncertain`) remains unavailable at the CLI. Writer reservations
   survive owner death, including death after terminal commit, and reconcile

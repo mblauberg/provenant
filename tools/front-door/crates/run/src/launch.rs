@@ -346,15 +346,21 @@ impl RunStore {
             let mut plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
-                    crate::writer::settle_launch_staging(&attempt)?;
-                    self.withdraw(
+                    match self.withdraw(
                         id,
                         AttemptState::Queued,
                         Outcome::Rejected,
                         &reason,
                         now()?,
                         call,
-                    )?;
+                    ) {
+                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
+                        Ok(None) => continue,
+                        // Another launcher or cancellation changed the attempt
+                        // while provider preparation was in progress.
+                        Err(RunError::Conflict) => continue,
+                        Err(error) => return Err(error),
+                    }
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
