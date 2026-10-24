@@ -202,6 +202,24 @@ green. Live provider runs need the user's authority.
    is wrong. The chair arranges cross-family review, then merges on green CI.
    Lanes open PRs and do not merge.
 
+## R12. Simple first
+
+Build the simplest design that is correct for the main path and the failures
+that matter now: data loss, credential exposure, killing a healthy provider,
+writing outside the selected roots, and silent wrong answers. Other edge cases
+get a typed refusal or a note in the PR, not a guardrail; we harden later when
+real use shows the need.
+
+- Test the main path and those failures. Do not test what a type, the compiler
+  or an upstream tool already guarantees, and do not add a test per branch.
+- Delete old Python and TS tests, helpers and CI steps freely once nothing
+  needs them; edit CI workflows and path filters as the step requires. Never
+  mute `ci-status`.
+- Reviews block only on real defects in those failure classes or on a broken
+  main path. Everything else is a follow-up note or a size cut.
+- When a fix or a rule would add more code than the risk justifies, choose the
+  smaller option and say so in the PR.
+
 ## R11. Authority and escalation
 
 The user has delegated rewrite decisions to the chairs (2026-10-23): design,
