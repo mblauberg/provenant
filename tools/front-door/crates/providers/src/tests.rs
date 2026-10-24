@@ -454,9 +454,20 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         continuation.validate(&route, "different"),
         Err(ProviderError::IdentityMismatch)
     ));
+    // Codex's exec stream never names a model, so its continuation pins the
+    // requested one; an adapter that reports models must have reported it.
     let codex = replay(&codex::Codex, fixture!("codex/success.jsonl"), EXIT)?.1;
+    codex::Codex
+        .continuation(&codex, &self::route("codex", "requested"), "grants")?
+        .validate(&self::route("codex", "requested"), "grants")?;
+    let unanswered = replay(
+        &claude::Claude,
+        fixture!("claude/live-auth-required.jsonl"),
+        EXIT,
+    )?
+    .1;
     assert!(matches!(
-        codex::Codex.continuation(&codex, &self::route("codex", "requested"), "grants"),
+        claude::Claude.continuation(&unanswered, &route, "grants"),
         Err(ProviderError::UnknownIdentity)
     ));
     Ok(())
@@ -578,49 +589,273 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     ));
 }
 
-#[test]
-fn prepare_refuses_unrecorded_launches() -> Result<(), ProviderError> {
+fn read_only_plan(root: &str) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
-    let confined = ConfinedPlan::new(PlanRequest {
+    let grant = |path: &str| PathGrant {
+        path: format!("{root}/{path}").into(),
+        scope: PathScope::Subtree,
+    };
+    ConfinedPlan::new(PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
             mode: AccessMode::ReadOnly,
-            scratch: PathGrant {
-                path: "/tmp/fixture-scratch".into(),
-                scope: PathScope::Subtree,
-            },
-            private_state: None,
-            read_roots: vec![],
+            scratch: grant("scratch"),
+            private_state: Some(grant("state")),
+            read_roots: vec![grant("repo")],
             protected_roots: vec![],
             secret_roots: vec![],
-            selected_authentication: None,
+            selected_authentication: Some("login".into()),
             include_continuation: false,
             network: vec![],
             capabilities: vec![],
             nested_confinement: false,
         },
     })
-    .unwrap();
+    .expect("fixture plan")
+}
+
+fn fixture_input<'a>(
+    route: &'a ResolvedRoute,
+    confined: &'a provenant_confinement::ConfinedPlan,
+    prompt: &'a Prompt,
+    cwd: &'a std::path::Path,
+) -> PrepareInput<'a> {
+    PrepareInput {
+        route,
+        confined,
+        prompt,
+        continuation: None,
+        grant_digest: "fixture",
+        executable: std::path::Path::new("/opt/homebrew/bin/provider"),
+        home: std::path::Path::new("/fixture/home"),
+        user: std::ffi::OsStr::new("fixture"),
+        cwd,
+        nonce: [9; 16],
+    }
+}
+
+#[test]
+fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<(), ProviderError> {
+    let confined = read_only_plan("/fixture");
     let prompt = Prompt::new("fixture prompt".into());
+    let repo = std::path::Path::new("/fixture/repo");
     for entry in REGISTRY {
-        let route = route(entry.adapter.id(), "fixture");
+        let id = entry.adapter.id();
+        let route = route(id, "fixture-model");
+        let result = entry
+            .adapter
+            .prepare(fixture_input(&route, &confined, &prompt, repo));
+        if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
+            assert!(
+                matches!(result, Err(ProviderError::Disabled { .. })),
+                "{id}"
+            );
+            continue;
+        }
+        let spec = result?;
+        let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
+        // Nothing is inherited: the environment is exactly the allow-list.
+        let keys: Vec<_> = spec
+            .env
+            .iter()
+            .map(|(key, _)| key.to_string_lossy())
+            .collect();
+        let extra: &[&str] = match id {
+            "codex" => &["CODEX_HOME", "SHELL"],
+            "claude" => &[
+                "CLAUDE_CODE_TMPDIR",
+                "DISABLE_AUTOUPDATER",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            ],
+            _ => &[],
+        };
+        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG"]
+            .iter()
+            .chain(extra)
+            .copied()
+            .collect();
+        assert_eq!(keys, expected, "{id}");
+        assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
+        assert!(
+            !argv.iter().any(|arg| arg.contains("fixture prompt")),
+            "{id}"
+        );
+        match id {
+            "codex" => {
+                assert!(argv.iter().any(|arg| arg == "service_tier=\"default\""));
+                assert!(
+                    !argv
+                        .iter()
+                        .any(|arg| arg.contains("fast") || arg.contains("priority"))
+                );
+            }
+            "claude" => {
+                let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob");
+            }
+            _ => {}
+        }
+        // A read-only launch may only start inside a declared read root.
         assert!(matches!(
-            entry.adapter.prepare(PrepareInput {
-                route: &route,
-                confined: &confined,
-                prompt: &prompt,
-                continuation: None,
-                grant_digest: "fixture"
-            }),
-            Err(ProviderError::Disabled { .. })
+            entry.adapter.prepare(fixture_input(
+                &route,
+                &confined,
+                &prompt,
+                std::path::Path::new("/fixture/elsewhere")
+            )),
+            Err(ProviderError::InvalidPath)
         ));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct LiveCapture {
+    id: String,
+    fixture: String,
+    session_mode: Session,
+    access_mode: Access,
+    process_exit: Option<i64>,
+    outcome: String,
+    answering_model: Option<String>,
+    activation_eligible: bool,
+    argv: Vec<String>,
+}
+
+fn recordings(adapter: &str) -> Vec<LiveCapture> {
+    let text = match adapter {
+        "codex" => fixture!("codex/recordings.json"),
+        "claude" => fixture!("claude/recordings.json"),
+        _ => "[]",
+    };
+    serde_json::from_str(text).expect("recordings manifest")
+}
+
+fn requested_model(capture: &LiveCapture) -> String {
+    let flag = capture
+        .argv
+        .iter()
+        .position(|arg| arg == "-m" || arg == "--model")
+        .expect("model flag");
+    capture.argv[flag + 1].clone()
+}
+
+/// Replays one live capture through the real decoder; a resume capture is
+/// bound to the continuation its fresh capture produced.
+fn replay_live(
+    adapter: &dyn Adapter,
+    id: &str,
+    bytes: &str,
+    fresh: Option<&str>,
+) -> Result<(), ProviderError> {
+    let captures = recordings(adapter.id());
+    let capture = captures.iter().find(|c| c.id == id).expect("capture");
+    let route = route(adapter.id(), &requested_model(capture));
+    let continuation = match fresh {
+        Some(fresh) => Some(adapter.continuation(&replay(adapter, fresh, EXIT)?.1, &route, "g")?),
+        None => None,
+    };
+    let mut state = adapter.stream(continuation.as_ref())?;
+    for chunk in bytes.as_bytes().chunks(17) {
+        adapter.observe(&mut state, chunk)?;
+    }
+    let exit = ExitObservation {
+        code: capture.process_exit,
+        timed_out: false,
+    };
+    let outcome = adapter.finish(state, exit)?;
+    assert_eq!(format!("{:?}", outcome.status()), capture.outcome, "{id}");
+    assert_eq!(outcome.model(), capture.answering_model.as_deref(), "{id}");
+    assert!(outcome.session().is_some(), "{id}");
+    Ok(())
+}
+
+macro_rules! live_replay {
+    ($name:ident, $adapter:expr, $id:literal, $file:literal $(, after $fresh:literal)?) => {
+        #[test]
+        fn $name() -> Result<(), ProviderError> {
+            #[allow(unused_mut, unused_assignments)]
+            let mut fresh = None;
+            $(fresh = Some(fixture!($fresh));)?
+            replay_live(&$adapter, $id, fixture!($file), fresh)
+        }
+    };
+}
+live_replay!(
+    live_codex_read_only_fresh,
+    codex::Codex,
+    "codex-live-read_only-fresh",
+    "codex/live-read_only-fresh.jsonl"
+);
+live_replay!(live_codex_read_only_resume, codex::Codex, "codex-live-read_only-resume", "codex/live-read_only-resume.jsonl", after "codex/live-read_only-fresh.jsonl");
+live_replay!(
+    live_codex_worktree_write_fresh,
+    codex::Codex,
+    "codex-live-worktree_write-fresh",
+    "codex/live-worktree_write-fresh.jsonl"
+);
+live_replay!(live_codex_worktree_write_resume, codex::Codex, "codex-live-worktree_write-resume", "codex/live-worktree_write-resume.jsonl", after "codex/live-worktree_write-fresh.jsonl");
+live_replay!(
+    live_claude_read_only_fresh,
+    claude::Claude,
+    "claude-live-read_only-fresh",
+    "claude/live-read_only-fresh.jsonl"
+);
+live_replay!(live_claude_read_only_resume, claude::Claude, "claude-live-read_only-resume", "claude/live-read_only-resume.jsonl", after "claude/live-read_only-fresh.jsonl");
+live_replay!(
+    live_claude_worktree_write_fresh,
+    claude::Claude,
+    "claude-live-worktree_write-fresh",
+    "claude/live-worktree_write-fresh.jsonl"
+);
+live_replay!(live_claude_worktree_write_resume, claude::Claude, "claude-live-worktree_write-resume", "claude/live-worktree_write-resume.jsonl", after "claude/live-worktree_write-fresh.jsonl");
+live_replay!(
+    live_claude_auth_required,
+    claude::Claude,
+    "claude-live-auth-required",
+    "claude/live-auth-required.jsonl"
+);
+
+#[test]
+fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
+    #[derive(Deserialize)]
+    struct Matrix {
+        execution_modes: Vec<Mode>,
+    }
+    #[derive(Deserialize)]
+    struct Mode {
+        adapter: String,
+        access_mode: Access,
+        session_mode: Session,
+        enabled: bool,
+        capture_refs: Vec<String>,
+    }
+    let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
+    for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
+        let captures = recordings(&mode.adapter);
+        assert!(!mode.capture_refs.is_empty(), "{}", mode.adapter);
+        for reference in &mode.capture_refs {
+            let capture = captures
+                .iter()
+                .find(|capture| &capture.id == reference)
+                .expect("cited capture");
+            // Read-only evidence never enables a writer, nor fresh a resume.
+            assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
+            assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
+            assert!(capture.activation_eligible, "{reference}");
+            assert_eq!(capture.outcome, "Success", "{reference}");
+            assert!(
+                capture
+                    .fixture
+                    .starts_with(&format!("{}/live-", mode.adapter))
+            );
+        }
+    }
 }
 
 #[test]

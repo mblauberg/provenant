@@ -14,8 +14,19 @@ provenant-records = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-quota = { workspace = true }
 
+[features]
+# Lets the activation recorder prepare unrecorded modes. Never enabled by a
+# production crate; the recorder verifies every claimed observation by probe.
+recording = []
+
 [dev-dependencies]
 provenant-core = { workspace = true }
+provenant-supervisor = { workspace = true }
+sha2 = { workspace = true }
+
+[[example]]
+name = "record"
+required-features = ["recording"]
 
 [lints]
 workspace = true

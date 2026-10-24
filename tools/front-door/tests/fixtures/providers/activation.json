@@ -15,104 +15,80 @@
       "adapter": "claude",
       "access_mode": "read_only",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "claude-model-mismatch",
-        "claude-fresh",
-        "claude-resume",
-        "claude-direct-model",
-        "claude-structured-error"
+        "claude-live-read_only-fresh"
       ]
     },
     {
       "adapter": "claude",
       "access_mode": "read_only",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "claude-model-mismatch",
-        "claude-fresh",
-        "claude-resume",
-        "claude-direct-model",
-        "claude-structured-error"
+        "claude-live-read_only-resume"
       ]
     },
     {
       "adapter": "claude",
       "access_mode": "worktree_write",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "claude-model-mismatch",
-        "claude-fresh",
-        "claude-resume",
-        "claude-direct-model",
-        "claude-structured-error"
+        "claude-live-worktree_write-fresh"
       ]
     },
     {
       "adapter": "claude",
       "access_mode": "worktree_write",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "claude-model-mismatch",
-        "claude-fresh",
-        "claude-resume",
-        "claude-direct-model",
-        "claude-structured-error"
+        "claude-live-worktree_write-resume"
       ]
     },
     {
       "adapter": "codex",
       "access_mode": "read_only",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "codex-success",
-        "codex-failure",
-        "codex-partial"
+        "codex-live-read_only-fresh"
       ]
     },
     {
       "adapter": "codex",
       "access_mode": "read_only",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "codex-success",
-        "codex-failure",
-        "codex-partial"
+        "codex-live-read_only-resume"
       ]
     },
     {
       "adapter": "codex",
       "access_mode": "worktree_write",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "codex-success",
-        "codex-failure",
-        "codex-partial"
+        "codex-live-worktree_write-fresh"
       ]
     },
     {
       "adapter": "codex",
       "access_mode": "worktree_write",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "codex-success",
-        "codex-failure",
-        "codex-partial"
+        "codex-live-worktree_write-resume"
       ]
     },
     {

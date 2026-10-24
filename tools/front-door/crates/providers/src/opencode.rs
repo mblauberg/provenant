@@ -1,7 +1,8 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct OpenCode;
-crate::adapter!(OpenCode, "opencode");
+crate::adapter!(OpenCode, "opencode", crate::launch::unrecorded);
+const MODEL_ON_WIRE: bool = true;
 // The recordings do not establish v2. Decode their evidence, never activate v2
 // or the exit-after-output exception from an unversioned stream.
 #[derive(Deserialize)]

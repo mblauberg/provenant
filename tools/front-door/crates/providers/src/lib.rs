@@ -6,9 +6,11 @@ pub mod claude;
 pub mod codex;
 mod contract;
 pub mod cursor;
+mod launch;
 pub mod opencode;
 mod stream;
 pub use contract::*;
+pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin, mode_enabled};
 pub use stream::*;
 
 use provenant_quota::QuotaSource;
@@ -42,13 +44,15 @@ pub static REGISTRY: &[Registration] = &[
     },
 ];
 
-// All invocation forms in step 0's activation.json are disabled. Keep shared
-// refusal mechanics here, rather than speculative per-provider launch builders.
+// Shared mechanics; each adapter supplies its own `prepare` builder.
 macro_rules! adapter {
-    ($ty:ty, $id:literal) => {
+    ($ty:ty, $id:literal, $prepare:path) => {
         impl crate::Adapter for $ty {
             fn id(&self) -> &'static str {
                 $id
+            }
+            fn execution_enabled(&self) -> bool {
+                crate::launch::any_mode_enabled($id)
             }
             fn account(
                 &self,
@@ -76,9 +80,14 @@ macro_rules! adapter {
             }
             fn prepare(
                 &self,
-                _: crate::PrepareInput<'_>,
-            ) -> Result<crate::AdapterLaunchSpec, crate::ProviderError> {
-                Err(crate::ProviderError::Disabled { adapter: $id })
+                input: crate::PrepareInput<'_>,
+            ) -> Result<crate::LaunchSpec, crate::ProviderError> {
+                let (access, session) = crate::launch::admit($id, &input)?;
+                let mut stream = crate::StreamState::new($id, decode);
+                if let Some(continuation) = input.continuation {
+                    continuation.bind_stream($id, &mut stream)?;
+                }
+                $prepare(&input, access, session, stream)
             }
             fn stream(
                 &self,
@@ -112,7 +121,7 @@ macro_rules! adapter {
                 route: &provenant_records::ResolvedRoute,
                 grant_digest: &str,
             ) -> Result<crate::Continuation, crate::ProviderError> {
-                crate::Continuation::from_outcome($id, outcome, route, grant_digest)
+                crate::Continuation::from_outcome($id, outcome, route, grant_digest, MODEL_ON_WIRE)
             }
             fn validate_provenance(
                 &self,

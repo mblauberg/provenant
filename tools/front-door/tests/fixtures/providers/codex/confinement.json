@@ -1,0 +1,37 @@
+{
+  "read_only": {
+    "authentication_read": "allowed",
+    "declared_process_exec": "allowed",
+    "declared_read": "allowed",
+    "other_network": "denied",
+    "process_fork": "allowed",
+    "protected_instruction_read": "allowed",
+    "protected_write": "denied",
+    "provider_endpoint": "allowed",
+    "secret_read": "denied",
+    "undeclared_process_exec": "denied",
+    "undeclared_read": "denied",
+    "undeclared_write": "denied"
+  },
+  "worktree_write": {
+    "authentication_read": "allowed",
+    "declared_process_exec": "allowed",
+    "declared_read": "allowed",
+    "git_config_write": "denied",
+    "git_head_write": "allowed",
+    "git_index_write": "allowed",
+    "git_objects_write": "allowed",
+    "other_network": "denied",
+    "other_ref_write": "denied",
+    "process_fork": "allowed",
+    "protected_instruction_read": "allowed",
+    "protected_write": "denied",
+    "provider_endpoint": "allowed",
+    "secret_read": "denied",
+    "selected_ref_write": "allowed",
+    "undeclared_process_exec": "denied",
+    "undeclared_read": "denied",
+    "undeclared_write": "denied",
+    "worktree_write": "allowed"
+  }
+}

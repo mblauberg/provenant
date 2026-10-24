@@ -1,7 +1,8 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Cursor;
-crate::adapter!(Cursor, "cursor");
+crate::adapter!(Cursor, "cursor", crate::launch::unrecorded);
+const MODEL_ON_WIRE: bool = true;
 crate::quota_source!(Cursor, "cursor");
 #[derive(Deserialize)]
 #[serde(tag = "type")]
