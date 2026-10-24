@@ -670,7 +670,7 @@ struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
-    head: [PathGrant; 12],
+    head: [PathGrant; 14],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
 }
@@ -711,6 +711,9 @@ impl WorktreeWriteGrants {
                 "MERGE_MODE",
                 "ORIG_HEAD",
                 "ORIG_HEAD.lock",
+                // Rerere records conflicted paths here when <common>/rr-cache exists.
+                "MERGE_RR",
+                "MERGE_RR.lock",
             ]
             .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
@@ -3009,6 +3012,18 @@ mod tests {
         // `git commit` needs its message buffer, only in the private directory.
         assert!(source.contains(&format!("\"{}\"", private.join("COMMIT_EDITMSG").display())));
         assert!(!source.contains(&format!("\"{}\"", common.join("COMMIT_EDITMSG").display())));
+        // A local `git merge` records its state only in the private directory.
+        for name in [
+            "MERGE_HEAD",
+            "MERGE_MSG",
+            "MERGE_MODE",
+            "MERGE_RR",
+            "ORIG_HEAD",
+            "ORIG_HEAD.lock",
+        ] {
+            assert!(source.contains(&format!("\"{}\"", private.join(name).display())));
+            assert!(!source.contains(&format!("\"{}\"", common.join(name).display())));
+        }
         // Pathspec commits write `next-index-<pid>.lock`, only in the private directory.
         let private_pattern = sbpl_regex_path(&private)?;
         assert!(source.contains(&format!(
