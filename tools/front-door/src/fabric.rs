@@ -1132,53 +1132,15 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<PeerResult, FacadeError> {
-        let ctx = &self.factory.context;
-        let peer = ctx
-            .config
-            .peers
-            .values()
-            .find(|p| p.host == host)
-            .ok_or(FacadeError::HomeUnavailable)?;
-        let project = ProjectLocator::new(&ctx.identity, &self.factory.home)
-            .map_err(|_| FacadeError::ConfinementRefused)?;
-        let request = PeerRequest {
-            version: 1,
-            target_host: host,
-            source_host: ctx.identity.host,
-            agent: ctx.identity.inbox.agent.clone(),
-            project,
+        self.factory.context.peer_with(
+            &self.factory.executor,
+            &self.factory.clock,
+            host,
             action,
-        };
-        let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
-            ctx.config.ssh_executable.as_deref(),
+            budget,
+            cancel,
         )
-        .map_err(|_| FacadeError::HomeUnavailable)?;
-        let transport = SshTransport {
-            executor: &self.factory.executor,
-            clock: &self.factory.clock,
-            home: &self.factory.home,
-            cwd: &self.factory.cwd,
-            executable,
-            seconds: ctx.config.limits.peer_seconds,
-        };
-        match transport
-            .exchange(peer, &request, budget, cancel)
-            .map_err(|error| {
-                let operation_id = match &error {
-                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
-                    _ => None,
-                };
-                FacadeError::from_code(error.code(), operation_id)
-            })?
-            .result
-        {
-            PeerResult::Error { code, operation_id } => Err(peer_error(&code, operation_id)),
-            value => Ok(value),
-        }
     }
-}
-fn peer_error(code: &str, operation_id: Option<provenant_core::OperationId>) -> FacadeError {
-    FacadeError::from_code(code, operation_id)
 }
 impl BinaryRunOwner<'_> {
     fn capabilities(&self) -> RunCapabilities {
@@ -1207,7 +1169,36 @@ impl BinaryRunOwner<'_> {
             tasks,
             concurrency,
             knobs,
+            host,
         } = input;
+        // Explicit placement forwards the whole batch; the peer confines it.
+        if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
+            if !self.allow_remote {
+                return Err(FacadeError::ConfinementRefused);
+            }
+            // Peer writers need worktree transport (#1457).
+            if tasks
+                .iter()
+                .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
+            {
+                return Err(FacadeError::OwnerUnavailable);
+            }
+            let input = SubmitInput::Submission {
+                operation_id,
+                tasks,
+                concurrency,
+                knobs,
+                host: None,
+            };
+            return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
+                PeerResult::Submitted(receipt)
+                    if receipt.targets.iter().all(|t| t.host == Some(host)) =>
+                {
+                    Ok(receipt)
+                }
+                _ => Err(FacadeError::StateCorrupt),
+            };
+        }
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
@@ -1721,6 +1712,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }],
             concurrency: Some(1),
             knobs: vec![],
+            host: None,
         };
         let mut owner = BinaryRunOwner {
             factory: self.factory,
@@ -2167,7 +2159,11 @@ mod peer_tests {
             "publication_failed",
             "home_unavailable",
         ] {
-            assert_eq!(super::peer_error(code, None).code(), code, "{code}");
+            assert_eq!(
+                super::FacadeError::from_code(code, None).code(),
+                code,
+                "{code}"
+            );
         }
     }
 
@@ -2194,7 +2190,7 @@ mod peer_tests {
             return Err("expected a peer refusal".into());
         };
         assert!(matches!(
-            super::peer_error(&code, operation_id),
+            super::FacadeError::from_code(&code, operation_id),
             super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop"
         ));
         Ok(())
