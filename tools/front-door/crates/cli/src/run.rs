@@ -184,9 +184,9 @@ impl run::Providers for Registry<'_> {
         events.extend(outcome.final_events().iter().cloned());
         let rollout = (adapter.id() == "codex")
             .then(|| {
-                outcome.session().and_then(|thread| {
-                    provenant_providers::codex_rollout::observe(provider_state, thread).ok()
-                })
+                outcome
+                    .session()
+                    .and_then(|thread| provider::observe_codex_rollout(provider_state, thread).ok())
             })
             .flatten();
         let observed_model = if adapter.id() == "codex" {

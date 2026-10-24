@@ -419,6 +419,37 @@ struct Probe<'a> {
     scratch: &'a Path,
 }
 
+/// Each explicit fallback candidate has its own private state, and only the
+/// launched one holds Codex's rollout. Exactly one candidate may match.
+pub(super) fn observe_codex_rollout(
+    provider_state: &Path,
+    thread: &str,
+) -> Result<provenant_providers::codex_rollout::Turn, provenant_providers::ProviderError> {
+    use provenant_providers::ProviderError;
+    let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
+    let mut observed = Err(ProviderError::UnknownIdentity);
+    for entry in entries.take(64) {
+        let name = entry
+            .map_err(|_| ProviderError::UnknownIdentity)?
+            .file_name();
+        let candidate = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("candidate-"));
+        if !candidate.is_some_and(|index| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            continue;
+        }
+        match provenant_providers::codex_rollout::observe(&provider_state.join(&name), thread) {
+            Ok(_) if observed.is_ok() => return Err(ProviderError::IdentityMismatch),
+            Ok(turn) => observed = Ok(turn),
+            Err(ProviderError::UnknownIdentity) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    observed
+}
+
 fn observe_account(
     entry: &provenant_providers::accounts::Registration,
     executable: &Path,
@@ -740,6 +771,29 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let base =
+            std::env::temp_dir().join(format!("provenant-candidates-{}", std::process::id()));
+        let thread = "01234567-89ab-cdef-0123-456789abcdef";
+        let day = base.join("candidate-1/sessions/2026/10/24");
+        std::fs::create_dir_all(base.join("candidate-0"))?;
+        std::fs::create_dir_all(&day)?;
+        std::fs::write(
+            day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+            ),
+        )?;
+        let observed = observe_codex_rollout(&base, thread);
+        std::fs::remove_dir_all(&base)?;
+        assert_eq!(observed?.model, "gpt-6-luna");
+        Ok(())
+    }
 
     #[test]
     fn setup_stays_below_run_owned_roots_without_following_links()
