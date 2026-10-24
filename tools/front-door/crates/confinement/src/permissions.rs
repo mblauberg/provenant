@@ -2935,6 +2935,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -3063,6 +3064,7 @@ mod tests {
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
         assert!(sbpl.contains("(deny file-link)"));
+        assert!(sbpl.contains("(allow sysctl-read)"));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -3113,6 +3115,17 @@ mod tests {
             "shell: {:?}; {}",
             shell_outcome.termination,
             String::from_utf8_lossy(&shell_outcome.stderr.bytes)
+        );
+        let memory_outcome = run(&executables[5], &[Path::new("-n"), Path::new("hw.memsize")]);
+        assert!(
+            successful_probe(&memory_outcome)
+                && String::from_utf8_lossy(&memory_outcome.stdout.bytes)
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|bytes| bytes > 0),
+            "hw.memsize sysctl-read failed under the compiled provider profile: {:?}; {}",
+            memory_outcome.termination,
+            String::from_utf8_lossy(&memory_outcome.stderr.bytes)
         );
         assert!(successful_probe(&run(
             &executables[0],

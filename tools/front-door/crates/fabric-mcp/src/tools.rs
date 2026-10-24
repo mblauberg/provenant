@@ -529,6 +529,10 @@ pub fn catalogue() -> &'static [Value] {
     schema::catalogue()
 }
 
+pub fn legacy_catalogue() -> &'static [Value] {
+    schema::legacy_catalogue()
+}
+
 #[cfg(test)]
 #[path = "tools_tests.rs"]
 mod tests;
