@@ -36,7 +36,9 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         exit_code: Some(0),
-        started_at: WallTime::from_micros(0).unwrap(),
+        queued_at: WallTime::from_micros(0).unwrap(),
+        started_at: Some(WallTime::from_micros(0).unwrap()),
+        provider_ms: None,
         finished_at: WallTime::from_micros(1).unwrap(),
         resolved_route: Some(RouteFact {
             provider: Some("p".into()),

@@ -248,7 +248,12 @@ pub fn stats(
         if total.attempts >= MAX_ATTEMPTS {
             return Err(TelemetryError::TooLarge("100,000 selected attempts"));
         }
-        if fact.started_at > fact.finished_at || fact.attempt_number == 0 {
+        if fact
+            .started_at
+            .is_some_and(|start| start > fact.finished_at)
+            || fact.queued_at > fact.finished_at
+            || fact.attempt_number == 0
+        {
             return Err(TelemetryError::InvalidFact(
                 "time order or zero attempt number",
             ));
