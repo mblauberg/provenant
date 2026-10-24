@@ -213,9 +213,12 @@ Run owns schema and transactions; shared typed records live in records:
   from validated store records: task, attempt number, operation, project,
   terminal state, exit, `started_at`/`finished_at`, resolved route (provider,
   model, effort, account label), usage counts (`u64`), output paths, reviewer
-  and optional `delivery_id`. It also carries workflow's subject/head, output
-  references/digests, requested/applied/observed route, verified owner, lineage
-  and reason, covering every execution field read from `RUN_RECEIPT`.
+  and optional `delivery_id`. Timing adds `queued_at` (admission accepted),
+  optional `started_at` (ticket granted) and optional `provider_ms`
+  (supervisor-observed execution) for telemetry's comparison view. It also
+  carries workflow's subject/head, output references/digests,
+  requested/applied/observed route, verified owner, lineage and reason,
+  covering every execution field read from `RUN_RECEIPT`.
 - `OperationRecord`: project/actor scope, kind, request digest, IDs and
   `prepared|accepted|terminal|launch_unknown`. The digest excludes reader
   wait/rendering but includes prompt, route, authority and execution controls.
@@ -314,7 +317,7 @@ retains a transaction between calls.
 | run / CLI, Fabric | `read_output(AttemptRef, ArtifactPart, ByteRange, &ExecutionContext) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits, &ExecutionContext) -> Result<ArtifactManifest, RunError>`. Bounded confined regular files and stable digests. |
 | run / Fabric, confinement edge | `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>`. Read-only host-local observations/paths, checked against handle authority. |
 | run / workflow composition edge | `AttemptReader::attempt(AttemptId) -> Result<AttemptFact, RunError>` and `attempts(filter)` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
-| run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
+| run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &Acceptance, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
 | providers / run | `prepare(ResolvedRoute, ConfinedPlan, Prompt, Continuation) -> AdapterLaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control or transcript reads. |
