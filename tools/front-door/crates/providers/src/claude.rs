@@ -669,6 +669,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
                 events.push(E::Model(message.model));
             }
+            let failed = error.is_some() || is_api_error_message;
             if let Some(error) = error {
                 events.push(if error == "authentication_failed" {
                     E::AuthRequired
@@ -678,9 +679,13 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             } else if is_api_error_message {
                 events.push(E::Error);
             }
-            for content in message.content {
-                if let Content::Text { text } = content {
-                    events.push(E::Text(text));
+            // The result event repeats the final answer, so assistant text is
+            // kept only as error evidence; otherwise every answer lands twice.
+            if failed {
+                for content in message.content {
+                    if let Content::Text { text } = content {
+                        events.push(E::Text(text));
+                    }
                 }
             }
             if let Some(usage) = message.usage {

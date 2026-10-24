@@ -521,6 +521,20 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
+fn claude_answer_is_recorded_once() -> Result<(), ProviderError> {
+    let (events, _) = replay(&claude::Claude, fixture!("claude/fresh.jsonl"), EXIT)?;
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["FIXTURE_USER_OR_PROVIDER_TEXT_001"]);
+    Ok(())
+}
+
+#[test]
 fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result<(), ProviderError>
 {
     let mut state = claude::Claude.stream(None)?;
