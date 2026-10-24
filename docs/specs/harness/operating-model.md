@@ -1,5 +1,9 @@
 # Spec: harness operating model for routing, cache, quota and telemetry
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **accepted** by the user on 2026-10-21 (r2, after a
 `codex/gpt-6.1-sol@high` review); r3 folds in the user's review answers. GitHub owns delivery state; this file owns
 the durable requirements. It grants no authority beyond what the user approves
@@ -100,7 +104,7 @@ web research until R9 gives it a working network path.
    `skills/session/references/chair-state.md` already defines for hookless
    hosts.
 4. A soft gate checks spawns before execution: the Claude PreToolUse hook on
-   the Agent tool and `fabric_dispatch`, and the Fabric dispatch path for
+   the Agent tool and `fabric_submit`, and the Fabric dispatch path for
    every chair. It bounces once, with the reason, a spawn that names neither
    a tier nor a model, puts a principal model on a non-principal role, or
    breaks pacing. A reissue carrying `principal: <why>` passes and is logged.

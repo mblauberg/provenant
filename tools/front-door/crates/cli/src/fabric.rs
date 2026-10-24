@@ -30,6 +30,12 @@ pub enum Fabric {
     },
     Identity,
     #[command(subcommand)]
+    Host(Host),
+    #[command(hide = true)]
+    Peer,
+    #[command(subcommand)]
+    Graph(Graph),
+    #[command(subcommand)]
     Mail(Mail),
     #[command(subcommand)]
     Task(Task),
@@ -40,6 +46,28 @@ pub enum Fabric {
     #[command(subcommand)]
     Landing(Landing),
 }
+#[derive(Debug, Subcommand)]
+pub enum Host {
+    List,
+}
+#[derive(Debug, Subcommand)]
+pub enum Graph {
+    Run {
+        #[arg(long)]
+        document: PathBuf,
+    },
+    Status {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Resume {
+        #[arg(long)]
+        document: PathBuf,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct Operation {
     #[arg(long)]
@@ -301,21 +329,48 @@ pub struct LandingFence {
     reference: String,
     #[arg(long)]
     id: ClaimId,
-    #[command(flatten)]
-    fence: Fence,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    generation: u64,
 }
+#[derive(Debug, thiserror::Error)]
+#[error("invalid landing token")]
+pub struct LandingTokenError;
+
+impl From<LandingTokenError> for EdgeError {
+    fn from(_: LandingTokenError) -> Self {
+        Self::Invalid
+    }
+}
+
 impl LandingFence {
-    fn proof(self) -> LandingProof {
-        LandingProof {
+    /// The fence secret never enters argv or clap's diagnostics.
+    pub fn proof(self) -> Result<LandingProof, LandingTokenError> {
+        let token = std::env::var("PROVENANT_LANDING_TOKEN")
+            .ok()
+            .and_then(|value| value.parse::<Token>().ok())
+            .ok_or(LandingTokenError)?;
+        Ok(LandingProof {
             reference: self.reference,
             id: self.id,
-            generation: self.fence.generation,
-            token: self.fence.token.0,
-        }
+            generation: self.generation,
+            token: token.0,
+        })
     }
 }
 #[derive(Debug, Subcommand)]
 pub enum Landing {
+    Push {
+        #[command(flatten)]
+        fence: LandingFence,
+        #[command(flatten)]
+        operation: Operation,
+    },
+    Reconcile {
+        #[command(flatten)]
+        fence: LandingFence,
+        #[command(flatten)]
+        operation: Operation,
+    },
     Acquire {
         #[arg(long)]
         reference: String,
@@ -377,10 +432,6 @@ pub(crate) enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
-    #[error(
-        "project home is remote; local coordination is refused until home routing is available"
-    )]
-    HomeUnavailable,
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)
@@ -397,6 +448,12 @@ impl Fabric {
         let (domain, verb) = match self {
             Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
+            Self::Host(_) => return "fabric host list".into(),
+            Self::Peer => return "fabric peer".into(),
+            Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
+            Self::Graph(Graph::Cancel { .. }) => return "fabric graph cancel".into(),
+            Self::Graph(Graph::Resume { .. }) => return "fabric graph resume".into(),
+            Self::Graph(Graph::Status { .. }) => return "fabric graph status".into(),
             Self::Mail(v) => (
                 "mail",
                 match v {
@@ -436,6 +493,8 @@ impl Fabric {
             Self::Landing(v) => (
                 "landing",
                 match v {
+                    Landing::Push { .. } => "push",
+                    Landing::Reconcile { .. } => "reconcile",
                     Landing::Acquire { .. } => "acquire",
                     Landing::Renew { .. } => "renew",
                     Landing::Verify(_) => "verify",
@@ -476,15 +535,17 @@ fn execute(
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
-    ctx.require_local_home()?;
     let clock = provenant_supervisor::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
     let backoff = ThreadWait;
-    let service = CoordinationService::open(
+    let service = CoordinationService::for_identity(
         &ctx.roots.state,
-        ctx.identity.project,
-        ctx.identity.inbox.actor,
+        &ctx.identity,
+        &ctx.config,
+        &ctx.home,
+        &ctx.cwd,
+        &ctx.executor,
         &clock,
         &backoff,
         budget,
@@ -494,7 +555,14 @@ fn execute(
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let value = match cmd {
-        Fabric::Identity | Fabric::Mcp { .. } => return Err(EdgeError::Invalid),
+        Fabric::Identity
+        | Fabric::Mcp { .. }
+        | Fabric::Host(_)
+        | Fabric::Graph(_)
+        | Fabric::Peer
+        | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
+            return Err(EdgeError::Invalid);
+        }
         Fabric::Mail(Mail::Send {
             to,
             kind,
@@ -700,21 +768,21 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Landing(LandingInput::Renew {
-                proof: fence.proof(),
+                proof: fence.proof()?,
                 lease_ms: ctx.lease(lease)?,
             }),
             operation,
         )?,
         Fabric::Landing(Landing::Verify(fence)) => json(service.landing(
             LandingInput::Verify {
-                proof: fence.proof(),
+                proof: fence.proof()?,
             },
             budget,
             &cancel,
         )?)?,
         Fabric::Landing(Landing::Release { fence, operation }) => mutate(
             Mutation::Landing(LandingInput::Release {
-                proof: fence.proof(),
+                proof: fence.proof()?,
             }),
             operation,
         )?,
@@ -780,7 +848,6 @@ pub fn run(
                     (Outcome::Invalid, "invalid_input")
                 }
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
-                EdgeError::HomeUnavailable => (Outcome::Error, "home_unavailable"),
                 _ => (Outcome::Error, "io"),
             };
             let mut result = CommandResult::new(&command, status, Value::Null);

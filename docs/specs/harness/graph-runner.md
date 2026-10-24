@@ -1,5 +1,9 @@
 # Spec: graph runner for contract-driven plan graphs
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **proposed**, 2026-10-22. Implements requirement R2 of the
 [operating model](operating-model.md) and is brought forward from its last
 rollout position at the user's direction. GitHub owns delivery state; this
@@ -64,7 +68,7 @@ before storage, so the runner only ever sees plain nodes.
 | `id` | Unique within the graph, `[a-z0-9][a-z0-9._-]{0,47}`; sub-graph nodes are prefixed `<lead>/`. Never used directly as a dispatch id |
 | `kind` | `work` (default), `review`, `lead` |
 | `role` and `tier` | Role from the R1.5 set; `tier` is `junior`, `senior` or `principal` |
-| `route` | Same fields as `fabric_dispatch`. Required in slice 1; later optional, defaulting from the size table (R1.1) |
+| `route` | Same fields as `fabric_submit`. Required in slice 1; later optional, defaulting from the size table (R1.1) |
 | `execution` | Absent (a Fabric lane) or `headless` (Claude only; see Headless Claude) |
 | `authority` | `mode` (`read_only` or `worktree_write`), `network`, `confidential`, `allow_secrets`, `capabilities`, `read_roots`. Narrowing only |
 | `worktree` | Key into `worktrees`; required for `worktree_write` |
@@ -175,11 +179,11 @@ graph is terminal and its receipts are written.
    the pool, so caps are exact between graphs and best effort against hand
    dispatch.
 3. **Order.** Critical path first, then cheaper tier, then node id.
-4. **Rate limits are not failures.** A `rate_limited` or `usage_limited`
-   outcome releases the slot and returns the node to `pending` with a retry
-   time, consuming no repair or escalation budget (R3.3, R7.3).
+4. **Rate limits preserve launch evidence.** A refusal before provider launch
+   may try the next configured route. After launch, only a read-only node may
+   fall back. A writer fails and reports its worktree for chair inspection.
 5. **Pipeline.** Each node is dispatched on its own, so an item's next stage
-   starts when its own previous stage passes. `fabric_batch` is not used.
+   starts when its own previous stage passes. The graph owner submits the individual ready tasks.
 6. **Wake-up.** File changes in running attempts' run directories (the
    `lane-watch` mechanism of
    [#1085](https://github.com/mblauberg/provenant/pull/1085) where merged, a
@@ -409,10 +413,10 @@ Rust front door ports it as one row.
 
 ### MCP
 
-One tool, `fabric_graph` (`action: run|status|revise|cancel|resume|templates`),
-with the dispatch tools' conventions and `wait_seconds` capped at 55. This
-amends [ADR 0022](../../adr/0022-thin-fabric-mcp-execution-facade.md),
-which fixes the execution tools at two; slice 1 carries the amendment.
+Use `fabric_graph` with `op: run|status|cancel|resume`. Run and resume take a
+project-local document path; status and cancel take `id`. Each call is bounded
+by the MCP request budget of 55 seconds. The [Rust Fabric design](../rust-port/design/fabric.md)
+owns the current checkpoint and execution contract.
 
 ### Output
 

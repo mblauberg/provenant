@@ -10,7 +10,7 @@ if [ -n "$manifest_dir" ]; then
     candidate=$manifest_dir
     while [ "$candidate" != / ]; do
         if [ -f "$candidate/Cargo.toml" ] && grep -q '^\[workspace\]' "$candidate/Cargo.toml"; then
-            workspace_root=$(CDPATH= cd -- "$candidate" && pwd -P)
+            workspace_root=$(CDPATH='' cd -- "$candidate" && pwd -P)
             break
         fi
         candidate=$(dirname "$candidate")
@@ -31,7 +31,7 @@ do
     destination=${mapping#*:}
     path=$cargo_home/$relative
     if [ -d "$path" ]; then
-        prefix=$(CDPATH= cd -- "$path" && pwd -P)
+        prefix=$(CDPATH='' cd -- "$path" && pwd -P)
         set -- "$@" "--remap-path-prefix=$prefix=$destination"
     fi
 done
@@ -57,7 +57,7 @@ if [ -n "$out_dir" ]; then
         *) path=$PWD/$out_dir ;;
     esac
     if [ -d "$path" ]; then
-        prefix=$(CDPATH= cd -- "$path" && pwd -P)
+        prefix=$(CDPATH='' cd -- "$path" && pwd -P)
         set -- "$@" "--remap-path-prefix=$prefix=/rustc-output"
     fi
 fi

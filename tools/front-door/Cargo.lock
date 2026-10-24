@@ -422,8 +422,12 @@ dependencies = [
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
+ "provenant-fabric-mcp",
+ "provenant-fabric-runtime",
+ "provenant-fabric-store",
  "provenant-providers",
  "provenant-records",
+ "provenant-run",
  "provenant-supervisor",
  "provenant-workflow",
  "serde",
@@ -454,6 +458,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

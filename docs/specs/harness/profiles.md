@@ -41,7 +41,7 @@ and the owning prose or constant still holds today's value until it is wired.
 | Auto-compaction ceiling | `config/model-routing.json` `context.ceiling_tokens`; `context_usage.py` clamps 100k–1M | 300,000 | Re-read tokens per turn against loss of detail | `context.ceiling_tokens`, wired |
 | Reviewers above the ladder | `HARNESS.md` Review ladder; `skills/code-review/SKILL.md` step 5; `references/multi-agent-review.md` (one reviewer at substantial, councils 2–4) | ladder minimum | Reviewer lanes against defect coverage | `review.extra_reviewers`, wired (skill) |
 | Cross-family requirement | `HARNESS.md` ladder: substantial falls back to same-family with another lens | prefer | Decorrelation against waiting on quota | `review.cross_family`, wired (skill) |
-| Re-review after repair | `skills/implement/SKILL.md` step 5 | repair delta only | Interaction defects against a second full review | `review.rereview_scope`, wired (skill) |
+| Re-review after repair | `skills/implement/SKILL.md` step 6 | repair delta only | Interaction defects against a second full review | `review.rereview_scope`, wired (skill) |
 | Repair cycle stop | `skills/deliver/references/contract.md` | 2 / 4 / 5 / 5 by tier | User attention against repair spend | `repair.max_cycles`, advisory; the ceiling is fixed |
 | Council juniors per part | `skills/orchestrate/references/tiered-council.md` | 3 | Lens passes against family spread | `council.junior_size`, advisory |
 | Pool pick mode | `scripts/model_route_pools.py` `pick` (`top`, `rotate`, `council`) | top weight | Consistency against quota spread | `routing.pool_mode`, wired |

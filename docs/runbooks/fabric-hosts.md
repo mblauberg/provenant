@@ -242,10 +242,11 @@ per call with `next_offset` for continuation. Each host keeps its own SQLite
 state, operation journal and last successful observations. Remote dispatch
 returns after the owner starts; use status or a lane wait to await completion.
 
-Codex, agy and Claude seats use the same `fabric_dispatch`, `fabric_runs`,
-`fabric_status`, `fabric_cancel` and `fabric_output` tools. Dispatch accepts
-`tasks[]`, `host` and `operation_id`, as well as `resume` and `handoff`.
-Qualified IDs route read/control tools to their owner.
+Codex, agy and Claude seats use `fabric_submit` with `op: submission` and a
+per-task route, `fabric_run` with `op: list|status|wait|cancel|resume`, and
+`fabric_output` with `op: read|fetch`. Run and output requests use an explicit
+attempt target, optionally qualified by its host. Use `fabric_graph` with
+`op: run|status|cancel|resume` for graph workflows.
 
 ## Transport read-only input
 
@@ -317,10 +318,10 @@ available for verification and fetch.
      refs/provenant/hosts/workshop/<result>/result
    ```
 
-The MCP equivalents are `fabric_dispatch` with `host`, `mode`, `worktree` and
-`operation_id`, followed by `fabric_fetch` with `id`. For multiple tasks, pass
-the per-task values in `tasks[]`. These operations use the same owner for
-Codex, agy and Claude chairs.
+For MCP, use `fabric_submit` with `op: submission` and `operation_id`;
+per-task access and worktree values belong in `tasks`. Read exported artefacts
+with `fabric_output` using `op: fetch`, an explicit target and manifest reference.
+These operations use the same owner for Codex, agy and Claude chairs.
 
 ### Errors
 

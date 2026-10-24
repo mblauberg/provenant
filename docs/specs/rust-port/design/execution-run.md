@@ -49,9 +49,9 @@ several projects and is a usage sample, not a production counter.
 | --- | --- |
 | `provenant lanes` | Council tally: 696; 22 waits exceeded 3600 s, maximum 14400 s |
 | `provenant fabric dispatch` | 31; `--operation-id` 26, model/effort/mode 26 each, worktree 24 |
-| `fabric_dispatch` | Council tally: 1116; no account, intent, risk tier, reviewer, orchestrator family, context ceiling, delivery ID or fallback pool supplied; one fallback list. Confidential true in all 1065 calls containing that field; Codex workers made 15 nested calls. |
-| `fabric_status` | Council tally: 254; 89 waits requested 55 s |
-| `fabric_output`, `fabric_cancel` | Initial sample: 31, 16 respectively |
+| `fabric_submit` | Council tally: 1116; no account, intent, risk tier, reviewer, orchestrator family, context ceiling, delivery ID or fallback pool supplied; one fallback list. Confidential true in all 1065 calls containing that field; Codex workers made 15 nested calls. |
+| `fabric_run` | Council tally: 254; 89 waits requested 55 s |
+| `fabric_output`, `fabric_run` | Initial sample: 31, 16 respectively |
 | Old `provenant run` verbs, `provenant batch`, direct `run_controls.py` | None found |
 | Direct `dispatch_run.py`, direct `cf_dispatch.py` | 7 and 1 command candidates; not evidence of a required public bypass |
 
