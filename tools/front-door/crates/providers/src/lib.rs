@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 mod contract;
 pub mod cursor;
+pub mod identity;
 mod launch;
 pub mod opencode;
 pub mod quota;

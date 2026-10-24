@@ -39,6 +39,8 @@ pub struct RoutePreference {
 #[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
     #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
     pub access: crate::graph::AccessMode,
     #[serde(default)]
     pub worktree: Option<String>,
