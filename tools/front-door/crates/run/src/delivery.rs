@@ -78,6 +78,7 @@ impl HostDeliveryContext {
             "GIT_SSH_COMMAND",
             "GIT_SSH_VARIANT",
             "GIT_TERMINAL_PROMPT",
+            "PROVENANT_GIT",
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_SYSTEM",
             "GIT_CONFIG_NOSYSTEM",
@@ -297,6 +298,18 @@ impl HostDeliveryContext {
         Ok(())
     }
     fn executable(&self, tool: &str, writer: &WriterRequest) -> Result<PathBuf> {
+        if tool == "git" {
+            let override_path = self
+                .environment
+                .iter()
+                .find(|(key, _)| key == b"PROVENANT_GIT")
+                .map(|(_, value)| OsString::from_vec(value.clone()));
+            let path = provenant_supervisor::git::resolve_git_executable(
+                override_path.as_deref().map(Path::new),
+            )
+            .ok_or(RunError::Delivery(Stage::Prepare))?;
+            return host_path(&path, writer);
+        }
         let path = self
             .environment
             .iter()
