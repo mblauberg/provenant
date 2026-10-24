@@ -64,7 +64,10 @@ bounded_input! {
         Submission {
             operation_id: OperationId,
             tasks: Vec<SubmittedTask>,
-            concurrency: u16,
+            #[serde(default)]
+            concurrency: Option<u16>,
+            #[serde(default)]
+            knobs: Vec<String>,
         },
     }
 }

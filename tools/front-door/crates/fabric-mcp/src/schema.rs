@@ -141,7 +141,7 @@ fn build_catalogue() -> Vec<Value> {
             "fabric_submit",
             "Submit one batch to the run service.",
             json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(65_536),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(4096)),"inputs?":artifacts,"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency":page.clone()}
+                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(65_536),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(4096)),"inputs?":artifacts,"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
             }),
         ),
         (
