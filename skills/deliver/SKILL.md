@@ -1,6 +1,6 @@
 ---
 name: deliver
-description: "Use for taking an approved research, analysis, document, or agent-product outcome through evidence, review, and acceptance. For a software change, unsettled scope, or release, use implement, scope, or release."
+description: "Use to verify and accept approved research, analysis, documents or agent work. Use implement for software changes, scope for unsettled work, and release for promotion."
 ---
 
 # Deliver
@@ -68,3 +68,5 @@ For audience-ready HTML, apply the
 
 Keep the scoped criteria, evidence and outcome in the existing project document
 or PR.
+
+Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).

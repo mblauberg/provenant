@@ -12,4 +12,4 @@ shares one read cursor. Labels never establish a provider or model route.
 
 Cross-host project keys derive from the canonical home-relative location.
 Outside home, identity remains local. A configured remote project home refuses
-local coordination until home routing is available. No legacy state is read.
+local coordination until home routing is available.

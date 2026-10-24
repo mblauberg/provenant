@@ -57,9 +57,12 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
    [ruleset guidance](references/ruleset-and-ci.md), confirming its app id.
 3. **Issue forms/security:** copy [`templates/SECURITY.md`](templates/SECURITY.md)
    to the root or verify a valid private route. Copy
-   `templates/ISSUE_TEMPLATE/*.yml` to `.github/ISSUE_TEMPLATE/`, adapting
-   project gates, fields, owner and repo. Use feature for discovery and
-   work-item for accepted, bounded proposals. Confirm private vulnerability
+   [`bug.yml`](templates/ISSUE_TEMPLATE/bug.yml),
+   [`config.yml`](templates/ISSUE_TEMPLATE/config.yml),
+   [`feature.yml`](templates/ISSUE_TEMPLATE/feature.yml), and
+   [`work-item.yml`](templates/ISSUE_TEMPLATE/work-item.yml) to
+   `.github/ISSUE_TEMPLATE/`, adapting project gates, fields, owner and repo.
+   Use feature for discovery and work-item for accepted, bounded proposals. Confirm private vulnerability
    reporting is enabled or replace `<private-reporting-route>` with a working
    confidential contact method. Publish only when the placeholder is gone and
    both routes work.

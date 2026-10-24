@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Use for a large, open-ended mission that must continue across sessions until the user writes STOP. Use orchestrate for bounded waves and the owning lifecycle skills for decisions and changes. Not for bounded PR-gate delivery."
+description: "Use when an open-ended mission must continue across sessions until the user says STOP. Use orchestrate for bounded waves and the owning skills for decisions and changes. Not for bounded delivery work."
 ---
 
 # Autopilot
@@ -75,3 +75,9 @@ Read [state-contract.md](references/state-contract.md) for state ownership,
 [recovery-and-cadence.md](references/recovery-and-cadence.md) for interruption
 and idle handling, and [assumptions-and-steering.md](references/assumptions-and-steering.md)
 for decisions made within an approved authority envelope.
+
+Use the [Codex operating reference](references/codex-operator.md),
+[cross-family review reference](references/cross-family-review.md), and the
+[goal](templates/GOAL.template.md), [state](templates/STATE.template.md),
+[handoff](templates/HANDOFF.template.md), and
+[README](templates/README.template.md) templates when preparing those artifacts.
