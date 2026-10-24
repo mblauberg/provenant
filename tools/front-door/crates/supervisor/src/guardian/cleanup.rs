@@ -379,14 +379,16 @@ impl Driver<'_> {
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
-            let reaped = if self.descendant_stop_allowed {
-                child.reap_adopted(&census, &spared)?
-            } else {
-                crate::sys::provider::AdoptedCleanup {
-                    reaped: vec![],
-                    unresolved: !self.tracked.is_empty(),
-                }
-            };
+            // Reaping sends no signal, so an adopted zombie is reaped even when
+            // descendant stops are not allowed; otherwise a fenced guardian
+            // would pin it indefinitely.
+            let mut reaped = child.reap_adopted(&census, &spared)?;
+            if !self.descendant_stop_allowed {
+                reaped.unresolved = !self
+                    .tracked
+                    .iter()
+                    .all(|identity| reaped.reaped.contains(identity));
+            }
             for identity in reaped.reaped {
                 self.tracked.remove(&identity);
                 if self.reaped.len() < 16 {
