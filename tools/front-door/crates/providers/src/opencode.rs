@@ -97,6 +97,13 @@ fn prepare(
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads: vec![subtree(package)],
+                discovery_reads: input
+                    .cwd
+                    .ancestors()
+                    .flat_map(|parent| {
+                        [".agents", ".claude", ".codex"].map(|name| exact(parent.join(name)))
+                    })
+                    .collect(),
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
@@ -151,3 +158,48 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
 }
 
 crate::quota_source!(OpenCode, "opencode");
+
+#[cfg(all(test, feature = "recording"))]
+mod tests {
+    use super::*;
+    use crate::Adapter;
+
+    #[test]
+    fn discovery_reads_are_literal_along_cwd_ancestry() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        // Recipe test does not enable an adapter with missing activation evidence.
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        for parent in input.cwd.ancestors() {
+            for name in [".agents", ".claude", ".codex"] {
+                assert!(
+                    spec.profile
+                        .spec
+                        .discovery_reads
+                        .contains(&exact(parent.join(name)))
+                );
+            }
+        }
+        assert!(
+            spec.profile
+                .spec
+                .discovery_reads
+                .iter()
+                .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
+        );
+    }
+}

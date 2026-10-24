@@ -436,6 +436,13 @@ impl RunStore {
     }
 }
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if r.read_only_writable.len() > 128
+        || r.read_only_writable
+            .iter()
+            .any(|p| provenant_core::RelativePath::parse(p).is_err())
+    {
+        return Err(RunError::Validation("invalid read-only writable paths"));
+    }
     if r.schema_version != 1 || r.attempt_number == 0 || r.revision == 0 {
         return Err(RunError::Validation("attempt version/ordinal"));
     }

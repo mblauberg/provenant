@@ -734,6 +734,7 @@ fn main() -> Result<()> {
         Ok(ConfinedPlan::new(PlanRequest {
             scope: WorkScope::Project(ProjectId::from_bytes([7; 16])),
             permissions: PlanPermissions {
+                read_only: None,
                 mode,
                 scratch: subtree(scratch),
                 private_state: Some(subtree(&layout.state)),

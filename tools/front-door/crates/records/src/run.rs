@@ -242,6 +242,9 @@ pub struct AttemptRecord {
     pub applied_route: Option<RouteRecord>,
     pub observed_route: Option<RouteRecord>,
     pub authority_digest: Digest,
+    /// Project-relative write exceptions actually granted before launch.
+    #[serde(default)]
+    pub read_only_writable: Vec<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
     pub verified_owner: Option<ActorId>,

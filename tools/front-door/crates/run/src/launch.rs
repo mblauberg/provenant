@@ -12,6 +12,8 @@ use std::{ffi::OsString, path::PathBuf};
 /// One prepared provider invocation. Secrets travel only in `environment`,
 /// in memory and on the handoff pipe.
 pub struct PreparedLaunch {
+    /// Exact project-relative exceptions from the compiled read-only plan.
+    pub read_only: Option<provenant_confinement::plan::ReadOnlyGrants>,
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub stdin: Vec<u8>,
@@ -37,6 +39,7 @@ pub trait Providers {
         &self,
         task: &TaskRequest,
         prompt: &str,
+        paths: &AttemptPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
@@ -117,7 +120,8 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let plan = match providers.prepare(task, &prompt, resume.as_ref()) {
+            let paths = self.temporary_paths(id, call)?;
+            let plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
                     self.withdraw(
@@ -135,7 +139,12 @@ impl RunStore {
                     continue;
                 }
             };
-            let record = match self.mark_starting(id, &plan.route, call) {
+            let writable = plan
+                .read_only
+                .as_ref()
+                .map(|g| g.writable_paths())
+                .unwrap_or_default();
+            let record = match self.mark_starting(id, &plan.route, writable, call) {
                 Ok(record) => record,
                 // A concurrent start already took this attempt.
                 Err(RunError::Conflict) => continue,

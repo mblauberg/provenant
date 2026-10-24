@@ -606,6 +606,8 @@ dependencies = [
 name = "provenant-run"
 version = "0.1.0"
 dependencies = [
+ "provenant-config",
+ "provenant-confinement",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",

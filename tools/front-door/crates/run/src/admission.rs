@@ -124,8 +124,16 @@ impl RunStore {
         &self,
         id: AttemptId,
         route: &RouteRecord,
+        writable: &[String],
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
+        if writable.len() > 128
+            || writable
+                .iter()
+                .any(|p| provenant_core::RelativePath::parse(p).is_err())
+        {
+            return Err(RunError::Validation("invalid read-only writable paths"));
+        }
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Queued {
@@ -136,6 +144,7 @@ impl RunStore {
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
             next.state = AttemptState::Starting;
+            next.read_only_writable = writable.to_vec();
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);

@@ -36,8 +36,11 @@ impl Providers for Fake {
         &self,
         _: &TaskRequest,
         _: &str,
+        paths: &AttemptPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        assert!(paths.temporary.ends_with("tmp"));
+        assert!(paths.temporary.is_dir());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err("fixture adapter is disabled".into());
@@ -101,7 +104,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     store.create(&serial, &call)?;
     let [first, second] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
     for id in [first, second] {
-        store.mark_starting(id, &route(), &call)?;
+        store.mark_starting(id, &route(), &[], &call)?;
     }
     let running = store
         .claim(first, now, &call)?
@@ -121,7 +124,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
     store.create(&spaced, &call)?;
     let id = spaced.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &call)?;
+    store.mark_starting(id, &route(), &[], &call)?;
     assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
 
     let attempt = store.attempt_dir(spaced.run_id, id, false)?;
@@ -135,7 +138,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &call)?;
+    store.mark_starting(id, &route(), &[], &call)?;
     let starved = Host { available: 1 };
     assert!(matches!(
         store.admit(id, &attempt, &starved, &clock, &cancel),
@@ -196,7 +199,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     };
     for (index, code) in [(0, 0), (1, 1)] {
         let id = batch.attempts[index].attempt_id;
-        store.mark_starting(id, &route(), &call)?;
+        store.mark_starting(id, &route(), &[], &call)?;
         store.claim(id, now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
@@ -241,7 +244,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let run = input();
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &call)?;
+    store.mark_starting(id, &route(), &[], &call)?;
     let mut observed = exit();
     observed.scope.generation = 1;
     observed.never_spawned = true;
@@ -302,7 +305,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         CancelReceipt::AlreadyTerminal
     );
 
-    store.mark_starting(starting, &route(), &call)?;
+    store.mark_starting(starting, &route(), &[], &call)?;
     // Before the handoff publishes its launch summary there is nothing to
     // stop; cancel retries until its budget ends, then says so.
     let system = provenant_supervisor::clock::SystemClock::new();
@@ -412,7 +415,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
 
     // The guardian sealed an exit but died before its terminal commit.
-    store.mark_starting(exited, &route(), &call)?;
+    store.mark_starting(exited, &route(), &[], &call)?;
     store
         .claim(exited, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -431,7 +434,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     seal_exit(&store, &observed)?;
 
     // A handoff whose reservation never reached a guardian.
-    store.mark_starting(orphan, &route(), &call)?;
+    store.mark_starting(orphan, &route(), &[], &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -472,9 +475,62 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    store.mark_starting(id, &route(), &call)?;
+    store.mark_starting(id, &route(), &[], &call)?;
     let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    Ok(())
+}
+
+#[test]
+fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let prepared = two_tasks(2);
+    store.create(&prepared, &call)?;
+    let first = prepared.attempts[0].attempt_id;
+    let second = prepared.attempts[1].attempt_id;
+    let first_tmp = store.temporary_paths(first, &call)?.temporary;
+    let second_tmp = store.temporary_paths(second, &call)?.temporary;
+    assert_ne!(first_tmp, second_tmp);
+    assert!(
+        first_tmp.starts_with(
+            context
+                .state_root
+                .as_path()
+                .join("runs")
+                .join(prepared.run_id.to_string())
+                .join("attempts")
+                .join(first.to_string())
+        )
+    );
+    assert_eq!(
+        std::fs::metadata(&first_tmp)?.permissions().mode() & 0o777,
+        0o700
+    );
+    store.mark_starting(first, &route(), &[".agent-run/locks".into()], &call)?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert_eq!(
+        store.record(first, &call)?.read_only_writable,
+        [".agent-run/locks"]
+    );
+    assert!(store.record(second, &call)?.read_only_writable.is_empty());
+    // Old v1 records omit the added field and retain an empty default.
+    let mut record = serde_json::to_value(store.record(first, &call)?)?;
+    record
+        .as_object_mut()
+        .ok_or("record object")?
+        .remove("read_only_writable");
+    assert!(
+        serde_json::from_value::<AttemptRecord>(record)?
+            .read_only_writable
+            .is_empty()
+    );
     Ok(())
 }

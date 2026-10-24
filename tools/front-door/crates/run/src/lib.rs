@@ -6,6 +6,8 @@ mod controls;
 mod db;
 mod holder;
 mod launch;
+mod plan;
+pub use plan::AttemptPaths;
 mod reader;
 mod store;
 
@@ -27,6 +29,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error(transparent)]
+    Permission(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
+    Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error("run-store schema version {0} is unsupported")]

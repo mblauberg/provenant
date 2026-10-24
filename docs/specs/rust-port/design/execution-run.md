@@ -183,6 +183,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     provider-state/            # retained provider state/history; no credentials
     quarantine/                # retained patches/blobs and manifest
     scratch/                   # disposable launch staging only
+    tmp/                       # attempt-private provider/test temporary data
 ```
 
 This shared attempt path and these supervisor filenames are the run/supervisor
@@ -192,6 +193,29 @@ uses the live stream, not a second on-disk copy. Structured run events live
 in SQLite. Retention policy is out of scope. Guardian settlement deletes only
 disposable `scratch/` data; history, unclassified data and transcripts remain
 retained, never staged there.
+Read-only plans take Git read authority from the host's persisted project
+binding, not the lane's `.git` marker. The common-directory subtree includes
+linked worktree private directories and is explicitly denied writes. Confinement
+checks the held repository against that binding before resolving grants.
+
+The user-approved #1343 exception policy is a bounded, strict JSON file at
+`projects/<ProjectId>/read-only.json`, with `{"readOnlyWritable": []}` by default.
+Absence means no exceptions; malformed or linked policy files refuse. Entries
+name existing directories relative to the verified repository root. Absolute
+paths, dot/parent traversal, symlinked components and Git/provider configuration
+components are refused. Writes cover only the named subtrees; protected config
+components remain immutable even when nested below a granted directory.
+The attempt records every granted relative path before guardian handoff.
+
+Run creates each attempt's `tmp/` with mode 0700 and passes it to preparation;
+read-only plan construction selects it as scratch, and provider recipes set
+`TMPDIR` there. It is disposable with its owning attempt; it is not retained
+provider history and is not the supervisor's host-only classified `scratch/`.
+No new deletion/retention command is introduced. The run plan builder and
+provider recipes are implemented; production `Registry::prepare` still needs
+to compose their setup, anchors, compilation and custody handoff. Until that
+composition lands, dispatch continues to refuse provider launches.
+
 Modes are 0700/0600 under state's verified root. Use rusqlite WAL,
 foreign keys and `synchronous=FULL`; each connection has one owning thread,
 bounded BUSY retries and no transaction spanning a wait, resource probe or

@@ -124,6 +124,7 @@ impl run::Providers for Registry<'_> {
         &self,
         task: &run::TaskRequest,
         _prompt: &str,
+        _paths: &run::AttemptPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
         if resume.is_some() {
