@@ -749,10 +749,8 @@ Decisions taken for the chair:
   execution-run. Rust custody is separate from `provenant fabric landing`.
   Delete `fabric_policy.py` with its Python differential test; the Rust
   fabric-runtime policy owner retains direct behaviour tests.
-- Keep the three state/config Python helpers and the delivery/shared Python
-  files assigned to lanes D/E. Their deletion is outside this lane's scope.
-  [Remaining Python inventory](../remaining-python.md) lists every file and
-  its owner. No TypeScript or JavaScript implementation remains.
+- Lanes D and E deleted the last state/config and delivery Python helpers.
+  No Python, TypeScript or JavaScript implementation remains.
 
 Route attribution for this cut: `codex/gpt-6.1-sol@medium` via Fabric.
 The author does not infer any other model identity. Chair review and green
