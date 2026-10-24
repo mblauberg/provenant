@@ -102,22 +102,35 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
 #[test]
 fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     let root = tempfile::tempdir()?;
-    let writer = acquire(root.path())?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    let writer = acquire(&path)?;
     drop(writer);
-    std::fs::remove_file(root.path().join("reservation.json"))?;
-    assert!(matches!(acquire(root.path()), Err(CustodyError::Fenced)));
-    std::fs::write(root.path().join("reservation.json"), b"{}")?;
-    assert!(matches!(acquire(root.path()), Err(CustodyError::Fenced)));
+    std::fs::remove_file(path.join("reservation.json"))?;
+    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
+    std::fs::write(path.join("reservation.json"), b"{}")?;
+    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
     let clock = SystemClock::new();
     assert!(matches!(
         acquire_recovery(
-            Directory::open_anchor(root.path())?,
+            Directory::open_anchor(&path)?,
             WaitBudget::cli(clock.mono_now(), 1)?,
             &CancelToken::new(),
             &clock
         ),
         Err(CustodyError::InvalidRecord)
     ));
+    let good = root.path().join("good");
+    std::fs::create_dir(&good)?;
+    let _good = acquire(&good)?;
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(listing.reservations[0].scope, scope());
+    assert_eq!(listing.issues.len(), 1);
+    assert_eq!(
+        listing.issues[0].reservation,
+        PathBuf::from("writer/reservation.json")
+    );
     Ok(())
 }
 struct Authority(bool);

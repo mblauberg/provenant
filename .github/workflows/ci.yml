@@ -159,6 +159,16 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo test -p provenant-supervisor -p provenant-confinement --locked
+      - name: Run writer dispatch integration tests
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+        run: |
+          cargo test --test worktrees --locked -- --exact writer_dispatch_edits_a_linked_worktree
+          cargo test --test worktrees --locked -- --exact second_writer_is_refused_while_first_holds_the_worktree
+          cargo test --test worktrees --locked -- --exact writer_terminal_refuses_sequencer_state
+          cargo test --test worktrees --locked -- --exact writer_production_plan_denies_outside_writes
+          cargo test --test worktrees --locked -- --exact writer_reconcile_refuses_unfinished_cherry_pick_and_releases
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test

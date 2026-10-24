@@ -32,8 +32,8 @@ non-training Haiku at low effort and Luna before free DeepSeek and GLM. Free
 pool members require `--allow-free` (default false). Use `--route utility`
 for Rust route resolution; `--confidential` excludes training or unclassified
 members and fallbacks. There is no classifier or synonym inference. The
-bundled Rust catalogue owns the pool. Fabric accepts a route preference but
-its submission owner remains unavailable.
+bundled Rust catalogue owns the pool. Fabric submissions and the CLI share
+the run owner's route and confinement path.
 
 Run `provenant help route` for flags. Named routes and
 exact model selectors are mutually exclusive. Explicit fallbacks use
