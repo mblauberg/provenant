@@ -230,12 +230,9 @@ pub(crate) fn resolve_dispatch(
             let resolved = provenant_routing::resolve_for_account(request, context, account)?;
             if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-                let pools =
-                    if resolved.adapter == "opencode" && context.catalogue.is_free_model(&model) {
-                        vec!["opencode-free".to_owned()]
-                    } else {
-                        Vec::new()
-                    };
+                let pools = free_pools(&resolved.adapter, || {
+                    context.catalogue.is_free_model(&model)
+                });
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let admission = provenant_quota::Admission {
                     now_unix_seconds,
@@ -260,13 +257,9 @@ pub(crate) fn resolve_dispatch(
                                 "{}/{}",
                                 alternative.adapter, alternative.model
                             ))?;
-                            let alternative_pools = if alternative.adapter == "opencode"
-                                && context.catalogue.is_free_model(&alternative_model)
-                            {
-                                vec!["opencode-free".to_owned()]
-                            } else {
-                                Vec::new()
-                            };
+                            let alternative_pools = free_pools(&alternative.adapter, || {
+                                context.catalogue.is_free_model(&alternative_model)
+                            });
                             provenant_quota::Admission {
                                 now_unix_seconds,
                                 records,
@@ -285,6 +278,15 @@ pub(crate) fn resolve_dispatch(
     )
     .map_err(|error| error.to_string())
 }
+/// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
+fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
+    if adapter == "opencode" && free() {
+        vec!["opencode-free".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
@@ -293,11 +295,7 @@ pub(crate) fn check_dispatch_candidate(
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
-    let pools = if catalogue.is_free_model(&model) {
-        vec!["opencode-free".into()]
-    } else {
-        Vec::new()
-    };
+    let pools = free_pools(&route.adapter, || catalogue.is_free_model(&model));
     provenant_quota::Admission {
         now_unix_seconds: jiff::Timestamp::now().as_second(),
         records: &crate::quota::read_cache(roots).map_err(|e| e.to_string())?,
@@ -426,4 +424,14 @@ pub fn run(
         publish,
     );
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
+}
+
+#[cfg(test)]
+mod free_pool_tests {
+    #[test]
+    fn only_opencode_routes_draw_on_the_free_pool() {
+        assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
+        assert!(super::free_pools("opencode", || false).is_empty());
+        assert!(super::free_pools("codex", || true).is_empty());
+    }
 }
