@@ -207,6 +207,8 @@ jobs:
         run: actionlint
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
+      - name: Check retired names
+        run: scripts/check-retired-names
 
   zizmor:
     name: Workflow security lint

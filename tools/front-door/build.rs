@@ -240,7 +240,7 @@ fn main() -> BuildResult<()> {
     ] {
         let directory = repository.join(source);
         watch(&mut watched, directory.clone())?;
-        let required = source != "templates";
+        let required = !matches!(source, "templates" | "scripts");
         collect_external_tree(&directory, release_name, &mut inputs, required, &tracked)?;
     }
     for (source, release_name) in [

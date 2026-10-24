@@ -315,6 +315,26 @@ nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
+The same handler then applies the workflow guard rules (#1319) to the simple
+commands the shell-command lexer reports, so there is no second parser. Rule
+ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
+`-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
+`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`git checkout` of a branch or revision, when the directory is a repository
+whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
+(`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+omitting an id disables that rule and an unknown id is a schema error. Unreadable
+config keeps every rule on. Input the lexer cannot parse is denied by the
+process-control check above, not by these rules. Codex and OpenCode have no
+recorded `PreToolUse` registration, so only Claude carries the rules; their
+lanes rely on the sandbox and the pre-push hook.
+
+`worktree create` records the primary checkout's `HEAD` before `git worktree
+add` and refuses with `PrimaryMoved` (refused outcome) if it differs afterwards
+(#1331), so a lane cannot silently move or detach the primary. Dispatch needs
+no change; it only sees the refusal.
+
 `PreCompact` reads validated cwd/session identity and emits advisory findings,
 always 0. `SessionStart` reads that session's already-published checkpoint from
 the new root and emits at most 8 KiB context, otherwise nothing, always 0.
@@ -677,6 +697,32 @@ supervisor's worktree flags. Step 1 freezes the parser from that table.
    Python/TS/Rust `Net lines:` and explains growth. Lanes do not merge or arm
    auto-merge.
 
+## Lane D command bindings (2026-10-24)
+
+`config show` now uses the landed config owner and complete domain registry.
+It reports effective values and origins, applies secret redaction, creates no
+state and refuses malformed configuration rather than returning defaults.
+
+The cut-over request restores the narrow `hosts doctor [SSH_ALIAS]` spelling
+for Claude sign-in diagnosis. This supersedes the earlier removal of that
+spelling for this diagnostic only. Without an alias, inspect the default
+Claude identity and each `.claude-<label>` directory; each CLI status probe gets
+that exact `CLAUDE_CONFIG_DIR`. With an alias, use bounded, noninteractive SSH
+to `~/.local/bin/provenant`, the default stable remote Rust front door.
+A custom remote bin directory is not resolved by this diagnostic. Do not silently fall back to local
+results when a remote host cannot answer.
+
+Doctor runs `claude auth status --json`, never a prompt. It emits only identity
+labels and typed states: `signed_in`, `signed_out`,
+`credential_store_present`, `keychain_unavailable`, or `unknown`. A negative
+login bit alone cannot establish sign-out: credential-file metadata or a
+password-free keychain item-existence probe distinguishes a present identity
+from an absent one. Store presence does not prove a token exists or can be
+renewed. Keychain failure stays indeterminate. No token or raw
+account/status output is persisted or printed. Every state carries
+`token_validity = "unverified"`; local status cannot prove a token is accepted
+by the provider or that quota and subscription information were refreshed.
+
 ## Final legacy cut (Lane F)
 
 The cut-over chair authorises deletion of the entire Python orchestrator before
@@ -703,10 +749,8 @@ Decisions taken for the chair:
   execution-run. Rust custody is separate from `provenant fabric landing`.
   Delete `fabric_policy.py` with its Python differential test; the Rust
   fabric-runtime policy owner retains direct behaviour tests.
-- Keep the three state/config Python helpers and the delivery/shared Python
-  files assigned to lanes D/E. Their deletion is outside this lane's scope.
-  [Remaining Python inventory](../remaining-python.md) lists every file and
-  its owner. No TypeScript or JavaScript implementation remains.
+- Lanes D and E deleted the last state/config and delivery Python helpers.
+  No Python, TypeScript or JavaScript implementation remains.
 
 Route attribution for this cut: `codex/gpt-6.1-sol@medium` via Fabric.
 The author does not infer any other model identity. Chair review and green

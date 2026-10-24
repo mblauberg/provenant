@@ -900,3 +900,50 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
     ));
     Ok(())
 }
+
+#[test]
+fn structured_http_auth_failure_is_not_generic_error_or_success() -> Result<(), ProviderError> {
+    let mut state = claude::Claude.stream(None)?;
+    claude::Claude.observe(&mut state, b"{\"type\":\"result\",\"session_id\":\"fixture\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"api_error_status\":401,\"result\":\"OAuth access token has expired\"}\n")?;
+    assert_eq!(
+        claude::Claude.account(&state)?,
+        AccountDetection::AuthRequired
+    );
+    assert_eq!(
+        claude::Claude.finish(state, EXIT)?.status(),
+        OutcomeStatus::Refused
+    );
+    Ok(())
+}
+
+#[test]
+fn claude_signin_does_not_call_a_locked_or_present_identity_signed_out() {
+    use claude::{CredentialPresence as C, SigninState as S, signin_status};
+    let negative = br#"{"loggedIn":false,"email":"never-publish@example.invalid"}"#;
+    assert_eq!(
+        signin_status(negative, Some(1), C::Present).state,
+        S::CredentialStorePresent
+    );
+    assert_eq!(
+        signin_status(negative, Some(1), C::Unavailable).state,
+        S::KeychainUnavailable
+    );
+    assert_eq!(
+        signin_status(negative, Some(1), C::Absent).state,
+        S::SignedOut
+    );
+    assert_eq!(
+        signin_status(negative, Some(1), C::Unknown).state,
+        S::Unknown
+    );
+    assert_eq!(
+        signin_status(br#"{"loggedIn":true}"#, Some(0), C::Unknown).state,
+        S::SignedIn
+    );
+    assert_eq!(
+        signin_status(b"broken", Some(1), C::Absent).state,
+        S::Unknown
+    );
+    let report = serde_json::to_string(&signin_status(negative, Some(1), C::Present)).unwrap();
+    assert!(!report.contains("never-publish"));
+}

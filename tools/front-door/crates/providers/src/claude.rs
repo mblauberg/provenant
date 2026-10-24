@@ -160,6 +160,8 @@ enum Event {
         subtype: String,
         is_error: bool,
         result: Option<String>,
+        #[serde(default)]
+        api_error_status: Option<u16>,
     },
     #[serde(other)]
     Other,
@@ -235,9 +237,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             subtype,
             is_error,
             result,
+            api_error_status,
         } => {
             let mut events = vec![E::Session(session_id)];
-            if is_error || subtype != "success" {
+            if api_error_status == Some(401) {
+                events.push(E::AuthRequired);
+            } else if is_error || subtype != "success" {
                 events.push(E::Error);
             } else {
                 if let Some(result) = result {
@@ -249,4 +254,55 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+/// Metadata only. The caller must never read a token to establish presence.
+#[derive(Clone, Copy)]
+pub enum CredentialPresence {
+    Present,
+    Absent,
+    Unavailable,
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigninState {
+    SignedIn,
+    SignedOut,
+    CredentialStorePresent,
+    KeychainUnavailable,
+    Unknown,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SigninStatus {
+    pub state: SigninState,
+    /// A local status probe does not establish network token validity.
+    pub token_validity: String,
+}
+/// Decode only the CLI's login bit. Account identifiers and diagnostics never
+/// escape this boundary; a negative probe alone cannot prove sign-out over SSH.
+pub fn signin_status(
+    stdout: &[u8],
+    exit_code: Option<i64>,
+    presence: CredentialPresence,
+) -> SigninStatus {
+    #[derive(Deserialize)]
+    struct Status {
+        #[serde(rename = "loggedIn")]
+        logged_in: bool,
+    }
+    let state = match wire::<Status>(stdout) {
+        Ok(status) if status.logged_in && exit_code == Some(0) => SigninState::SignedIn,
+        Ok(status) if !status.logged_in => match presence {
+            CredentialPresence::Present => SigninState::CredentialStorePresent,
+            CredentialPresence::Absent => SigninState::SignedOut,
+            CredentialPresence::Unavailable => SigninState::KeychainUnavailable,
+            CredentialPresence::Unknown => SigninState::Unknown,
+        },
+        _ => SigninState::Unknown,
+    };
+    SigninStatus {
+        state,
+        token_validity: "unverified".into(),
+    }
 }

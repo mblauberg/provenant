@@ -521,3 +521,52 @@ Each build PR lands Rust and deletes its subjects/tests together; no Python→Ru
 bridge, selector or old-output oracle. Chairs arrange cross-family review and
 accept/merge on CI. This lane updates the existing design PR and does not merge
 or arm auto-merge.
+
+## Lane D quota freshness and Claude expiry (2026-10-24)
+
+Quota reports retain last-known windows and their observation age. Any failed
+refresh makes the retained snapshot stale immediately, even inside its ordinary
+poll interval. Human output prints each account, `STALE`, `last known`, age,
+window percentages and a sanitised failure code. JSON retains the original
+snapshot and exposes current freshness at the account row, rather than rewriting
+the historical observation. A previously recorded plan name is not evidence of
+the current subscription after an account upgrade.
+
+The installed Claude CLI's `auth --help` advertises login, logout and status;
+`auth status --help` advertises JSON/text status only. There is no recorded
+non-billable token-renewal or usage-refresh command. Status success is not proof
+that usage was refreshed. Provenant does not run a model to renew tokens, copy
+credentials between `.claude-<label>` identities, write credentials, or widen a
+sandbox's keychain access. Expired identities need renewal through that selected
+Claude identity outside the utility sandbox before a supported quota probe can
+replace the last-known reading. Current Rust quota sources remain disabled
+without their activation recording and credential authority.
+
+Claude's structured result field `api_error_status = 401` is authentication
+failure, including an expired OAuth token inside confinement. It now becomes
+`AuthRequired` rather than a generic error or successful answer. Provider text
+mentioning expiry is ordinary text and cannot assert an authentication failure.
+This classification permits an explicitly authorised cross-adapter retry without
+weakening confinement. Utility execution and hosts-doctor composition still need
+their run/Fabric owners; a credential's existence alone never proves it can be
+refreshed in an SSH session with a locked or unavailable keychain.
+
+The cut-over request also restores model-backed `digest`, `classify` and
+`extract`, superseding their earlier removal decision. Restoration is still
+blocked on execution composition: current Run exposes persistence/read APIs
+only, every provider's `prepare`/`preflight` returns `Disabled`, and both launch
+plan types are uninhabited. Confinement's `utility` module is a closed Git
+boundary, not an inference runner. Bypassing Run through a CLI-owned process
+would lose custody/confinement guarantees. No placeholder command or unused
+retry seam is added.
+
+The utility execution owner must consume an ordered, explicit cross-adapter
+candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:
+Claude utility model, Codex `gpt-6-luna` at low effort, an eligible recorded
+OpenCode free model for non-confidential input, then a recorded Agy Gemini Flash
+model. Do not retry the same Claude route as a junior fallback. Each candidate
+needs its own disclosure, availability and confinement checks; confidential
+input must never reach a free model without an explicit non-training guarantee.
+A sandboxed 401 takes this route-around path rather than receiving wider auth
+write/keychain access. Exact selectors and controls still require activation
+evidence; a requested model name cannot fabricate that evidence.
