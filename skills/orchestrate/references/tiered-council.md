@@ -4,8 +4,8 @@ When several model families are available, work as a hierarchy, like an
 engineering team. Juniors from many families do the laid-out work and the
 fine-grained passes. Seniors judge that work, make the medium decisions and
 delegate to juniors. Principals make the critical calls. Each tier is a route
-pool, so a dispatch names its tier directly. The live roster is
-`provenant route list`; pools and tiers live in `config/model-routing.json`.
+pool, so a dispatch names its tier directly. The live roster and named routes
+are shown by `provenant route list`.
 
 | Tier | Route | Job |
 |---|---|---|

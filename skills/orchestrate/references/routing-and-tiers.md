@@ -30,11 +30,10 @@ provenant route resolve --model ADAPTER/ID --effort LEVEL
 The `utility` pool sits below junior for mechanical work, trying low-cost
 non-training Haiku at low effort and Luna before free DeepSeek and GLM. Free
 pool members require `--allow-free` (default false). Use `--route utility`
-for Rust route resolution; `--confidential` excludes
-training or unclassified members and fallbacks. There is no classifier or
-synonym inference. The bundled Rust catalogue owns the pool; Rust does not
-read the legacy `config/model-routing.json`. Fabric submissions and the CLI
-share the run owner's route and confinement path.
+for Rust route resolution; `--confidential` excludes training or unclassified
+members and fallbacks. There is no classifier or synonym inference. The
+bundled Rust catalogue owns the pool. Fabric submissions and the CLI share
+the run owner's route and confinement path.
 
 Run `provenant help route` for flags. Named routes and
 exact model selectors are mutually exclusive. Explicit fallbacks use

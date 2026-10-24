@@ -48,7 +48,7 @@ pub(super) fn prepare(
         .ok_or("current user identity is unavailable")?
         .name;
 
-    let resolved = crate::route::resolve(&route_request(task)?, roots)?;
+    let resolved = crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
     let mut reasons = Vec::new();
     for route in candidates(resolved) {
         let label = format!("{}/{}", route.adapter, route.model);
@@ -109,6 +109,7 @@ pub(super) fn prepare(
             executable: &executable,
             home: &home,
             user: &user,
+            account: None,
             token: None,
             cwd: &cwd,
             nonce,

@@ -189,6 +189,18 @@ impl RunStore {
             let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
             let prompt = String::from_utf8(prompt)
                 .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
+            let directory = self
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{run}/attempts/{id}"));
+            let prompt = format!(
+                "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Empty attempt scratch is deleted at settlement; unknown contents and provider history remain retained. Files left in scratch are not deliverables.\n\n{prompt}",
+                result = directory.join("result.md").display(),
+                exit = directory.join("process-exit.json").display(),
+                stdout = directory.join("stdout.log").display(),
+                stderr = directory.join("stderr.log").display(),
+            );
             let now = || {
                 call.clock
                     .wall_now()

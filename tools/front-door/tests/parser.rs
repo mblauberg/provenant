@@ -46,6 +46,24 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let lane = &value["data"]["lanes"][0];
     assert_eq!(lane["state"], "rejected");
+    assert_eq!(lane["account"], "unknown");
+    let manifest = rig.root.join("accounts.json");
+    std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","model":"codex/id","account":"fixture-account"}]}"#)?;
+    let placed = rig.command(&[
+        "dispatch",
+        "--manifest",
+        manifest.to_str().ok_or("manifest path")?,
+        "--operation-id",
+        "account-override",
+        "--json",
+    ])?;
+    assert_eq!(code(&placed), 0);
+    let placed: serde_json::Value = serde_json::from_slice(&placed.stdout.bytes)?;
+    let run = placed["data"]["run_id"].as_str().ok_or("run")?;
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    assert_eq!(saved["tasks"][0]["account"], "fixture-account");
     // Replaying the operation returns the same run.
     let again: serde_json::Value =
         serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
@@ -124,7 +142,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         String::from_utf8_lossy(&stats.stdout.bytes)
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
-    assert_eq!(value["data"]["totals"]["attempts"], 1);
+    assert_eq!(value["data"]["totals"]["attempts"], 2);
     rig.assert_legacy_unchanged()
 }
 

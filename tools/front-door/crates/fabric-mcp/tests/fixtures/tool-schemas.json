@@ -3653,6 +3653,20 @@
                     ],
                     "type": "string"
                   },
+                  "account": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "type": "string",
+                        "x-provenant-maxUtf8Bytes": 64
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "delivery_id": {
                     "anyOf": [
                       {
@@ -3662,14 +3676,6 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "inputs": {
-                    "items": {
-                      "$ref": "#/$defs/Artifact"
-                    },
-                    "maxItems": 100,
-                    "minItems": 0,
-                    "type": "array"
                   },
                   "prompt": {
                     "maxLength": 65536,

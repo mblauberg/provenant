@@ -115,7 +115,7 @@ requires caller edits in the same replacement lane, not an alias layer.
 | Dispatch route and authority validation | Merge | `run`, `routing` and `confinement` own it; Fabric validates envelope and project only | Strict typed inputs |
 | Native-seat provider bans | Cut | No family inferred from a seat; shared run policy controls permitted dispatch | Same-provider dispatch possible |
 | Named sessions | Cut | Only 2 sessions / 13 events ever recorded; native continuation stays in `resume` | Remove session table/tool/flags and F4 |
-| Ad-hoc handoff prompt assembly | Cut | Chair submits an explicit new task with artefact inputs | `handoff` removed |
+| Ad-hoc handoff prompt assembly | Cut | Chair submits an explicit task prompt | `handoff` removed |
 | Bounded graph execution | Keep | One bounded DAG owner delegates attempts to run and checkpoints every attempt | Single `route` or ordered `routes`; terminal availability failures try the next route |
 | Graph shell gates, gate workers, auto task mirroring | Cut | Verification is an ordinary authorised task or chair action | Gate document fields removed |
 | SSH hosts and diagnostics | Keep | Explicit trusted host list and one fixed peer command | Versioned new peer envelope |
@@ -450,6 +450,10 @@ All inputs use `op` to select one typed operation.
 | `fabric_graph` | run, status, cancel, resume |
 | `fabric_output` | read, fetch |
 | `fabric_hosts` | list |
+
+Submission tasks expose a prompt and route preference, with optional account,
+access, worktree, timeout and delivery ID. They do not accept artefact inputs;
+the CLI-owned submission path has no input-reference handling.
 
 For `fabric_graph`, `run` and `resume` take a project-local graph document path;
 `status` and `cancel` take its `id`. The document declares each node's `access`

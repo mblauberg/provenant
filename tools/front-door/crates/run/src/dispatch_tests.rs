@@ -7,7 +7,7 @@ use provenant_records::CanonicalV1;
 use provenant_supervisor::{
     custody::ExitObservation, exec::Termination, fs::Directory, sys::resources::MemorySample,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 struct Host {
@@ -30,15 +30,17 @@ struct Fake {
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
+    prompt: RefCell<String>,
 }
 impl Providers for Fake {
     fn prepare(
         &self,
         _: &TaskRequest,
-        _: &str,
+        prompt: &str,
         _: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.prompt.replace(prompt.into());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err("fixture adapter is disabled".into());
@@ -162,6 +164,16 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(
         matches!(&started[..], [Started::Refused { reason, .. }] if reason.contains("disabled"))
     );
+    let prompt = fake.prompt.borrow();
+    let path = store.context.state_root.as_path().join(format!(
+        "runs/{}/attempts/{}",
+        run.run_id, run.attempts[0].attempt_id
+    ));
+    assert!(prompt.contains(&path.join("result.md").display().to_string()));
+    assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
+    assert!(prompt.contains("only durable outputs"));
+    assert!(prompt.contains("deleted"));
+    assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempts[0].attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,
@@ -344,7 +356,8 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
+    let mut run = input();
+    run.request.tasks[0].account = Some("fixture-account".into());
     store.create(&run, &call)?;
     let prior = run.attempts[0].attempt_id;
     let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
@@ -372,6 +385,12 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.parent, Some(prior));
+    assert_eq!(
+        store.request(continued.run_id, &call)?.tasks[0]
+            .account
+            .as_deref(),
+        Some("fixture-account")
+    );
     assert_eq!(store.resume(&resume("r1", 0, 20)?, &call)?, continued);
     let mut changed = resume("r1", 0, 20)?;
     changed.prompt = "other".into();

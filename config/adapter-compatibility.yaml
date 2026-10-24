@@ -25,9 +25,9 @@ adapters:
         - darwin-arm64
     model_family_constraints:
       # The families below anthropic are reachable only through an endpoint
-      # profile in `config/model-routing.json`, which points the CLI at a
-      # provider's Anthropic-compatible base URL. Without `--endpoint` the
-      # catalogue's `fixed_model_family` still pins the adapter to anthropic.
+      # profile, which points the CLI at a provider's Anthropic-compatible base
+      # URL. Without `--endpoint` the bundled catalogue's `fixed_model_family`
+      # still pins the adapter to anthropic.
       allowed:
         - anthropic
         - zhipu
@@ -51,7 +51,7 @@ adapters:
         - darwin-arm64
     model_family_constraints:
       # The families below openai are reachable only through an endpoint
-      # profile in `config/model-routing.json` that lists `codex` among its
+      # profile that lists `codex` among its
       # adapters. The profile is passed to the CLI as an inline provider
       # override; without `--endpoint` the catalogue's `fixed_model_family`
       # still pins the adapter to openai.
@@ -259,8 +259,8 @@ adapters:
 
 # ---------------------------------------------------------------------------
 # Dispatch registry (P1b of #827): the product-owned single source for which
-# adapters the dispatcher knows and how it may run them. `model-routing.json`
-# is instance-owned (ADR 0019) and must never carry these policy facts.
+# adapters the dispatcher knows and how it may run them. Instance routing
+# preferences must never carry these policy facts.
 #
 # dispatch:  implemented — the dispatcher has an executing arm in
 #            Rust dispatch and Fabric may stage runs for it.
