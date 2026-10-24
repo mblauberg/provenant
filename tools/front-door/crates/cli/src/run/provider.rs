@@ -81,13 +81,6 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        let provider_route = match adapter_route(&route) {
-            Ok(route) => route,
-            Err(error) => {
-                reasons.push(format!("{label}: {error}"));
-                continue;
-            }
-        };
         // A read-only lane's scratch is its private temporary directory, which
         // terminal commit and withdrawal remove; writer scratch keeps settlement.
         let scratch = if writer.is_some() {
@@ -117,7 +110,7 @@ pub(super) fn prepare(
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
-            route: &provider_route,
+            route: &route,
             confined: &plan,
             prompt: &prompt,
             continuation: None,
@@ -193,18 +186,6 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
         readiness: alternative.readiness.clone(),
         confidentiality: alternative.confidentiality.clone(),
     }
-}
-
-fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
-    let prefix = format!("{}/", route.adapter);
-    let model = route
-        .model
-        .strip_prefix(&prefix)
-        .ok_or("resolved model does not match its provider")?;
-    let mut provider_route = route.clone();
-    provider_route.model = model.to_owned();
-    provider_route.alternatives = Default::default();
-    Ok(provider_route)
 }
 
 fn confinement_request(
