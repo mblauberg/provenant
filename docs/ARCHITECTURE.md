@@ -297,7 +297,8 @@ quality are deliberately accepted.
 
 The router separates policy from execution:
 
-- `config/model-routing.json` describes families, aliases and fallbacks;
+- `tools/front-door/crates/routing/assets/catalogue.toml` describes routes,
+  models and fallbacks;
 - `provenant route resolve` resolves a route from Rust routing policy;
 - Rust providers executes the resolved route;
 - receipts record requested and actual identity, effort and substitutions.

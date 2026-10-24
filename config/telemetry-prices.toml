@@ -33,7 +33,7 @@ output_excluding_reasoning = 15000000
 provider = "agy"
 model = "gemini-3.8-flash"
 billing = "subscription"
-sources = ["config/model-routing.json (identity only; no verified price)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # No official Google price was verified for this model.
 [models.rates]
 
@@ -52,7 +52,7 @@ output_excluding_reasoning = 50000000
 provider = "claude"
 model = "claude-haiku-4-5"
 billing = "subscription"
-sources = ["config/model-routing.json (identity only; no verified price)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # The Anthropic reference used here does not state Haiku 4.5 prices.
 [models.rates]
 
@@ -149,7 +149,7 @@ output_excluding_reasoning = 10000000
 provider = "cursor"
 model = "auto"
 billing = "subscription"
-sources = ["config/model-routing.json (identity only; no verified price)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # Auto picks the model per request, so no single rate applies.
 [models.rates]
 
@@ -168,7 +168,7 @@ output_excluding_reasoning = 2500000
 provider = "cursor"
 model = "cursor-grok-4.6"
 billing = "subscription"
-sources = ["config/model-routing.json (identity only; no verified price)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 [models.rates]
 
 [[models]]
@@ -217,7 +217,7 @@ output_excluding_reasoning = 500000
 provider = "opencode"
 model = "opencode/deepseek-v4.1-flash-free"
 billing = "free"
-sources = ["config/model-routing.json free_pattern (-free models carry no charge)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (-free models carry no charge)"]
 zero_rate_verified = true
 [models.rates]
 uncached_input = 0
@@ -229,7 +229,7 @@ output_excluding_reasoning = 0
 provider = "opencode"
 model = "opencode/glm-5.3-flash-free"
 billing = "free"
-sources = ["config/model-routing.json free_pattern (-free models carry no charge)"]
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (-free models carry no charge)"]
 zero_rate_verified = true
 [models.rates]
 uncached_input = 0
