@@ -66,6 +66,7 @@ pub trait QuotaEffects {
 #[serde(default, deny_unknown_fields)]
 pub struct QuotaDetails {
     pub plan: Option<String>,
+    pub billing_anchor: Option<String>,
     pub fingerprint: Option<String>,
     pub priority: Option<u64>,
     pub credit_balance: Option<String>,

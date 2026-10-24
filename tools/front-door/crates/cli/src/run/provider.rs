@@ -120,6 +120,10 @@ fn prepare_with(
                 label: "default".into(),
                 key,
                 directory,
+                plan: None,
+                priority: None,
+                billing_anchor: None,
+                limits: None,
             });
         }
     }
@@ -131,6 +135,10 @@ fn prepare_with(
             label: "keyless".into(),
             key: "keyless".into(),
             directory: paths.provider_state.clone(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            limits: None,
         });
     }
     let timestamp = jiff::Timestamp::now().as_second();
@@ -144,6 +152,9 @@ fn prepare_with(
         scratch: &paths.scratch,
     };
     for entry in &entries {
+        if !matches!(entry.adapter.as_str(), "claude" | "codex") {
+            continue;
+        }
         match locate(&entry.adapter).and_then(|executable| {
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {

@@ -24,6 +24,15 @@ pub enum Accounts {
         /// Account's configuration directory
         #[arg(long)]
         directory: PathBuf,
+        /// Provider plan name
+        #[arg(long)]
+        plan: Option<String>,
+        /// Account priority for quota scheduling
+        #[arg(long)]
+        priority: Option<u64>,
+        /// Billing cycle anchor
+        #[arg(long)]
+        billing_anchor: Option<String>,
     },
 }
 pub fn execute(
@@ -41,6 +50,9 @@ pub fn execute(
         label,
         adapter,
         directory,
+        plan,
+        priority,
+        billing_anchor,
     } = command
     {
         if !provenant_providers::accounts::label(label) {
@@ -69,11 +81,15 @@ pub fn execute(
             cwd,
         )
         .map_err(|e| e.to_string())?;
-        let entry = Registration {
+        let mut entry = Registration {
             adapter: adapter.clone(),
             label: label.clone(),
             key,
             directory,
+            plan: plan.clone(),
+            priority: *priority,
+            billing_anchor: billing_anchor.clone(),
+            limits: None,
         };
         entry.registered().map_err(|e| e.to_string())?;
         // The config lock and held parent make the read/edit/replace one operation.
@@ -88,6 +104,18 @@ pub fn execute(
             .map_err(|e| e.to_string())?
             .domains
             .accounts;
+        if let Some(previous) = settings
+            .entries
+            .values()
+            .find(|a| a.adapter == *adapter && a.label == *label)
+        {
+            entry.plan = entry.plan.or_else(|| previous.plan.clone());
+            entry.priority = entry.priority.or(previous.priority);
+            entry.billing_anchor = entry
+                .billing_anchor
+                .or_else(|| previous.billing_anchor.clone());
+            entry.limits = previous.limits.clone();
+        }
         settings
             .entries
             .retain(|_, a| a.adapter != *adapter || a.label != *label);
@@ -111,6 +139,29 @@ pub fn execute(
             row["key"] = toml_edit::value(&e.key);
             row["directory"] =
                 toml_edit::value(e.directory.to_str().ok_or("account path encoding")?);
+            if let Some(value) = &e.plan {
+                row["plan"] = toml_edit::value(value);
+            }
+            if let Some(value) = e.priority {
+                let value = i64::try_from(value).map_err(|_| "priority out of range")?;
+                row["priority"] = toml_edit::value(value);
+            }
+            if let Some(value) = &e.billing_anchor {
+                row["billing_anchor"] = toml_edit::value(value);
+            }
+            if let Some(limits) = &e.limits {
+                let mut table = toml_edit::Table::new();
+                if let Some(value) = limits.monthly_usd {
+                    table["monthly_usd"] = toml_edit::value(value);
+                }
+                if let Some(value) = &limits.cycle_anchor {
+                    table["cycle_anchor"] = toml_edit::value(value);
+                }
+                if let Some(value) = &limits.weekly_anchor {
+                    table["weekly_anchor"] = toml_edit::value(value);
+                }
+                row["limits"] = toml_edit::Item::Table(table);
+            }
             entries[name] = toml_edit::Item::Table(row);
         }
         section["entries"] = toml_edit::Item::Table(entries);

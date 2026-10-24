@@ -5,25 +5,26 @@ use std::{
     os::unix::fs::PermissionsExt,
     time::{SystemTime, UNIX_EPOCH},
 };
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, code, register_account};
 
 fn configured() -> Result<TestRig> {
     let rig = TestRig::new()?;
     let spare = rig.root.join("spare's account");
     fs::create_dir(&spare)?;
-    fs::create_dir_all(rig.home.join(".agents/config"))?;
-    fs::write(
-        rig.home.join(".agents/config/telemetry.json"),
-        serde_json::to_vec(&json!({"accounts":{"claude":{
-            "current":{"identity_dir":rig.root.join("claude")}, "spare":{"identity_dir":spare}
-        }}}))?,
-    )?;
     fs::create_dir_all(&rig.state)?;
     fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version = 1\n[knobs]\n\"chair.auto_switch\" = true\n\"chair.switch_accounts\" = ['spare']\n",
     )?;
+    register_account(
+        &rig,
+        "claude",
+        "current",
+        "current",
+        &rig.root.join("claude"),
+    )?;
+    register_account(&rig, "claude", "spare", "spare", &spare)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     for (key, used) in [("current", 9200), ("spare", 100)] {
         let dir = rig.state.join("quota").join(key);
@@ -40,6 +41,23 @@ fn configured() -> Result<TestRig> {
         )?;
     }
     Ok(rig)
+}
+
+fn register_pair(rig: &TestRig) -> Result {
+    register_account(
+        rig,
+        "claude",
+        "current",
+        "current",
+        &rig.root.join("claude"),
+    )?;
+    register_account(
+        rig,
+        "claude",
+        "spare",
+        "spare",
+        &rig.root.join("spare's account"),
+    )
 }
 #[test]
 fn chair_dry_run_reports_registered_target_and_creates_no_checkpoint() -> Result {
@@ -92,6 +110,44 @@ fn chair_dry_run_reports_registered_target_and_creates_no_checkpoint() -> Result
     let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
     assert_eq!(value["status"], "refused");
     assert_eq!(value["data"]["outcome"], "refused");
+    Ok(())
+}
+
+#[test]
+fn state_dir_registrations_drive_quota_and_chair_without_agents_config() -> Result {
+    let rig = configured()?;
+    let legacy = rig.home.join(".agents");
+    if legacy.exists() {
+        fs::remove_dir_all(&legacy)?;
+    }
+    let cached = ["current", "spare"]
+        .map(|key| fs::read(rig.state.join("quota").join(key).join("claude.json")))
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()?;
+    fs::remove_dir_all(rig.state.join("quota"))?;
+    let tick = rig.command(&["quota", "tick", "--json"])?;
+    assert_eq!(
+        code(&tick),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&tick.stdout.bytes),
+        String::from_utf8_lossy(&tick.stderr.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&tick.stdout.bytes)?;
+    assert_eq!(report["data"]["accounts"].as_array().unwrap().len(), 2);
+    for (key, bytes) in ["current", "spare"].into_iter().zip(cached) {
+        fs::write(rig.state.join("quota").join(key).join("claude.json"), bytes)?;
+    }
+    let switched = rig.command(&["chair", "switch", "--to", "spare", "--dry-run", "--json"])?;
+    assert_eq!(
+        code(&switched),
+        0,
+        "{}",
+        String::from_utf8_lossy(&switched.stdout.bytes)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&switched.stdout.bytes)?;
+    assert_eq!(result["data"]["target_account"], "spare");
+    assert!(!legacy.exists());
     Ok(())
 }
 
@@ -153,6 +209,7 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     assert_eq!(repeated["continue"], true);
     assert!(repeated["systemMessage"].is_string());
     fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
+    register_pair(&rig)?;
     assert!(hook(&rig, false, "old")?.stdout.bytes.is_empty());
     // The source account cannot consume its own handoff on compaction.
     assert!(hook(&rig, true, "old")?.stdout.bytes.is_empty());
@@ -180,6 +237,7 @@ fn chair_disabled_and_refused_paths_never_launch() -> Result {
         rig.state.join("config.toml"),
         "schema_version = 1\n[knobs]\n\"chair.auto_switch\" = true\n",
     )?;
+    register_pair(&rig)?;
     let refused = hook(&rig, false, "refused")?;
     let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes).map_err(|e| {
         format!(
@@ -280,12 +338,7 @@ fn chair_refuses_rotating_default_directory_as_a_target() -> Result {
     let rig = configured()?;
     let rotating = rig.home.join(".claude");
     fs::create_dir(&rotating)?;
-    fs::write(
-        rig.home.join(".agents/config/telemetry.json"),
-        serde_json::to_vec(&json!({"accounts":{"claude":{
-            "current":{"identity_dir":rig.root.join("claude")}, "spare":{"identity_dir":rotating}
-        }}}))?,
-    )?;
+    register_account(&rig, "claude", "spare", "spare", &rotating)?;
     let output = rig.command(&["chair", "switch", "--dry-run", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(value["data"]["outcome"], "refused");

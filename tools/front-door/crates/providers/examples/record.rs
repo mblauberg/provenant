@@ -1014,6 +1014,10 @@ fn main() -> Result<()> {
         label: "recording".into(),
         key: account_key.clone(),
         directory,
+        plan: None,
+        priority: None,
+        billing_anchor: None,
+        limits: None,
     }
     .registered()?;
     let token = match (args.adapter.as_str(), &account) {

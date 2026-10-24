@@ -6,11 +6,60 @@ use provenant_supervisor::exec::{
 use std::{
     ffi::OsString,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+pub fn register_account(
+    rig: &TestRig,
+    adapter: &str,
+    label: &str,
+    key: &str,
+    directory: &Path,
+) -> Result {
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = if config.exists() {
+        fs::read_to_string(&config)?.parse()?
+    } else {
+        "schema_version = 1\n".parse()?
+    };
+    let domains = doc["domains"]
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("domains")?;
+    let accounts = domains
+        .entry("accounts")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("accounts")?;
+    let entries = accounts
+        .entry("entries")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("entries")?;
+    let mut row = toml_edit::Table::new();
+    row["adapter"] = toml_edit::value(adapter);
+    row["label"] = toml_edit::value(label);
+    row["key"] = toml_edit::value(key);
+    row["directory"] = toml_edit::value(directory.to_str().ok_or("directory")?);
+    entries.insert(&format!("{adapter}-{label}"), toml_edit::Item::Table(row));
+    fs::write(config, doc.to_string())?;
+    Ok(())
+}
+
+pub fn clear_accounts(rig: &TestRig) -> Result {
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
+    doc["domains"]["accounts"]["entries"] = toml_edit::table();
+    fs::write(config, doc.to_string())?;
+    Ok(())
+}
+
 pub struct TestRig {
     _temp: tempfile::TempDir,
     pub root: PathBuf,
@@ -22,7 +71,7 @@ pub struct TestRig {
 }
 impl TestRig {
     pub fn new() -> Result<Self> {
-        Self::in_directory(Path::new("/tmp"))
+        Self::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))
     }
     pub fn in_directory(parent: &Path) -> Result<Self> {
         Self::with_object_format(parent, "sha1")
@@ -86,13 +135,20 @@ impl TestRig {
             fs::create_dir_all(path.parent().ok_or("missing sentinel parent")?)?;
             fs::write(path, b"legacy sentinel\0unchanged")?;
         }
+        let git = std::env::var_os("PROVENANT_GIT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
         let output = rig.execute(
-            Path::new("/usr/bin/git"),
+            &git,
             &["init", "-q", &format!("--object-format={format}")],
             None,
         )?;
         if output.termination != provenant_supervisor::exec::Termination::Exit(0) {
-            return Err("git init failed".into());
+            return Err(format!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
         }
         Ok(rig)
     }
