@@ -182,13 +182,18 @@ impl run::Providers for Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
-        let rollout = (adapter.id() == "codex")
-            .then(|| {
-                outcome
-                    .session()
-                    .and_then(|thread| provider::observe_codex_rollout(provider_state, thread).ok())
-            })
-            .flatten();
+        let rollout = (adapter.id() == "codex").then(|| {
+            outcome
+                .session()
+                .ok_or(provenant_providers::ProviderError::UnknownIdentity)
+                .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
+        });
+        // The typed reason survives into the terminal record for diagnosis.
+        let rollout_error = rollout
+            .as_ref()
+            .and_then(|observed| observed.as_ref().err())
+            .map(|error| format!("Codex rollout identity: {error}"));
+        let rollout = rollout.and_then(Result::ok);
         let observed_model = if adapter.id() == "codex" {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
@@ -255,6 +260,9 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
+        if decoded.reason.is_none() {
+            decoded.reason = rollout_error;
+        }
         if let Some(ProviderEvent::QuotaLimited { message, pool }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
@@ -1841,5 +1849,61 @@ mod tests {
             "reason must leave room in the terminal record"
         );
         assert!(reason.ends_with('☀'));
+    }
+
+    #[test]
+    fn codex_rollout_error_reaches_the_decoded_reason() {
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: RunId::from_bytes([1; 16]),
+                attempt: AttemptId::from_bytes([2; 16]),
+                generation: 1,
+            },
+            termination: Some(provenant_supervisor::exec::Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        };
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            ..Default::default()
+        };
+        let registry = Registry {
+            roots: None,
+            home: None,
+            assets: None,
+            cwd: None,
+            state_root: None,
+            project_id: None,
+        };
+        let stream = [
+            json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"OK"}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+        ]
+        .map(|frame| format!("{frame}\n"))
+        .concat();
+        let decoded = registry
+            .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert!(decoded.observed_route.is_none());
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("Codex rollout identity: provider continuation identity is unknown")
+        );
     }
 }

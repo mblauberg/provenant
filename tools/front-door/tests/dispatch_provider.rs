@@ -160,7 +160,12 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert!(lane["applied_route"]["account_label"].as_str().is_some());
         } else {
             assert_eq!(lane["state"], "failed", "{lane}");
-            assert_eq!(lane["reason"], "provider identity was not observed");
+            assert!(
+                lane["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("provider identity was not observed: ")),
+                "{lane}"
+            );
         }
         rig.assert_legacy_unchanged()?;
     }

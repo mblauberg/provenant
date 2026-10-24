@@ -357,7 +357,13 @@ impl RunStore {
             };
             if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
-                decoded.reason = Some(reason.into());
+                // Keep the decoder's typed identity evidence error, if any.
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(detail) if reason == "provider identity was not observed" => {
+                        format!("{reason}: {detail}")
+                    }
+                    _ => reason.into(),
+                });
             }
         }
         let publication = TerminalPublication {
