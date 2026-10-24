@@ -47,12 +47,20 @@ reconciliation run.
    a later gate, report those tests as deferred and unverified; that gate
    runs them before merge. When required, run `evaluate` and attach its
    passing receipt.
-4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
+4. Polish before review when the diff exceeds about 300 changed lines or
+   touches more than one crate or package (`review.polish`: `auto`, `always`
+   or `off`). A fresh writer lane applies `refactor` to the changed code only:
+   one responsibility per unit, typed states over flags, no unwrap or silent
+   fallback on production paths, no speculative traits or dead seams. Simple
+   first beats SOLID abstraction. It keeps every fast check green and
+   escalates structural moves (new modules, public API or cross-crate moves)
+   to the chair instead of making them.
+5. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Bind each reviewer attempt with `provenant workflow review`. A change that affects UI produces screenshots at set viewports and
    attaches them to the review brief; reviewers with vision get them. Record
    omissions and substitutions. Native subagents use the Agent tool model
    parameter and mark the route resolved.
-5. Batch findings from review and the slow checks into one repair round, then
+6. Batch findings from review and the slow checks into one repair round, then
    repeat verification and re-review only the repair delta. A gate that still
    fails takes the step 2 escalation, within the repair ceilings in
    [run-contract.md](references/run-contract.md). Stop and escalate, or return to the user, when two
@@ -60,13 +68,13 @@ reconciliation run.
    even with budget left.
    Every gate still passes before merge. Return
    evidence to user or `scope` on drift. `review.rereview_scope` and the other
-   `review.*` knobs in `scripts/provenant-profile show --resolved` adjust this step.
-6. Update owned docs for behavioural, architectural, operational or decision
+   `review.*` knobs in `provenant config show` adjust this step.
+7. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context and graduate durable findings.
-7. The pull request is the evidence: exact-head CI, required review and the
+8. The pull request is the evidence: exact-head CI, required review and the
    repository merge. Hand off after the receipt accepts.
-8. Objective checks and the review required by the tier meet final acceptance;
+9. Objective checks and the review required by the tier meet final acceptance;
    the chair reports the outcome and the user may still reject it. Require
    explicit user acceptance only for `terminal` work or when the approved
    scope asks for it. A project may name its landing gate as acceptance.

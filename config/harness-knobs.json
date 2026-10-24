@@ -47,6 +47,12 @@
       "effect": "After a repair, re-review only the repair delta, or the whole change again.",
       "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
     },
+    "review.polish": {
+      "project": "strengthen", "type": "enum", "values": ["auto", "always", "off"], "default": "auto", "status": "wired",
+      "reader": "skills/implement/SKILL.md",
+      "effect": "auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never.",
+      "trade_off": "Polish costs one writer lane per qualifying change for a simpler diff and shorter review."
+    },
     "repair.max_cycles": {
       "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
       "reader": "skills/deliver/references/contract.md (2/4/5/5, fixed)",
@@ -97,6 +103,7 @@
         "council.junior_size": 2,
         "routing.pool_mode": "rotate",
         "writing.final_polish": "off",
+        "review.polish": "off",
         "context.summary_tokens": 1000
       }
     },
@@ -107,6 +114,7 @@
         "review.extra_reviewers": 1,
         "review.cross_family": "require",
         "review.rereview_scope": "full",
+        "review.polish": "always",
         "council.junior_size": 4
       },
       "task_classes": {
