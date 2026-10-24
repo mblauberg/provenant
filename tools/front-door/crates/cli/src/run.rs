@@ -1,6 +1,10 @@
-//! Run's composition edge: `dispatch`, `lanes` and `output`, and the provider
-//! seam that the same-binary guardian holder shares.
-use crate::{Condition, Dispatch, Lanes, Mode, Output, Part, Switch, Target};
+//! Run's composition edge: `dispatch`, `lanes`, `output`, `cancel`, `resume`,
+//! `reconcile` and `telemetry stats`, and the provider seam that the
+//! same-binary guardian holder shares.
+use crate::{
+    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
+    Target,
+};
 use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
@@ -95,7 +99,14 @@ impl run::Providers for Registry<'_> {
         &self,
         task: &run::TaskRequest,
         _prompt: &str,
+        resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
+        if resume.is_some() {
+            return Err(
+                "continuation needs a provider session; providers do not expose sessions yet"
+                    .into(),
+            );
+        }
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let resolved = crate::route::resolve(&route_request(task)?, roots)?;
         let candidates = std::iter::once((resolved.adapter.as_str(), resolved.model.as_str()))
@@ -567,6 +578,18 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
     };
     let session = open(edge, &call)?;
     let record = session.store.create(&prepared, &call)?;
+    let started = launch(&session, record.run_id, edge, &call)?;
+    report(&session, &record, &started, command.wait, edge, &call)
+}
+
+/// Hand every queued attempt of `run` to its own guardian. Fabric's facade
+/// shares this path with the CLI leaves.
+fn launch(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+) -> Result<Vec<run::Started>, Fail> {
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
@@ -583,38 +606,47 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
         }
         .encode()
     };
-    let started = session.store.start(
-        record.run_id,
-        &Registry {
-            roots: Some(edge.roots),
-        },
-        &holder,
-        &call,
-    )?;
-    let unknown: Vec<String> = started
+    let registry = Registry {
+        roots: Some(edge.roots),
+    };
+    Ok(session.store.start(run, &registry, &holder, call)?)
+}
+fn launch_unknown(started: &[run::Started]) -> Vec<String> {
+    started
         .iter()
         .filter_map(|s| match s {
             run::Started::Unknown { attempt, error } => Some(format!("{attempt}: {error}")),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+/// The lanes of a just-accepted run, optionally after waiting for all of them.
+fn report(
+    session: &Session,
+    record: &run::RunRecord,
+    started: &[run::Started],
+    wait: Option<u64>,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+) -> Result<(Value, String), Fail> {
     let target = Target {
         run: record.run_id,
         task: None,
         attempt: None,
     };
-    let (mut data, human, _) = match command.wait {
-        Some(seconds) => wait_lanes(&session, &[target], Condition::All, seconds, edge)?,
+    let (mut data, human, _) = match wait {
+        Some(seconds) => wait_lanes(session, &[target], Condition::All, seconds, edge)?,
         None => {
             let page = session
                 .store
-                .lanes(&lane_query(&[target], true, 100, 0), &call)?;
+                .lanes(&lane_query(&[target], true, 100, 0), call)?;
             let (data, human) = render_lanes(&page.lanes, None, edge);
             (data, human, false)
         }
     };
     data["run_id"] = json!(record.run_id);
     data["operation_id"] = json!(record.operation_id);
+    let unknown = launch_unknown(started);
     if !unknown.is_empty() {
         data["launch_unknown"] = json!(unknown);
     }
@@ -727,6 +759,33 @@ fn settled(state: &run::AttemptState) -> (bool, bool) {
         _ => (false, false),
     }
 }
+/// Snapshot every attempt the targets name. Without targets, the selection is
+/// the current nonterminal work; host caps bound it.
+fn select(
+    session: &Session,
+    targets: &[Target],
+    call: &run::Request<'_>,
+) -> Result<Vec<AttemptId>, Fail> {
+    let mut selected = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = session
+            .store
+            .lanes(&lane_query(targets, !targets.is_empty(), 100, after), call)?;
+        selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
+        match page.next {
+            Some(next) if selected.len() < 1000 => after = next,
+            Some(_) => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    "INVALID",
+                    "selection exceeds 1000 lanes",
+                ));
+            }
+            None => return Ok(selected),
+        }
+    }
+}
 /// Snapshot the selection at entry and poll until the condition holds or the
 /// reader deadline expires. Expiry never stops a provider.
 fn wait_lanes(
@@ -739,28 +798,7 @@ fn wait_lanes(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let call = request(&clock, &cancel)?;
-    // Without targets, the selection is the current nonterminal work. The
-    // host caps bound it, so every page is snapshotted.
-    let mut selected = Vec::new();
-    let mut after = 0;
-    loop {
-        let page = session
-            .store
-            .lanes(&lane_query(targets, !targets.is_empty(), 100, after), &call)?;
-        selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
-        match page.next {
-            Some(next) if selected.len() < 1000 => after = next,
-            Some(_) => {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    "INVALID",
-                    "wait selection exceeds 1000 lanes",
-                ));
-            }
-            None => break,
-        }
-    }
+    let selected = select(session, targets, &request(&clock, &cancel)?)?;
     loop {
         let call = request(&clock, &cancel)?;
         let lanes = selected
@@ -897,4 +935,210 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         }),
         text,
     ))
+}
+
+/// Cancel every attempt the target names. Queued work ends at once; started
+/// work gets a stop request its guardian acts on. Requested is not exit.
+pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
+    let mut expired = false;
+    let mut out = reply(
+        "cancel",
+        (|| {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let session = open(edge, &call)?;
+            let reason = command.reason.as_deref().unwrap_or("cancelled by request");
+            let targets = [command.target];
+            let mut receipts = Vec::new();
+            let mut human = String::new();
+            for id in select(&session, &targets, &call)? {
+                let receipt = session
+                    .store
+                    .cancel(id, reason, &request(&clock, &cancel)?)?;
+                human.push_str(&format!("{id} {}\n", state_tag(&receipt)));
+                receipts.push(json!({ "attempt_id": id, "receipt": receipt }));
+            }
+            let mut data = json!({ "operation_id": command.operation_id, "receipts": receipts });
+            if let Some(seconds) = command.wait {
+                let (lanes, rendered, timed_out) =
+                    wait_lanes(&session, &targets, Condition::All, seconds, edge)?;
+                expired = timed_out;
+                data["lanes"] = lanes["lanes"].clone();
+                data["condition_met"] = lanes["condition_met"].clone();
+                human.push_str(&rendered);
+            }
+            Ok((data, human))
+        })(),
+    );
+    if expired {
+        out.result.status = Status::Timeout;
+    }
+    out
+}
+fn state_tag(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Continue one terminal attempt with new input as a new single-task run on
+/// the same route and access.
+pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
+    reply("resume", resume_inner(command, edge))
+}
+fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let target = command.attempt.0;
+    let prior = target
+        .attempt
+        .ok_or(Fail::new(Status::Invalid, "INVALID", "attempt required"))?;
+    let prompt = match &command.prompt.prompt_file {
+        Some(path) => read_bounded(path)?,
+        None => read_text(std::io::stdin().lock())?,
+    };
+    let session = open(edge, &call)?;
+    let record = session.store.record(prior, &call)?;
+    if record.run_id != target.run || target.task.is_some_and(|task| task != record.task_id) {
+        return Err(Fail::new(
+            Status::Invalid,
+            "NOT_FOUND",
+            "attempt is not in that run/task",
+        ));
+    }
+    let run = session.store.resume(
+        &run::Resume {
+            prior,
+            // The CLI continues an attempt once; a second continuation of the
+            // same attempt is a conflict, not a new branch.
+            expected_generation: 0,
+            operation_id: command.operation_id,
+            run_id: fresh(RunId::from_bytes)?,
+            attempt_id: fresh(AttemptId::from_bytes)?,
+            prompt,
+            created_at: now(&clock)?,
+        },
+        &call,
+    )?;
+    let started = launch(&session, run.run_id, edge, &call)?;
+    let (mut data, human) = report(&session, &run, &started, command.wait, edge, &call)?;
+    data["resumed_from"] = json!(prior);
+    Ok((data, human))
+}
+
+/// Recover runs whose guardian or submitter died: commit durable exits,
+/// withdraw launches that never reached a guardian, and start queued work.
+/// Uncertain custody stays fenced and is reported.
+pub fn reconcile(command: Reconcile, edge: &Edge<'_>) -> Reply {
+    reply("reconcile", reconcile_inner(command, edge))
+}
+fn reconcile_inner(command: Reconcile, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    if command.abandon_uncertain {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "abandoning uncertain custody is not available in this build",
+        ));
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let session = open(edge, &request(&clock, &cancel)?)?;
+    let runs = if command.id.is_empty() {
+        session.store.open_runs(&request(&clock, &cancel)?)?
+    } else {
+        command.id
+    };
+    let registry = Registry {
+        roots: Some(edge.roots),
+    };
+    let mut rows = Vec::new();
+    let mut human = String::new();
+    for run in runs {
+        // Each run gets a fresh call budget; recovery waits on custody locks.
+        let call = request(&clock, &cancel)?;
+        let found = session.store.reconcile(run, &registry, &call)?;
+        let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
+            launch(&session, run, edge, &call)?
+        } else {
+            Vec::new()
+        };
+        let attempts: Vec<Value> = found
+            .iter()
+            .map(|(id, state)| {
+                human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
+                json!({ "attempt_id": id, "found": state })
+            })
+            .collect();
+        rows.push(json!({
+            "run_id": run,
+            "attempts": attempts,
+            "launched": started.iter().filter(|s| matches!(s, run::Started::Launched(_))).count(),
+            "launch_unknown": launch_unknown(&started),
+        }));
+    }
+    if rows.is_empty() {
+        human.push_str("no open runs\n");
+    }
+    Ok((json!({ "runs": rows }), human))
+}
+
+/// Usage and cost over this project's terminal attempts, priced from the
+/// reviewed table shipped with the product.
+pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
+    reply("telemetry stats", stats_inner(command, edge))
+}
+fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    use run::AttemptReader;
+    let path = edge.assets.join("config/telemetry-prices.toml");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            "PRICES",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let prices = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
+        .map_err(|error| error.to_string())
+        .and_then(|config| {
+            provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
+        })
+        .map_err(|error| Fail::new(Status::Error, "PRICES", error))?;
+    let instant = |time: Option<jiff::Timestamp>| {
+        time.map(|t| WallTime::from_micros(t.as_microsecond()))
+            .transpose()
+            .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let session = open(edge, &call)?;
+    let window = provenant_telemetry::Window {
+        since: instant(command.since)?,
+        until: instant(command.until)?,
+        project: Some(session.context.project_id),
+        detail: command.detail,
+    };
+    let facts = session
+        .store
+        .attempts(
+            run::AttemptFilter {
+                run_id: None,
+                task_id: None,
+            },
+            &call,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = provenant_telemetry::stats(facts, &prices, window)
+        .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
+    let cost = report.totals.cost.complete.as_ref().map_or_else(
+        || format!("at least ${}", report.totals.cost.known_lower_bound.usd),
+        |money| format!("${}", money.usd),
+    );
+    let human = format!("{} attempts, {cost}\n", report.totals.attempts);
+    let data = serde_json::to_value(&report)
+        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+    Ok((data, human))
 }

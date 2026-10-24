@@ -166,7 +166,11 @@ impl RunStore {
             project_id: context.project_id,
             actor_id: context.actor_id,
             operation_id: input.operation_id.clone(),
-            kind: OperationKind::Dispatch,
+            kind: if input.request.parent.is_some() {
+                OperationKind::Resume
+            } else {
+                OperationKind::Dispatch
+            },
             request_digest: digest,
             run_id: input.run_id,
             state: OperationState::Prepared,
@@ -199,11 +203,16 @@ impl RunStore {
             if queued + input.request.tasks.len() as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
             tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
+            if let Some(target) = input.request.parent {
+                // Each terminal attempt is continued at most once.
+                let taken = tx.execute("INSERT INTO continuations(target,run) VALUES (?1,?2) ON CONFLICT DO NOTHING", params![target.to_string(), input.run_id.to_string()])?;
+                if taken != 1 { return Err(RunError::Conflict); }
+            }
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: 1, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
+                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
@@ -299,9 +308,12 @@ impl RunStore {
     /// exit evidence, no start time and an empty sealed result.
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
+    /// `expected` names the state the caller observed; any other state is a
+    /// conflict, so a cancelled queued attempt never races a starting launch.
     pub fn withdraw(
         &self,
         id: AttemptId,
+        expected: AttemptState,
         outcome: Outcome,
         reason: &str,
         finished_at: WallTime,
@@ -323,7 +335,9 @@ impl RunStore {
         if let AttemptState::Terminal { .. } = old.state {
             return Ok(old);
         }
-        if !matches!(old.state, AttemptState::Queued | AttemptState::Starting) {
+        if old.state != expected
+            || !matches!(old.state, AttemptState::Queued | AttemptState::Starting)
+        {
             return Err(RunError::Conflict);
         }
         let revision = old.revision;
@@ -462,6 +476,9 @@ impl RunStore {
 fn validate_request(input: &PreparedRun) -> Result<()> {
     if input.request.schema_version != 1 {
         return Err(RunError::Version(input.request.schema_version as i64));
+    }
+    if input.request.parent.is_some() && input.request.tasks.len() != 1 {
+        return Err(RunError::Validation("a continuation has one task"));
     }
     if !(1..=64).contains(&input.request.tasks.len())
         || !(1..=8).contains(&input.request.concurrency)

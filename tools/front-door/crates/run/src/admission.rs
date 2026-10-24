@@ -173,6 +173,10 @@ impl RunStore {
             if now >= ticket.admission_deadline {
                 return Err(RunError::Refused);
             }
+            // An explicit cancel before spawn ends the wait; finish records it.
+            if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+                return Err(RunError::Cancelled);
+            }
             let fits = match (resources.memory(), resources.disk(attempt)) {
                 (Ok(memory), Ok(disk)) => {
                     memory.total_bytes > 0

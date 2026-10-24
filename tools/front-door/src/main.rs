@@ -262,11 +262,19 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::output(cmd, edge)
         }),
-        Command::Cancel(_) => unavailable("cancel", "run", globals),
-        Command::Resume(_) => unavailable("resume", "run", globals),
-        Command::Reconcile(_) => unavailable("reconcile", "run", globals),
-        Command::Telemetry(provenant_cli::Telemetry::Stats(_)) => {
-            unavailable("telemetry stats", "telemetry", globals)
+        Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::cancel(cmd, edge)
+        }),
+        Command::Resume(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::resume(cmd, edge)
+        }),
+        Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::reconcile(cmd, edge)
+        }),
+        Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::run::stats(cmd, edge)
+            })
         }
         Command::Quota(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {

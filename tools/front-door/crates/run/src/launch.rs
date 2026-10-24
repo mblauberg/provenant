@@ -30,11 +30,14 @@ pub struct Decoded {
 }
 pub trait Providers {
     /// Prepare one task, trying its fallback routes in order. An error is a
-    /// task-local refusal reason; siblings still launch.
+    /// task-local refusal reason; siblings still launch. `resume` is the prior
+    /// terminal attempt of a continuation, whose exact session must be used:
+    /// without one, refuse rather than start a fresh session.
     fn prepare(
         &self,
         task: &TaskRequest,
         prompt: &str,
+        resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
     fn decode(&self, route: &RouteRecord, stdout: &[u8], exit: &ExitObservation) -> Decoded;
@@ -80,6 +83,10 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         let request = self.request(run, call)?;
+        let resume = request
+            .parent
+            .map(|prior| self.record(prior, call))
+            .transpose()?;
         let ids: Vec<String> = call.retry(|| {
             let mut query = self.db.prepare(
                 "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
@@ -110,10 +117,17 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let plan = match providers.prepare(task, &prompt) {
+            let plan = match providers.prepare(task, &prompt, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
-                    self.withdraw(id, Outcome::Rejected, &reason, now()?, call)?;
+                    self.withdraw(
+                        id,
+                        AttemptState::Queued,
+                        Outcome::Rejected,
+                        &reason,
+                        now()?,
+                        call,
+                    )?;
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
@@ -132,7 +146,14 @@ impl RunStore {
                 // Nothing reached a guardian: the attempt ends here.
                 Err(HandOff::Local(error)) => {
                     let reason = format!("launch preparation failed: {error}");
-                    self.withdraw(id, Outcome::Rejected, &reason, now()?, call)?;
+                    self.withdraw(
+                        id,
+                        AttemptState::Starting,
+                        Outcome::Rejected,
+                        &reason,
+                        now()?,
+                        call,
+                    )?;
                     Started::Refused {
                         attempt: id,
                         reason,

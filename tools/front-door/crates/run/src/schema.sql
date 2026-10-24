@@ -26,6 +26,9 @@ CREATE INDEX admission_counts ON admission(active,project,run);
 CREATE TABLE spacing (
  id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE continuations (
+ target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)
+) STRICT;
 CREATE TABLE events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
  attempt TEXT NOT NULL REFERENCES attempts(id), revision INTEGER NOT NULL,

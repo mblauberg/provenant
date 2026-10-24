@@ -1,5 +1,5 @@
-//! Dispatch, admission and holder behaviour at Run's owner boundary. Fake
-//! providers and resources stand in for adapters and the host.
+//! Dispatch, admission, holder and control behaviour at Run's owner boundary.
+//! Fake providers and resources stand in for adapters and the host.
 use super::tests::{call, clock, context, exit, input, route};
 use super::*;
 use provenant_core::{AttemptId, CancelToken, TaskId, WallTime};
@@ -24,13 +24,21 @@ impl Resources for Host {
         Ok(u64::MAX)
     }
 }
+#[derive(Default)]
 struct Fake {
     refuse: bool,
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
+    resumed: Cell<Option<AttemptId>>,
 }
 impl Providers for Fake {
-    fn prepare(&self, _: &TaskRequest, _: &str) -> std::result::Result<PreparedLaunch, String> {
+    fn prepare(
+        &self,
+        _: &TaskRequest,
+        _: &str,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err("fixture adapter is disabled".into());
         }
@@ -147,7 +155,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     let fake = Fake {
         refuse: true,
         observed: None,
-        decoded: Cell::new(0),
+        ..Fake::default()
     };
     let started = store.start(run.run_id, &fake, &|_| unreachable!(), &call)?;
     assert!(
@@ -184,7 +192,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     let fake = Fake {
         refuse: false,
         observed: Some(route()),
-        decoded: Cell::new(0),
+        ..Fake::default()
     };
     for (index, code) in [(0, 0), (1, 1)] {
         let id = batch.attempts[index].attempt_id;
@@ -246,7 +254,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let fake = Fake {
         refuse: false,
         observed: None,
-        decoded: Cell::new(0),
+        ..Fake::default()
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
     let fact = store.attempt(id, &call)?;
@@ -256,5 +264,180 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
     assert_eq!(fake.decoded.get(), 0);
+    Ok(())
+}
+
+fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outcome> {
+    match store.record(id, call)?.state {
+        AttemptState::Terminal { outcome, .. } => Ok(outcome),
+        _ => Err(RunError::Nonterminal),
+    }
+}
+
+#[test]
+fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let batch = two_tasks(2);
+    store.create(&batch, &call)?;
+    let [queued, starting] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+
+    assert_eq!(
+        store.cancel(queued, "stop", &call)?,
+        CancelReceipt::Cancelled
+    );
+    assert_eq!(terminal(&store, queued, &call)?, Outcome::Cancelled);
+    assert!(store.attempt(queued, &call)?.started_at.is_none());
+    assert_eq!(
+        store.cancel(queued, "stop", &call)?,
+        CancelReceipt::AlreadyTerminal
+    );
+
+    store.mark_starting(starting, &route(), &call)?;
+    assert!(matches!(
+        store.cancel(starting, "stop", &call)?,
+        CancelReceipt::Unobservable { .. }
+    ));
+    // Supervisor's stop writes cancel.json; the waiting guardian sees it.
+    let dir = store.attempt_dir(batch.run_id, starting, false)?;
+    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    let host = Host { available: 100 };
+    assert!(matches!(
+        store.admit(starting, &dir, &host, &clock, &cancel),
+        Err(RunError::Cancelled)
+    ));
+    let mut observed = exit();
+    observed.scope.attempt = starting;
+    observed.scope.generation = 1;
+    observed.never_spawned = true;
+    observed.termination = None;
+    observed.terminal_observed = false;
+    observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
+    seal_exit(&store, &observed)?;
+    store.finish(starting, &dir, &observed, &Fake::default(), &call)?;
+    assert_eq!(terminal(&store, starting, &call)?, Outcome::Cancelled);
+    assert_eq!(store.run(batch.run_id, &call)?.closure, Closure::Closed);
+    Ok(())
+}
+
+#[test]
+fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let prior = run.attempts[0].attempt_id;
+    let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
+        Ok(Resume {
+            prior,
+            expected_generation,
+            operation_id: provenant_core::OperationId::parse(operation)
+                .map_err(|_| RunError::Validation("operation"))?,
+            run_id: provenant_core::RunId::from_bytes([byte; 16]),
+            attempt_id: AttemptId::from_bytes([byte + 1; 16]),
+            prompt: "answer".into(),
+            created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
+        })
+    };
+    assert!(matches!(
+        store.resume(&resume("r1", 0, 20)?, &call),
+        Err(RunError::Nonterminal)
+    ));
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(run.run_id, &fake, &|_| unreachable!(), &call)?;
+    assert_eq!(fake.resumed.get(), None);
+
+    let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
+    assert_eq!(continued.parent, Some(prior));
+    assert_eq!(store.resume(&resume("r1", 0, 20)?, &call)?, continued);
+    for expected in [0, 1] {
+        assert!(matches!(
+            store.resume(&resume("r2", expected, 30)?, &call),
+            Err(RunError::Conflict)
+        ));
+    }
+    let next = AttemptId::from_bytes([21; 16]);
+    let record = store.record(next, &call)?;
+    assert_eq!(record.retry_of, Some(prior));
+    assert_eq!(
+        record.requested_route,
+        store.record(prior, &call)?.requested_route
+    );
+    store.start(continued.run_id, &fake, &|_| unreachable!(), &call)?;
+    assert_eq!(fake.resumed.get(), Some(prior));
+    Ok(())
+}
+
+#[test]
+fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        ..AdmissionPolicy::default()
+    });
+    let batch = two_tasks(2);
+    store.create(&batch, &call)?;
+    let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+
+    // The guardian sealed an exit but died before its terminal commit.
+    store.mark_starting(exited, &route(), &call)?;
+    store
+        .claim(exited, WallTime::from_micros(100)?, &call)?
+        .ok_or("not admitted")?;
+    let dir = store.attempt_dir(batch.run_id, exited, false)?;
+    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope.attempt = exited;
+    observed.scope.generation = 1;
+    let summary = serde_json::json!({"schema_version": 1, "scope": observed.scope, "requester": provenant_core::ActorId::from_bytes([2; 16])});
+    artifacts::seal(
+        &dir,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    seal_exit(&store, &observed)?;
+
+    // A handoff whose reservation never reached a guardian.
+    store.mark_starting(orphan, &route(), &call)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: batch.run_id,
+        attempt: orphan,
+        generation: 1,
+    };
+    drop(provenant_supervisor::custody::acquire_reader(
+        store.attempt_dir(batch.run_id, orphan, false)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let found = store.reconcile(batch.run_id, &fake, &call)?;
+    assert_eq!(
+        found,
+        vec![
+            (exited, Reconciled::Finished),
+            (orphan, Reconciled::Withdrawn)
+        ]
+    );
+    assert_eq!(terminal(&store, exited, &call)?, Outcome::Succeeded);
+    assert!(artifacts::read_sealed(&dir, "release.json", RECORD_LIMIT)?.is_some());
+    assert_eq!(terminal(&store, orphan, &call)?, Outcome::Rejected);
+    assert!(store.reconcile(batch.run_id, &fake, &call)?.is_empty());
     Ok(())
 }

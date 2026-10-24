@@ -148,7 +148,16 @@ impl RunStore {
             .clock
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
+        let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
+            (_, true) if cancelled => Decoded {
+                outcome: Outcome::Cancelled,
+                result: String::new(),
+                complete: true,
+                observed_route: None,
+                usage: UsageRecord::default(),
+                reason: Some("cancelled before start".into()),
+            },
             (_, true) => Decoded {
                 outcome: Outcome::Rejected,
                 result: String::new(),

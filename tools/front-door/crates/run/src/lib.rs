@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod admission;
 mod artifacts;
+mod controls;
 mod db;
 mod holder;
 mod launch;
@@ -11,6 +12,7 @@ mod store;
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
+pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use holder::{HolderContext, RootSeed, RunHolder};
 pub use launch::{Decoded, PreparedLaunch, Providers, Started};
 

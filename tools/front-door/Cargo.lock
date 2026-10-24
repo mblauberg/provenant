@@ -450,10 +450,12 @@ dependencies = [
  "provenant-routing",
  "provenant-run",
  "provenant-supervisor",
+ "provenant-telemetry",
  "regex",
  "serde",
  "serde_json",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

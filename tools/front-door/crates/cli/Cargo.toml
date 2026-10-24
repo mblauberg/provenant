@@ -19,10 +19,12 @@ provenant-routing = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-run = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-telemetry = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+toml_edit = { workspace = true }
 
 [lints]
 workspace = true
