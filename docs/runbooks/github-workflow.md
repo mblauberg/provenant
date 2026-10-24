@@ -103,14 +103,13 @@ Name the branch `<type>/<area>-<slug>` per
 [`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
 for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
-branch with `/` replaced by `-`, as `scripts/worktree` already defaults. The
+branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. Removing a clean worktree also needs no extra authority;
 dirty worktrees are refused and unmerged branches are kept.
 
 ```sh
-scripts/worktree create \
-  --new-branch fix/repo-runbook-mechanics --start-point main
+provenant worktree create fix/repo-runbook-mechanics --base main
 ```
 
 To also record the issue-to-branch link on GitHub, create the branch with
@@ -119,9 +118,11 @@ To also record the issue-to-branch link on GitHub, create the branch with
 ```sh
 gh issue develop 148 --name fix/repo-runbook-mechanics --base main
 git fetch origin
-scripts/worktree create \
-  --existing-branch fix/repo-runbook-mechanics
+provenant worktree create fix/repo-runbook-mechanics
 ```
+
+Use `provenant worktree list` to inspect worktrees and
+`provenant worktree remove NAME` to remove an eligible one.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -152,12 +153,12 @@ bound to the exact head SHA and the independent-review block included, and
 pass it explicitly:
 
 ```sh
-mkdir -p .agent-run/scratch
-cp .github/pull_request_template.md .agent-run/scratch/pr-body.md
+PR_BODY="$(mktemp)"
+cp .github/pull_request_template.md "$PR_BODY"
 # fill in every section, then:
 gh pr create --base main \
   --title "docs(runbooks): document agent GitHub mechanics" \
-  --body-file .agent-run/scratch/pr-body.md
+  --body-file "$PR_BODY"
 ```
 
 Set the issue to `In review` while exact-head checks and independent review
@@ -237,13 +238,8 @@ For an auto-merge, run the last two lines after GitHub has created the merge
 commit. A mismatch is a publication check failure: stop before claiming the
 merge is ready and record the generated author evidence.
 
-Read that check's state correctly. `gh pr view <n> --json statusCheckRollup`
-leaves `.conclusion` as an empty string while a check is still running, so a
-`jq` expression that only guards against `null` treats a running check as
-finished and reports a false green. Filter on `.status` first, treating anything
-other than `COMPLETED` as still running, and only then require every non-skipped
-`.conclusion` to be `SUCCESS`. Merging on `.conclusion` alone merges unverified
-heads.
+For status-check rollup handling and false-green traps, follow the
+[shell-pitfalls runbook](shell-pitfalls.md#shell-pitfalls).
 
 The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, an exhausted repair
@@ -286,14 +282,11 @@ when all of the following hold:
 - `dependabot/fetch-metadata` reports the update type as
   `version-update:semver-patch` (minor and major updates wait for maintainer
   review); and
-- the dependency list does not include `@anthropic-ai/claude-agent-sdk`,
-  `@anthropic-ai/claude-code` or `@openai/codex`.
+- Dependabot is configured for GitHub Actions and the Rust workspace's Cargo
+  dependencies; the former npm package exclusions do not apply.
 
-These adapter dependencies are excluded even at patch level because an adapter
-dependency update requires current runtime identity, handshake and capability
-evidence. A green dependency bump alone does not prove that enabled activation
-will remain conformant. The queued merge still lands only after `ci-status`
-reports green; that gate is the whole review pressure for these PRs.
+The queued merge still lands only after `ci-status` reports green; that gate is
+the whole review pressure for these PRs.
 
 ### After merge
 
