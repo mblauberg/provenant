@@ -122,10 +122,11 @@ impl GitOid {
 }
 impl std::fmt::Display for GitOid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&match self {
-            Self::Sha1(bytes) => crate::hex(bytes),
-            Self::Sha256(bytes) => crate::hex(bytes),
-        })
+        let bytes: &[u8] = match self {
+            Self::Sha1(bytes) => bytes,
+            Self::Sha256(bytes) => bytes,
+        };
+        f.write_str(&crate::hex(bytes))
     }
 }
 text_wire!(GitOid, GitOidError);
