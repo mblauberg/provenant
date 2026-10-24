@@ -2,11 +2,46 @@
 //! Custody and OS confinement remain authoritative; this is no shell evaluator.
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    ProcessControl,
+    DynamicCommandName,
+    Expansion,
+    Unparseable,
+}
+
 pub const DENY_REASON: &str =
     "Direct process control is refused. Use `provenant cancel TARGET` for owned work.";
+
+impl RefusalReason {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ProcessControl => DENY_REASON,
+            Self::DynamicCommandName => {
+                "A dynamic command name is refused. Write the command path literally."
+            }
+            Self::Expansion => {
+                "An unbounded expansion is refused. Write the command name literally."
+            }
+            Self::Unparseable => {
+                "Shell syntax the guard cannot parse is refused. Simplify the command."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
-#[error("{DENY_REASON}")]
-pub struct ShellRefusal;
+#[error("{}", .0.message())]
+pub struct ShellRefusal(pub RefusalReason);
+
+impl ShellRefusal {
+    const fn unparseable() -> Self {
+        Self(RefusalReason::Unparseable)
+    }
+    const fn expansion() -> Self {
+        Self(RefusalReason::Expansion)
+    }
+}
 
 /// Refuse process control wherever bash would run it as a command: after
 /// separators and keywords, behind wrappers such as `sudo` and `xargs`, in
@@ -28,7 +63,7 @@ pub fn commands(command: &str) -> Result<Vec<Vec<String>>, ShellRefusal> {
 }
 fn inspect(command: &str, depth: usize) -> Result<Vec<Vec<String>>, ShellRefusal> {
     if depth > 8 || command.len() > 1024 * 1024 || command.contains('\0') {
-        return Err(ShellRefusal);
+        return Err(ShellRefusal::unparseable());
     }
     let mut lexer = Lexer {
         chars: command.chars().collect(),
@@ -41,7 +76,7 @@ fn inspect(command: &str, depth: usize) -> Result<Vec<Vec<String>>, ShellRefusal
     if lexer.data_reaches_shell {
         for text in &lexer.seen {
             if data_names_control(text)? {
-                return Err(ShellRefusal);
+                return Err(ShellRefusal(RefusalReason::ProcessControl));
             }
         }
     }
@@ -284,7 +319,7 @@ impl Lexer {
     }
     fn list(&mut self, depth: usize, until: Until) -> Result<(), ShellRefusal> {
         if depth > 8 {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         let mut scope = Scope::default();
         let mut word = Word::default();
@@ -293,7 +328,7 @@ impl Lexer {
                 break false;
             };
             match character {
-                '\\' => match self.next().ok_or(ShellRefusal)? {
+                '\\' => match self.next().ok_or_else(ShellRefusal::unparseable)? {
                     // A backslash-newline is a line continuation: bash removes both.
                     '\n' => {}
                     escaped => {
@@ -351,16 +386,16 @@ impl Lexer {
         self.finish(&mut scope, &mut word, depth)?;
         self.end_command(&mut scope)?;
         if until != Until::End && !closed {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         Ok(())
     }
     fn single_quoted(&mut self, word: &mut Word, ansi: bool) -> Result<(), ShellRefusal> {
         loop {
-            match self.next().ok_or(ShellRefusal)? {
+            match self.next().ok_or_else(ShellRefusal::unparseable)? {
                 '\'' => return Ok(()),
                 '\\' if ansi => {
-                    let escaped = self.next().ok_or(ShellRefusal)?;
+                    let escaped = self.next().ok_or_else(ShellRefusal::unparseable)?;
                     word.push(escaped);
                 }
                 character => word.push(character),
@@ -371,7 +406,7 @@ impl Lexer {
     /// without a literal operand reads commands from stdin.
     fn end_command(&mut self, scope: &mut Scope) -> Result<(), ShellRefusal> {
         if matches!(scope.position, Position::Probe) {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         if let Some((operands, dynamic)) = scope.interpreter {
             self.data_reaches_shell |= operands == 0 || dynamic;
@@ -389,14 +424,14 @@ impl Lexer {
     }
     fn double_quoted(&mut self, word: &mut Word, depth: usize) -> Result<(), ShellRefusal> {
         if depth > 8 {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         word.special();
         word.quoted = true;
         loop {
-            match self.next().ok_or(ShellRefusal)? {
+            match self.next().ok_or_else(ShellRefusal::unparseable)? {
                 '"' => return Ok(()),
-                '\\' => match self.next().ok_or(ShellRefusal)? {
+                '\\' => match self.next().ok_or_else(ShellRefusal::unparseable)? {
                     '\n' => {}
                     escaped => {
                         if !"$`\"\\".contains(escaped) {
@@ -419,7 +454,7 @@ impl Lexer {
     /// double quotes, single quotes in `${...}` are literal.
     fn dollar(&mut self, word: &mut Word, depth: usize, quoted: bool) -> Result<(), ShellRefusal> {
         if depth > 8 {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         let start = self.at - 1;
         if self.eat('(') {
@@ -428,10 +463,10 @@ impl Lexer {
         let mut inner = Word::default();
         if self.eat('{') {
             loop {
-                match self.next().ok_or(ShellRefusal)? {
+                match self.next().ok_or_else(ShellRefusal::unparseable)? {
                     '}' => break,
                     '\\' => {
-                        self.next().ok_or(ShellRefusal)?;
+                        self.next().ok_or_else(ShellRefusal::unparseable)?;
                     }
                     '\'' if !quoted => self.single_quoted(&mut inner, false)?,
                     '"' => self.double_quoted(&mut inner, depth + 1)?,
@@ -503,7 +538,7 @@ impl Lexer {
                 }
                 let mut inner = Word::default();
                 while self.at < end {
-                    match self.next().ok_or(ShellRefusal)? {
+                    match self.next().ok_or_else(ShellRefusal::unparseable)? {
                         '\\' => self.at += 1,
                         '$' => self.dollar(&mut inner, depth, true)?,
                         '`' => {
@@ -552,7 +587,7 @@ impl Lexer {
             return Ok(());
         }
         if self.seen.len() >= 16_384 {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal::unparseable());
         }
         self.seen.push(word.text.clone());
         match std::mem::replace(&mut scope.redirect, Redirect::None) {
@@ -584,10 +619,10 @@ impl Lexer {
             Position::Command if keyword(&["function"]) => Position::Name,
             Position::Name => Position::Command,
             Position::Probe if text == "-0" => Position::Argument,
-            Position::Probe => return Err(ShellRefusal),
+            Position::Probe => return Err(ShellRefusal::unparseable()),
             Position::Wrapped(COMMAND) if text == "-v" || text == "-V" => Position::Argument,
             Position::Wrapped(XARGS) if !text.starts_with('-') && text.contains("{}") => {
-                return Err(ShellRefusal);
+                return Err(ShellRefusal::unparseable());
             }
             Position::Wrapped(wrapper)
                 if text == "--"
@@ -666,7 +701,7 @@ impl Lexer {
     /// shells. Brace and glob forms count when any expansion could match.
     fn command(&mut self, scope: &mut Scope, word: &Word) -> Result<Position, ShellRefusal> {
         if word.dynamic {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal(RefusalReason::DynamicCommandName));
         }
         let mut expansions = Vec::new();
         expand_braces(&word.text, &mut expansions)?;
@@ -684,7 +719,7 @@ impl Lexer {
                 .position(|item| names.iter().any(|name| may_name(name, item)))
         };
         if named(&PROCESS_CONTROL).is_some() {
-            return Err(ShellRefusal);
+            return Err(ShellRefusal(RefusalReason::ProcessControl));
         }
         if let Some(shell) = named(&SHELLS) {
             scope.interpreter = (shell < INTERPRETERS).then_some((0, false));
@@ -727,7 +762,7 @@ fn data_names_control(text: &str) -> Result<bool, ShellRefusal> {
 /// comma stay literal, as in bash.
 fn expand_braces(word: &str, out: &mut Vec<String>) -> Result<(), ShellRefusal> {
     if out.len() > 256 || word.matches('{').count() > 64 {
-        return Err(ShellRefusal);
+        return Err(ShellRefusal::expansion());
     }
     let bytes = word.as_bytes();
     for open in (0..bytes.len()).filter(|&i| bytes[i] == b'{') {
@@ -875,6 +910,18 @@ mod tests {
             "cp a{,.bak} && mkdir -p src/{a,b}",
         ] {
             assert!(check(command).is_ok(), "{command}");
+        }
+    }
+    #[test]
+    fn refusals_report_their_reason() {
+        let braces = "{a,b}".repeat(65);
+        for (command, reason) in [
+            ("pkill -f claude", RefusalReason::ProcessControl),
+            ("$CMD 1", RefusalReason::DynamicCommandName),
+            (braces.as_str(), RefusalReason::Expansion),
+            ("echo \"open", RefusalReason::Unparseable),
+        ] {
+            assert_eq!(check(command).expect_err(command).0, reason, "{command}");
         }
     }
     #[test]

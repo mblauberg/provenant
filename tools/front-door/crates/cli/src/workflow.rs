@@ -30,8 +30,10 @@ const WAIT_SECONDS: u64 = 30;
 pub enum Workflow {
     /// Check bound reviews against the receipt's risk tier.
     Review(Input),
+    /// Show and save delivery receipts
     #[command(subcommand)]
     Receipt(Receipt),
+    /// Save and show session checkpoints
     #[command(subcommand)]
     Session(Session),
 }
@@ -43,10 +45,14 @@ pub struct Input {
 }
 #[derive(Debug, Subcommand)]
 pub enum Receipt {
+    /// Show a delivery receipt
     Show {
+        /// Delivery ID
         delivery_id: DeliveryId,
     },
+    /// Save a delivery receipt
     Save {
+        /// Delivery ID
         delivery_id: DeliveryId,
         /// Zero creates the receipt; otherwise the stored revision.
         #[arg(long)]
@@ -57,13 +63,17 @@ pub enum Receipt {
 }
 #[derive(Debug, Subcommand)]
 pub enum Session {
+    /// Save a session checkpoint
     Save {
+        /// Session ID
         session_id: String,
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
     },
+    /// Show a session checkpoint
     Show {
+        /// Session ID
         session_id: String,
     },
 }
@@ -146,6 +156,7 @@ impl From<ApprovalInput> for UserApproval {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRequest {
+    /// Delivery ID
     delivery_id: DeliveryId,
     #[serde(default)]
     reviews: Vec<ReviewInput>,

@@ -88,16 +88,22 @@ pub struct RoutePacing {
 }
 #[derive(Debug, Args)]
 pub struct RouteRequest {
+    /// Exact model in ADAPTER/ID form
     #[arg(long, conflicts_with = "route")]
     pub model: Option<Model>,
+    /// Named route
     #[arg(long)]
     pub route: Option<String>,
+    /// Reasoning effort
     #[arg(long)]
     pub effort: Option<String>,
+    /// Require a confidential-safe route
     #[arg(long)]
     pub confidential: bool,
+    /// Allow free-tier models
     #[arg(long)]
     pub allow_free: bool,
+    /// Fallback models in ADAPTER/ID form, comma separated
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
 }
