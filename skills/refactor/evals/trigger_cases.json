@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "target_skill": "refactor",
+  "cases": [
+    {
+      "id": "q190",
+      "relation": "positive",
+      "prompt": "Refactor this module without changing behaviour, using characterisation tests and equivalence evidence.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q191",
+      "relation": "positive",
+      "prompt": "Remove the duplicated flow while preserving the public API and all observable outcomes.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q192",
+      "relation": "positive",
+      "prompt": "Simplify this state machine structurally, keep tests green, and prove no behaviour changed.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q193",
+      "relation": "negative",
+      "prompt": "Add this new observable behaviour with a right-reason failing test first.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q194",
+      "relation": "negative",
+      "prompt": "Review the proposed cleanup read-only and report whether it introduces defects.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q195",
+      "relation": "negative",
+      "prompt": "We do not know why this code crashes; reproduce it and find the root cause.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q196",
+      "relation": "boundary",
+      "prompt": "Implement the approved behaviour-preserving repository cleanup through verification and independent review.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "refactor"
+        ]
+      }
+    },
+    {
+      "id": "q197",
+      "relation": "boundary",
+      "prompt": "Migrate the API with one changed behaviour and one structural simplification, proving both separately.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "refactor",
+          "tdd"
+        ]
+      }
+    },
+    {
+      "id": "q198",
+      "relation": "boundary",
+      "prompt": "Assess this refactor proposal source-read-only; an attractive simplification alone is not a defect.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    }
+  ]
+}

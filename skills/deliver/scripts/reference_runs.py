@@ -50,7 +50,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
                     "kind": kind,
                     "gate": gate,
                     "status": "pass",
-                    "method": "scripts/check-harness" if gate == "tests" else f"reference-{gate}",
+                    "method": f"reference-{gate}",
                     "artifact_id": "evidence-bundle",
                     "source_paths": ["input"],
                 }

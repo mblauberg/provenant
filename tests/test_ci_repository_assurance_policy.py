@@ -472,7 +472,6 @@ def test_ci_runs_complete_harness_gates() -> None:
         assert checkout_index < composite_index, job_name
 
     harness_commands = "\n".join(str(step.get("run", "")) for step in harness_steps)
-    assert "scripts/check-harness --checks-only" in harness_commands
     assert "runtime/agent-fabric" not in harness_commands
     assert python_test_job.get("strategy", {}).get("matrix", {}).get("shard") == [
         "fabric-hosts",
@@ -531,20 +530,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
 
     run_commands = [str(step.get("run", "")).strip() for step in harness_steps if "run" in step]
     assert not any("pip install" in command for command in run_commands)
-    sync_index = run_commands.index("uv sync --locked --only-group test")
-    gate_index = run_commands.index("scripts/check-harness --checks-only")
-    assert sync_index < gate_index
-
-    # The gate runs against the synced environment: scripts/check-harness
-    # honours HARNESS_PYTHON before any interpreter fallback.
-    gate_step = next(
-        step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness --checks-only"
-    )
-    assert gate_step.get("env") == {
-        "AGENT_FABRIC_PRODUCT_ROOT": "${{ github.workspace }}",
-        "AGENT_FABRIC_INSTANCE_ROOT": "${{ github.workspace }}",
-        "HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python",
-    }
+    assert "uv sync --locked --only-group test" in run_commands
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     # Not a Python package: uv must never build or install the repo itself.
@@ -638,54 +624,30 @@ def test_work_item_form_exposes_intake_fields() -> None:
     assert {"problem-evidence", "outcome", "scope", "acceptance", "dependencies", "risk-authority-gates"} <= field_ids
 
 
-def test_gate_reports_each_step_and_tails_failed_step_log(tmp_path: Path) -> None:
-    root = tmp_path / "product"
-    scripts = root / "scripts"
-    scripts.mkdir(parents=True)
-    gate = scripts / "gate"
-    gate.write_bytes((ROOT / "scripts" / "gate").read_bytes())
-    gate.chmod(0o755)
-
-    path_bin = tmp_path / "bin"
-    path_bin.mkdir()
-    for name in ("npm", "node", "git"):
-        executable = path_bin / name
-        executable.write_text(
-            "#!/bin/sh\n"
-            "i=1\n"
-            "while [ $i -le 25 ]; do echo \"$0 line-$i\"; i=$((i + 1)); done\n"
-            + ("exit 7\n" if name == "npm" else "exit 0\n"),
-            encoding="utf-8",
-        )
-        executable.chmod(0o755)
-    for name in ("check-harness", "static-security-check.py", "public-release-check"):
-        executable = scripts / name
-        executable.write_text("#!/bin/sh\necho \"$0 ok\"\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o755)
-
-    result = subprocess.run(
-        [str(gate)],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "AGENT_FABRIC_PRODUCT_ROOT": str(root),
-            "PATH": f"{path_bin}:{os.environ['PATH']}",
-            "GATE_LOG_DIR": str(tmp_path / "logs"),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
+def test_rust_harness_and_surviving_ordinary_checks_remain_required() -> None:
+    document = _workflow()
+    asset = next(
+        step for step in _steps(_job(document, "docs"))
+        if step.get("name") == "Check harness assets"
     )
-
-    assert result.returncode == 1
-    lines = result.stdout.splitlines()
-    summaries = [line for line in lines if re.match(r"(?:ok|FAIL) [a-z0-9-]+ \d+s$", line)]
-    failures = [line for line in summaries if line.startswith("FAIL ")]
-    assert len(failures) == 1
-    assert "workspace-checks" in failures[0]
-    assert "line-25" in result.stdout
-    failed_log_line = next(line for line in lines if line.startswith("log: "))
-    failed_log = Path(failed_log_line.removeprefix("log: "))
-    assert failed_log.parent.parent == tmp_path / "logs"
-    assert failed_log.suffix == ".log"
-    assert failed_log.is_file()
+    assert asset.get("working-directory") == "tools/front-door"
+    assert asset.get("env", {}).get("PROVENANT_ROOT") == "${{ github.workspace }}"
+    assert asset.get("run") == (
+        'cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"'
+    )
+    ordinary = next(
+        step for step in _steps(_job(document, "harness-checks"))
+        if step.get("name") == "Run ordinary checks"
+    )
+    commands = str(ordinary.get("run", ""))
+    for required in (
+        "find skills -type f -name '*.sh' ! -name '*cross-family.sh' -print0 | xargs -0 -r -n1 bash -n",
+        "find skills -type f -name '*cross-family.sh' -print0 | xargs -0 -r -n1 sh -n",
+        "find skills -type d -name node_modules -prune -o -type f \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -print0",
+        "| xargs -0 -r -n1 node --check",
+        "find skills runtime -type d -name node_modules -prune -o -type f -name '*.test.mjs' -print0",
+        "| xargs -0 -r node --test",
+        ".venv/bin/python scripts/static-security-check.py",
+        ".venv/bin/python scripts/lint-timebomb-fixtures.py",
+    ):
+        assert required in commands

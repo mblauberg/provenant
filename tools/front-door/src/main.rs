@@ -1,5 +1,6 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
+mod checks;
 mod overflow;
 mod roots;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
@@ -184,10 +185,23 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         }
         Command::Install(_) => unavailable("install", "config", globals),
         Command::Uninstall(_) => unavailable("uninstall", "config", globals),
-        Command::Route(route) => match route {
-            provenant_cli::Route::List(_) => unavailable("route list", "routing", globals),
-            provenant_cli::Route::Resolve(_) => unavailable("route resolve", "routing", globals),
-        },
+        Command::Route(command) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                roots::roots(globals, &assets, &project)
+            })();
+            match resolved {
+                Ok(roots) => provenant_cli::route::run(command, globals, &roots),
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Dispatch(_) => unavailable("dispatch", "run", globals),
         Command::Lanes(_) => unavailable("lanes", "run", globals),
         Command::Output(_) => unavailable("output", "run", globals),
@@ -225,27 +239,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 unavailable("worktree remove", "confinement", globals)
             }
         },
-        Command::Check(check) => {
-            let (name, owner, checkout) = match check {
-                provenant_cli::Check::Config(_) => ("check config", "config", false),
-                provenant_cli::Check::Install { .. } => ("check install", "config", false),
-                provenant_cli::Check::Harness(_) => ("check harness", "cli checks", true),
-                provenant_cli::Check::Release { .. } => ("check release", "cli checks", true),
-                provenant_cli::Check::Writing { .. } => ("check writing", "workflow", false),
-            };
-            if checkout
-                && let Err(error) = roots::selected_project(inv.globals.project.as_deref(), true)
-            {
-                return fail(
-                    name,
-                    Outcome::Invalid,
-                    "CHECKOUT",
-                    &error.to_string(),
-                    globals,
-                );
-            }
-            unavailable(name, owner, globals)
-        }
+        Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => match hook {
             provenant_cli::Hook::Claude(hook) => match hook {
                 provenant_cli::ClaudeHook::PreToolUse => {

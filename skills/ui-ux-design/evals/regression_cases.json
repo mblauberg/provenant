@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "target_skill": "ui-ux-design",
+  "cases": [
+    {
+      "id": "r001",
+      "relation": "positive",
+      "prompt": "Critique these interface screenshots and distinguish tested, untested, and inferred states.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      },
+      "note": "Screenshot and untested-state discipline from references/review.md. A screenshot alone must not be reported as certifying more than it shows."
+    },
+    {
+      "id": "r002",
+      "relation": "boundary",
+      "prompt": "Review this app against WCAG 2.2 and separate automated evidence from untested conformance claims.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": [
+          "engineering-docs"
+        ]
+      },
+      "note": "Original frontend-review boundary case (WCAG-companion). The companion places the recorded findings; this skill still owns the review workflow and the finding contract, per references/review.md."
+    },
+    {
+      "id": "r003",
+      "relation": "boundary",
+      "prompt": "Capture Lighthouse accessibility and performance scores for this page and flag any claim in the report that the scan alone cannot support.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": [
+          "engineering-docs"
+        ]
+      },
+      "note": "Lighthouse-evidence companion to r002: a Lighthouse run is one evidence lane, not a substitute for manual inspection or a standards certification; see the claim-boundary section in references/review.md."
+    },
+    {
+      "id": "r004",
+      "relation": "boundary",
+      "prompt": "Review this interface and then fix what you find.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      },
+      "note": "A clear review-and-fix request contains change intent. Implement owns the approved change lifecycle and UI/UX supplies design judgement plus the fresh read-only review after the repair."
+    },
+    {
+      "id": "r005",
+      "relation": "positive",
+      "prompt": "Audit this product's design system for token and component drift; report only and make no edits.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      },
+      "note": "Design-system audit remains a read-only focus inside UI/UX design rather than becoming a competing top-level skill."
+    },
+    {
+      "id": "r006",
+      "relation": "boundary",
+      "prompt": "Consolidate the approved design-system tokens and migrate the existing UI consumers.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      },
+      "note": "A design-system change stays a UI/UX focus, while implementation owns source mutation, migration, verification and handoff."
+    },
+    {
+      "id": "r007",
+      "relation": "boundary",
+      "prompt": "Review this app-owned preview with the Playwright skill, but keep the entire attempt read-only and do not edit source.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      },
+      "note": "Check browser availability/version without downloading it implicitly. Keep navigation, snapshots and screenshots read-only, with output outside the reviewed tree; mark unavailable browser evidence not tested."
+    },
+    {
+      "id": "r110",
+      "relation": "positive",
+      "prompt": "Capture light and dark desktop screenshots of the two screens this branch changed and review them for visual regressions without editing anything.",
+      "tags": [
+        "direct",
+        "changed-surface-capture"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      },
+      "note": "Changed surfaces only, both themes, and the reviewer looks at every capture before judging."
+    },
+    {
+      "id": "r111",
+      "relation": "boundary",
+      "prompt": "Build an interactive prototype of two competing dashboard layouts for the owner to choose between, then implement the chosen one.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "ui-ux-design"
+        ]
+      },
+      "note": "A prototype awaiting the owner parks that item; other work continues."
+    }
+  ]
+}

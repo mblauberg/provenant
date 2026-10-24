@@ -90,6 +90,7 @@ thiserror = { workspace = true }
 provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-confinement = { workspace = true }
 
 [build-dependencies]
 provenant-records = { workspace = true }

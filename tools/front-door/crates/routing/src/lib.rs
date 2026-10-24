@@ -1,28 +1,36 @@
-//! Catalogue, preferences, live probes and route decisions.
-
-// Rewrite pending: remove when this crate is rewritten.
-#![allow(
-    clippy::collapsible_if,
-    clippy::disallowed_methods,
-    clippy::print_stderr
-)]
+//! Pure explicit routing over immutable snapshots. No process or state effects.
 #![forbid(unsafe_code)]
+mod catalog;
+mod facts;
+mod request;
+mod resolve;
+pub use catalog::*;
+pub use facts::*;
+pub use provenant_records::ResolvedRoute;
+pub use request::*;
+pub use resolve::*;
 
-mod casefold;
-mod render;
-
-pub mod catalog;
-pub mod cli;
-pub mod discovery;
-pub mod exec_routing;
-pub mod live;
-pub mod matching;
-pub mod model_route;
-pub mod pools;
-pub mod preferences;
-
-pub mod ordered_json;
-pub mod pending;
+#[derive(Debug, thiserror::Error)]
+pub enum RoutingError {
+    #[error("model must be a bounded exact ADAPTER/ID selector")]
+    InvalidModel,
+    #[error("invalid route name or effort")]
+    InvalidValue,
+    #[error("at most two distinct alternatives, different from the primary, are allowed")]
+    Alternatives,
+    #[error("unknown adapter")]
+    UnknownAdapter,
+    #[error("unknown named route")]
+    UnknownRoute,
+    #[error("effort is not supported by recorded model controls")]
+    UnsupportedEffort,
+    #[error("invalid catalogue")]
+    Catalogue,
+    #[error("invalid cached availability record")]
+    Availability,
+    #[error("invalid review demand")]
+    ReviewDemand,
+}
 
 #[cfg(test)]
-mod oracle;
+mod tests;

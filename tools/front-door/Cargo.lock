@@ -420,6 +420,7 @@ version = "0.1.0"
 dependencies = [
  "provenant-cli",
  "provenant-config",
+ "provenant-confinement",
  "provenant-core",
  "provenant-providers",
  "provenant-records",
@@ -444,7 +445,9 @@ dependencies = [
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
+ "provenant-routing",
  "provenant-supervisor",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
@@ -572,13 +575,15 @@ dependencies = [
 name = "provenant-routing"
 version = "0.1.0"
 dependencies = [
- "clap",
- "jiff",
- "regex",
+ "provenant-config",
+ "provenant-core",
+ "provenant-providers",
+ "provenant-quota",
+ "provenant-records",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

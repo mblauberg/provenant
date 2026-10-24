@@ -76,8 +76,8 @@ npm ci
 npm run check
 ```
 
-`scripts/check-harness` runs the remaining harness checks in the selected
-checkout. `npm run check` validates dependencies for that checkout and reports
+`provenant check harness` validates tracked skills, local assets, Markdown
+links and issue forms in the selected project. `npm run check` validates dependencies for that checkout and reports
 missing packages; it never installs or borrows another checkout's tree.
 
 ## Providers

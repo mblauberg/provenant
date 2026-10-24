@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -9,7 +10,8 @@ FORBIDDEN_MUTATION_TOOLS = {"Write", "Edit", "NotebookEdit", "ApplyPatch", "Dele
 
 
 def _fixture(name: str) -> dict:
-    return yaml.safe_load((UI_UX_DESIGN / "evals" / name).read_text())
+    path = UI_UX_DESIGN / "evals" / name
+    return json.loads(path.read_text()) if path.suffix == ".json" else yaml.safe_load(path.read_text())
 
 
 def test_review_cases_encode_the_complete_zero_mutation_contract():
@@ -27,7 +29,7 @@ def test_review_cases_encode_the_complete_zero_mutation_contract():
 
 
 def test_implementation_requests_keep_implement_as_owner_with_ui_companion():
-    cases = {case["id"]: case for case in _fixture("trigger_cases.yaml")["cases"]}
+    cases = {case["id"]: case for case in _fixture("trigger_cases.json")["cases"]}
     assert cases["q716"]["expected"] == {
         "primary_skill": "implement",
         "companion_skills": ["ui-ux-design"],

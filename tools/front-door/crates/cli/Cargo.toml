@@ -8,18 +8,20 @@ publish = false
 
 [dependencies]
 provenant-quota = { workspace = true }
-provenant-providers = { workspace = true }
-provenant-config = { workspace = true }
-provenant-confinement = { workspace = true }
-provenant-supervisor = { workspace = true }
-provenant-fabric-runtime = { workspace = true }
 clap = { workspace = true }
 jiff = { workspace = true }
+provenant-config = { workspace = true }
+provenant-confinement = { workspace = true }
+provenant-core = { workspace = true }
+provenant-fabric-runtime = { workspace = true }
+provenant-records = { workspace = true }
+provenant-routing = { workspace = true }
+provenant-providers = { workspace = true }
+provenant-supervisor = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-provenant-core = { workspace = true }
-provenant-records = { workspace = true }
 
 [lints]
 workspace = true
