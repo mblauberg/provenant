@@ -486,6 +486,7 @@ pub(crate) struct ProviderGroup {
     _reaper: Reaper,
     pid: i32,
     last_direct_signal: Option<i32>,
+    last_group_signal: Option<i32>,
     observed: Option<Termination>,
     provider_identity: Option<ProcessIdentity>,
     owned_descendants: BTreeSet<ProcessIdentity>,
@@ -559,6 +560,7 @@ impl ProviderGroup {
             _reaper: reaper,
             pid,
             last_direct_signal: None,
+            last_group_signal: None,
             observed: None,
             provider_identity: Some(identity),
             owned_descendants: BTreeSet::new(),
@@ -637,6 +639,47 @@ impl ProviderGroup {
         // this signals only that provider, never its mutable process group.
         if unsafe { libc::kill(self.pid, signal) } == 0 {
             self.last_direct_signal = Some(signal);
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    /// Signal the provider's whole process group, for explicit cancellation
+    /// only. While the leader is unreaped (live or a WNOWAIT zombie) it
+    /// reserves the PGID. After it is reaped, the group is signalled only if a
+    /// `kill(-pgid, 0)` probe shows a live member, which keeps the id
+    /// allocated (the probe-to-signal gap is the accepted residual). Members
+    /// that left the group are not reached.
+    pub(crate) fn stop_group(&mut self, escalation: bool) -> io::Result<bool> {
+        let signal = if escalation {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        if self.last_group_signal == Some(signal) {
+            return Ok(false);
+        }
+        if self.child.is_none() {
+            // SAFETY: signal 0 delivers nothing; it only probes the group.
+            if unsafe { libc::kill(-self.pid, 0) } != 0 {
+                let error = io::Error::last_os_error();
+                return if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(false)
+                } else {
+                    Err(error)
+                };
+            }
+        }
+        // SAFETY: the provider was spawned as its own group leader
+        // (`process_group(0)`), so `-pid` names exactly the group it leads; a
+        // live member (or the unreaped leader) keeps the PGID allocated.
+        if unsafe { libc::kill(-self.pid, signal) } == 0 {
+            self.last_group_signal = Some(signal);
             return Ok(true);
         }
         let error = io::Error::last_os_error();
@@ -957,6 +1000,18 @@ impl Drop for ProviderGroup {
             permit.transfer(child);
         }
     }
+}
+
+/// Liveness probe only (signal 0): true unless every PID is provably absent.
+pub(crate) fn any_pid_alive(pids: &[i64]) -> bool {
+    pids.iter().any(|&pid| match i32::try_from(pid) {
+        Ok(pid) if pid > 0 => {
+            // SAFETY: signal 0 delivers nothing and cannot affect the target.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            alive || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+        _ => true,
+    })
 }
 
 fn provider_ancestry(

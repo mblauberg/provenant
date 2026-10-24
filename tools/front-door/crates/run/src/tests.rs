@@ -122,6 +122,7 @@ pub(super) fn exit() -> ExitObservation {
         omitted_warnings: 0,
         terminal_observed: true,
         unresolved_cleanup: false,
+        unresolved_pids: vec![],
         settlement_evidence: SettlementEvidence::LinuxKernelChildren,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),

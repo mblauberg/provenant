@@ -76,6 +76,94 @@ impl Driver<'_> {
         }
     }
 
+    /// The attempt's pending cancellation request, if it is valid for this
+    /// scope and requester. Stale or unreadable requests only warn.
+    pub(super) fn read_cancel(
+        &self,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Option<machine::StopReason> {
+        match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
+            Ok(request)
+                if request.scope == self.reservation.scope
+                    && request.requester == self.requester
+                    && provenant_core::OperationId::parse(request.request_id.as_str()).is_ok() =>
+            {
+                Some(request.reason)
+            }
+            Ok(_) => {
+                push_warning(warnings, omitted, "stale cancellation ignored");
+                None
+            }
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => None,
+            Err(_) => {
+                push_warning(warnings, omitted, "cancel request unreadable");
+                None
+            }
+        }
+    }
+
+    /// Cancellation of a provider that already exited: TERM then, after the
+    /// descendant grace, KILL to the provider's group while its unreaped
+    /// leader still reserves the PGID. Returns once no live member remains or
+    /// the bounded budget is spent; settlement is judged by the caller.
+    fn terminate_group(
+        &mut self,
+        child: &mut crate::sys::provider::ProviderGroup,
+        plan: CapturePlan,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) {
+        let began = Instant::now();
+        let grace = Duration::from_millis(plan.descendant_grace_ms);
+        let group = child.id();
+        let mut escalation = false;
+        loop {
+            // A group signal cannot exclude members, so never send one while a
+            // spared or protected owner shares the group, or without a census.
+            if let Some(census) = self.refresh_census(child) {
+                let members = || {
+                    census.facts().filter(|fact| {
+                        fact.identity.group_id == group && fact.identity.pid != group
+                    })
+                };
+                let shielded = members().any(|fact| {
+                    self.protected.contains(&fact.identity)
+                        || self
+                            .spared
+                            .spared_identities()
+                            .any(|spared| *spared == fact.identity)
+                });
+                if shielded || (census.is_complete() && members().all(|fact| fact.zombie)) {
+                    return;
+                }
+                let signal = if escalation {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                };
+                let outcome = stop_delivery_outcome(child.stop_group(escalation));
+                self.record_delivery(
+                    self.reservation.provider.clone(),
+                    machine::StopReason::ExplicitCancellation,
+                    signal,
+                    outcome,
+                );
+                if outcome != DeliveryOutcome::Delivered && !escalation {
+                    push_warning(warnings, omitted, "cancel group signal not delivered");
+                }
+            }
+            if escalation && began.elapsed() >= grace.saturating_mul(2) {
+                return;
+            }
+            if !escalation && began.elapsed() >= grace {
+                escalation = true;
+                continue;
+            }
+            let _ = self.reactor.wait(&[], Duration::from_millis(20));
+        }
+    }
+
     pub(super) fn provider_cpu_micros(&self) -> Option<u64> {
         let expected = self.reservation.provider.as_ref()?;
         match self.observer.observe(expected.pid) {
@@ -253,9 +341,16 @@ impl Driver<'_> {
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
         plan: CapturePlan,
+        cancelled: bool,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) -> Result<bool> {
+        if cancelled
+            || self.read_cancel(warnings, omitted)
+                == Some(machine::StopReason::ExplicitCancellation)
+        {
+            self.terminate_group(child, plan, warnings, omitted);
+        }
         let deadline = Instant::now()
             + Duration::from_millis(
                 plan.root_flush_ms

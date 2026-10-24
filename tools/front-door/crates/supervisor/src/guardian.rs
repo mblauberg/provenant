@@ -665,33 +665,7 @@ impl Driver<'_> {
             let cancel_due = last_cancel_ms.is_none_or(|last| now.saturating_sub(last) >= 100);
             let request = if cancel_due {
                 last_cancel_ms = Some(now);
-                match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
-                    Ok(request)
-                        if request.scope == self.reservation.scope
-                            && request.requester == self.requester
-                            && provenant_core::OperationId::parse(request.request_id.as_str())
-                                .is_ok() =>
-                    {
-                        Some(request.reason)
-                    }
-                    Ok(_) => {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "stale cancellation ignored",
-                        );
-                        None
-                    }
-                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => None,
-                    Err(_) => {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "cancel request unreadable",
-                        );
-                        None
-                    }
-                }
+                self.read_cancel(&mut warnings, &mut omitted_warnings)
             } else {
                 None
             };
@@ -825,6 +799,7 @@ impl Driver<'_> {
                     cleanup_complete = match self.cleanup(
                         &mut child,
                         plan,
+                        stop_reason == Some(machine::StopReason::ExplicitCancellation),
                         &mut warnings,
                         &mut omitted_warnings,
                     ) {
@@ -1005,6 +980,15 @@ impl Driver<'_> {
             omitted_failed_deliveries: self.omitted_failed_deliveries,
             terminal_observed: terminal,
             unresolved_cleanup: unresolved,
+            unresolved_pids: if unresolved {
+                self.tracked
+                    .iter()
+                    .take(16)
+                    .map(|identity| identity.pid)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             settlement_evidence: self.settlement_evidence,
             stdout: totals.next().unwrap_or_default(),
             stderr: totals.next().unwrap_or_default(),
@@ -1016,8 +1000,28 @@ impl Driver<'_> {
             self.release(&record);
         }
         if !cleanup_complete {
-            // A durable unresolved fence permits recovery to reconcile after
-            // the guardian exits. It does not certify descendant absence.
+            // The unresolved exit is durable. Keep the guardian (and the unreaped
+            // leader) alive while group members remain: poll for cancellation
+            // and for the group emptying, and republish a settled exit.
+            let mut cancelled = false;
+            loop {
+                cancelled |= self.read_cancel(&mut warnings, &mut omitted_warnings)
+                    == Some(machine::StopReason::ExplicitCancellation);
+                if let Ok(true) = self.cleanup(
+                    &mut child,
+                    plan,
+                    cancelled,
+                    &mut warnings,
+                    &mut omitted_warnings,
+                ) {
+                    self.republish_settled(record, cancelled);
+                    break;
+                }
+                match self.reactor.wait(&[], Duration::from_millis(100)) {
+                    Ok(event) if event.supervisor_signal => break,
+                    _ => {}
+                }
+            }
             loop {
                 match child.finish_fenced() {
                     Ok(_) => break,
@@ -1030,6 +1034,43 @@ impl Driver<'_> {
             }
         }
         Ok(())
+    }
+    /// Replace the unresolved exit with the settled facts once cleanup proves
+    /// the group gone. The reservation is made resolved first, so a crash in
+    /// between leaves only the conservative unresolved exit visible.
+    fn republish_settled(&mut self, mut record: ProcessExit, cancelled: bool) {
+        self.reservation.unresolved_cleanup = false;
+        if !self.persist_reservation() {
+            self.reservation.unresolved_cleanup = true;
+            return;
+        }
+        record.unresolved_cleanup = false;
+        record.unresolved_pids = Vec::new();
+        record.settlement_evidence = self.settlement_evidence;
+        record.reaped = self.reaped.clone();
+        record.omitted_reaped = self.omitted_reaped;
+        record.delivered_signals = self.delivered_signals.clone();
+        record.failed_deliveries = self.failed_deliveries.clone();
+        record.omitted_failed_deliveries = self.omitted_failed_deliveries;
+        if cancelled && record.stop_reason.is_none() {
+            record.stop_reason = Some(machine::StopReason::ExplicitCancellation);
+        }
+        let Ok(bytes) = record.bounded_bytes() else {
+            return;
+        };
+        let published = self
+            .attempt
+            .atomic_write(
+                OsStr::new("process-exit.json"),
+                ".exit-",
+                &bytes,
+                PublishMode::Replace,
+            )
+            .map_err(CustodyError::from)
+            .and_then(require_durable);
+        if published.is_ok() {
+            self.release(&record);
+        }
     }
     fn spawn_provider(
         &self,

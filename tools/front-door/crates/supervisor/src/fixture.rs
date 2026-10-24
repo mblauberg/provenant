@@ -762,12 +762,18 @@ pub fn dispatch() -> io::Result<bool> {
             ready.write_all(b"\n")?;
             wait_for_eof(&mut ready)?;
         }
-        "s2-setsid-provider" => {
+        "s2-setsid-provider" | "s2-group-provider" => {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;
             let root = std::env::current_dir()?;
             let mut descendant = ChildGuard::new(
-                command_with_args("s2-setsid-descendant", &[ready_socket], &root, true)?.spawn()?,
+                command_with_args(
+                    "s2-setsid-descendant",
+                    &[ready_socket],
+                    &root,
+                    scenario == "s2-setsid-provider",
+                )?
+                .spawn()?,
             );
             let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
             gate.write_all(b"R")?;

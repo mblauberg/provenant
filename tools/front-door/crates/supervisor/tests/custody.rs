@@ -871,6 +871,89 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     wait_for_identity_absence(&descendant)?;
     Ok(())
 }
+fn cancel_kills_the_whole_group_and_settles(root: &Path) -> Result<()> {
+    let ready_path = root.join("group-ready.sock");
+    let gate_path = root.join("group-gate.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let gate_listener = UnixListener::bind(&gate_path)?;
+    let (_writer, handle) = start(
+        root,
+        "group",
+        "s2-group-provider",
+        &[ready_path.into_os_string(), gate_path.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    // The child ignores TERM and shares the provider's process group.
+    let mut child_stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut child_stream, b'R')?;
+    let child = process_identity(read_pid_line(&mut child_stream)?)?;
+    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut gate, b'R')?;
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    // The provider stays gated, so cancellation (not a natural exit) ends it.
+    let exit = exited(&handle)?;
+    drop(gate);
+    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.is_empty());
+    wait_for_identity_absence(&child)?;
+    Ok(())
+}
+fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Result<()> {
+    let ready_path = root.join("late-ready.sock");
+    let gate_path = root.join("late-gate.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let gate_listener = UnixListener::bind(&gate_path)?;
+    let (_writer, handle) = start(
+        root,
+        "late",
+        "s2-group-provider",
+        &[ready_path.into_os_string(), gate_path.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut child_stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut child_stream, b'R')?;
+    let child = process_identity(read_pid_line(&mut child_stream)?)?;
+    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut gate, b'R')?;
+    // The provider exits on its own, leaving the TERM-ignoring child behind.
+    drop(gate);
+    let first = exited(&handle)?;
+    // Linux's subreaper kills the adopted child itself; Darwin leaves it fenced.
+    if first.unresolved_cleanup {
+        assert!(first.unresolved_pids.contains(&child.pid), "{first:?}");
+        assert_eq!(
+            stop(&handle, StopReason::ExplicitCancellation)?,
+            StopReceipt::Requested
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let settled = loop {
+            let exit = exited(&handle)?;
+            if !exit.unresolved_cleanup {
+                break exit;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other("cancel did not settle the exit").into());
+            }
+            std::thread::park_timeout(Duration::from_millis(50));
+        };
+        assert_eq!(settled.stop_reason, Some(StopReason::ExplicitCancellation));
+        assert!(settled.unresolved_pids.is_empty());
+    }
+    wait_for_identity_absence(&child)?;
+    Ok(())
+}
 
 struct FileChildRegistry {
     home: PathBuf,
@@ -1466,6 +1549,14 @@ const CASES: &[Case] = &[
     (
         "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
         setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+    ),
+    (
+        "cancel_kills_the_whole_group_and_settles",
+        cancel_kills_the_whole_group_and_settles,
+    ),
+    (
+        "cancel_after_unresolved_exit_republishes_a_settled_exit",
+        cancel_after_unresolved_exit_republishes_a_settled_exit,
     ),
     (
         "nested_owner_stays_protected_when_native_custody_proof_is_uncertain",

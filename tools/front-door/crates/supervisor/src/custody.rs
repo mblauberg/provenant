@@ -855,6 +855,8 @@ pub struct ProcessExit {
     pub omitted_failed_deliveries: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
+    /// PIDs of tracked descendants still possibly alive when cleanup gave up.
+    pub unresolved_pids: Vec<i64>,
     pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
@@ -882,6 +884,7 @@ impl ProcessExit {
             omitted_failed_deliveries: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
+            unresolved_pids: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
@@ -907,6 +910,7 @@ impl ProcessExit {
             omitted_warnings: self.omitted_warnings,
             terminal_observed: self.terminal_observed,
             unresolved_cleanup: self.unresolved_cleanup,
+            unresolved_pids: self.unresolved_pids.clone(),
             settlement_evidence: self.settlement_evidence,
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
@@ -972,6 +976,8 @@ struct StoredExit {
     terminal_observed: bool,
     unresolved_cleanup: bool,
     #[serde(default)]
+    unresolved_pids: Vec<i64>,
+    #[serde(default)]
     settlement_evidence: SettlementEvidence,
     stdout: CaptureTotals,
     stderr: CaptureTotals,
@@ -992,6 +998,8 @@ pub struct ExitObservation {
     pub omitted_warnings: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
+    /// PIDs of tracked descendants still possibly alive when cleanup gave up.
+    pub unresolved_pids: Vec<i64>,
     pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
@@ -1010,6 +1018,10 @@ struct StoredObservation {
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     publication_pending: bool,
+}
+/// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
+pub fn any_pid_alive(pids: &[i64]) -> bool {
+    crate::sys::provider::any_pid_alive(pids)
 }
 #[derive(Debug)]
 pub enum Observation {
@@ -1054,6 +1066,7 @@ pub fn observe(
                     omitted_warnings: record.omitted_warnings,
                     terminal_observed: record.terminal_observed,
                     unresolved_cleanup: record.unresolved_cleanup,
+                    unresolved_pids: record.unresolved_pids,
                     settlement_evidence: record.settlement_evidence,
                     stdout: record.stdout,
                     stderr: record.stderr,
