@@ -67,6 +67,8 @@ pub enum Command {
     #[command(subcommand)]
     Worktree(Worktree),
     #[command(subcommand)]
+    Bench(crate::bench::Bench),
+    #[command(subcommand)]
     Workflow(crate::workflow::Workflow),
     #[command(subcommand)]
     Check(Check),
@@ -177,6 +179,14 @@ pub struct Dispatch {
     pub task_id: Option<TaskId>,
     #[arg(long)]
     pub delivery_id: Option<DeliveryId>,
+    /// Fetch and deliver this writer's final head on the host.
+    #[arg(long, requires_all = ["deliver_branch", "worktree"])]
+    pub deliver_remote: Option<String>,
+    #[arg(long, requires = "deliver_remote")]
+    pub deliver_branch: Option<String>,
+    /// Create a pull request after the host verifies the pushed head.
+    #[arg(long, requires = "deliver_remote")]
+    pub open_pr: bool,
     #[command(flatten)]
     pub route: RouteRequest,
     #[command(flatten)]
@@ -373,6 +383,9 @@ pub struct Stats {
     pub since: Option<jiff::Timestamp>,
     #[arg(long, value_parser = timestamp)]
     pub until: Option<jiff::Timestamp>,
+    /// Restrict usage and cost to one run.
+    #[arg(long)]
+    pub run_id: Option<RunId>,
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
 }

@@ -403,6 +403,10 @@ impl ValidateInput for SubmitInput {
                         &format!("{path}.worktree"),
                         MAX_ARTIFACT_PATH_BYTES,
                     )?;
+                    if let Some(deliver) = &task.deliver {
+                        bounded_text(&deliver.remote, &format!("{path}.deliver.remote"), 64)?;
+                        bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
+                    }
                     route(&task.route, &format!("{path}.route"))?;
                     if !(1_000..=14_400_000).contains(&task.timeout_ms) {
                         return Err(field(&format!("{path}.timeout_ms")));

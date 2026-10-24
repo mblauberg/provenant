@@ -682,18 +682,17 @@ and account gate applies before running this recorder, including retries;
 never use the anese identity. The Rust writer launcher consumes confinement's
 host-prepared directories and per-worktree cargo cache described in
 [supervisor](supervisor.md). Shared Git config and packed refs stay
-read-only under that design; #1255's host fetch/upstream handoff still needs
-runtime composition and its conformance test. The remaining handoff belongs
-with #1246's host writer delivery owner: `TaskRequest` currently carries no
-selected delivery remote, push refspec, credential authority or push receipt.
-Generic terminal settlement also handles cancelled and recovered attempts;
-a successful provider exit does not establish that a branch was pushed.
-It must not infer delivery from provider prose or run an unconditional fetch
-and write common config. The host delivery contract must bind the remote and
-`HEAD:<branch>` push, fetch before dispatch, then fetch and verify that remote
-branch against the final head after exit before setting and verifying upstream.
-#1255 remains open until that composition and fetch/commit/push/upstream
-conformance row land; this does not reassign authority to the sandbox.
+read-only under that design. Run owns #1246/#1255 host delivery: an explicit
+`TaskRequest.deliver` binds a configured remote and destination branch, with
+optional PR creation. The host fetches before launch and, only on live verified
+writer success, pushes the final commit, fetches and compares the remote ref,
+then sets and verifies upstream. The host credential environment is private
+handoff data, never provider environment or a persisted record. Attempts retain
+a typed delivery receipt, including failed stages and interrupted operations;
+recovery never repeats delivery and provider prose is never push evidence.
+The local bare-remote conformance row covers fetch/commit/push/upstream and
+receipt publication; live host credentials and PR creation remain chair gates.
+This does not grant shared Git writes or host credentials to the sandbox.
 
 Each capture manifest records source provenance, CLI version/platform, redacted
 argv, fresh/resume and access mode, exit and redaction rules. It must prove the

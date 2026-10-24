@@ -178,6 +178,7 @@ impl RunStore {
                     fallback: vec![],
                     authority_digest: prior.authority_digest,
                     writer: task.writer.clone(),
+                    deliver: task.deliver.clone(),
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
                 }],

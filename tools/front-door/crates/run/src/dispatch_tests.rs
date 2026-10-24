@@ -136,7 +136,7 @@ fn two_tasks(concurrency: u64) -> PreparedRun {
     });
     run
 }
-fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
+pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
     let mut value = serde_json::to_value(exit)?;
     let object = value.as_object_mut().ok_or("exit fixture")?;
     object.remove("publication");

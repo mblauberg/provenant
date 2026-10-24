@@ -40,6 +40,11 @@ enum Error {
     InvalidScope,
 }
 
+#[allow(clippy::print_stderr)]
+fn warn_cache_sweep(error: &impl std::fmt::Display) {
+    eprintln!("warning: could not sweep orphaned lane caches: {error}");
+}
+
 impl Error {
     fn outcome(&self) -> Outcome {
         match self {
@@ -191,8 +196,18 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 }
             };
             let removed = worktrees::remove(&context, request, &cancel)?;
-            let home = roots::home()?;
-            provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(&home)?;
+            match roots::home() {
+                Ok(home) => {
+                    if let Err(error) =
+                        provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(
+                            &home,
+                        )
+                    {
+                        warn_cache_sweep(&error);
+                    }
+                }
+                Err(error) => warn_cache_sweep(&error),
+            }
             Data::Removed(removed)
         }
     };

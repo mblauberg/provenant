@@ -34,17 +34,9 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|p| provenant_supervisor::sys::is_executable(p))
-    .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(git)?, home).map_err(error)
+    let git = provenant_supervisor::git::git_executable()
+        .ok_or(RunError::Validation("Git executable unavailable"))?;
+    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(&git)?, home).map_err(error)
 }
 fn budget() -> Result<UtilityBudget> {
     UtilityBudget::bounded(Duration::from_secs(5)).map_err(error)

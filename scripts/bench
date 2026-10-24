@@ -1,0 +1,200 @@
+#!/bin/sh
+set -eu
+
+cmd=${1:?expected mine, verify or run}
+shift
+repo=$(pwd -P)
+root=$(git -C "$repo" rev-parse --show-toplevel)
+tasks=$root/bench/tasks
+mkdir -p "$tasks"
+
+field() {
+    python3 - "$1" "$2" <<'PY'
+import sys,tomllib
+with open(sys.argv[2],"rb") as source:
+    task=tomllib.load(source)
+expected={"repo","parent_sha","merge_sha","prompt","hidden_test_command","split"}
+if set(task) != expected or task["split"] not in {"search","acceptance","held-out"}:
+    raise SystemExit("invalid benchmark task fields or split")
+value=task[sys.argv[1]]
+if not isinstance(value,str):
+    raise SystemExit("benchmark task fields must be strings")
+sys.stdout.write(value+"\n")
+PY
+}
+
+test_command() {
+    path=$1
+    case "$path" in
+        tools/front-door/crates/*/src/*_tests.rs|tools/front-door/crates/*/src/tests.rs)
+            package=$(printf '%s\n' "$path" | cut -d/ -f4)
+            printf 'cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-%s --lib\n' "$package" ;;
+        tools/front-door/crates/*/tests/*.rs)
+            package=$(printf '%s\n' "$path" | cut -d/ -f4)
+            printf 'cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-%s\n' "$package" ;;
+        tools/front-door/tests/*.rs)
+            name=$(basename "$path" .rs)
+            printf 'cargo test --manifest-path tools/front-door/Cargo.toml --test %s\n' "$name" ;;
+        *) printf 'cargo test --manifest-path tools/front-door/Cargo.toml --workspace\n' ;;
+    esac
+}
+
+init_task_repo() {
+    path=$1
+    base=$2
+    other=${3:-}
+    common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
+    git init -q "$path"
+    printf '%s/objects\n' "$common" > "$path/.git/objects/info/alternates"
+    git -C "$path" update-ref refs/heads/bench-base "$base"
+    [ -z "$other" ] || git -C "$path" update-ref refs/bench/merge "$other"
+}
+
+task_fingerprint() {
+    python3 - "$1" "${1%.toml}.patch" <<'PY'
+import hashlib,sys
+digest=hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path,"rb") as source:
+        for chunk in iter(lambda: source.read(65536), b""):
+            digest.update(chunk)
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+case "$cmd" in
+mine)
+    limit=100
+    while [ "$#" -gt 0 ]; do
+        case "$1" in --limit) limit=$2; shift 2 ;; *) echo "unknown mine option: $1" >&2; exit 2 ;; esac
+    done
+    count=0
+    merge_log=$(mktemp "${TMPDIR:-/tmp}/provenant-bench-log.XXXXXX")
+    trap 'rm -f "$merge_log"' EXIT HUP INT TERM
+    git -C "$root" log --merges --format='%H' > "$merge_log"
+    while IFS= read -r merge; do
+        [ "$count" -lt "$limit" ] || break
+        parent=$(git -C "$root" rev-parse "$merge^1")
+        test_files=$(git -C "$root" diff --name-only "$parent" "$merge" -- ':(glob)**/*test*.rs' ':(glob)**/*_tests.rs' ':(glob)**/tests/**/*.rs')
+        [ -n "$test_files" ] || continue
+        first=$(printf '%s\n' "$test_files" | sed -n '1p')
+        short=$(printf '%s' "$merge" | cut -c1-12)
+        title=$(git -C "$root" show -s --format=%s "$merge" | sed 's/"/\\"/g')
+        file=$tasks/candidate-$short.toml
+        [ ! -e "$file" ] || continue
+        command=$(test_command "$first")
+        escaped_command=$(printf '%s' "$command" | sed 's/"/\\"/g')
+        cat > "$file" <<EOF
+repo = "."
+parent_sha = "$parent"
+merge_sha = "$merge"
+prompt = "Implement the change from merge $short: $title"
+hidden_test_command = "$escaped_command"
+split = "search"
+EOF
+        git -C "$root" diff --binary --unified=0 "$parent" "$merge" -- ':(glob)**/*test*.rs' ':(glob)**/*_tests.rs' ':(glob)**/tests/**/*.rs' > "$tasks/candidate-$short.patch"
+        count=$((count + 1))
+        echo "$file"
+    done < "$merge_log"
+    rm -f "$merge_log"
+    ;;
+verify)
+    task=${1:?expected task TOML path}
+    case "$task" in /*) ;; *) task=$root/$task ;; esac
+    parent=$(field parent_sha "$task")
+    merge=$(field merge_sha "$task")
+    command=$(field hidden_test_command "$task")
+    patch=${task%.toml}.patch
+    [ -n "$parent" ] && [ -n "$merge" ] && [ -n "$command" ] && [ -f "$patch" ] || { echo "incomplete task or hidden patch" >&2; exit 2; }
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench.XXXXXX")
+    init_task_repo "$tmp/repo" "$parent" "$merge"
+    trap 'git -C "$tmp/repo" worktree remove --force "$tmp/parent" >/dev/null 2>&1 || :; git -C "$tmp/repo" worktree remove --force "$tmp/merge" >/dev/null 2>&1 || :; rm -rf "$tmp"' EXIT HUP INT TERM
+    git -C "$tmp/repo" worktree add --detach "$tmp/parent" "$parent" >/dev/null
+    git -C "$tmp/repo" worktree add --detach "$tmp/merge" "$merge" >/dev/null
+    git -C "$tmp/parent" apply --unidiff-zero "$patch"
+    if (cd "$tmp/parent" && sh -c "$command"); then echo "hidden tests unexpectedly pass on parent" >&2; exit 1; fi
+    (cd "$tmp/merge" && sh -c "$command")
+    task_fingerprint "$task" > "$task.verified"
+    echo "verified $task"
+    ;;
+run)
+    route= split=acceptance limit=100
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --route) route=$2; shift 2 ;;
+            --split) split=$2; shift 2 ;;
+            --limit) limit=$2; shift 2 ;;
+            *) echo "unknown run option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [ -n "$route" ] || { echo "--route is required" >&2; exit 2; }
+    model=${route%@*}; effort=${route##*@}; [ "$model" != "$route" ] || effort=
+    bin=${PROVENANT_BIN:-provenant}
+    state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
+    ledger=$state/bench.jsonl
+    mkdir -p "$state"
+    count=0
+    for task in "$tasks"/*.toml; do
+        [ -f "$task" ] || continue
+        [ "$count" -lt "$limit" ] || break
+        task_split=$(field split "$task")
+        [ "$task_split" = "$split" ] || continue
+        parent=$(field parent_sha "$task")
+        prompt=$(field prompt "$task")
+        command=$(field hidden_test_command "$task")
+        patch=${task%.toml}.patch
+        [ -f "$patch" ] && [ -n "$prompt" ] || { echo "task prompt or hidden patch is missing" >&2; exit 2; }
+        expected=$(task_fingerprint "$task")
+        actual=$(cat "$task.verified" 2>/dev/null || :)
+        [ "$expected" = "$actual" ] || { echo "task is unverified or changed; run bench verify first: $task" >&2; exit 2; }
+        tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench.XXXXXX")
+        init_task_repo "$tmp/repo" "$parent"
+        branch=bench-$(date +%s)-$count
+        worktree=$tmp/repo/.worktrees/$branch
+        cleanup() {
+            "$bin" worktree remove "$branch" --project "$tmp/repo" --json >/dev/null 2>&1 || git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null 2>&1 || :
+            rm -rf "$tmp"
+        }
+        trap cleanup EXIT HUP INT TERM
+        start=$(date +%s)
+        "$bin" worktree create "$branch" --base "$parent" --project "$tmp/repo" --json > "$tmp/worktree.json"
+        printf '%s\n' "$prompt" > "$tmp/prompt.md"
+        op=bench-$(date +%s)-$count
+        set -- --project "$tmp/repo" --prompt-file "$tmp/prompt.md" --operation-id "$op"
+        case "$model" in */*) set -- "$@" --model "$model" ;; *) set -- "$@" --route "$model" ;; esac
+        set -- "$@" --mode worktree-write --worktree "$worktree" --wait 10800 --json
+        [ -z "$effort" ] || set -- "$@" --effort "$effort"
+        dispatch_exit=0
+        "$bin" dispatch "$@" > "$tmp/dispatch.json" || dispatch_exit=$?
+        if [ "$dispatch_exit" -eq 0 ]; then
+            run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["run_id"])' "$tmp/dispatch.json")
+            "$bin" telemetry stats --project "$tmp/repo" --run-id "$run_id" --json > "$tmp/stats.json" || printf '{"data":null}\n' > "$tmp/stats.json"
+        else
+            printf '{"data":null}\n' > "$tmp/stats.json"
+        fi
+        git -C "$worktree" apply --unidiff-zero "$patch"
+        passed=false
+        if [ "$dispatch_exit" -eq 0 ] && (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then passed=true; fi
+        seconds=$(( $(date +%s) - start ))
+        python3 - "$task" "$route" "$model" "$passed" "$seconds" "$tmp/stats.json" >> "$ledger" <<'PY'
+import json,sys
+report=json.load(open(sys.argv[6])).get("data")
+totals=None if report is None else report["totals"]
+categories={} if totals is None else totals["usage"]
+missing=sum(item["missing"] for item in categories.values())
+tokens=None if totals is None or missing else sum(item["known"] for item in categories.values())
+complete=None if totals is None else totals["cost"]["complete"]
+cost=None if complete is None else complete["usd"]
+turns=None if totals is None else totals["attempts"]
+print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":sys.argv[4]=="true","tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5])},separators=(",",":")))
+PY
+        git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null
+        rm -rf "$tmp"
+        trap - EXIT HUP INT TERM
+        count=$((count + 1))
+    done
+    echo "recorded $count task(s) in $ledger"
+    ;;
+*) echo "unknown bench command: $cmd" >&2; exit 2 ;;
+esac

@@ -48,7 +48,26 @@ pub struct HolderContext {
     pub actor_id: ActorId,
     pub run_id: RunId,
     pub attempt_id: AttemptId,
+    /// Private handoff only, never copied to the attempt or provider environment.
+    #[serde(default)]
+    pub host_delivery: Option<crate::HostDeliveryContext>,
     pub launch: Option<HostLaunchContext>,
+}
+
+enum Completion<'a> {
+    Live {
+        custody: &'a custody::Recovery,
+        delivery: Option<&'a crate::HostDeliveryContext>,
+    },
+    Recovered(Option<&'a custody::Recovery>),
+}
+impl Completion<'_> {
+    fn custody(&self) -> Option<&custody::Recovery> {
+        match self {
+            Self::Live { custody, .. } => Some(custody),
+            Self::Recovered(custody) => *custody,
+        }
+    }
 }
 impl HolderContext {
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -142,7 +161,10 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 context.attempt_id,
                 attempt,
                 exit,
-                Some(recovery),
+                Completion::Live {
+                    custody: recovery,
+                    delivery: context.host_delivery.as_ref(),
+                },
                 self.providers,
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
             )
@@ -188,8 +210,14 @@ impl RunStore {
         } else {
             None
         };
-        let record =
-            self.finish_in_custody(id, attempt, exit, recovery.as_ref(), providers, call)?;
+        let record = self.finish_in_custody(
+            id,
+            attempt,
+            exit,
+            Completion::Recovered(recovery.as_ref()),
+            providers,
+            call,
+        )?;
         crate::writer::settle_launch_staging(attempt)?;
         if let Some(recovery) = recovery {
             custody::publish_release(attempt, exit.scope)
@@ -209,10 +237,11 @@ impl RunStore {
         id: AttemptId,
         attempt: &Directory,
         exit: &ExitObservation,
-        recovery: Option<&custody::Recovery>,
+        completion: Completion<'_>,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
+        let recovery = completion.custody();
         let record = self.record(id, call)?;
         if exit.scope != Self::scope(&record)
             || recovery.is_some_and(|recovery| recovery.scope() != exit.scope)
@@ -384,6 +413,23 @@ impl RunStore {
                 });
             }
         }
+        // Recovered/result-only publication never starts external delivery.
+        let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
+        if !result_orphan
+            && decoded.outcome == Outcome::Succeeded
+            && !cancelled
+            && exit.stop_reason.is_none()
+            && exit.terminal_observed
+            && !exit.unresolved_cleanup
+            && exit.publication == custody::PublicationState::Durable
+            && let Completion::Live {
+                delivery: Some(host),
+                ..
+            } = &completion
+            && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
+        {
+            crate::delivery::deliver_once(host, writer, deliver, attempt)?;
+        }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -402,7 +448,7 @@ impl RunStore {
             usage: decoded.usage,
         };
         // A result sealed without intent predates a crash: keep its bytes.
-        if read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some() {
+        if result_orphan {
             return self.recover_result_only(id, &publication, exit, call);
         }
         self.publish_terminal(id, record.revision, &publication, exit, call)

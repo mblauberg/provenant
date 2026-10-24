@@ -4,6 +4,7 @@ mod admission;
 mod artifacts;
 mod controls;
 mod db;
+mod delivery;
 mod holder;
 mod launch;
 mod plan;
@@ -15,6 +16,7 @@ pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
+pub use delivery::HostDeliveryContext;
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
@@ -46,6 +48,8 @@ pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("host writer delivery failed at {0:?}; inspect the attempt delivery receipt")]
+    Delivery(WriterDeliveryStage),
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]
@@ -104,6 +108,8 @@ pub enum RunError {
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]

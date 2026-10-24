@@ -410,7 +410,7 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        let holder_context = context(record).map_err(|e| local(&e))?;
+        let mut holder_context = context(record).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
@@ -453,6 +453,30 @@ impl RunStore {
                     .withdraw_unlaunched()
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
                 return Err(local(&error));
+            }
+        }
+        if let Some(deliver) = &task.deliver {
+            let prepare = || -> Result<Vec<u8>> {
+                let mut holder: HolderContext = decode(&holder_context)?;
+                let writer = task
+                    .writer
+                    .as_ref()
+                    .ok_or(RunError::Validation("delivery requires a writer"))?;
+                let host = holder
+                    .host_delivery
+                    .take()
+                    .ok_or(RunError::Validation("delivery lacks host context"))?;
+                holder.host_delivery = Some(host.prepare(writer, deliver)?);
+                holder.encode()
+            };
+            match prepare() {
+                Ok(context) => holder_context = context,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(local(&error));
+                }
             }
         }
         if let Some(confinement) = &plan.confinement {

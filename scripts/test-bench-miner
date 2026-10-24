@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+script=$(cd "$(dirname "$0")" && pwd -P)/bench
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench-miner.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+git -C "$tmp" init -q -b main
+git -C "$tmp" config user.name Bench
+git -C "$tmp" config user.email bench@example.test
+mkdir -p "$tmp/src"
+printf 'base\n' > "$tmp/README.md"
+git -C "$tmp" add README.md
+git -C "$tmp" commit -qm base
+parent=$(git -C "$tmp" rev-parse HEAD)
+git -C "$tmp" switch -qc change
+printf '#[test]\nfn new_test() {}\n' > "$tmp/src/new_tests.rs"
+git -C "$tmp" add src/new_tests.rs
+git -C "$tmp" commit -qm 'add regression test'
+git -C "$tmp" switch -q main
+git -C "$tmp" merge --no-ff -qm 'Merge test change' change
+merge=$(git -C "$tmp" rev-parse HEAD)
+(cd "$tmp" && "$script" mine --limit 1) > "$tmp/out"
+task=$(sed -n '1p' "$tmp/out")
+[ -f "$task" ]
+grep -F "parent_sha = \"$parent\"" "$task" >/dev/null
+grep -F "merge_sha = \"$merge\"" "$task" >/dev/null
+[ -s "${task%.toml}.patch" ]
+echo 'candidate miner fixture passed'
