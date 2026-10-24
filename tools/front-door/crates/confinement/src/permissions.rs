@@ -278,6 +278,9 @@ pub struct ProviderProfileSpec {
     /// providers whose file reading goes through a shell.
     pub tool_exec_roots: Vec<PathGrant>,
     pub provider_api: Vec<NetworkEndpoint>,
+    /// The CLI talks to its own private server over loopback TCP: bind,
+    /// accept and connect on `localhost` only.
+    pub loopback_server: bool,
     pub network: Vec<NetworkGrant>,
     pub capabilities: Vec<CapabilityGrant>,
     pub native_controls: Vec<String>,
@@ -437,6 +440,7 @@ pub enum FixtureOperation {
     UndeclaredProcessExec,
     ProcessFork,
     StateWrite,
+    LoopbackServer,
     BrowserIpc,
     PostgresIpc,
 }
@@ -1332,6 +1336,13 @@ fn render_profile(
     for endpoint in &profile.spec.provider_api {
         push_network_endpoint(&mut source, endpoint)?;
     }
+    if profile.spec.loopback_server {
+        source.push_str(concat!(
+            "(allow network-bind (local ip \"localhost:*\"))\n",
+            "(allow network-inbound (local ip \"localhost:*\"))\n",
+            "(allow network-outbound (remote ip \"localhost:*\"))\n",
+        ));
+    }
     for grant in &plan.network {
         match grant {
             NetworkGrant::Tcp { endpoint } => {
@@ -1539,6 +1550,9 @@ fn verify_requested_evidence(
     }
     if !plan.network.is_empty() || !profile.spec.provider_api.is_empty() {
         required.push((FixtureOperation::ProviderEndpoint, allowed));
+    }
+    if profile.spec.loopback_server {
+        required.push((FixtureOperation::LoopbackServer, allowed));
     }
     required.extend(plan.capabilities.iter().map(|capability| {
         let operation = match capability {
@@ -2509,16 +2523,40 @@ mod tests {
                 .expect("UTF-8 SBPL");
         assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
         assert!(rendered.contains("(allow process-fork)"));
+        assert!(!rendered.contains("localhost"));
 
         spec.allow_process_fork = false;
-        let profile = ProviderProfile {
+        spec.loopback_server = true;
+        use FixtureOperation as O;
+        use FixtureOutcome::{Allowed, Denied};
+        let mut profile = ProviderProfile {
             spec,
-            observations: BTreeMap::new(),
+            observations: BTreeMap::from([
+                (O::DeclaredRead, Allowed),
+                (O::UndeclaredRead, Denied),
+                (O::UndeclaredWrite, Denied),
+                (O::SecretRead, Denied),
+                (O::ProtectedWrite, Denied),
+                (O::OtherNetwork, Denied),
+                (O::DeclaredProcessExec, Allowed),
+                (O::UndeclaredProcessExec, Denied),
+                (O::ProcessFork, Denied),
+            ]),
         };
         let rendered =
             String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
                 .expect("UTF-8 SBPL");
         assert!(!rendered.contains("(allow process-fork)"));
+        // A private server binds and is reached on loopback only.
+        assert!(rendered.contains("(allow network-bind (local ip \"localhost:*\"))"));
+        assert!(rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+        assert!(!rendered.contains("\"*:*\""));
+        assert!(matches!(
+            verify_requested_evidence(&plan, &profile),
+            Err(PermissionError::FixtureInsufficient)
+        ));
+        profile.observations.insert(O::LoopbackServer, Allowed);
+        assert!(verify_requested_evidence(&plan, &profile).is_ok());
     }
 
     #[cfg(target_os = "macos")]

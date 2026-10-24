@@ -184,7 +184,7 @@
       "access_mode": "read_only",
       "session_mode": "fresh",
       "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "reason": "live_stream_without_terminal_event",
       "capture_refs": [
         "opencode-unversioned-success",
         "opencode-error",
@@ -196,7 +196,7 @@
       "access_mode": "read_only",
       "session_mode": "resume",
       "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "reason": "live_stream_without_terminal_event",
       "capture_refs": [
         "opencode-unversioned-success",
         "opencode-error",
@@ -208,7 +208,7 @@
       "access_mode": "worktree_write",
       "session_mode": "fresh",
       "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "reason": "live_stream_without_terminal_event",
       "capture_refs": [
         "opencode-unversioned-success",
         "opencode-error",
@@ -220,7 +220,7 @@
       "access_mode": "worktree_write",
       "session_mode": "resume",
       "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "reason": "live_stream_without_terminal_event",
       "capture_refs": [
         "opencode-unversioned-success",
         "opencode-error",

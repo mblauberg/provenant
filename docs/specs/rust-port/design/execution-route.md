@@ -264,7 +264,7 @@ adds only its verified permission/config arguments; no raw caller argv.
 | Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` only; default config directory and keychain login. No shell tool. No endpoint profile. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
-| OpenCode v2 | `opencode run --standalone --format json --auto --print-logs --log-level error [-s ID] [--model PROVIDER/MODEL#VARIANT] PROMPT`; argv prompt, stdin null, cwd selects project. Verify `OPENCODE_CONFIG_CONTENT` permissions/MCP isolation; no v1/shared-server fallback. |
+| OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
 
 ### Live activation
 
@@ -320,8 +320,20 @@ macOS 27.0.1 arm64, 2026-10-24):
   none; the resume argv pins the same `-m`. Adapters that report a model must
   have reported the requested one.
 - Provider endpoints are `*:443`: Seatbelt cannot filter by host name.
-- Agy, Cursor and OpenCode keep refusing (`launch::unrecorded`) until they have
-  a launch form and recordings. Preflight and availability records are still
+- OpenCode: the standalone server is a child process on a loopback port, so
+  its profile adds `loopback_server` (bind, accept and connect on `localhost`
+  only) and must carry a `LoopbackServer` observation. That grant also reaches
+  other local services; accepted because bash, webfetch, MCP and plugins are
+  off. The confined launch answered on 2026-10-24 (v2.0.32,
+  `opencode/glm-5.3-flash-free`), but its stream ended after the text event
+  without `step_finish`, which decodes as `Partial`; the same happened
+  unconfined whenever Git was off the search path. The free quota then ran
+  out, so no mode is enabled and no capture was stored. Next step: confirm
+  whether `step_finish` needs Git (snapshots); if it does, grant one Git
+  executable and its libraries rather than decode a stream without a terminal
+  event as success.
+- Agy and Cursor keep refusing (`launch::unrecorded`) until they have a launch
+  form and recordings. Preflight and availability records are still
   unimplemented, so routing reports enabled adapters as `UnknownAvailability`
   until the run lane supplies them.
 

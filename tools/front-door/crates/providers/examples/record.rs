@@ -27,7 +27,8 @@ use provenant_confinement::{
 };
 use provenant_core::{CancelToken, ProjectId, WorkScope};
 use provenant_providers::{
-    Adapter, ExitObservation, LaunchSpec, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin,
+    Adapter, ExitObservation, LaunchSpec, OutcomeStatus, PrepareInput, Prompt, REGISTRY, SetupStep,
+    Stdin,
 };
 use provenant_records::ResolvedRoute;
 use provenant_supervisor::exec::{
@@ -98,6 +99,7 @@ fn args() -> Result<Args> {
     let (binary, endpoint) = match adapter.as_str() {
         "codex" => ("codex", "api.openai.com"),
         "claude" => ("claude", "api.anthropic.com"),
+        "opencode" => ("opencode", "opencode.ai"),
         _ => return Err("no recorder form for this adapter".into()),
     };
     let found = which(binary).ok_or("executable not on PATH")?;
@@ -238,13 +240,19 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
                 Denied
             },
         ),
-        (O::AuthenticationRead, Allowed),
     ]);
+    if !spec.authentication.is_empty() {
+        map.insert(O::AuthenticationRead, Allowed);
+    }
     if !spec.runtime_reads.is_empty() {
         map.insert(O::RuntimeRead, Allowed);
     }
     if !spec.state_writes.is_empty() {
         map.insert(O::StateWrite, Allowed);
+    }
+    // Proved by the live run itself: the CLI cannot answer without it.
+    if spec.loopback_server {
+        map.insert(O::LoopbackServer, Allowed);
     }
     if writer {
         map.extend([
@@ -462,13 +470,17 @@ fn probes(
     );
     fork.stdin = Some(b"x\n");
     list.push(fork);
-    let auth = spec
-        .authentication
-        .iter()
-        .find(|auth| Some(&auth.mechanism) == plan.permissions().selected_authentication.as_ref())
-        .and_then(|auth| auth.roots.first())
-        .ok_or("selected authentication")?;
-    list.push(read(O::AuthenticationRead, &auth.path));
+    if !spec.authentication.is_empty() {
+        let auth = spec
+            .authentication
+            .iter()
+            .find(|auth| {
+                Some(&auth.mechanism) == plan.permissions().selected_authentication.as_ref()
+            })
+            .and_then(|auth| auth.roots.first())
+            .ok_or("selected authentication")?;
+        list.push(read(O::AuthenticationRead, &auth.path));
+    }
     if let Some(grant) = spec.runtime_reads.first() {
         let file = first_file(grant).ok_or("runtime read file")?;
         list.push(read(O::RuntimeRead, &file));
@@ -517,6 +529,14 @@ fn observe(
     let stderr = String::from_utf8_lossy(&outcome.stderr.bytes).into_owned();
     let result = match outcome.termination {
         Termination::Exit(0) if !outcome.timed_out => FixtureOutcome::Allowed,
+        // The provider ran: exec was allowed even if `--version` then failed
+        // under the probe's bare environment.
+        Termination::Exit(_)
+            if item.operation == FixtureOperation::DeclaredProcessExec
+                && !stderr.contains("sandbox-exec:") =>
+        {
+            FixtureOutcome::Allowed
+        }
         _ if stderr.contains("Operation not permitted") => FixtureOutcome::Denied,
         _ => {
             return Err(format!(
@@ -694,7 +714,8 @@ fn main() -> Result<()> {
                 },
                 protected_roots: vec![exact(&cwd.join("AGENTS.md"))],
                 secret_roots: vec![subtree(&layout.secret)],
-                selected_authentication: Some("login".into()),
+                // OpenCode answers only from keyless providers.
+                selected_authentication: (args.adapter != "opencode").then(|| "login".into()),
                 include_continuation: false,
                 network: vec![],
                 capabilities: vec![],
@@ -813,6 +834,9 @@ fn main() -> Result<()> {
         }
         observed.insert(item.operation, result);
     }
+    if profile.spec.loopback_server {
+        observed.insert(FixtureOperation::LoopbackServer, FixtureOutcome::Allowed);
+    }
     profile.observations = observed;
 
     let mut literals: Vec<(String, String)> = session_ids
@@ -865,7 +889,7 @@ fn main() -> Result<()> {
             "prompt": if *session == "fresh" { fresh_prompt } else { RESUME_PROMPT },
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
-            "activation_eligible": true,
+            "activation_eligible": outcome.status() == OutcomeStatus::Success,
         });
         println!("{}", serde_json::to_string_pretty(&entry)?);
         if args.write {

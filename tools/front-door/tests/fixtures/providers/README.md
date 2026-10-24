@@ -13,7 +13,7 @@ refuses any execution mode it does not enable, and a missing mode is disabled.
 | Codex | Live confined runs (0.159.0); success/usage, structured failure, interrupted prefix | Enabled | Enabled | Lane D |
 | Cursor | Success, thinking deltas, continuation pair | Disabled | Disabled | Lane D |
 | Agy | Init/step updates/success and error result | Disabled | Disabled | Lane D |
-| OpenCode (version unknown) | Text/stop, error, tool-step finish then error and nonzero exit | Disabled | Disabled | Lane D |
+| OpenCode | Projected (version unknown): text/stop, error, tool-step finish then error and nonzero exit. Launch form prepared; live v2.0.32 stream lacked `step_finish` | Disabled | Disabled | Lane D |
 
 ## Live recordings
 
