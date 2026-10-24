@@ -93,33 +93,6 @@
         "weight": "sparing"
       }
     ],
-    "utility": [
-      {
-        "model": "claude/claude-haiku-5-5",
-        "weight": "high",
-        "effort": [
-          "low"
-        ]
-      },
-      {
-        "model": "codex/gpt-6-luna",
-        "weight": "normal",
-        "effort": [
-          "low",
-          "medium"
-        ]
-      },
-      {
-        "model": "opencode/opencode/deepseek-v4.1-flash-free",
-        "weight": "sparing",
-        "confidential": false
-      },
-      {
-        "model": "opencode/opencode/glm-5.3-flash-free",
-        "weight": "sparing",
-        "confidential": false
-      }
-    ],
     "design": [
       {
         "model": "claude/claude-sonnet-5-5",
@@ -178,12 +151,7 @@
     "mechanical": "junior",
     "research": "junior",
     "screenshots": "junior",
-    "ui-taste": "design",
-    "classify": "utility",
-    "extract": "utility",
-    "format": "utility",
-    "transform": "utility",
-    "digest": "utility"
+    "ui-taste": "design"
   },
   "model_traits": {},
   "task_class_routes": {
@@ -969,22 +937,15 @@
       "family": "meta"
     }
   ],
-  "route_defaults": {
-    "utility": {
-      "confidential": true,
-      "allow_free": false
-    }
-  },
+  "route_defaults": {},
   "task_classification": {
     "chain": [
       "explicit",
       "rules",
-      "model",
       "default"
     ],
     "shadow": [
-      "rules",
-      "model"
+      "rules"
     ],
     "rules": [
       {
@@ -1026,12 +987,6 @@
         "class": "screenshots"
       }
     ],
-    "model": {
-      "alias": "utility",
-      "effort": "low",
-      "timeout_s": 20,
-      "min_confidence": 0.6
-    },
     "default": "implementation",
     "size_tiers": [
       {

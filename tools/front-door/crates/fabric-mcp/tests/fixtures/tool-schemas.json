@@ -292,6 +292,20 @@
                 }
               ]
             },
+            "route": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "task_class": {
               "anyOf": [
                 {
@@ -707,6 +721,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,
@@ -1239,6 +1267,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,
@@ -1845,6 +1887,20 @@
                 }
               ]
             },
+            "route": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "task_class": {
               "anyOf": [
                 {
@@ -2324,6 +2380,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,
@@ -2844,6 +2914,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,
@@ -3393,6 +3477,20 @@
                 }
               ]
             },
+            "route": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "task_class": {
               "anyOf": [
                 {
@@ -3889,6 +3987,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,
@@ -4451,6 +4563,20 @@
                 }
               ]
             },
+            "route": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "task_class": {
               "anyOf": [
                 {
@@ -4941,6 +5067,20 @@
                 }
               ]
             },
+            "route": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "task_class": {
               "anyOf": [
                 {
@@ -5407,6 +5547,20 @@
               ]
             },
             "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "route": {
               "anyOf": [
                 {
                   "maxLength": 128,

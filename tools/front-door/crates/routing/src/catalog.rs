@@ -50,6 +50,18 @@ pub struct ModelEntry {
     pub efforts: Vec<String>,
     pub evidence_ref: String,
     pub family: Option<String>,
+    /// Unknown is treated as training for confidential selection.
+    #[serde(default)]
+    pub trains_on_prompts: Option<bool>,
+}
+/// Ordered candidate in a bundled route pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutePoolMember {
+    pub model: ModelId,
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub free: bool,
 }
 /// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
 /// change family/effort rows while retaining an existing revision.
@@ -58,6 +70,7 @@ pub struct Catalogue {
     pub(crate) schema_version: u64,
     pub(crate) revision: String,
     pub(crate) models: Vec<ModelEntry>,
+    pub(crate) pools: BTreeMap<String, Vec<RoutePoolMember>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +78,8 @@ struct CatalogueAsset {
     schema_version: u64,
     revision: String,
     models: Vec<ModelEntry>,
+    #[serde(default)]
+    pools: BTreeMap<String, Vec<RoutePoolMember>>,
 }
 impl Catalogue {
     pub fn bundled() -> Result<Self, RoutingError> {
@@ -77,6 +92,7 @@ impl Catalogue {
             schema_version: asset.schema_version,
             revision: asset.revision,
             models: asset.models,
+            pools: asset.pools,
         };
         value.validate()?;
         Ok(value)
@@ -101,6 +117,27 @@ impl Catalogue {
                 || row.family.as_deref().is_some_and(|f| !identifier(f))
             {
                 return Err(RoutingError::Catalogue);
+            }
+        }
+        if self.pools.len() > 32 {
+            return Err(RoutingError::Catalogue);
+        }
+        for (name, members) in &self.pools {
+            if !identifier(name) || members.is_empty() || members.len() > 32 {
+                return Err(RoutingError::Catalogue);
+            }
+            let mut pool_models = BTreeSet::new();
+            for member in members {
+                let Some(model) = self.model(&member.model) else {
+                    return Err(RoutingError::Catalogue);
+                };
+                if !pool_models.insert(&member.model)
+                    || member.effort.as_deref().is_some_and(|effort| {
+                        !model.efforts.iter().any(|supported| supported == effort)
+                    })
+                {
+                    return Err(RoutingError::Catalogue);
+                }
             }
         }
         Ok(())

@@ -276,6 +276,8 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         choice,
         effort,
         fallback,
+        confidential: false,
+        allow_free: false,
     })
 }
 

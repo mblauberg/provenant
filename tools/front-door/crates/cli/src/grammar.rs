@@ -296,12 +296,29 @@ pub enum Telemetry {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
-    #[arg(long, value_parser = timestamp)]
+    /// Count local CLI verbs and MCP tools, including unused installed units.
+    #[arg(long)]
+    pub usage: bool,
+    #[arg(long, value_parser = stats_timestamp)]
     pub since: Option<jiff::Timestamp>,
     #[arg(long, value_parser = timestamp)]
     pub until: Option<jiff::Timestamp>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
+}
+fn stats_timestamp(value: &str) -> Result<jiff::Timestamp, String> {
+    if let Some(days) = value.strip_suffix('d') {
+        let seconds = days
+            .parse::<i64>()
+            .ok()
+            .filter(|days| *days > 0)
+            .and_then(|days| days.checked_mul(86_400))
+            .ok_or_else(|| "since must be a positive day count or timestamp".to_owned())?;
+        return jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_secs(seconds))
+            .map_err(|error| error.to_string());
+    }
+    timestamp(value).map_err(str::to_owned)
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {

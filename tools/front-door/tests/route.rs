@@ -73,6 +73,12 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
             .iter()
             .any(|m| m["model"] == "opencode/openrouter/~anthropic/claude-haiku-latest")
     );
+    let pool = call(
+        &rig,
+        &["route", "resolve", "--route", "utility", "--confidential"],
+        0,
+    )?;
+    assert_eq!(pool["data"]["model"], "claude-haiku-5-5");
     let resolved = call(
         &rig,
         &[

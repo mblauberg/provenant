@@ -22,6 +22,8 @@ pub enum RoutingError {
     UnknownAdapter,
     #[error("unknown named route")]
     UnknownRoute,
+    #[error("route is not permitted for confidential input")]
+    ConfidentialModel,
     #[error("effort is not supported by recorded model controls")]
     UnsupportedEffort,
     #[error("invalid catalogue")]

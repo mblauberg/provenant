@@ -24,6 +24,10 @@ pub struct RouteRequest {
     pub route: Option<String>,
     #[arg(long)]
     pub effort: Option<String>,
+    #[arg(long)]
+    pub confidential: bool,
+    #[arg(long)]
+    pub allow_free: bool,
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
 }
@@ -57,6 +61,8 @@ impl RouteRequest {
         Ok(provenant_routing::RouteRequest {
             choice,
             effort: self.effort.clone(),
+            confidential: self.confidential,
+            allow_free: self.allow_free,
             fallback,
         })
     }
@@ -198,6 +204,19 @@ pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {
                             .iter()
                             .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
                     );
+                    lines.extend(list.pools.iter().map(|(name, members)| {
+                        let models = members
+                            .iter()
+                            .map(|member| {
+                                member.effort.as_ref().map_or_else(
+                                    || member.model.as_str().to_owned(),
+                                    |effort| format!("{}@{effort}", member.model.as_str()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("route pool {name} = {models}")
+                    }));
                     lines.extend(list.availability.iter().map(|a| {
                         format!(
                             "{} {:?} age={}s",
