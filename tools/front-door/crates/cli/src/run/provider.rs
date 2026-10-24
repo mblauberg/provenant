@@ -90,8 +90,14 @@ pub(super) fn prepare(
         };
         let scratch = &paths.scratch;
         let private_state = &paths.provider_state;
-        let plan = match confinement_plan(project_id, &cwd, scratch, private_state, writer.as_ref())
-        {
+        let plan = match confinement_plan(
+            project_id,
+            &cwd,
+            &home,
+            scratch,
+            private_state,
+            writer.as_ref(),
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
@@ -144,6 +150,7 @@ pub(super) fn prepare(
                 plan,
                 profile: spec.profile,
                 writer,
+                home: home.clone(),
             }),
         });
     }
@@ -193,13 +200,14 @@ fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
 fn confinement_plan(
     project_id: ProjectId,
     cwd: &Path,
+    home: &Path,
     scratch: &Path,
     private_state: &Path,
     writer: Option<&run::WriterLaunch>,
 ) -> Result<ConfinedPlan, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
-            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch)
+            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, home)
                 .map_err(|error| error.to_string())?,
         )),
         None => AccessMode::ReadOnly,
@@ -282,12 +290,14 @@ fn apply_setup(steps: &[SetupStep], private_state: &Path) -> Result<(), String> 
 pub fn writer_fixture_plan(
     project: ProjectId,
     cwd: &Path,
+    home: &Path,
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
 ) -> Result<ConfinedPlan, String> {
     confinement_plan(
         project,
         cwd,
+        home,
         &paths.scratch,
         &paths.provider_state,
         Some(writer),

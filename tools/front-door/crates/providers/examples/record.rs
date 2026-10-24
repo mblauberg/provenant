@@ -49,8 +49,10 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const PROMPT: &str = "Reply with the word ok";
 const RESUME_PROMPT: &str = "Reply with the word ok again";
+const SHELL_RESUME_PROMPT: &str = "Use Bash to run git status --short. Then make a separate Bash call running only printf provenant-shell-proof. Reply with the word ok again";
 /// Writers must prove an in-sandbox tool edit, not just a reply.
 const WRITER_PROMPT: &str = "Create the file note.txt in the current directory containing the word ok, then reply with the word ok";
+const SHELL_WRITER_PROMPT: &str = "Use Bash to run printf ok > note.txt in the current directory and git status --short. Then make a separate Bash call running only printf provenant-shell-proof. Reply with the word ok";
 const BRANCH: &str = "provenant-probe";
 const PROBE_TOOLS: [&str; 6] = [
     "/bin/cat",
@@ -95,6 +97,9 @@ fn args() -> Result<Args> {
     }
     if write && skip_live {
         return Err("--write needs live evidence".into());
+    }
+    if adapter == "claude" && flags.remove("--account").as_deref() != Some("pro") {
+        return Err("Claude recording requires --account pro and chair quota approval; no other identity is supported".into());
     }
     let (binary, endpoint) = match adapter.as_str() {
         "codex" => ("codex", "api.openai.com"),
@@ -270,6 +275,13 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
             },
         ),
     ]);
+    if spec.deny_keychain_access {
+        map.extend([
+            (O::ShellExec, Allowed),
+            (O::KeychainTool, Denied),
+            (O::KeychainRead, Denied),
+        ]);
+    }
     if !spec.authentication.is_empty() {
         map.insert(O::AuthenticationRead, Allowed);
     }
@@ -338,6 +350,7 @@ fn route(args: &Args) -> ResolvedRoute {
 }
 
 struct Context<'a> {
+    home: &'a Path,
     executor: &'a SystemExecutor,
     safe_fs: &'a LocalFs,
     backend: &'a dyn provenant_confinement::ConfinementBackend,
@@ -349,11 +362,23 @@ fn compile(
     plan: &ConfinedPlan,
     profile: &ProviderProfile,
 ) -> Result<provenant_confinement::permissions::ConfinedLaunch> {
+    if let (AccessMode::WorktreeWrite(authority), Some((worktree, selected_ref))) =
+        (&plan.permissions().mode, context.worktree)
+    {
+        provenant_confinement::permissions::prepare_writer_directories(
+            context.safe_fs,
+            worktree,
+            selected_ref,
+            authority,
+            context.home,
+        )?;
+    }
     let directories = required_anchors(plan.permissions(), profile, context.worktree)
         .into_iter()
         .map(|path| AnchoredDirectory::open_canonical(context.safe_fs, path))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let anchors = Anchors {
+        home: context.home,
         directories: &directories,
         safe_fs: context.safe_fs,
         worktree: context.worktree,
@@ -515,6 +540,21 @@ fn probes(
         let file = first_file(grant).ok_or("runtime read file")?;
         list.push(read(O::RuntimeRead, &file));
     }
+    if spec.deny_keychain_access {
+        list.extend([
+            probe(
+                O::ShellExec,
+                "/bin/sh",
+                &[Path::new("-c"), Path::new("printf ok")],
+            ),
+            probe(O::KeychainTool, "/usr/bin/security", &[Path::new("help")]),
+            read(
+                O::KeychainRead,
+                &PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?)
+                    .join("Library/Keychains/login.keychain-db"),
+            ),
+        ]);
+    }
     if let Some(grant) = spec.state_writes.first() {
         let path = match grant.scope {
             PathScope::Exact => grant.path.clone(),
@@ -672,6 +712,79 @@ fn platform() -> Result<String> {
     ))
 }
 
+fn successful_bash(stream: &[u8]) -> bool {
+    let mut requests = std::collections::BTreeSet::new();
+    for event in stream
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+    {
+        let Some(content) = event
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for item in content {
+            match (
+                event.get("type").and_then(Value::as_str),
+                item.get("type").and_then(Value::as_str),
+            ) {
+                (Some("assistant"), Some("tool_use"))
+                    if item.get("name").and_then(Value::as_str) == Some("Bash")
+                        && item
+                            .get("input")
+                            .and_then(|input| input.get("command"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|command| {
+                                command.contains("printf provenant-shell-proof")
+                            }) =>
+                {
+                    if let Some(id) = item.get("id").and_then(Value::as_str) {
+                        requests.insert(id.to_owned());
+                    }
+                }
+                (Some("user"), Some("tool_result"))
+                    if item.get("is_error").and_then(Value::as_bool) != Some(true)
+                        && item
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| requests.contains(id))
+                        && item
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.trim() == "provenant-shell-proof") =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn bash_proof_needs_a_matching_successful_tool_result() {
+    let request = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"printf provenant-shell-proof"}}]}}"#;
+    let result = |id: &str, error: bool, output: &str| {
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error,"content":output}]}}).to_string()
+    };
+    assert!(!successful_bash(request.as_bytes()));
+    for (id, error, output) in [
+        ("other", false, "provenant-shell-proof"),
+        ("b", true, "provenant-shell-proof"),
+        ("b", false, "permission denied"),
+    ] {
+        assert!(!successful_bash(
+            format!("{request}\n{}", result(id, error, output)).as_bytes()
+        ));
+    }
+    assert!(successful_bash(
+        format!("{request}\n{}", result("b", false, "provenant-shell-proof")).as_bytes()
+    ));
+}
+
 fn main() -> Result<()> {
     let args = args()?;
     if std::fs::read_dir(&args.root)?.next().is_some() {
@@ -714,6 +827,7 @@ fn main() -> Result<()> {
         None
     };
     let context = Context {
+        home: &home,
         executor: &executor,
         safe_fs: &safe_fs,
         backend: backend.as_ref(),
@@ -728,7 +842,7 @@ fn main() -> Result<()> {
         private_dir(scratch)?;
         let mode = match &worktree {
             Some(tree) => AccessMode::WorktreeWrite(Box::new(
-                WorktreeWriteAuthority::for_worktree(tree, &selected_ref)?,
+                WorktreeWriteAuthority::for_worktree(tree, &selected_ref, &home)?,
             )),
             None => AccessMode::ReadOnly,
         };
@@ -781,8 +895,19 @@ fn main() -> Result<()> {
     let mut continuation = None;
     let mut last_profile = None;
     let mut session_ids = Vec::new();
-    let fresh_prompt = if args.writer { WRITER_PROMPT } else { PROMPT };
-    for (session, text) in [("fresh", fresh_prompt), ("resume", RESUME_PROMPT)] {
+    let fresh_prompt = if args.writer && args.adapter == "claude" {
+        SHELL_WRITER_PROMPT
+    } else if args.writer {
+        WRITER_PROMPT
+    } else {
+        PROMPT
+    };
+    let resume_prompt = if args.writer && args.adapter == "claude" {
+        SHELL_RESUME_PROMPT
+    } else {
+        RESUME_PROMPT
+    };
+    for (session, text) in [("fresh", fresh_prompt), ("resume", resume_prompt)] {
         let plan = plan_for(&args.root.join(format!("scratch-{session}")))?;
         let prompt = Prompt::new(text.into());
         let mut nonce = [0u8; 16];
@@ -830,6 +955,11 @@ fn main() -> Result<()> {
         if let Some(id) = outcome.session() {
             session_ids.push(id.to_owned());
         }
+        let writer_shell_proof =
+            args.writer && args.adapter == "claude" && successful_bash(&run.outcome.stdout.bytes);
+        if args.writer && args.adapter == "claude" && !writer_shell_proof {
+            return Err("Claude writer did not invoke Bash".into());
+        }
         if session == "fresh" && args.writer {
             let note = std::fs::read_to_string(layout.worktree.join("note.txt"))?;
             if note.trim() != "ok" {
@@ -840,7 +970,7 @@ fn main() -> Result<()> {
         if session == "fresh" {
             continuation = Some(adapter.continuation(&outcome, &route, "recording")?);
         }
-        records.push((session, run, outcome));
+        records.push((session, run, outcome, writer_shell_proof));
         last_profile = Some((plan, spec.profile));
     }
 
@@ -915,7 +1045,7 @@ fn main() -> Result<()> {
         .trim()
         .to_owned();
     let platform = platform()?;
-    for (session, run, outcome) in &records {
+    for (session, run, outcome, writer_shell_proof) in &records {
         let redacted = redactor.stream(&run.outcome.stdout.bytes)?;
         let argv: Vec<String> = run
             .argv
@@ -938,10 +1068,12 @@ fn main() -> Result<()> {
             "process_exit": exit(&run.outcome).code,
             "outcome": format!("{:?}", outcome.status()),
             "answering_model": outcome.model(),
-            "prompt": if *session == "fresh" { fresh_prompt } else { RESUME_PROMPT },
+            "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
+            "writer_shell_proof": writer_shell_proof,
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
-            "activation_eligible": outcome.status() == OutcomeStatus::Success,
+            "keychain_ipc_proof": false,
+            "activation_eligible": outcome.status() == OutcomeStatus::Success && !profile.spec.deny_keychain_access,
         });
         println!("{}", serde_json::to_string_pretty(&entry)?);
         if args.write {
