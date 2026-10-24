@@ -197,6 +197,7 @@ harness variables pass through as their tools define them.
 | `ReviewFact` | Attempt/reviewer IDs, subject, output reference/digest, verdict, blocking findings, route provenance and named lens. |
 | `ReviewContext` | Authors, decision-maker IDs, risk, current time, policy and routing availability facts. |
 | `ValidationReport` | Sorted code/field/message/remedy diagnostics, missing review legs and status. |
+| `AcceptanceFact` | Delivery/project IDs and decision state, returned by the read-only `acceptance(ProjectId, DeliveryId) -> Result<Option<AcceptanceFact>, ReceiptError>`; `None` means no receipt. Telemetry's cost per accepted delivery reads it through CLI. |
 
 For PR work, the PR is the evidence: exact-head required CI, review findings
 and repairs, then merge through the repository's workflow. A receipt records
@@ -875,7 +876,7 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 | run | `AttemptReader::attempt(AttemptId) -> AttemptFact` (fact type in `records`, `Serialize` only; see execution-run.md): terminal state/exit, subject, output ref/digest, route and reviewer. Terminal records carry `DeliveryId` for stats. Own top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile`, git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
 | providers | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; keep adapter, endpoint and model family separate. ChairAttested never fills cross-family coverage. Workflow consumes edge-built facts, without a providers dependency. |
 | routing | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`: tiers, all author families, expiry and quota/config/capability/family-slot blockers. No probes under the receipt lock. Quota feeds routing, with no workflow call. |
-| telemetry | No workflow write/report API or ledger. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |
+| telemetry | No workflow write/report API or ledger; CLI reads `acceptance` for the accepted-delivery join. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |
 | cli/binary | Parse proposed workflow leaves and `hook claude pre-compact\|compact`; route `check writing` to workflow's matcher; register workflow's pre-compact and session-start handlers in cli's `HookSpec` table, which the installer also reads. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/124/130; partial/input-required in data. Run verbs stay top level under run. |
 | fabric-store / fabric-runtime | Own the only read-only one-shot cut-over import: open/blocked tasks plus unacknowledged requests from the last 14 days. Map project/identity without importing authority; workflow points agents to it. Product identity env is `PROVENANT_AGENT_LABEL`, replacing `AGENT_FABRIC_LABEL`. |
 | fabric-mcp | No workflow asks, tools or dependency edge. CLI JSON, top-level run `lanes` and Fabric tasks suffice. |
