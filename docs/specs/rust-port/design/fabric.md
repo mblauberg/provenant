@@ -181,7 +181,10 @@ key for graph, node and route index. Pending and unknown observations reuse that
 key. Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
 result consumes the next route. Task failure, input requirements and uncertain
 launches do not trigger fallback. Every tried route and its terminal outcome
-remains in the checkpoint. Dependants start after successful prerequisites and
+remains in the checkpoint, with the actor that first submitted it (absent in older
+checkpoints, which use the resuming actor). A resume with no saved attempt
+reference submits under that actor, so run's actor-scoped operation replay returns
+the existing attempt instead of creating a second. Dependants start after successful prerequisites and
 become blocked after a failed prerequisite. Canonical plan/checkpoint digests,
 a per-project, per-graph lock and atomic publication under new state make ticks restartable.
 No shell gates or named sessions return.

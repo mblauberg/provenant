@@ -108,6 +108,11 @@ pub struct GraphAttempt {
     pub state: AttemptState,
     pub attempt_ref: Option<String>,
     pub outcome: Option<AttemptOutcome>,
+    /// Actor that first submitted this attempt. Run-store operation replay is
+    /// actor-scoped, so a resume submits under it. Absent in older checkpoints,
+    /// which use the resuming actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_actor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,13 +196,26 @@ pub struct GraphRun {
     pub checkpoint: GraphCheckpoint,
 }
 
+/// What the checkpoint already knows about an attempt.
+#[derive(Clone, Copy, Debug)]
+pub struct Replay<'a> {
+    /// Reference to the accepted attempt, once saved.
+    pub stored_ref: Option<&'a str>,
+    /// Actor to submit under when no reference was saved.
+    pub launch_actor: &'a str,
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
-/// is, never resubmit, so a changed actor cannot launch duplicate work.
-/// Provider launch and terminal publication remain run's responsibility.
+/// is, never resubmit. Without one, the submission replays under `launch_actor`
+/// (the actor recorded before the first submit) so a changed actor cannot
+/// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// The actor this owner submits as, recorded before the first submit.
+    fn actor(&self) -> String;
 
     fn observe_or_start(
         &mut self,
@@ -206,7 +224,7 @@ pub trait AttemptOwner {
         route: &GraphRoute,
         access: AccessMode,
         worktree: Option<&str>,
-        stored_ref: Option<&str>,
+        replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error>;
 }
 
@@ -557,6 +575,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     attempt_ref: None,
                     outcome: None,
                     launched: true,
+                    launch_actor: Some(owner.actor()),
                 });
                 checkpoint.nodes[node_index].state = NodeState::Running;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -566,6 +585,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .attempts
                 .last()
                 .and_then(|last| last.attempt_ref.clone());
+            let launch_actor = checkpoint.nodes[node_index]
+                .attempts
+                .last()
+                .and_then(|last| last.launch_actor.clone())
+                .unwrap_or_else(|| owner.actor());
             let observation = owner
                 .observe_or_start(
                     &key,
@@ -573,7 +597,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &route,
                     node.access,
                     node.worktree.as_deref(),
-                    stored_ref.as_deref(),
+                    Replay {
+                        stored_ref: stored_ref.as_deref(),
+                        launch_actor: &launch_actor,
+                    },
                 )
                 .map_err(GraphError::Run)?;
             let should_continue = {
@@ -921,10 +948,16 @@ mod tests {
         calls: Vec<(AttemptKey, GraphRoute)>,
         permissions: Vec<(AccessMode, Option<String>)>,
         stored_refs: Vec<Option<String>>,
+        actor: String,
+        launch_actors: Vec<String>,
     }
 
     impl AttemptOwner for FakeOwner {
         type Error = NoObservation;
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
 
         fn observe_or_start(
             &mut self,
@@ -933,9 +966,10 @@ mod tests {
             route: &GraphRoute,
             access: AccessMode,
             worktree: Option<&str>,
-            stored_ref: Option<&str>,
+            replay: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
-            self.stored_refs.push(stored_ref.map(str::to_owned));
+            self.stored_refs.push(replay.stored_ref.map(str::to_owned));
+            self.launch_actors.push(replay.launch_actor.to_owned());
             self.calls.push((key.clone(), route.clone()));
             self.permissions.push((access, worktree.map(str::to_owned)));
             self.observations.pop_front().ok_or(NoObservation)
@@ -1269,6 +1303,55 @@ mod tests {
     }
 
     #[test]
+    fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor() {
+        let document = graph(vec![node("node", route("route"))]);
+        let mut journal = MemoryJournal::default();
+        let mut first = FakeOwner {
+            actor: "actor-a".into(),
+            observations: VecDeque::from([AttemptObservation::Pending { attempt_ref: None }]),
+            ..FakeOwner::default()
+        };
+        advance(&document, &mut first, &mut journal).unwrap();
+        // The crash window: the run store accepted the attempt but no reference was saved.
+        let attempt = &mut journal.0.as_mut().unwrap().nodes[0].attempts[0];
+        assert_eq!(attempt.launch_actor.as_deref(), Some("actor-a"));
+        attempt.attempt_ref = None;
+        let mut second = FakeOwner {
+            actor: "actor-b".into(),
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..FakeOwner::default()
+        };
+        resume(&document, &mut second, &mut journal).unwrap();
+        assert_eq!(second.launch_actors, vec!["actor-a".to_owned()]);
+        assert_eq!(second.stored_refs, vec![None]);
+    }
+
+    #[test]
+    fn checkpoint_without_launch_actor_decodes_and_uses_the_resuming_actor() {
+        let document = graph(vec![node("node", route("route"))]);
+        let mut journal = MemoryJournal::default();
+        let mut first = FakeOwner {
+            actor: "actor-a".into(),
+            observations: VecDeque::from([AttemptObservation::Pending { attempt_ref: None }]),
+            ..FakeOwner::default()
+        };
+        let run = advance(&document, &mut first, &mut journal).unwrap();
+        let mut value = serde_json::to_value(&run.checkpoint).unwrap();
+        value["nodes"][0]["attempts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("launch_actor");
+        journal.0 = Some(serde_json::from_value(value).unwrap());
+        let mut second = FakeOwner {
+            actor: "actor-b".into(),
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..FakeOwner::default()
+        };
+        resume(&document, &mut second, &mut journal).unwrap();
+        assert_eq!(second.launch_actors, vec!["actor-b".to_owned()]);
+    }
+
+    #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
             access: AccessMode::ReadOnly,
@@ -1331,6 +1414,9 @@ mod file_tests {
     struct Owner;
     impl AttemptOwner for Owner {
         type Error = Infallible;
+        fn actor(&self) -> String {
+            "fixture-actor".into()
+        }
         fn observe_or_start(
             &mut self,
             _: &AttemptKey,
@@ -1338,7 +1424,7 @@ mod file_tests {
             _: &GraphRoute,
             _: AccessMode,
             _: Option<&str>,
-            _: Option<&str>,
+            _: Replay<'_>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(AttemptObservation::Pending {
                 attempt_ref: Some("fixture-attempt".into()),
