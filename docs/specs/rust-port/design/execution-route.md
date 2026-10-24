@@ -466,6 +466,12 @@ provider profile to confinement compilation. A CLI-dispatch integration fixture
 probes the host config/hook/extension/npm write denials and provider-state
 symlink denial through that path; this is a fake-provider confinement test,
 not a new live provider smoke row. #927 remains open for the live rows.
+A macOS CI probe also found that Apple's `/usr/bin/git` shim cannot load
+Xcode's `libxcrun.dylib` under the current runtime grants. The read-only
+integration case proves common Git file reads and write denial directly; it
+does not claim working Xcode-backed Git tools. A narrow immutable Git runtime
+recipe needs separate confinement acceptance before a live shell smoke can
+claim those tools work. No Xcode directory grant is added here.
 Kiro is retired.
 
 Claude has a writer-shell candidate under the recorder only. It keeps the
