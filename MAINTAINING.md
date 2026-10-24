@@ -177,9 +177,7 @@ commands are retired.
 
 ## Change the delivery kernel
 
-Keep profile policy in `config/delivery-profiles.json`, surface-selected checks
-in `config/security-evidence.json` and machine invariants in the `deliver`
-validator. A new domain should compose an existing base profile and a domain
+Keep delivery invariants in `crates/workflow`. A new domain should compose an existing base profile and a domain
 skill first. Add a base profile only when its artifacts, deterministic gates,
 judgement gates and release meaning are materially distinct.
 

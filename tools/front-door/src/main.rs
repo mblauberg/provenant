@@ -251,6 +251,29 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ),
             }
         }
+        Command::Workflow(cmd) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                Ok((
+                    roots::roots(globals, &assets, &project)?,
+                    roots::home()?,
+                    project,
+                ))
+            })();
+            match resolved {
+                Ok((roots, home, cwd)) => {
+                    provenant_cli::workflow::run(cmd, globals, &roots, &home, &cwd)
+                }
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Worktree(worktree) => worktrees::run(worktree, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
