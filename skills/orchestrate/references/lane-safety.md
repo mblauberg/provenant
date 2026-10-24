@@ -9,11 +9,12 @@ false report. Paste the first section into every lane and reviewer brief.
   and any test suite, build, browser walk or process that starts a database or
   server in a shared checkout. Before trusting a review, check no suite ran;
   cancel and redispatch a lane that started one.
-- Direct process control is refused. Use `provenant cancel TARGET` for owned
-  work. The optional Bash hook is `provenant hook claude pre-tool-use`;
+- Pattern and group process control (`pkill`, `killall`, `kill` of non-literal
+  or non-positive PIDs) is refused; `kill [-SIGNAL] PID` is allowed. Use
+  `provenant cancel TARGET` for owned work. The optional Bash hook is `provenant hook claude pre-tool-use`;
   confinement and owned process handles enforce the underlying policy. The
   same hook denies bare `git stash`, `git reset --hard`, `git clean -f`,
-  force pushes (not `--force-with-lease`), `--no-verify`, branch changes in a
+  force pushes (not `--force-with-lease`), branch changes in a
   primary checkout and foreground `sleep N` of 5 s or more, each with a
   one-line remedy. `[domains.guard] deny = [...]` in `config.toml` lists the
   rules that are on; omit an id to turn it off. Only Claude has a

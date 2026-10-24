@@ -38,7 +38,7 @@ pub const RULES: [(&str, &str); 7] = [
         "Foreground `sleep` polling is refused. Use a background wait or `provenant lanes --wait`.",
     ),
 ];
-const DEFAULT_DENY: &str = r#"deny = ["stash", "reset-hard", "clean-force", "force-push", "no-verify", "primary-checkout", "sleep-poll"]
+const DEFAULT_DENY: &str = r#"deny = ["stash", "reset-hard", "clean-force", "force-push", "primary-checkout", "sleep-poll"]
 "#;
 
 /// `[domains.guard]`: the rule ids that deny. Omit an id to turn its rule off.
@@ -50,7 +50,12 @@ pub struct GuardConfig {
 impl Default for GuardConfig {
     fn default() -> Self {
         Self {
-            deny: RULES.iter().map(|(id, _)| (*id).to_owned()).collect(),
+            // `no-verify` is opt-in: CI is the gate.
+            deny: RULES
+                .iter()
+                .filter(|(id, _)| *id != "no-verify")
+                .map(|(id, _)| (*id).to_owned())
+                .collect(),
         }
     }
 }
@@ -315,9 +320,6 @@ mod tests {
             "git push --force",
             "git push -f origin main",
             "git push origin +main",
-            "git commit --no-verify -m x",
-            "git commit -nm x",
-            "git push --no-verify",
             "git checkout main",
             "git checkout -b topic",
             "git switch main",
@@ -328,8 +330,6 @@ mod tests {
             "git -Cx stash",
             "git -c a=b -C. -Cx stash",
             "bash -c 'git stash' _ 'echo'",
-            "git push --no-ver",
-            "git commit -n -mmsg",
             "git stash push -u",
             "git checkout -b",
             "git checkout --orphan x",
@@ -353,6 +353,11 @@ mod tests {
             "git push --force-with-lease=main",
             "bash -c 'printf \"%s\\n\" \"$1\"' _ 'git stash'",
             "git stash list",
+            "git commit --no-verify -m x",
+            "git commit -nm x",
+            "git push --no-verify",
+            "git push --no-ver",
+            "git commit -n -mmsg",
             "git stash apply abc123",
             "git stash drop",
             "git reset --soft HEAD~1",
@@ -410,6 +415,10 @@ mod tests {
         assert!(violation("git stash", cwd, &only_stash).is_some());
         assert!(violation("git reset --hard", cwd, &only_stash).is_none());
         assert!(violation("sleep 9", cwd, &GuardConfig { deny: vec![] }).is_none());
+        let opt_in = GuardConfig {
+            deny: vec!["no-verify".into()],
+        };
+        assert!(violation("git commit --no-verify", cwd, &opt_in).is_some());
         let bad = GuardConfig {
             deny: vec!["nope".into()],
         };
