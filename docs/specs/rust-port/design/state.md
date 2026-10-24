@@ -34,7 +34,7 @@ requirement.
 | Drop | Reason and consequence |
 | --- | --- |
 | Fused/split roots, root pointers, seeded defaults and three-way refresh | Fresh state and immutable release assets remove copied catalogue reconciliation. No `AGENTS_HOME`, `AGENT_FABRIC_*` root fallback or per-command stale-checkout probe. |
-| Profile mutation, overlays and knob registry | No `config set/reset/profiles`, project `.provenant.toml`, task-class tables, `PROVENANT_PROFILE` or `PROVENANT_KNOB_*`; no strengthen-only re-resolution. Domain policy still enforces authority, confinement and review minima. |
+| Profile mutation, overlays and knob registry | `config set` and `unset` return (user decision, #1118) over the embedded registry and a `[knobs]` table; still no `config reset/profiles`, project `.provenant.toml`, task-class tables, `PROVENANT_PROFILE` or `PROVENANT_KNOB_*`; no strengthen-only re-resolution. Domain policy still enforces authority, confinement and review minima. |
 | Generic installer transactions | No bundle/plan/apply/recover commands, plan digest, rollback journal, exchange primitive or binary backup. Re-apply `install` after failure; rollback reinstalls `pre-rust-rewrite`. |
 | Kiro registration | No observed use; do not carry another unsupported client. |
 | `_shared`, JS workflows and old link layouts | Replace retained skills individually; remove exact retired links at cut-over. Do not migrate custom skill contents or read old receipts. |
@@ -202,8 +202,10 @@ const-concatenation. These assets are the only preset channel: balanced defaults
 one additional review, cross-family required and full re-review. Domain
 owners validate those values and enforce their minima. The config crate
 loads/validates user domain sections over the selected compiled defaults once;
-there is no profile layering, per-request profile selector or generic knobs
-API. A preset never grants authority or a provider stop reason.
+there is no profile layering or per-request profile selector. Knobs resolve
+through the embedded registry (default, profile preset, optional task class,
+then the user's `[knobs]` override); there is no other generic knobs API. A preset never grants authority or a
+provider stop reason.
 
 Every allowed section key appears in its complete default asset. Tables merge
 recursively; arrays replace as a whole. Structured arrays provide a complete
@@ -574,8 +576,9 @@ fast and targeted; full workspace/harness and platform checks run in CI.
 
 `config show` now binds `config_show` with the complete registered domain
 aggregate. Compiled `Profile` and the single typed `config.toml` replace the
-profile CLI's layered JSON knob registry and mutation commands. There is no
-replacement for profile mutation; edit the user-owned TOML explicitly.
+profile CLI's layered JSON knob layers. `config set`/`unset` edit `profile` and
+the `[knobs]` table (default, then profile preset, then override) against the
+embedded `config/harness-knobs.json`.
 
 `config::bind_host` owns the random host ID in the selected state's `host-id`.
 The old hostname slug, `hosts.json` alias migration and telemetry host aliases

@@ -272,9 +272,12 @@ pub struct AdmissionTicket {
     pub generation: u64,
     pub holder: Option<ActorId>,
     pub active: bool,
-    pub memory_floor_bytes: u64,
+    /// Available memory floor as basis points of installed memory.
+    pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
     pub startup_spacing_ms: u64,
+    /// The owning run's batch concurrency, distinct from host admission caps.
+    pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
 }

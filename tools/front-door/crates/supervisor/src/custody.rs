@@ -1,7 +1,7 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::exec::{CapturedStream, Termination};
-use crate::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
+use crate::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode, SafeDir};
 use crate::machine::StopReason;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
 use provenant_records::{Limits, decode_v1};
@@ -50,49 +50,71 @@ pub(crate) enum LaunchState {
     Spawned,
 }
 /// Confinement supplies verified worktree and Git directory handles, never a
-/// caller-selected PID or a path that supervisor resolves again.
+/// caller-selected PID or a path that supervisor resolves again. A read-only
+/// binding holds custody in the attempt directory and grants no worktree.
 #[derive(Clone, Debug, Serialize)]
 pub struct WriterBinding(StoredWriterBinding);
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StoredWriterBinding {
-    worktree_device: u64,
-    worktree_inode: u64,
-    git_device: u64,
-    git_inode: u64,
-    branch: String,
-    base: GitOid,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum StoredWriterBinding {
+    Worktree {
+        worktree_device: u64,
+        worktree_inode: u64,
+        git_device: u64,
+        git_inode: u64,
+        branch: String,
+        base: GitOid,
+    },
+    ReadOnly,
 }
 impl WriterBinding {
     pub fn from_verified(
-        worktree: &Directory,
-        git: &Directory,
+        worktree: &dyn SafeDir,
+        git: &dyn SafeDir,
         branch: &str,
         base: GitOid,
     ) -> Result<Self> {
-        // The confinement owner also verifies Git ref semantics. Here reject
-        // control bytes and unbounded input at the storage edge.
-        if branch.is_empty() || branch.len() > 1024 || branch.bytes().any(|b| b.is_ascii_control())
-        {
-            return Err(CustodyError::InvalidRecord);
-        }
         let worktree = worktree.metadata()?;
         let git = git.metadata()?;
-        Ok(Self(StoredWriterBinding {
+        let binding = StoredWriterBinding::Worktree {
             worktree_device: worktree.device,
             worktree_inode: worktree.inode,
             git_device: git.device,
             git_inode: git.inode,
             branch: branch.into(),
             base,
-        }))
+        };
+        // The confinement owner also verifies Git ref semantics. Here reject
+        // control bytes and unbounded input at the storage edge.
+        binding.validate()?;
+        Ok(Self(binding))
     }
 }
 impl StoredWriterBinding {
+    /// Branch and base may advance between generations; the held worktree may not.
+    fn same_custody(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Worktree {
+                    worktree_device: a_device,
+                    worktree_inode: a_inode,
+                    ..
+                },
+                Self::Worktree {
+                    worktree_device: b_device,
+                    worktree_inode: b_inode,
+                    ..
+                },
+            ) => a_device == b_device && a_inode == b_inode,
+            (Self::ReadOnly, Self::ReadOnly) => true,
+            _ => false,
+        }
+    }
     fn validate(&self) -> Result<()> {
-        if self.branch.is_empty()
-            || self.branch.len() > 1024
-            || self.branch.bytes().any(|b| b.is_ascii_control())
+        if let Self::Worktree { branch, .. } = self
+            && (branch.is_empty()
+                || branch.len() > 1024
+                || branch.bytes().any(|b| b.is_ascii_control()))
         {
             return Err(CustodyError::InvalidRecord);
         }
@@ -225,13 +247,13 @@ impl Reservation {
     }
 }
 #[derive(Debug)]
-pub struct WriterLease {
+pub struct CustodyLease {
     pub(crate) directory: Directory,
     pub(crate) lease: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     launched: bool,
 }
-impl WriterLease {
+impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
@@ -261,6 +283,25 @@ impl WriterLease {
         })
     }
 }
+/// Read-only custody uses the attempt directory itself, so readers never share
+/// or contend for a worktree fence. The same reservation and settlement rules
+/// apply: a guardian must prove exit before the reservation is cleared.
+pub fn acquire_reader(
+    attempt: Directory,
+    scope: Scope,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<CustodyLease> {
+    acquire_writer(
+        attempt,
+        scope,
+        WriterBinding(StoredWriterBinding::ReadOnly),
+        budget,
+        cancel,
+        clock,
+    )
+}
 /// The supplied directory belongs to confinement's verified worktree identity.
 /// Existing reservations always require recovery, even with a free kernel lock.
 pub fn acquire_writer(
@@ -270,7 +311,7 @@ pub fn acquire_writer(
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
-) -> Result<WriterLease> {
+) -> Result<CustodyLease> {
     acquire_writer_with_observer(
         directory,
         scope,
@@ -290,7 +331,7 @@ pub(crate) fn acquire_writer_with_observer(
     cancel: &CancelToken,
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
-) -> Result<WriterLease> {
+) -> Result<CustodyLease> {
     let lease = directory.lock(
         OsStr::new("writer.lock"),
         LockMode::Exclusive,
@@ -303,18 +344,17 @@ pub(crate) fn acquire_writer_with_observer(
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    match directory.metadata_at(OsStr::new("identity.json"), false) {
+    match directory.metadata_at(OsStr::new("ownership.json"), false) {
         Ok(_) => {
             let previous: OwnershipJournal =
-                read_record(&directory, "identity.json", RECORD_LIMIT)?;
+                read_record(&directory, "ownership.json", RECORD_LIMIT)?;
             let settled: SettlementJournal =
                 read_record(&directory, "settlement.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
             if previous.schema_version != 1
                 || (settled.scope.run != previous.scope.run
                     || settled.scope.generation < previous.scope.generation)
-                || previous.binding.worktree_device != binding.0.worktree_device
-                || previous.binding.worktree_inode != binding.0.worktree_inode
+                || !previous.binding.same_custody(&binding.0)
             {
                 return Err(CustodyError::Fenced);
             }
@@ -348,7 +388,7 @@ pub(crate) fn acquire_writer_with_observer(
     reservation.validate()?;
     require_durable(write_record(
         &directory,
-        "identity.json",
+        "ownership.json",
         &OwnershipJournal {
             schema_version: 1,
             scope,
@@ -362,7 +402,7 @@ pub(crate) fn acquire_writer_with_observer(
         &reservation,
         PublishMode::NoReplace,
     )?)?;
-    Ok(WriterLease {
+    Ok(CustodyLease {
         directory,
         lease: Some(lease),
         reservation,
@@ -455,7 +495,11 @@ pub struct ProviderCommand {
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
+    /// Opaque, bounded reference for the composed terminal holder. It travels
+    /// on the handoff pipe only and is never written to the launch summary.
+    pub holder_context: Vec<u8>,
 }
+pub const HOLDER_CONTEXT_LIMIT: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StreamMode {
@@ -517,7 +561,7 @@ impl CapturePlan {
 }
 pub struct OwnedLaunch<'a> {
     pub command: ProviderCommand,
-    pub writer: &'a mut WriterLease,
+    pub lease: &'a mut CustodyLease,
     pub handshake: WaitBudget,
     pub cancel: &'a CancelToken,
     pub clock: &'a dyn Clock,
@@ -611,22 +655,22 @@ pub fn launch(
         custody,
         pending_exit: None,
     };
-    if owned.writer.launched {
+    if owned.lease.launched {
         return Err(failure(CustodyError::Fenced, publication));
     }
-    let scope = owned.writer.scope();
+    let scope = owned.lease.scope();
     let requester = owned.command.requester;
     let metadata = match publication.directory.metadata() {
         Ok(metadata) => metadata,
         Err(error) => return Err(failure(error.into(), publication)),
     };
-    owned.writer.reservation.attempt_device = Some(metadata.device);
-    owned.writer.reservation.attempt_inode = Some(metadata.inode);
+    owned.lease.reservation.attempt_device = Some(metadata.device);
+    owned.lease.reservation.attempt_inode = Some(metadata.inode);
     if owned.cancel.is_cancelled() || capture.validate().is_err() {
-        owned.writer.reservation.launch_state = LaunchState::NeverSpawned;
-        owned.writer.reservation.unresolved_cleanup = false;
-        owned.writer.reservation.census_incomplete = false;
-        owned.writer.launched = true;
+        owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
+        owned.lease.reservation.unresolved_cleanup = false;
+        owned.lease.reservation.census_incomplete = false;
+        owned.lease.launched = true;
         let reason = if owned.cancel.is_cancelled() {
             Some(StopReason::ExplicitCancellation)
         } else {
@@ -654,9 +698,9 @@ pub fn launch(
             omitted_warnings: 0,
         };
         let publication_result = write_record(
-            &owned.writer.directory,
+            &owned.lease.directory,
             "reservation.json",
-            &owned.writer.reservation,
+            &owned.lease.reservation,
             PublishMode::Replace,
         )
         .and_then(require_durable)
@@ -680,12 +724,12 @@ pub fn launch(
             pending_exit: Some(Box::new(record)),
         });
     }
-    owned.writer.launched = true;
-    owned.writer.reservation.launch_state = LaunchState::HandingOff;
+    owned.lease.launched = true;
+    owned.lease.reservation.launch_state = LaunchState::HandingOff;
     if let Err(error) = write_record(
-        &owned.writer.directory,
+        &owned.lease.directory,
         "reservation.json",
-        &owned.writer.reservation,
+        &owned.lease.reservation,
         PublishMode::Replace,
     )
     .and_then(require_durable)
@@ -765,7 +809,7 @@ pub enum SettlementEvidence {
     Unresolved,
     NeverSpawned,
     LinuxKernelChildren,
-    DarwinCensusAndWriterLease,
+    DarwinCensusAndCustodyLease,
 }
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
@@ -791,6 +835,28 @@ pub struct ProcessExit {
     pub omitted_warnings: u64,
 }
 impl ProcessExit {
+    /// The observation of a record this guardian has just published durably.
+    pub(crate) fn durable_observation(&self) -> ExitObservation {
+        ExitObservation {
+            publication: PublicationState::Durable,
+            scope: self.scope,
+            termination: self.termination,
+            never_spawned: self.never_spawned,
+            stop_reason: self.stop_reason,
+            delivered_signals: self.delivered_signals.clone(),
+            reaped: self.reaped.clone(),
+            omitted_reaped: self.omitted_reaped,
+            spared: self.spared.clone(),
+            omitted_spared: self.omitted_spared,
+            warnings: self.warnings.clone(),
+            omitted_warnings: self.omitted_warnings,
+            terminal_observed: self.terminal_observed,
+            unresolved_cleanup: self.unresolved_cleanup,
+            settlement_evidence: self.settlement_evidence,
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+        }
+    }
     pub(crate) fn bounded_bytes(&self) -> Result<Vec<u8>> {
         let mut bounded = self.clone();
         loop {
@@ -1003,6 +1069,37 @@ pub fn acquire_recovery(
         reservation,
     })
 }
+/// Writer exclusion over an attempt directory that holds no reservation, launch
+/// summary or exit. Reservations precede every guardian handoff, so none began;
+/// while this lease lives no reservation can be created.
+#[derive(Debug)]
+pub struct Unreserved {
+    _lease: LockGuard,
+}
+/// `None` when any reservation, launch or exit evidence exists; recover those
+/// with [`acquire_recovery`] or [`reattach`].
+pub fn prove_unreserved(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<Option<Unreserved>> {
+    let lease = directory.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget,
+        cancel,
+        clock,
+    )?;
+    for name in ["reservation.json", "launch.json", "process-exit.json"] {
+        match directory.metadata_at(OsStr::new(name), false) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(Unreserved { _lease: lease }))
+}
 fn validate_anchor(directory: &Directory, reservation: &Reservation) -> Result<()> {
     reservation.validate()?;
     let metadata = directory.metadata()?;
@@ -1083,14 +1180,14 @@ struct ReleaseReceipt {
     terminal_digest: provenant_records::FileDigest,
     quarantine_digest: provenant_records::FileDigest,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementArtifact {
     schema_version: u64,
     scope: Scope,
     kind: SettlementKind,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SettlementKind {
     CanonicalTerminal,
@@ -1107,45 +1204,116 @@ impl SettlementCommit {
         quarantine: &Directory,
         custody: LockGuard,
     ) -> Result<Self> {
-        let release: ReleaseReceipt = read_record(receipt, "release.json", RECORD_LIMIT)?;
-        if release.scope != scope {
-            return Err(CustodyError::InvalidRecord);
-        }
-        for (directory, name, digest, expected_terminal) in [
-            (
-                terminal,
-                "terminal-commit.json",
-                release.terminal_digest,
-                true,
-            ),
-            (
-                quarantine,
-                "manifest.json",
-                release.quarantine_digest,
-                false,
-            ),
-        ] {
-            let mut file = directory.open_read(OsStr::new(name))?;
-            let bytes = file.read_bounded(RECORD_LIMIT)?;
-            let artifact: SettlementArtifact = decode_v1(bytes.as_slice(), Limits::CONFIG)
-                .map_err(|_| CustodyError::InvalidRecord)?;
-            if artifact.schema_version != 1
-                || artifact.scope != scope
-                || expected_terminal != matches!(artifact.kind, SettlementKind::CanonicalTerminal)
-                || provenant_records::CanonicalV1::file_digest(&bytes) != digest
-            {
-                return Err(CustodyError::InvalidRecord);
-            }
-            file.sync()?;
-            directory.sync()?;
-        }
-        receipt.open_read(OsStr::new("release.json"))?.sync()?;
-        receipt.sync()?;
+        verify_release(scope, receipt, terminal, quarantine)?;
         Ok(Self {
             scope,
             _custody: custody,
         })
     }
+}
+/// The caller holds the attempt custody lock and the writer lease.
+pub(crate) fn verify_release(
+    scope: Scope,
+    receipt: &Directory,
+    terminal: &Directory,
+    quarantine: &Directory,
+) -> Result<()> {
+    let release: ReleaseReceipt = read_record(receipt, "release.json", RECORD_LIMIT)?;
+    if release.scope != scope {
+        return Err(CustodyError::InvalidRecord);
+    }
+    for (directory, name, digest, expected_terminal) in [
+        (
+            terminal,
+            "terminal-commit.json",
+            release.terminal_digest,
+            true,
+        ),
+        (
+            quarantine,
+            "manifest.json",
+            release.quarantine_digest,
+            false,
+        ),
+    ] {
+        let mut file = directory.open_read(OsStr::new(name))?;
+        let bytes = file.read_bounded(RECORD_LIMIT)?;
+        let artifact: SettlementArtifact =
+            decode_v1(bytes.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
+        if artifact.schema_version != 1
+            || artifact.scope != scope
+            || expected_terminal != matches!(artifact.kind, SettlementKind::CanonicalTerminal)
+            || provenant_records::CanonicalV1::file_digest(&bytes) != digest
+        {
+            return Err(CustodyError::InvalidRecord);
+        }
+        file.sync()?;
+        directory.sync()?;
+    }
+    receipt.open_read(OsStr::new("release.json"))?.sync()?;
+    receipt.sync()?;
+    Ok(())
+}
+/// Clear a verified, proven-absent fence while the writer lease is held.
+/// Publish Run's release attestations for one committed terminal attempt:
+/// `terminal-commit.json`, `quarantine/manifest.json`, then `release.json`
+/// naming both digests. Repeating it with the same scope is idempotent;
+/// conflicting bytes are never replaced.
+pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
+    fn seal(dir: &Directory, name: &str, bytes: &[u8]) -> Result<()> {
+        match dir.atomic_write(OsStr::new(name), ".release-", bytes, PublishMode::NoReplace) {
+            Ok(publication) => require_durable(publication),
+            Err(error) if error.is_exists() => {
+                if dir.read_bounded(OsStr::new(name), RECORD_LIMIT)? != bytes {
+                    return Err(CustodyError::InvalidRecord);
+                }
+                Ok(dir.sync()?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {
+        serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)
+    }
+    let terminal = encode(&SettlementArtifact {
+        schema_version: 1,
+        scope,
+        kind: SettlementKind::CanonicalTerminal,
+    })?;
+    let manifest = encode(&SettlementArtifact {
+        schema_version: 1,
+        scope,
+        kind: SettlementKind::QuarantineManifest,
+    })?;
+    match attempt.mkdir(OsStr::new("quarantine"), 0o700) {
+        Ok(()) => attempt.sync()?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+    seal(attempt, "terminal-commit.json", &terminal)?;
+    seal(&quarantine, "manifest.json", &manifest)?;
+    let release = encode(&ReleaseReceipt {
+        schema_version: 1,
+        scope,
+        terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
+        quarantine_digest: provenant_records::CanonicalV1::file_digest(&manifest),
+    })?;
+    seal(attempt, "release.json", &release)
+}
+pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<()> {
+    require_durable(write_record(
+        directory,
+        "settlement.json",
+        &SettlementJournal {
+            schema_version: 1,
+            scope,
+        },
+        PublishMode::Replace,
+    )?)?;
+    directory.unlink(OsStr::new("reservation.json"))?;
+    directory.sync()?;
+    Ok(())
 }
 impl Recovery {
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
@@ -1190,7 +1358,7 @@ impl Recovery {
     }
 }
 
-impl WriterLease {
+impl CustodyLease {
     pub fn advance_attempt(&mut self, next: Scope) -> Result<()> {
         self.advance_with(next, &SystemProcessObserver)
     }
@@ -1338,17 +1506,7 @@ impl Recovery {
     }
     fn finish_settlement(self, scratch: &mut crate::scratch::Scratch) -> Result<()> {
         scratch.settle()?;
-        require_durable(write_record(
-            &self.directory,
-            "settlement.json",
-            &SettlementJournal {
-                schema_version: 1,
-                scope: self.scope(),
-            },
-            PublishMode::Replace,
-        )?)?;
-        self.directory.unlink(OsStr::new("reservation.json"))?;
-        self.directory.sync()?;
+        clear_reservation(&self.directory, self.scope())?;
         drop(self.lease);
         Ok(())
     }

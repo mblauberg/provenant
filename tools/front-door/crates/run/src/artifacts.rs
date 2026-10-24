@@ -72,27 +72,38 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
         .map_err(|_| RunError::UnsafePath)?;
     Ok(PathWire::from_relative(&path)?)
 }
+pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
+    let mut file = match dir.open_read(OsStr::new(name)) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta = file.metadata()?;
+    if meta.kind != FileKind::Regular
+        || meta.links != 1
+        || meta.mode & 0o077 != 0
+        || meta.uid != provenant_supervisor::fs::effective_uid()
+    {
+        return Err(RunError::UnsafePath);
+    }
+    let bytes = file.read_bounded(limit)?;
+    file.sync()?;
+    dir.sync()?;
+    Ok(Some(bytes))
+}
 pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> Result<()> {
     if content.len() as u64 > limit {
         return Err(RunError::TooLarge { limit });
     }
-    let name = OsStr::new(name);
-    match dir.atomic_write(name, ".run-", content, PublishMode::NoReplace) {
+    match dir.atomic_write(OsStr::new(name), ".run-", content, PublishMode::NoReplace) {
         Ok(Publication::Durable) => Ok(()),
         Ok(Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
             Err(RunError::Publication(sync_error))
         }
         Err(e) if e.is_exists() => {
-            let mut file = dir.open_read(name)?;
-            let meta = file.metadata()?;
-            if meta.links != 1 || meta.mode & 0o077 != 0 {
-                return Err(RunError::UnsafePath);
-            }
-            if file.read_bounded(limit)? != content {
+            if read_sealed(dir, name, limit)?.ok_or(RunError::Conflict)? != content {
                 return Err(RunError::ArtifactMismatch);
             }
-            file.sync()?;
-            dir.sync()?;
             Ok(())
         }
         Err(e) => Err(e.into()),
