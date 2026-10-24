@@ -66,6 +66,7 @@ impl From<run::RunError> for Fail {
         use run::RunError as E;
         let (status, code) = match &error {
             E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
+            E::WorktreeUnregistered(_) => (Status::Refused, "WORKTREE_UNREGISTERED"),
             E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
             E::Validation(_) | E::TooLarge { .. } => (Status::Invalid, "INVALID"),
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),

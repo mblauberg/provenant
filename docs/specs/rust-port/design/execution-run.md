@@ -930,7 +930,11 @@ scheduler daemon. Within that, the lane decided:
 - **Worktrees.** A missing local worktree is `WORKTREE_MISSING` (Fabric
   `worktree_missing`, #1309); a writer without a worktree or a reader with
   one is invalid (#1310). Writer scope is persisted and reverified at launch
-  and terminal publication; primary, foreign and unregistered trees refuse.
+  and terminal publication; primary, foreign and unregistered trees refuse. A
+  Git worktree Provenant never created refuses `WORKTREE_UNREGISTERED` naming
+  `provenant worktree create --base <branch> <branch>` (#1459). A succeeded
+  attempt whose task requested delivery but has no receipt records
+  `not_attempted`, never a bare `delivery: null` (#1458).
 - **Fabric's facade** calls the CLI's shared `submit`, `continue_attempt`,
   cancel and output paths, so Fabric submissions, graph nodes and the CLI
   admit, record and launch identically. Output fetch accepts only the

@@ -46,6 +46,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_list_and_remove_a_managed_worktree",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
+            "dispatch_into_an_unregistered_worktree_names_the_create_command",
         ],
         |name| {
             let result = match name {
@@ -77,6 +78,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
                     merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
+                }
+                "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
+                    dispatch_into_an_unregistered_worktree_names_the_create_command()
                 }
                 _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
             };
@@ -1142,6 +1146,43 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
         assert!(dirty.join("precious").is_file());
         rig.assert_legacy_unchanged()?;
     }
+    Ok(())
+}
+
+fn dispatch_into_an_unregistered_worktree_names_the_create_command() -> Result {
+    let rig = repository()?;
+    git(
+        &rig,
+        &["worktree", "add", "-qb", "foreign", ".worktrees/foreign"],
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "hello")?;
+    let refused = command(
+        &rig,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt path")?,
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/foreign",
+            "--operation-id",
+            "foreign",
+            "--json",
+        ],
+    )?;
+    let value = json(&refused)?;
+    assert_eq!(code(&refused), 1, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "WORKTREE_UNREGISTERED", "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(
+        message.contains("provenant worktree create --base <branch> <branch>"),
+        "{message}"
+    );
     Ok(())
 }
 
