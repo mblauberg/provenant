@@ -49,8 +49,8 @@
     },
     "repair.max_cycles": {
       "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
-      "reader": "skills/deliver/scripts/delivery_validation_common.py REPAIR_BUDGETS (2/4/5/5, fixed)",
-      "effect": "The chair's stopping point for repair cycles; null uses the risk-tier budget. It can only lower the validator's fixed ceiling.",
+      "reader": "skills/deliver/references/contract.md (2/4/5/5, fixed)",
+      "effect": "The chair's stopping point for repair cycles; null uses the risk-tier budget. It can only lower the fixed ceiling.",
       "trade_off": "Lower returns to the user sooner and spends less on repairs, at the cost of the user's attention."
     },
     "council.junior_size": {

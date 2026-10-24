@@ -1,0 +1,518 @@
+//! Workflow leaves: review coverage, receipts and session checkpoints. The edge
+//! gathers owner facts (run attempts, trusted actor, clock) and hands workflow
+//! plain values; request JSON never supplies verified facts or authority.
+use crate::{Globals, RenderMode};
+use clap::{Args, Subcommand};
+use provenant_core::{
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, ProjectId, Roots,
+    UtcMicros, WaitBudget,
+};
+use provenant_records::{CommandError, CommandResult, Outcome, workflow::*};
+use provenant_run::{AttemptReader, ExecutionContext, Request, RunStore};
+use provenant_supervisor::clock::SystemClock;
+use provenant_workflow::{
+    bind::{self, ReviewClaim},
+    coverage::{self, LegBlocker, ReviewContext, Status},
+    receipt::{self, ReceiptInput},
+    risk,
+    session::{HostSessionId, SessionStore},
+    store::{ReceiptStore, SaveContext},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{io, io::Read, path::Path};
+
+const REQUEST_LIMIT: u64 = 256 * 1024;
+const FACT_LIFETIME_SECONDS: u64 = 300;
+const WAIT_SECONDS: u64 = 30;
+
+#[derive(Debug, Subcommand)]
+pub enum Workflow {
+    /// Check bound reviews against the receipt's risk tier.
+    Review(Input),
+    #[command(subcommand)]
+    Receipt(Receipt),
+    #[command(subcommand)]
+    Session(Session),
+}
+#[derive(Debug, Args)]
+pub struct Input {
+    /// Request JSON file, or `-` for standard input.
+    #[arg(long)]
+    pub request: String,
+}
+#[derive(Debug, Subcommand)]
+pub enum Receipt {
+    Show {
+        delivery_id: DeliveryId,
+    },
+    Save {
+        delivery_id: DeliveryId,
+        /// Zero creates the receipt; otherwise the stored revision.
+        #[arg(long)]
+        expected_revision: u64,
+        #[command(flatten)]
+        input: Input,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum Session {
+    Save {
+        session_id: String,
+        /// Markdown checkpoint file, or `-` for standard input.
+        #[arg(long)]
+        file: String,
+    },
+    Show {
+        session_id: String,
+    },
+}
+impl Workflow {
+    pub fn path(&self) -> &'static str {
+        match self {
+            Self::Review(_) => "workflow review",
+            Self::Receipt(Receipt::Show { .. }) => "workflow receipt show",
+            Self::Receipt(Receipt::Save { .. }) => "workflow receipt save",
+            Self::Session(Session::Save { .. }) => "workflow session save",
+            Self::Session(Session::Show { .. }) => "workflow session show",
+        }
+    }
+    fn read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Review(_)
+                | Self::Receipt(Receipt::Show { .. })
+                | Self::Session(Session::Show { .. })
+        )
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{message}")]
+    Refused {
+        code: &'static str,
+        message: String,
+        data: Value,
+    },
+    #[error("not found")]
+    Missing,
+    #[error(transparent)]
+    Context(#[from] crate::fabric::EdgeError),
+    #[error(transparent)]
+    Store(#[from] provenant_workflow::store::StoreError),
+    #[error(transparent)]
+    Session(#[from] provenant_workflow::session::SessionError),
+    #[error(transparent)]
+    Run(#[from] provenant_run::RunError),
+    #[error(transparent)]
+    Time(#[from] provenant_core::TimeError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+fn invalid(message: impl Into<String>) -> Error {
+    Error::Invalid(message.into())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewInput {
+    attempt_id: AttemptId,
+    #[serde(flatten)]
+    claim: ReviewClaim,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockerInput {
+    reference: EvidenceRef,
+    expires_at: UtcMicros,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalInput {
+    actor_id: ActorId,
+    evidence: EvidenceRef,
+}
+impl From<ApprovalInput> for UserApproval {
+    fn from(a: ApprovalInput) -> Self {
+        UserApproval {
+            actor_id: a.actor_id,
+            evidence: a.evidence,
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRequest {
+    delivery_id: DeliveryId,
+    #[serde(default)]
+    reviews: Vec<ReviewInput>,
+    #[serde(default)]
+    blockers: Vec<BlockerInput>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RiskInput {
+    factors: RiskFactors,
+    tier: RiskTier,
+    downgrade_approval: Option<ApprovalInput>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum DecisionInput {
+    Pending {},
+    Accepted {
+        reason: String,
+        user_approval: Option<ApprovalInput>,
+    },
+    Abandoned {
+        reason: String,
+        user_approval: Option<ApprovalInput>,
+    },
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveRequest {
+    subject: Subject,
+    authors: Vec<Author>,
+    risk: RiskInput,
+    #[serde(default)]
+    reviews: Vec<ReviewInput>,
+    #[serde(default)]
+    blockers: Vec<BlockerInput>,
+    decision: DecisionInput,
+}
+
+fn read_input(source: &str) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    if source == "-" {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECONDS);
+        bytes = provenant_supervisor::sys::hook_io::read_stdin(REQUEST_LIMIT as usize, deadline)?;
+    } else {
+        std::fs::File::open(Path::new(source))?
+            .take(REQUEST_LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+    }
+    if bytes.len() as u64 > REQUEST_LIMIT {
+        return Err(invalid("input exceeds 256 KiB"));
+    }
+    Ok(bytes)
+}
+fn request<T: serde::de::DeserializeOwned>(source: &str) -> Result<T, Error> {
+    serde_json::from_slice(&read_input(source)?)
+        .map_err(|e| invalid(format!("invalid request: {e}")))
+}
+
+struct Edge {
+    roots: Roots,
+    project: ProjectId,
+    actor: ActorId,
+    clock: SystemClock,
+    cancel: CancelToken,
+}
+impl Edge {
+    fn budget(&self) -> Result<WaitBudget, Error> {
+        Ok(WaitBudget::cli(self.clock.mono_now(), WAIT_SECONDS)?)
+    }
+    /// Bind each claim to run's verified attempt fact for this project.
+    fn bind(
+        &self,
+        reviews: &[ReviewInput],
+        subject: &Subject,
+        delivery: DeliveryId,
+    ) -> Result<Vec<ReviewFact>, Error> {
+        if reviews.is_empty() {
+            return Ok(vec![]);
+        }
+        let budget = self.budget()?;
+        let call = Request {
+            clock: &self.clock,
+            budget,
+            cancel: &self.cancel,
+        };
+        let store = RunStore::open(
+            &ExecutionContext {
+                state_root: self.roots.state.clone(),
+                project_id: self.project,
+                actor_id: self.actor,
+                read_prompts: false,
+            },
+            &call,
+        )?;
+        let policy = ReviewPolicy::default();
+        reviews
+            .iter()
+            .map(|r| {
+                let attempt = store.attempt(r.attempt_id, &call)?;
+                bind::review_fact(&attempt, &r.claim, subject, delivery, &policy).map_err(|e| {
+                    Error::Refused {
+                        code: "REVIEW_UNBOUND",
+                        message: format!("attempt {}: {e}", r.attempt_id),
+                        data: Value::Null,
+                    }
+                })
+            })
+            .collect()
+    }
+    fn report(
+        &self,
+        receipt: &DeliveryReceipt,
+        facts: &[ReviewFact],
+        blockers: Vec<BlockerInput>,
+    ) -> Result<coverage::ValidationReport, Error> {
+        let blockers: Vec<_> = blockers
+            .into_iter()
+            .map(|b| LegBlocker {
+                reference: b.reference,
+                expires_at: b.expires_at,
+            })
+            .collect();
+        Ok(coverage::check(
+            &ReviewContext {
+                subject: receipt.subject(),
+                authors: receipt.authors(),
+                decision_makers: &[self.actor],
+                risk: receipt.risk().tier(),
+                now: self.clock.wall_now()?,
+                policy: &ReviewPolicy::default(),
+                blockers: &blockers,
+            },
+            facts,
+        ))
+    }
+}
+
+fn execute(
+    cmd: Workflow,
+    globals: &Globals,
+    roots: Roots,
+    home: &Path,
+    cwd: &Path,
+) -> Result<Value, Error> {
+    let _ = globals;
+    let (roots, project, actor) = crate::fabric::identity(roots, home, cwd)?;
+    let edge = Edge {
+        roots,
+        project,
+        actor,
+        clock: SystemClock::new(),
+        cancel: CancelToken::new(),
+    };
+    match cmd {
+        Workflow::Review(input) => {
+            let req: ReviewRequest = request(&input.request)?;
+            let stored = ReceiptStore::new(edge.roots.state.clone(), project, req.delivery_id)
+                .read()?
+                .ok_or(Error::Missing)?;
+            let facts = edge.bind(&req.reviews, stored.subject(), req.delivery_id)?;
+            let report = edge.report(&stored, &facts, req.blockers)?;
+            Ok(serde_json::to_value(report).map_err(|e| invalid(e.to_string()))?)
+        }
+        Workflow::Receipt(Receipt::Show { delivery_id }) => {
+            let stored = ReceiptStore::new(edge.roots.state.clone(), project, delivery_id)
+                .read()?
+                .ok_or(Error::Missing)?;
+            Ok(serde_json::to_value(stored).map_err(|e| invalid(e.to_string()))?)
+        }
+        Workflow::Receipt(Receipt::Save {
+            delivery_id,
+            expected_revision,
+            input,
+        }) => save(
+            &edge,
+            delivery_id,
+            expected_revision,
+            request(&input.request)?,
+        ),
+        Workflow::Session(Session::Save { session_id, file }) => {
+            let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
+            let text = read_input(&file)?;
+            SessionStore::new(edge.roots.state.clone(), project, id).save(
+                &text,
+                edge.budget()?,
+                &edge.cancel,
+                &edge.clock,
+            )?;
+            Ok(serde_json::json!({"saved_bytes": text.len()}))
+        }
+        Workflow::Session(Session::Show { session_id }) => {
+            let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
+            let checkpoint = SessionStore::new(edge.roots.state.clone(), project, id)
+                .read()?
+                .ok_or(Error::Missing)?;
+            Ok(serde_json::to_value(checkpoint).map_err(|e| invalid(e.to_string()))?)
+        }
+    }
+}
+fn save(
+    edge: &Edge,
+    delivery: DeliveryId,
+    expected: u64,
+    req: SaveRequest,
+) -> Result<Value, Error> {
+    let now = edge.clock.wall_now()?;
+    let policy = provenant_records::workflow::RiskPolicy::default();
+    let downgrade: Option<UserApproval> = req.risk.downgrade_approval.map(Into::into);
+    let risk = risk::assess(req.risk.factors, req.risk.tier, &policy, downgrade.as_ref())
+        .map_err(|e| invalid(e.to_string()))?;
+    let mut candidate = receipt::new(
+        ReceiptInput {
+            delivery_id: delivery,
+            project_id: edge.project,
+            subject: req.subject.clone(),
+            authors: req.authors,
+            risk,
+        },
+        now,
+        &policy,
+        &ReviewPolicy::default(),
+        downgrade.as_ref(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let facts = edge.bind(&req.reviews, &req.subject, delivery)?;
+    candidate = candidate
+        .with_review_attempts(facts.iter().map(|f| f.attempt_id).collect())
+        .map_err(|e| invalid(e.to_string()))?;
+    let earliest_blocker = req.blockers.iter().map(|b| b.expires_at).min();
+    let decision_at = edge.clock.wall_now()?;
+    let record = |e: RecordError| invalid(e.to_string());
+    candidate = match req.decision {
+        DecisionInput::Pending {} => candidate,
+        DecisionInput::Accepted {
+            reason,
+            user_approval,
+        } => {
+            let report = edge.report(&candidate, &facts, req.blockers)?;
+            if report.status != Status::Passed {
+                return Err(Error::Refused {
+                    code: "REVIEW_INCOMPLETE",
+                    message: "review coverage does not support acceptance".into(),
+                    data: serde_json::to_value(report).unwrap_or(Value::Null),
+                });
+            }
+            let approval = user_approval.map(UserApproval::from);
+            candidate
+                .with_decision(decision_at, |ctx| {
+                    Decision::accept(ctx, edge.actor, decision_at, reason, approval.as_ref())
+                })
+                .map_err(record)?
+        }
+        DecisionInput::Abandoned {
+            reason,
+            user_approval,
+        } => {
+            let approval = user_approval.map(UserApproval::from);
+            candidate
+                .with_decision(decision_at, |ctx| {
+                    Decision::abandon(ctx, edge.actor, decision_at, reason, approval.as_ref())
+                })
+                .map_err(record)?
+        }
+    };
+    let mut valid_until = now.checked_add(DurationMicros::from_seconds(FACT_LIFETIME_SECONDS)?)?;
+    if let Some(blocker) = earliest_blocker {
+        valid_until = valid_until.min(blocker);
+    }
+    let saved = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery).save(
+        &candidate,
+        expected,
+        SaveContext {
+            subject: &req.subject,
+            valid_until,
+            risk_policy: &policy,
+            downgrade_approval: downgrade.as_ref(),
+        },
+        edge.budget()?,
+        &edge.cancel,
+        &edge.clock,
+    )?;
+    #[derive(Serialize)]
+    struct Saved {
+        receipt: DeliveryReceipt,
+        clock_regression: Option<bool>,
+    }
+    serde_json::to_value(Saved {
+        receipt: saved.receipt,
+        clock_regression: saved.clock_regression.map(|_| true),
+    })
+    .map_err(|e| invalid(e.to_string()))
+}
+
+fn classify(error: &Error) -> (Outcome, &'static str) {
+    use provenant_workflow::store::StoreError as S;
+    match error {
+        Error::Invalid(_) => (Outcome::Invalid, "INVALID"),
+        Error::Refused { code, .. } => (Outcome::Refused, code),
+        Error::Missing => (Outcome::Failed, "MISSING"),
+        Error::Store(S::Conflict { .. } | S::StaleSubject | S::Expired) => {
+            (Outcome::Refused, "CONFLICT")
+        }
+        Error::Store(S::Malformed(_) | S::Version | S::Limit | S::Risk(_)) => {
+            (Outcome::Invalid, "INVALID")
+        }
+        Error::Store(S::Cancelled) => (Outcome::Cancelled, "CANCELLED"),
+        Error::Store(S::Deadline | S::Contention) => (Outcome::Timeout, "TIMEOUT"),
+        Error::Session(provenant_workflow::session::SessionError::TooLarge) => {
+            (Outcome::Invalid, "INVALID")
+        }
+        _ => (Outcome::Error, "IO"),
+    }
+}
+
+pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &Path) -> u8 {
+    let command = cmd.path();
+    let read_only = cmd.read_only();
+    let result = execute(cmd, globals, roots.clone(), home, cwd);
+    let mut out = match result {
+        Ok(data) => CommandResult::new(command, Outcome::Ok, data),
+        Err(error) => {
+            let (status, code) = classify(&error);
+            let data = match &error {
+                Error::Refused { data, .. } => data.clone(),
+                _ => Value::Null,
+            };
+            let mut out = CommandResult::new(command, status, data);
+            out.error = Some(CommandError {
+                code: code.into(),
+                message: error.to_string(),
+                cause: None,
+                repair: None,
+            });
+            out
+        }
+    };
+    // Incomplete or failed coverage is a result, not an error.
+    if command == "workflow review"
+        && out.error.is_none()
+        && out.data.get("status").and_then(Value::as_str) != Some("passed")
+    {
+        out.status = Outcome::Failed;
+    }
+    let human = if out.error.is_none() {
+        serde_json::to_string_pretty(&out.data)
+            .map(|s| format!("{s}\n"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mode = if globals.json {
+        RenderMode::Json
+    } else {
+        RenderMode::Human {
+            text: &human,
+            read_only,
+        }
+    };
+    match crate::render_or_publish(
+        &out,
+        mode,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        |_| Err(io::Error::other("result too large")),
+    ) {
+        Ok(status) => crate::exit_status(&status),
+        Err(_) => 3,
+    }
+}

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Fail when a tracked file still names a retired workflow module, config or
+# template. History lives in design docs, ADRs, research and the installer's
+# legacy list, so those paths are exempt. The scripts/ and tests/ exemptions
+# are temporary until the last Python there is deleted.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+names='delivery_receipt
+delivery_policy_validation
+delivery_run_shape
+delivery_validation_
+validate_delivery
+software_delivery_validation
+reference_evaluation
+reference_runs
+authority_mapping
+delivery_run_invariants
+review_ladder
+review_panel
+review_terminal
+run_gates
+bind_merged_delivery
+checkpoint_run
+RUN.template
+delivery-profiles
+delivery-profile-scenarios
+security-evidence.json
+skills/_shared'
+hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
+  ':(exclude)docs/specs/rust-port/design' ':(exclude)docs/adr' \
+  ':(exclude)docs/research' ':(exclude)assets/install/legacy.toml' \
+  ':(exclude)scripts' ':(exclude)tests' \
+  ':(exclude)docs/specs/rust-port/README.md' ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
+if [ -n "$hits" ]; then
+  printf '%s\n' "$hits"
+  echo "check-retired-names: retired names above must be removed" >&2
+  exit 1
+fi

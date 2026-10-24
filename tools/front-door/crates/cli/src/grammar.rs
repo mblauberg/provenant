@@ -61,6 +61,8 @@ pub enum Command {
     #[command(subcommand)]
     Worktree(Worktree),
     #[command(subcommand)]
+    Workflow(crate::workflow::Workflow),
+    #[command(subcommand)]
     Check(Check),
     #[command(subcommand)]
     Hook(Hook),

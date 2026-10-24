@@ -3,8 +3,8 @@ use crate::{
     db::{decode, sql_int},
     *,
 };
-use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
-use provenant_records::{AttemptFact, OutputRef};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
+use provenant_records::{AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
@@ -61,6 +61,26 @@ impl Iterator for Attempts<'_> {
         Some(fact)
     }
 }
+/// Reviewer attribution: the owning actor and the provider family the
+/// observed route reports, or `Unknown` without an observed provider.
+fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Option<ReviewerFact> {
+    let actor_id = owner?;
+    let family = observed
+        .and_then(|r| r.provider.as_deref())
+        .filter(|p| !p.is_empty())
+        .map(str::to_ascii_lowercase);
+    Some(ReviewerFact {
+        provenance: if family.is_some() {
+            ReviewerProvenance::Observed
+        } else {
+            ReviewerProvenance::Unknown
+        },
+        actor_id,
+        family,
+        model: observed.and_then(|r| r.model.clone()),
+        outcome: None,
+    })
+}
 impl AttemptReader for RunStore {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact> {
         let r = self.record(id, call)?;
@@ -91,7 +111,7 @@ impl AttemptReader for RunStore {
             resolved_route: r.resolved_route.map(Into::into),
             usage: r.usage.into(),
             output_paths: vec![output.path.clone()],
-            reviewer: None,
+            reviewer: reviewer_fact(r.verified_owner, r.observed_route.as_ref()),
             delivery_id: r.delivery_id,
             subject: r.subject,
             head: r.head,
