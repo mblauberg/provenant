@@ -1170,6 +1170,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
     let home = fs::canonicalize(&home)?;
     let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
     let mut accounts = String::new();
+    let mut claude_key = String::new();
     for (adapter, label, directory) in [
         ("codex", "default", home.join(".codex")),
         ("claude", "fixture", home.join(".claude-fixture")),
@@ -1183,6 +1184,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &directory,
             &rig.root,
         )?;
+        if adapter == "claude" {
+            claude_key.clone_from(&key);
+        }
         accounts.push_str(&format!(
             "[domains.accounts.entries.{adapter}-{label}]\nadapter={adapter:?}\nlabel={label:?}\nkey={key:?}\ndirectory={:?}\n",
             directory.to_str().ok_or("account path")?
@@ -1272,7 +1276,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
             fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
             fs::write(&poison, b"partial setup")?;
         }
-        let token = provenant_providers::claude::refresh_if_expiring(
+        // Bound to the registered account, as the host loader binds it.
+        let token = provenant_providers::claude::refresh_for_account(
             &FixtureCredential,
             &provenant_providers::claude::Login {
                 executable: &executable,
@@ -1281,9 +1286,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 config_dir: &home.join(".claude-fixture"),
                 scratch: &paths.scratch,
             },
+            &provenant_providers::identity::RegisteredAccount::new(
+                "claude",
+                &claude_key,
+                home.join(".claude-fixture"),
+            )?,
             &|| 1000,
             2000,
-            None,
         )?;
         let mut launch = provenant_cli::run::prepare_fixture(
             &registry,
@@ -1292,7 +1301,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &paths,
             &executable,
             Some(&token),
-        )?;
+        )
+        .map_err(|e| format!("prepare {adapter} writer={writer}: {e}"))?;
         assert!(
             launch
                 .environment
@@ -1467,7 +1477,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &attempt,
             roots.state.as_path(),
             frames.as_bytes(),
-        )?;
+            &config,
+        )
+        .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
     Ok(())
 }
@@ -1528,7 +1540,9 @@ pub(crate) fn lane_provider() -> Result {
     options.stdin = Some(&input);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
-    let output = SystemExecutor::new(1)?.execute(options)?;
+    let output = SystemExecutor::new(1)?
+        .execute(options)
+        .map_err(|e| format!("MCP spawn: {e:?}"))?;
     std::io::stdout().write_all(&output.stdout.bytes)?;
     std::io::stderr().write_all(&output.stderr.bytes)?;
     if code(&output) != 0 {
@@ -1587,10 +1601,11 @@ fn verify_lane_profile(
     attempt: &Path,
     state: &Path,
     frames: &[u8],
+    config: &dyn Fn(u8) -> String,
 ) -> Result {
     use provenant_confinement::permissions::{
-        AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
-        required_anchors, system_backend,
+        AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
+        prepare_writer_directories, required_anchors, system_backend,
     };
     use provenant_supervisor::{
         exec::{ExecOptions, StreamPolicy, SystemExecutor},
@@ -1623,6 +1638,12 @@ fn verify_lane_profile(
         .writer
         .as_ref()
         .map(|w| (&w.worktree, &w.branch));
+    // Run creates the writer's ref parents and lane cache under custody.
+    if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+        (writer, &confinement.plan.permissions().mode)
+    {
+        prepare_writer_directories(&LocalFs, worktree, branch, authority, &confinement.home)?;
+    }
     let directories = required_anchors(confinement.plan.permissions(), profile, writer)
         .iter()
         .map(|path| AnchoredDirectory::open_canonical(&LocalFs, path))
@@ -1679,20 +1700,14 @@ fn verify_lane_profile(
         }
     };
     let before = run_count()?;
-    fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.max_depth'=2\n",
-    )?;
+    fs::write(state.join("config.toml"), config(2))?;
     let nested_frames =
         String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
     let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
     options.env = Some(&launch.environment);
     options.stdin = Some(nested_frames.as_bytes());
     let nested = executor.execute(options)?;
-    fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
-    )?;
+    fs::write(state.join("config.toml"), config(1))?;
     assert_eq!(
         code(&nested),
         0,
@@ -1748,16 +1763,26 @@ struct FixtureCredential;
 impl Executor for FixtureCredential {
     fn execute(
         &self,
-        _: provenant_supervisor::exec::ExecOptions<'_>,
+        options: provenant_supervisor::exec::ExecOptions<'_>,
     ) -> std::result::Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+        // `auth status` answers the identity check; anything else reads the credential.
+        let bytes: &[u8] = if options.argv.iter().any(|arg| arg == "status") {
+            br#"{"loggedIn":true,"email":"fixture@example.test"}"#
+        } else {
+            br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#
+        };
         Ok(ExecOutcome {
             termination: provenant_supervisor::exec::Termination::Exit(0),
             stdout: provenant_supervisor::exec::CapturedStream {
-                bytes: br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#.to_vec(),
+                bytes: bytes.to_vec(),
                 ..Default::default()
             },
-            stderr: Default::default(), timed_out: false, drain_truncated: false,
-            overflow_stopped: false, cancelled: false, elapsed_micros: 0,
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
         })
     }
 }
