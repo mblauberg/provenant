@@ -3,6 +3,16 @@ import Foundation
 /// A projection of the quota crate's versioned report for the menu-bar views.
 struct QuotaReport {
     static let schemaVersion: UInt64 = 1
+    enum Status: String, Decodable {
+        case available
+        case creditOnly = "credit_only"
+        case exhausted
+        case stale
+        case unknown
+        case authRequired = "auth_required"
+        case unsupported
+    }
+
     let accounts: [Account]
     let generatedAt: Date
     let nextDueAt: Date?
@@ -14,7 +24,8 @@ struct QuotaReport {
 
     struct Coverage { let total, known: UInt64 }
     struct Source {
-        let adapter, status: String
+        let adapter: String
+        let status: Status
         let error: String?
         let nextDueAt: Date?
         var title: String { QuotaReport.providerName(adapter) }
@@ -27,7 +38,7 @@ struct QuotaReport {
         let fingerprint, creditBalance, note: String?
         let active: Bool?
         let priority: Double?
-        let status: String
+        let status: Status
         let providerName, displayName, planLabel: String?
         let backAt, observedAt: Date?
         let windows: [Window]
@@ -39,8 +50,8 @@ struct QuotaReport {
         private let hasSnapshot: Bool
 
         var id: String { "\(provider)/\(accountKey)" }
-        var hasReading: Bool { hasSnapshot && ["available", "credit_only", "exhausted", "stale"].contains(status) }
-        var requiresAuth: Bool { status == "auth_required" }
+        var hasReading: Bool { hasSnapshot && [.available, .creditOnly, .exhausted, .stale].contains(status) }
+        var requiresAuth: Bool { status == .authRequired }
         var next: Schedule? { schedule }
         var credits: [Credit] { [] }
         var statusTitle: String {
@@ -48,15 +59,14 @@ struct QuotaReport {
         }
 
         fileprivate init(_ row: QuotaWireAccount, generatedAt: Date) throws {
-            let rowStatus = row.status
             let adapter = row.account.adapter
             provider = adapter
             account = row.account.label
             accountKey = row.account.accountKey
-            guard QuotaReport.validStatuses.contains(rowStatus) else {
+            guard let status = Status(rawValue: row.status) else {
                 throw QuotaReport.invalid("unknown account status")
             }
-            status = rowStatus
+            self.status = status
             error = row.error
             hasSnapshot = row.snapshot != nil
             providerName = QuotaReport.providerName(provider)
@@ -70,7 +80,7 @@ struct QuotaReport {
             creditBalance = details?.creditBalance
             note = details?.note
             unreported = nil
-            drawingCredits = rowStatus == "credit_only"
+            drawingCredits = status == .creditOnly
             creditBurnPerHour = nil
             banked = details?.resetCredits.map { count in
                 Resets(available: Int(clamping: count),
@@ -90,7 +100,7 @@ struct QuotaReport {
             }
             windows = mappedWindows
             let binding = QuotaReport.Account.binding(in: mappedWindows, now: generatedAt)
-            backAt = rowStatus == "exhausted" && binding?.pace.state == "exhausted" ? binding?.resetAt : nil
+            backAt = status == .exhausted && binding?.pace.state == "exhausted" ? binding?.resetAt : nil
             schedule = row.nextDueUnixSeconds.map { Schedule(nextDueAt: QuotaReport.date($0), reason: nil) }
         }
     }
@@ -122,7 +132,6 @@ struct QuotaReport {
     }
     struct Pace { let state: String; let runsOutAt: Date?; let summary: String? }
 
-    private static let validStatuses: Set<String> = ["available", "credit_only", "exhausted", "stale", "unknown", "auth_required", "unsupported"]
     private static func date(_ seconds: Int64) -> Date { Date(timeIntervalSince1970: Double(seconds)) }
     private static func providerName(_ adapter: String) -> String {
         switch adapter {
@@ -134,14 +143,15 @@ struct QuotaReport {
         default: Fmt.human(adapter)
         }
     }
-    private static func statusTitle(_ status: String) -> String {
+    private static func statusTitle(_ status: Status) -> String {
         switch status {
-        case "stale": "Stale"
-        case "unknown": "Unknown"
-        case "auth_required": "Authentication required"
-        case "unsupported": "Unsupported"
-        case "credit_only": "Exhausted, drawing on credits"
-        default: Fmt.human(status)
+        case .available: "Available"
+        case .creditOnly: "Exhausted, drawing on credits"
+        case .exhausted: "Exhausted"
+        case .stale: "Stale"
+        case .unknown: "Unknown"
+        case .authRequired: "Authentication required"
+        case .unsupported: "Unsupported"
         }
     }
 
@@ -242,8 +252,10 @@ struct QuotaReport {
         let generatedAt = date(wire.generatedUnixSeconds)
         let accounts = try wire.accounts.map { try Account($0, generatedAt: generatedAt) }
         let sources = try (wire.sources ?? []).map { source -> Source in
-            guard validStatuses.contains(source.status) else { throw invalid("unknown source status") }
-            return Source(adapter: source.adapter, status: source.status, error: source.error,
+            guard let status = Status(rawValue: source.status) else {
+                throw invalid("unknown source status")
+            }
+            return Source(adapter: source.adapter, status: status, error: source.error,
                           nextDueAt: source.nextDueUnixSeconds.map(date))
         }
         return QuotaReport(accounts: accounts, generatedAt: generatedAt,
@@ -260,7 +272,7 @@ struct QuotaReport {
     }
     func top(now: Date) -> (account: Account, window: Window)? {
         accounts.filter { $0.rank(now) == 0 }.compactMap { account in account.binding(now: now).map { (account, $0) } }
-            .max { $0.window.usedPercent! < $1.window.usedPercent! }
+            .max { ($0.window.usedPercent ?? -1) < ($1.window.usedPercent ?? -1) }
     }
     func featured(now: Date) -> (account: Account, window: Window)? {
         top(now: now).map { ($0.account, $0.account.display(now: now, alert: alertPercent) ?? $0.window) }
@@ -315,7 +327,12 @@ private struct QuotaWireWindow: Decodable {
     let resetsUnixSeconds: Int64?
     let windowSeconds: UInt64?
 }
-private struct QuotaWireSource: Decodable { let adapter, status: String; let error: String?; let nextDueUnixSeconds: Int64? }
+private struct QuotaWireSource: Decodable {
+    let adapter: String
+    let status: String
+    let error: String?
+    let nextDueUnixSeconds: Int64?
+}
 
 extension QuotaReport.Account {
     typealias Window = QuotaReport.Window
@@ -326,18 +343,21 @@ extension QuotaReport.Account {
     }
     static func worst(_ windows: [Window]) -> Window? {
         windows.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
-            ?? windows.max { $0.usedPercent! < $1.usedPercent! }
+            ?? windows.max { ($0.usedPercent ?? -1) < ($1.usedPercent ?? -1) }
     }
     static func shown(_ windows: [Window], alert: Double) -> Window? {
         if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
-        let longest = windows.max { ($0.windowMinutes ?? 0, $0.usedPercent!) < ($1.windowMinutes ?? 0, $1.usedPercent!) }
-        let alerts = windows.filter { $0.usedPercent! >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
-        return alerts.max { $0.usedPercent! < $1.usedPercent! } ?? longest
+        let windowsWithUsage = windows.filter { $0.usedPercent != nil }
+        let longest = windowsWithUsage.max {
+            ($0.windowMinutes ?? 0, $0.usedPercent ?? 0) < ($1.windowMinutes ?? 0, $1.usedPercent ?? 0)
+        }
+        let alerts = windowsWithUsage.filter { ($0.usedPercent ?? 0) >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
+        return alerts.max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } ?? longest
     }
     fileprivate static func binding(in windows: [Window], now: Date) -> Window? {
         let worsts = Self.groups(in: windows).compactMap { Self.worst(Self.current($0.windows, now: now)) }
         let available = worsts.filter { $0.pace.state != "exhausted" }
-        if let binding = available.max(by: { $0.usedPercent! < $1.usedPercent! }) { return binding }
+        if let binding = available.max(by: { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) }) { return binding }
         return worsts.min(by: { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) })
     }
     private static func groups(in windows: [Window]) -> [(pool: String?, windows: [Window])] {
@@ -378,10 +398,10 @@ extension QuotaReport.Account {
     func isDrawing(now _: Date) -> Bool { drawingCredits == true }
     func rank(_ now: Date) -> Int {
         switch status {
-        case "auth_required": 4
-        case "exhausted": 3
-        case "credit_only": 1
-        case "available": 0
+        case .authRequired: 4
+        case .exhausted: 3
+        case .creditOnly: 1
+        case .available: 0
         default: 2
         }
     }
@@ -454,7 +474,8 @@ enum Fmt {
     /// A reset in a row, after its symbol: "4h 40m" within a day, otherwise "Thu 21 Mar".
     static func soon(_ date: Date?, now: Date) -> String? {
         guard let date, date > now else { return nil }
-        return date.timeIntervalSince(now) < 86_400 ? until(date, now: now)! : self.date(date)
+        if date.timeIntervalSince(now) < 86_400, let remaining = until(date, now: now) { return remaining }
+        return self.date(date)
     }
 
     /// "Weekly all", never "weekly_all:2": no underscores or colons reach the reader.
@@ -485,14 +506,16 @@ enum Fmt {
     /// A reset is a fact: "resets in 4h 40m" within a day, otherwise "resets Tue 19 Mar".
     static func resets(_ date: Date?, now: Date) -> String? {
         guard let date, date > now else { return nil }
-        return date.timeIntervalSince(now) < 86_400 ? "resets in \(until(date, now: now)!)" : "resets \(self.date(date))"
+        if date.timeIntervalSince(now) < 86_400, let remaining = until(date, now: now) { return "resets in \(remaining)" }
+        return "resets \(self.date(date))"
     }
 
     /// "back in 4h 40m", "back Mon 9 am", or "back since Mon 9 am" once it has passed.
     static func back(_ date: Date?, now: Date) -> String {
         guard let date else { return "reset time unknown" }
         if date <= now { return "back since \(moment(date, now: now))" }
-        return date.timeIntervalSince(now) < 86_400 ? "back in \(until(date, now: now)!)" : "back \(moment(date, now: now))"
+        if date.timeIntervalSince(now) < 86_400, let remaining = until(date, now: now) { return "back in \(remaining)" }
+        return "back \(moment(date, now: now))"
     }
 
     /// The allowance estimate and reserve runway, only when allowance would be spent before reset.
@@ -500,7 +523,9 @@ enum Fmt {
         guard window.pace.state != "exhausted", let out = window.pace.runsOutAt, out > now,
               window.resetAt.map({ out < $0 }) ?? true else { return nil }
         if window.pace.state == "ahead_of_pace", let summary = window.pace.summary { return sentence(summary) }
-        if out.timeIntervalSince(now) < 86_400 { return "At this pace, allowance lasts about \(until(out, now: now)!)" }
+        if out.timeIntervalSince(now) < 86_400, let remaining = until(out, now: now) {
+            return "At this pace, allowance lasts about \(remaining)"
+        }
         let day = abs(out.timeIntervalSince(now)) < 6.5 * 86_400 ? weekday(out) : date(out)
         return "At this pace, allowance lasts until \(day)"
     }

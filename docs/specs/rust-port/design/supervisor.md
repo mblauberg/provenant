@@ -374,7 +374,7 @@ runs/<RunId>/
   custody.lock
   children/{journal.lock,<ChildId>.json}
   attempts/<AttemptId>/
-    prompt.txt                 # run-owned immutable exact provider prompt
+    prompt.txt                 # run-owned immutable submitted prompt
     result.md                  # run-owned sealed result, including failure
     custody.lock
     launch.json                # redacted summary

@@ -13,6 +13,7 @@ workspace = true
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-confinement = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

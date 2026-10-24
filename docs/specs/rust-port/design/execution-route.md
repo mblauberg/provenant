@@ -206,6 +206,15 @@ auth-required and unsupported. Refusals remain model/account-scoped unless wire
 evidence proves wider scope; independent allowance pools do not exhaust each
 other. A newer comparable observation or reset expires only that scoped refusal;
 unknown data preserves it. Unknown reset has a one-hour backoff. No pin bypass.
+OpenCode `provider.quota` decodes its structured response body (JSON or a JSON
+string); `FreeUsageLimitError` supplies the shared `opencode-free` pool and its
+provider message, without searching stderr. The admission rule matches this
+pool across models only for the same account identity and a supplied pool
+binding. Production launch still needs to persist these events and supply those
+bindings. The quota tick's macOS Claude refresh calls the shared provider helper
+from the binary composition edge; quota itself cannot import providers because
+providers already depends on quota. The credential-file path on other platforms
+remains separate because that helper currently reads Keychain only.
 
 Tick TTLs (timer/panel seconds): Claude 300/120, Codex 900/300, Cursor 1800/600,
 Agy 1200/900. Manual has a 30 s floor and respects backoff. Battery doubles

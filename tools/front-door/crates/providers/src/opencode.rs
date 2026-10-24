@@ -123,9 +123,68 @@ enum Event {
         session: String,
         part: Finish,
     },
-    Error,
+    Error {
+        error: Failure,
+    },
+    #[serde(rename = "provider.quota")]
+    Quota {
+        message: Option<String>,
+        response: Option<Response>,
+    },
     #[serde(other)]
     Other,
+}
+#[derive(Deserialize)]
+struct Failure {
+    #[serde(rename = "type")]
+    kind: String,
+    message: Option<String>,
+    response: Option<Response>,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Response {
+    Body { body: Option<Body> },
+    Other(serde::de::IgnoredAny),
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Body {
+    Json(ErrorBody),
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+#[derive(Deserialize)]
+struct ErrorBody {
+    error: LimitError,
+}
+#[derive(Deserialize)]
+struct LimitError {
+    #[serde(default, rename = "type", alias = "name")]
+    kind: String,
+    message: Option<String>,
+}
+fn quota(message: Option<String>, response: Option<Response>) -> E {
+    let body = response
+        .and_then(|response| match response {
+            Response::Body { body } => body,
+            Response::Other(_) => None,
+        })
+        .and_then(|body| match body {
+            Body::Json(body) => Some(body),
+            Body::Text(text) => wire::<ErrorBody>(text.as_bytes()).ok(),
+            Body::Other(_) => None,
+        });
+    let pool = body
+        .as_ref()
+        .filter(|body| body.error.kind == "FreeUsageLimitError")
+        .map(|_| "opencode-free".into());
+    let message = body
+        .and_then(|body| body.error.message)
+        .or(message)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "provider quota exhausted".into());
+    E::QuotaLimited { message, pool }
 }
 #[derive(Deserialize)]
 struct Text {
@@ -145,7 +204,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
-        Event::Error => vec![E::Error],
+        Event::Quota { message, response } => vec![quota(message, response)],
+        Event::Error { error } if error.kind == "provider.quota" => {
+            vec![quota(error.message, error.response)]
+        }
+        Event::Error { .. } => vec![E::Error],
         _ => vec![],
     })
 }

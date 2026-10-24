@@ -45,8 +45,6 @@ pub struct SubmittedTask {
     #[serde(default)]
     pub worktree: Option<String>,
     pub prompt: String,
-    #[serde(default)]
-    pub inputs: Vec<ArtifactRef>,
     pub route: RoutePreference,
     pub timeout_ms: u64,
     #[serde(default)]

@@ -1372,6 +1372,56 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
 }
 
 #[test]
+fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
+    // Synthetic protocol regression from #1216, not an activation recording.
+    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
+    for wrapped in [false, true] {
+        for string_body in [false, true] {
+            let body =
+                serde_json::json!({"error":{"type":"FreeUsageLimitError","message":message}});
+            let body = if string_body {
+                serde_json::Value::String(body.to_string())
+            } else {
+                body
+            };
+            let event =
+                serde_json::json!({"type":"provider.quota","status":429,"response":{"body":body}});
+            let event = if wrapped {
+                serde_json::json!({"type":"error","error":event})
+            } else {
+                event
+            };
+            let (events, outcome) = replay(
+                &opencode::OpenCode,
+                &(event.to_string() + "\n"),
+                ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )?;
+            assert_eq!(outcome.status(), OutcomeStatus::Refused);
+            assert!(events.contains(&ProviderEvent::QuotaLimited {
+                message: message.into(),
+                pool: Some("opencode-free".into())
+            }));
+        }
+    }
+    for response in [
+        serde_json::json!({}),
+        serde_json::json!({"body":{"error":{"code":429,"message":"provider quota message"}}}),
+    ] {
+        let event = serde_json::json!({"type":"provider.quota","message":"provider quota message","response":response});
+        let (events, outcome) = replay(&opencode::OpenCode, &(event.to_string() + "\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(events.contains(&ProviderEvent::QuotaLimited {
+            message: "provider quota message".into(),
+            pool: None
+        }));
+    }
+    Ok(())
+}
+
+#[test]
 fn selected_accounts_control_provider_environment_and_exact_authentication_grants()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
