@@ -181,13 +181,19 @@ pub fn roots(
     assets: &Path,
     project: &Path,
 ) -> Result<Roots, RootError> {
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
-    if !home.is_absolute() {
-        return Err(RootError::Home);
-    }
+    let home = home()?;
     let mut inputs = RootInputs::new(home, assets.into());
     inputs.state_dir = globals.state_dir.clone();
     inputs.environment_state_dir = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
     inputs.workspaces.push(project.into());
     Ok(inputs.resolve(&Resolver)?)
+}
+
+/// Canonical home used by root selection and home-relative Fabric identity.
+pub fn home() -> Result<PathBuf, RootError> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
+    if !home.is_absolute() {
+        return Err(RootError::Home);
+    }
+    Ok(fs::canonicalize(home)?)
 }

@@ -1,7 +1,7 @@
 use crate::*;
 use provenant_core::{CancelToken, Clock, DurationMicros, StateRoot, WaitBudget};
 use provenant_supervisor::fs::{Directory, FileKind};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
     marker::PhantomData,
@@ -16,6 +16,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/002-import-skips.sql"),
     include_str!("migrations/003-claims-landing.sql"),
     include_str!("migrations/004-claim-lookup.sql"),
+    include_str!("migrations/005-coordination-operations.sql"),
 ];
 fn schema_version(db: &Connection) -> Result<usize> {
     // One statement reads both values from one snapshot, so a concurrent first
@@ -197,8 +198,11 @@ impl Store {
     pub(crate) fn write<T>(
         &self,
         request: &Request<'_>,
-        action: impl Fn(&Transaction<'_>) -> Result<T>,
+        action: impl Fn(&Connection) -> Result<T>,
     ) -> Result<T> {
+        if !self.db.is_autocommit() {
+            return action(&self.db);
+        }
         request.retry(|| {
             let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             let value = action(&tx)?;

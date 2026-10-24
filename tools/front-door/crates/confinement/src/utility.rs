@@ -227,6 +227,12 @@ pub struct UtilityRuntime {
     home: PrivateHome,
 }
 
+/// Canonical project location and its verified Git origin, when present.
+pub struct DiscoveredProject {
+    pub location: provenant_config::ProjectLocation,
+    pub repository: Option<VerifiedRepo>,
+}
+
 impl UtilityRuntime {
     pub fn new(
         fs: Arc<dyn SafeFs>,
@@ -265,6 +271,41 @@ impl UtilityRuntime {
                 object_format,
                 attribute_source,
             })
+        })
+    }
+
+    /// One project-discovery owner for CLI/runtime callers. A Git marker is
+    /// verified by open_repo; malformed metadata never falls back to non-Git.
+    /// Non-Git workspaces bind their canonical directory, without a Git parser.
+    pub fn project_location(
+        &self,
+        executor: &dyn Executor,
+        cwd: &Path,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<DiscoveredProject, UtilityError> {
+        let cwd = canonicalize(cwd)?;
+        for ancestor in cwd.ancestors() {
+            let directory = self.fs.open_anchor(ancestor)?;
+            match directory.metadata_at(OsStr::new(".git"), false) {
+                Ok(_) => {
+                    let repo = self.open_repo(executor, ancestor, budget, cancel)?;
+                    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
+                        .map_err(|_| UtilityError::InvalidOperationValue)?;
+                    return Ok(DiscoveredProject {
+                        location,
+                        repository: Some(repo),
+                    });
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let location = provenant_config::ProjectLocation::new(cwd)
+            .map_err(|_| UtilityError::InvalidOperationValue)?;
+        Ok(DiscoveredProject {
+            location,
+            repository: None,
         })
     }
 

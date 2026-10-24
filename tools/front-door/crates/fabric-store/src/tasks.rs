@@ -80,7 +80,7 @@ impl std::fmt::Debug for TaskFence {
             .finish_non_exhaustive()
     }
 }
-pub(crate) fn insert_task(tx: &Transaction<'_>, task: &Task) -> Result<bool> {
+pub(crate) fn insert_task(tx: &rusqlite::Connection, task: &Task) -> Result<bool> {
     text(&task.objective, "objective")?;
     if let Some(note) = &task.note {
         text(note, "note")?;
@@ -140,7 +140,7 @@ fn load(db: &rusqlite::Connection, project: ProjectId, id: TaskId) -> Result<Tas
     Ok(task)
 }
 fn fenced(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     project: ProjectId,
     fence: &TaskFence,
     at: WallTime,
@@ -162,7 +162,7 @@ fn fenced(
     }
     Ok(task)
 }
-fn save(tx: &Transaction<'_>, task: &Task, token: Option<&[u8]>) -> Result<()> {
+fn save(tx: &rusqlite::Connection, task: &Task, token: Option<&[u8]>) -> Result<()> {
     let generation =
         i64::try_from(task.generation).map_err(|_| Error::Invalid("task generation"))?;
     tx.execute("UPDATE tasks SET state=?,generation=?,owner=?,token=?,expires=?,record=? WHERE project=? AND id=?",params![task.state.sql(),generation,task.owner.map(|id|id.to_string()),token,task.expires_at.map(|t|t.as_micros()),encode(task)?,task.project.to_string(),task.id.to_string()])?;

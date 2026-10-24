@@ -7,6 +7,7 @@ mod events;
 mod import;
 mod landing;
 mod messages;
+mod operations;
 mod tasks;
 
 pub use claims::*;
@@ -19,7 +20,7 @@ pub use tasks::*;
 
 use provenant_core::{ActorId, ProjectId, WallTime};
 use provenant_records::{CanonicalV1, Limits};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub type Result<T> = std::result::Result<T, Error>;

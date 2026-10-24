@@ -83,7 +83,8 @@ restart; page further results with its cursor. Read retained events with
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Registered worktrees share the
 project, so the waiter works from any cwd in that project. Start inbox triage
-with `fabric_inbox{digest:true}`; fetch selected bodies by message ID.
+with `provenant fabric mail read --after SEQ --limit N`; advance its read cursor
+with `provenant fabric mail mark-read SEQ --operation-id ID` after processing.
 
 ## Peers and relay discipline
 
