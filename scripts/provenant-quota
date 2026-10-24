@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIRECTORY="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIRECTORY/lib/harness-python.sh"
-run_stdlib "$SCRIPT_DIRECTORY/provider_quota.py" "$@"

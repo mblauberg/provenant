@@ -1,9 +1,0 @@
-# zizmor configuration for the CI workflow security lint job.
-rules:
-  adhoc-packages:
-    # The composite action pins npm with a version-exact global install and
-    # then verifies the installed version; the npm toolchain pin is part of
-    # the CI contract pinned by tests/test_ci_repository_assurance_policy.py
-    # and predates this configuration.
-    ignore:
-      - action.yml
