@@ -8,6 +8,29 @@ use support::{Result, TestRig, code};
 
 fn scenario(name: &str) -> Result<u8> {
     match name {
+        "exec" => {
+            // Codex stub: both children must hold a connection before either
+            // can finish. Only fixture auth files are read.
+            use std::net::TcpStream;
+            let mut address = String::new();
+            io::stdin().read_to_string(&mut address)?;
+            let home = std::path::PathBuf::from(
+                std::env::var_os("CODEX_HOME").ok_or("missing CODEX_HOME")?,
+            );
+            let identity = std::fs::read(home.join("auth.json"))?;
+            let mut peer = TcpStream::connect(address.trim())?;
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+            peer.write_all(&identity)?;
+            peer.write_all(b"\n")?;
+            let mut release = [0];
+            peer.read_exact(&mut release)?;
+            if release != *b"R" {
+                return Err("invalid account barrier".into());
+            }
+            io::stdout().write_all(&identity)?;
+            std::fs::write(home.join("stub-state"), &identity)?;
+        }
+
         "malformed" => io::stdout().write_all(b"{malformed}\n")?,
         "truncated" => io::stdout().write_all(b"{\"type\":\"result\"")?,
         "input-required" => io::stdout().write_all(b"{\"state\":\"input_required\"}\n")?,
@@ -136,12 +159,196 @@ fn suite() -> Result {
     );
     rig.assert_legacy_unchanged()
 }
+fn account_placement() -> Result {
+    use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_providers::{
+        Adapter, PrepareInput, Prompt, SetupStep, Stdin,
+        codex::Codex,
+        identity::{Accounts, RegisteredAccount},
+    };
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor};
+    use std::{
+        ffi::OsStr,
+        fs,
+        io::BufRead,
+        net::{TcpListener, TcpStream},
+        time::Duration,
+    };
+    let rig = TestRig::new()?;
+    let executable = std::env::current_exe()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let mut entries = Vec::new();
+    for key in ["one", "two"] {
+        let dir = rig.home.join(format!(".codex-{key}"));
+        fs::create_dir(&dir)?;
+        fs::write(dir.join("auth.json"), key)?;
+        entries.push(RegisteredAccount::new("codex", key, dir)?);
+    }
+    let accounts = Accounts::new(entries)?;
+    let mut specs = Vec::new();
+    for key in ["one", "two"] {
+        let scratch = rig.root.join(format!("scratch-{key}"));
+        let state = rig.root.join(format!("state-{key}"));
+        fs::create_dir(&scratch)?;
+        fs::create_dir(&state)?;
+        let grant = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
+                [7; 16],
+            )),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: grant(scratch),
+                private_state: Some(grant(state.clone())),
+                read_roots: vec![grant(rig.project.clone())],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: Some("login".into()),
+                include_continuation: false,
+                network: vec![],
+                capabilities: vec![],
+                nested_confinement: false,
+            },
+        })?;
+        let route = ResolvedRoute {
+            adapter: "codex".into(),
+            model: "fixture".into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: Some(key.into()),
+            host: "fixture".into(),
+            alternatives: Default::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: i64::MAX,
+            },
+            confidentiality: RouteConfidentiality {
+                evidence_ref: "fixture".into(),
+            },
+        };
+        let prompt = Prompt::new(address.to_string());
+        let account = accounts.selected(&route)?;
+        let spec = Codex.prepare(PrepareInput {
+            route: &route,
+            confined: &plan,
+            prompt: &prompt,
+            continuation: None,
+            grant_digest: "fixture",
+            executable: &executable,
+            home: &rig.home,
+            user: OsStr::new("fixture"),
+            account: Some(account),
+            token: None,
+            cwd: &rig.project,
+            nonce: [1; 16],
+        })?;
+        let auth = account.directory().join("auth.json");
+        let selected = &spec.profile.spec.authentication[0];
+        assert_eq!(selected.roots.len(), 1);
+        assert_eq!(selected.roots[0].path, auth);
+        assert_eq!(selected.in_place_writes.len(), 1);
+        assert_eq!(selected.in_place_writes[0].path, auth);
+        for step in &spec.setup {
+            match step {
+                SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
+                _ => return Err("unexpected setup".into()),
+            }
+        }
+        specs.push((key, state, spec));
+    }
+    let coordinator = std::thread::spawn(move || -> std::io::Result<Vec<String>> {
+        let mut peers = Vec::new();
+        let mut identities = Vec::new();
+        for _ in 0..2 {
+            let (peer, _) = listener.accept()?;
+            peer.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut line = String::new();
+            std::io::BufReader::new(peer.try_clone()?).read_line(&mut line)?;
+            identities.push(line.trim().to_owned());
+            peers.push(peer);
+        }
+        for mut peer in peers {
+            peer.write_all(b"R")?;
+        }
+        Ok(identities)
+    });
+    let results = std::thread::scope(|scope| {
+        let children: Vec<_> = specs
+            .iter()
+            .map(|(key, state, spec)| {
+                scope.spawn(move || -> std::result::Result<(), String> {
+                    let Stdin::Bytes(input) = &spec.stdin else {
+                        return Err("missing stdin".into());
+                    };
+                    let mut options =
+                        ExecOptions::new(&spec.argv, &spec.cwd, Duration::from_secs(8));
+                    options.env = Some(&spec.env);
+                    options.stdin = Some(input);
+                    let out = SystemExecutor::new(1)
+                        .and_then(|e| e.execute(options))
+                        .map_err(|e| e.to_string())?;
+                    assert_eq!(code(&out), 0);
+                    assert_eq!(out.stdout.bytes, key.as_bytes());
+                    assert_eq!(
+                        fs::read(state.join("stub-state")).map_err(|e| e.to_string())?,
+                        key.as_bytes()
+                    );
+                    Ok(())
+                })
+            })
+            .collect();
+        children
+            .into_iter()
+            .map(|c| {
+                c.join()
+                    .unwrap_or_else(|_| Err("stub child panicked".into()))
+            })
+            .collect::<Vec<_>>()
+    });
+    // Wake a blocked accept even when a child failed before connecting.
+    for _ in 0..2 {
+        let _ = TcpStream::connect(address);
+    }
+    let mut seen = coordinator
+        .join()
+        .map_err(|_| "account coordinator panicked")??;
+    for result in results {
+        result?;
+    }
+    seen.sort();
+    assert_eq!(seen, ["one", "two"]);
+    rig.assert_legacy_unchanged()
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args.is_empty() || args[0].as_encoded_bytes().starts_with(b"--") {
-        provenant_supervisor::fixture::run_libtest(&args, &["fake_provider"], |_| {
-            suite().map_err(|error| io::Error::other(error.to_string()))
-        })
+        provenant_supervisor::fixture::run_libtest(
+            &args,
+            &["fake_provider", "account_placement"],
+            |name| {
+                let result = if name == "account_placement" {
+                    account_placement()
+                } else {
+                    suite()
+                };
+                result.map_err(|error| io::Error::other(error.to_string()))
+            },
+        )
         .map(|()| 0)
         .map_err(Into::into)
     } else {

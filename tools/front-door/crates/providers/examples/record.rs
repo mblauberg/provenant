@@ -322,7 +322,8 @@ fn route(args: &Args) -> ResolvedRoute {
         model: args.model.clone(),
         effort: args.effort.clone(),
         catalogue_revision: "recording".into(),
-        account_key: Some("default".into()),
+        // This recorder measures provider activation, not signed-in identity.
+        account_key: None,
         host: "recording".into(),
         alternatives: Default::default(),
         exclusions: Vec::new(),
@@ -796,6 +797,7 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
+            account: None,
             token: token.as_ref(),
             cwd,
             nonce,

@@ -284,6 +284,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         model: "fixture".into(),
                         effort: None,
                     },
+                    account: None,
                     fallback: vec![],
                     authority_digest: Digest::from_bytes([94; 32]),
                     provider_timeout_seconds: 60,

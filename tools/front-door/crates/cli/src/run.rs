@@ -134,7 +134,8 @@ impl run::Providers for Registry<'_> {
             );
         }
         let roots = self.roots.ok_or("routing context is unavailable")?;
-        let resolved = crate::route::resolve(&route_request(task)?, roots)?;
+        let resolved =
+            crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
         let candidates = std::iter::once((resolved.adapter.as_str(), resolved.model.as_str()))
             .chain(
                 resolved
@@ -340,6 +341,7 @@ struct ManifestTask {
     #[serde(default)]
     fallback: Vec<String>,
     delivery_id: Option<DeliveryId>,
+    account: Option<String>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
@@ -476,6 +478,7 @@ pub struct Submitted {
     pub task_id: TaskId,
     pub prompt: String,
     pub route: run::RequestedRoute,
+    pub account: Option<String>,
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
@@ -531,6 +534,7 @@ pub fn submit(
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
             route: task.route,
+            account: task.account,
             fallback: fallback(&task.fallback)?,
             authority_digest: authority,
             provider_timeout_seconds: task.provider_timeout,
@@ -665,6 +669,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 )?,
                 fallback,
                 task.delivery_id,
+                task.account,
             ));
         }
     } else {
@@ -686,6 +691,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
             )?,
             flag_route.3.clone(),
             command.delivery_id,
+            None,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -696,12 +702,13 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id)| Submitted {
+            |(task_id, prompt, route, fallback, delivery_id, account)| Submitted {
                 task_class: None,
                 task_id,
                 prompt,
                 route,
                 fallback,
+                account,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
             },
@@ -854,8 +861,13 @@ fn render_lanes(
                 .result
                 .as_ref()
                 .map(|_| artifact(edge, lane, "result.md"));
+            let account = lane
+                .applied_route
+                .as_ref()
+                .and_then(|r| r.account_label.as_deref())
+                .unwrap_or("unknown");
             human.push_str(&format!(
-                "{}/{}/{} {state} {route}{}\n",
+                "{}/{}/{} {state} {route} account={account}{}\n",
                 lane.run_id,
                 lane.task_id,
                 lane.attempt_id,
@@ -874,6 +886,7 @@ fn render_lanes(
                 "reason": reason,
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
+                "account": account,
                 "observed_route": lane.observed_route,
                 "queued_at": lane.queued_at,
                 "started_at": lane.started_at,
