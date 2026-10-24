@@ -8,6 +8,7 @@ use std::{
     ffi::OsString,
     fs,
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -278,13 +279,24 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    // Simulate an unfinished Git operation without widening the stub's grant.
+    fs::write(
+        writer
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD"),
+        b"fixture sequencer state",
+    )?;
     let prepared = writer_run(request, "writer-sequencer", 61, "create sequencer state")?;
     let attempt = prepared.attempts[0].attempt_id;
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
         project: context.project_id,
-        mode: "sequencer",
+        mode: "edit",
     };
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
@@ -447,25 +459,17 @@ impl provenant_run::Providers for WriterProvider {
             .map_err(|error| error.to_string())?;
         let scratch = self.state.join("writer-fixture-scratch");
         fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
+        fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
         let executable =
             fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
                 .map_err(|error| error.to_string())?;
-        let mut argv = vec![
+        let argv = vec![
             executable.clone().into_os_string(),
             OsString::from("--writer-provider"),
             OsString::from(self.mode),
             writer.worktree.path().as_os_str().to_owned(),
         ];
-        if self.mode == "sequencer" {
-            argv.push(
-                writer
-                    .worktree
-                    .repo()
-                    .private_git_dir()
-                    .as_os_str()
-                    .to_owned(),
-            );
-        }
         let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
             scope: provenant_core::WorkScope::Project(self.project),
             permissions: provenant_confinement::permissions::PlanPermissions {
@@ -682,16 +686,6 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
                 }
                 thread::yield_now();
             }
-        }
-        "sequencer" => {
-            let private_git = args
-                .get(3)
-                .map(PathBuf::from)
-                .ok_or("writer provider private Git directory missing")?;
-            fs::write(
-                private_git.join("CHERRY_PICK_HEAD"),
-                b"fixture sequencer state",
-            )?;
         }
         _ => return Err("unknown writer provider fixture mode".into()),
     }
