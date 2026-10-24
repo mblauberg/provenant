@@ -7,6 +7,7 @@
 
 mod domains;
 mod harness;
+mod hooks;
 mod inspection;
 mod loader;
 mod managed;
@@ -24,7 +25,9 @@ mod tests;
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
-pub use project_binding::{ProjectBinding, ProjectLocation, bind_host, bind_project};
+pub use project_binding::{
+    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project,
+};
 pub use provenant_records::Finding;
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -174,3 +177,5 @@ pub use release::{Release, package_release};
 
 /// Schema version accepted by the single-file configuration owner.
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
+
+pub use managed::HookRegistration;

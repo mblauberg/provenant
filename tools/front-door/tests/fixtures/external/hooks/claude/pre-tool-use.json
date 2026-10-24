@@ -1,0 +1,1 @@
+{"session_id":"recorded-session","transcript_path":"/recorded/transcript.jsonl","cwd":"/recorded/project","prompt_id":"recorded-prompt","permission_mode":"default","effort":{"level":"medium"},"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hook-capture","description":"Echo hook-capture string"},"tool_use_id":"recorded-tool-use"}

@@ -7,6 +7,6 @@ pinned Git range. Findings return exit 1; invalid input returns exit 2.
 
 The Python branch and commit-message linter and its commit-msg hook are retired.
 Follow the [branch and commit doctrine](../../skills/setup-repo/references/doctrine.md)
-when preparing changes. The existing `scripts/hooks/pre-push` adapter stays until the Rust
-`provenant hook git pre-push REMOTE LOCATION` handler is runnable. Its current
-CLI leaf returns unavailable; do not replace a working guard with that stub.
+when preparing changes. Git pre-push protection uses
+`provenant hook git pre-push REMOTE LOCATION`. `install --hooks on` owns
+registration of the fixture-backed Rust hooks.

@@ -387,6 +387,49 @@ Date lint is a workspace test over Rust `#[test]` sources (ADR 0028 decision 7),
 with injected clocks or a local `timebomb: allow REASON` for deliberate dates;
 no `check dates`, Python AST or JS matching.
 
+### Hook implementation choices
+
+CLI step 3 replaces the hook entry points with native transports and the static
+`provenant_cli::hooks::HOOK_SPECS` catalogue. Config receives its registration
+values from the composition root; it never imports cli. The registry supplies
+Claude event names, matchers, host timeouts, handlers and recorded fixture names.
+
+The guard reads cap+1 bytes under one monotonic one-second deadline. Input or
+policy failure emits Claude deny JSON with exit 0; a bounded nonblocking stdout
+write that fails uses stderr and exit 2. Transport errors never echo stdin.
+Confinement inspects bounded shell words for direct process control, including
+paths, wrappers and quoted command bodies. Dynamic expansions and ambiguous
+shell syntax receive a refusal. This deliberately conservative advisory policy
+does not interpret arbitrary scripts or aliases; OS confinement and owned
+process handles remain authoritative.
+
+Checkpoint callbacks validate the host cwd and session, resolve an existing
+project binding without writes and delegate to workflow. They use a one-day
+freshness window, a one-second local deadline and workflow's 8 KiB encoded
+context limit. Missing bindings/state produce only a diagnostic. No transcript
+or old-root lookup occurs.
+
+Pre-push reads trusted Git evidence with inherited redirects disabled, refuses
+incomplete history without trusting shallow boundaries, and checks default-branch deletion, linked
+worktree pushes to the default branch, non-fast-forward updates and conflict
+markers. A missing remote HEAD falls back to local main/master; an unknown
+default branch refuses. New remote refs exclude commits already reachable from
+known remote refs. No fetch or other remote operation occurs.
+
+Installer hook leaves are matched by exact event, matcher and command. An
+optional numeric legacy timeout is accepted. Replacements keep their array
+positions; retired entries are removed without rewriting foreign siblings.
+Only Claude has recorded harness registrations. Unsupported harness hooks
+refuse before writes. The legacy pre-push link is replaced only in the verified
+hooks directory inside canonical `--legacy-checkout`; external hooksPath values
+refuse and foreign Git hooks conflict.
+
+The retired configurer, utility output hook, routing context hook and their
+standalone tests were already absent at this slice's base. This slice removes
+the lane guard and old Git hooks, retaining only the mixed test file's reap
+subjects until their run-owned caller retires. The compiled legacy manifest
+retains names solely as exact installer removal/replacement evidence.
+
 ## State and crate seams
 
 CLI has no private database, cache, run registry or approval store.
@@ -651,11 +694,11 @@ Decisions taken for the chair:
   every one to succeed.
 - Retire the old JSON record schemas and synthetic fixtures with their Python
   judge. Typed Rust records and owner boundary tests define current contracts.
-- Keep the Git pre-push script: `provenant hook git pre-push` parses, but its
-  binary handler still returns unavailable. Delete the adapter when the Rust
-  confinement hook is runnable. Keep the small post-merge Git adapter because
-  there is no Rust post-merge leaf. It resolves integration/range OIDs and calls `provenant worktree remove
-  --merged --integration OID --since OID`, without a Python cleanup engine.
+- Delete both Git shell adapters. The merged CLI hook lane supplies runnable
+  `provenant hook git pre-push` and Claude hook handlers with fixtures. Rust
+  install owns registrations. Merged pruning uses explicit `provenant worktree
+  remove --merged --integration OID --since OID`; the post-merge shell adapter
+  and Python cleanup engine are retired.
 - Delete `lease.py`: the run-directory driver lease is explicitly retired by
   execution-run. Rust custody is separate from `provenant fabric landing`.
   Delete `fabric_policy.py` with its Python differential test; the Rust
@@ -674,8 +717,6 @@ Merge dependency: lane E must replace the delivery validator that imports
 explicitly authorised parallel deletions, not an assertion that the retained
 Python delivery implementation remains runnable. No shim is added.
 
-The Claude pre-tool-use hook is also a cut-over dependency on the CLI/confinement
-lane: its grammar exists but the current binary handler returns unavailable.
-Do not register that leaf until its Rust handler and fixture checks pass.
-Local `check harness` on this Mac is blocked before scanning by the existing
-pinned-Git selector choosing a Homebrew symlink; CLI owns that selector.
+The final main merge includes PR #1401's runnable Rust hooks and canonicalised
+Git selection. Earlier review findings about unavailable hook handlers and
+Homebrew symlink pinning are resolved by that owner, not waived by this cut.

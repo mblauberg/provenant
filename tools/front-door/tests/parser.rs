@@ -160,7 +160,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
 }
 
 #[test]
-fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
+fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
     let rig = TestRig::new()?;
     let attempt = format!(
         "{}/{}/{}",
@@ -201,10 +201,6 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
         vec!["worktree", "create", "fixture"],
         vec!["worktree", "list"],
         vec!["worktree", "remove", "fixture"],
-        vec!["hook", "claude", "pre-tool-use"],
-        vec!["hook", "claude", "pre-compact"],
-        vec!["hook", "claude", "compact"],
-        vec!["hook", "git", "pre-push", "origin", "/fixture/remote"],
     ];
     for leaf in leaves {
         for (flag, path) in [

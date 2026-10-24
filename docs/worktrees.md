@@ -37,8 +37,8 @@ provenant worktree remove --merged --integration OID --since PRE_MERGE_OID
 ```
 
 The integration OID and scope prevent a hook from sweeping unrelated branches.
-`scripts/hooks/post-merge` is the remaining Git adapter: it resolves HEAD and
-ORIG_HEAD, checks the primary integration checkout and invokes this Rust leaf.
-It reports failure without changing the merge result. The old clean/reap
-engines, retention plans and Node dependency cloning are retired. Guardian
-settlement owns classified scratch cleanup; retained history stays on disk.
+The old post-merge and pre-push shell adapters are retired. Rust install owns
+fixture-backed hook registration; merged pruning is an explicit Rust worktree
+operation. The clean/reap engines, retention plans and Node dependency cloning
+are retired. Guardian settlement owns classified scratch cleanup; retained
+history stays on disk.

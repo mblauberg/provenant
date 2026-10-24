@@ -829,3 +829,5 @@ mod tests {
         assert_eq!(inv.globals.state_dir.map(|v| v.into_os_string()), Some(raw));
     }
 }
+
+pub mod hooks;
