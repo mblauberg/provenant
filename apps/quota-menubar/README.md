@@ -2,7 +2,7 @@
 
 An optional macOS menu-bar app that displays account quota snapshots from Provenant. It does not install or start itself.
 
-The status item shows the highest-use available account and its percentage. The panel lists accounts by status, shows reported usage windows and reset times, and keeps the last good report visible if a refresh fails. Rows without a snapshot show their reported status and error. When the CLI has no account snapshots, the panel shows how many quota report rows have known account data.
+The status item shows the highest-use available account and its percentage, beside the Provenant mark while usage is below the alert threshold and a gauge or warning symbol above it. The panel lists accounts by status, shows reported usage windows and reset times, and keeps the last good report visible if a refresh fails. Rows without a snapshot show their reported status and error. When the CLI has no account snapshots, the panel shows how many quota report rows have known account data.
 
 Binding limits must have a reset time and must not be advisory. Rust `credit_only` accounts have spent their plan allowance and appear as "Exhausted, drawing on credits", with the allowance reset time when known.
 
@@ -66,3 +66,5 @@ The supported way to start the app at login is a LaunchAgent. Adding the bare ex
 ```
 
 Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.provenant.quota-menubar.plist`. To stop it, run `launchctl bootout gui/$(id -u)/dev.provenant.quota-menubar` and delete the file. With `KeepAlive` false, quitting from the panel keeps the app closed until the next login.
+
+The status item uses the Provenant glyph for loading and healthy quota states, with the existing gauge and error symbols retained for warnings and failures. The panel summary includes the glyph.

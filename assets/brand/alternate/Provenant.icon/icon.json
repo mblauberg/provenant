@@ -1,0 +1,77 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-gray:1.00000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "name": "ring",
+          "image-name": "ring.svg",
+          "glass": true
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "lighting": "individual",
+      "translucency": {
+        "enabled": true,
+        "value": 0.35
+      }
+    },
+    {
+      "layers": [
+        {
+          "name": "warp",
+          "image-name": "warp.svg",
+          "glass": true,
+          "opacity": 0.6
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "specular": true,
+      "lighting": "individual",
+      "translucency": {
+        "enabled": true,
+        "value": 0.75
+      }
+    },
+    {
+      "layers": [
+        {
+          "name": "weft",
+          "image-name": "weft.svg",
+          "glass": false
+        },
+        {
+          "name": "well",
+          "glass": false,
+          "image-name-specializations": [
+            {
+              "value": "well.svg"
+            },
+            {
+              "appearance": "dark",
+              "value": "well-dark.svg"
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "specular": false,
+      "lighting": "individual"
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

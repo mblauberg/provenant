@@ -28,7 +28,14 @@ struct MenuBarLabel: View {
     var body: some View {
         let label = model.label
         HStack(spacing: 4) {
-            Image(systemName: label.symbol)
+            if label.usesBrandGlyph {
+                Image(nsImage: Brand.glyph)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
+            } else {
+                Image(systemName: label.symbol)
+            }
             if let text = label.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
@@ -36,10 +43,21 @@ struct MenuBarLabel: View {
     }
 }
 
+/// The Provenant mark as a template image, so it follows the menu bar's appearance and tint.
+enum Brand {
+    static let glyph: NSImage = {
+        let image = Bundle.module.url(forResource: "ProvenantGlyph", withExtension: "svg")
+            .flatMap(NSImage.init(contentsOf:)) ?? NSImage()
+        image.isTemplate = true
+        return image
+    }()
+}
+
 /// What the status item shows. Redrawing a status item costs real CPU, so the model replaces this only when it
 /// differs.
 struct MenuLabel: Equatable {
     var symbol = "gauge.with.dots.needle.0percent", text: String? = "–", spoken = "Provider quota"
+    var usesBrandGlyph = true
 
     init() {}
 
@@ -47,6 +65,7 @@ struct MenuLabel: Equatable {
         let featured = report?.featured(now: now), used = featured?.window.usedPercent ?? report?.headline(now: now)
         let level = ["0", "33", "50", "67", "100"][[20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4]
         symbol = failed ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(level)percent"
+        usesBrandGlyph = !failed && (used.map { $0 < (report?.alertPercent ?? 90) } ?? true)
         text = report.map { report in
             featured.map { Fmt.percent($0.window.usedPercent ?? 0) }
                 ?? (report.iconOnly ? nil : report.headline(now: now).map(Fmt.percent) ?? "–")
