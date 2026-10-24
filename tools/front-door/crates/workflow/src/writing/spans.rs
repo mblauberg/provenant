@@ -238,8 +238,14 @@ pub(super) fn long_sentences(
             || trim.starts_with(['|', '#', '>'])
             || trim.starts_with("---")
             || mask[offset..offset + line.len()].iter().all(|b| *b);
-        let list = trim.starts_with(['-', '*', '+'])
-            || trim.bytes().take_while(u8::is_ascii_digit).count() > 0 && trim.contains(['.', ')']);
+        let bytes = trim.as_bytes();
+        let bullet =
+            matches!(bytes.first(), Some(b'-' | b'*' | b'+')) && bytes.get(1) == Some(&b' ');
+        let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+        let numbered = digits > 0
+            && matches!(bytes.get(digits), Some(b'.' | b')'))
+            && bytes.get(digits + 1) == Some(&b' ');
+        let list = bullet || numbered;
         if non_prose || list {
             finish(offset, &mut hits, &mut words, &mut sentence);
             paragraph = None;
@@ -280,4 +286,18 @@ pub(super) fn long_sentences(
     }
     finish(text.len(), &mut hits, &mut words, &mut sentence);
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::long_sentences;
+
+    #[test]
+    fn emphasis_and_years_do_not_split_wrapped_prose_as_list_items() {
+        let text = "2026 was busy, and it continued\n*emphasis* through the week.";
+        let mask = vec![false; text.len()];
+        let ranges = long_sentences(text, &mask, 7);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], 0..text.len());
+    }
 }

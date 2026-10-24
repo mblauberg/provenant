@@ -1,5 +1,6 @@
 //! Quota policy is pure: immutable observations in, bounded update intents out.
 #![forbid(unsafe_code)]
+pub mod chair;
 mod source;
 pub use source::*;
 mod settings;

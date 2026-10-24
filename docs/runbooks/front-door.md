@@ -19,11 +19,16 @@ Cargo does not install this example.
 ```sh
 cd tools/front-door
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$HOME/Library/Caches/provenant-cargo-target-package"
+export CARGO_TARGET_DIR="$(mktemp -d)/cargo-target"
 RELEASE="$(mktemp -d)/release"
 cargo build --release --locked --bin provenant
 cargo run --locked --example package-release -- --out "$RELEASE"
 ```
+
+Host builds use a fresh target directory. Confined writers use the separate
+`$HOME/Library/Caches/provenant-lane-cargo/<sha256>` namespace, derived from
+verified worktree and repository identities. Never use a lane cache for a host
+build.
 
 The binary defaults to `$CARGO_TARGET_DIR/release/provenant` (or the workspace's
 `target/release/provenant` without that variable). Pass `--binary PATH` to package

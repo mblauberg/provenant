@@ -209,16 +209,12 @@ fn candidate(
                 && q.snapshot.account.adapter == model.adapter()
                 && Some(&q.snapshot.account.account_key) == account.as_ref()
                 && q.snapshot.observed_unix_seconds <= context.now_seconds()
-                && !matches!(
-                    q.snapshot.status,
-                    QuotaStatus::Unknown | QuotaStatus::Stale | QuotaStatus::Unsupported
-                )
+                && q.snapshot.observed_unix_seconds < q.expires_unix_seconds
+                && context.now_seconds() < q.expires_unix_seconds
         })
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
     if reason.is_none()
         && let Some(q) = quota
-        && q.snapshot.observed_unix_seconds < q.expires_unix_seconds
-        && context.now_seconds() < q.expires_unix_seconds
     {
         reason = match q.snapshot.status {
             QuotaStatus::Exhausted => Some(RouteExclusionReason::Exhausted),
@@ -329,14 +325,26 @@ pub fn resolve(
             if let Some(pool) = context.catalogue.pools.get(name) {
                 let mut first_unavailable = None;
                 let mut selected = None;
+                let mut exclusions = Vec::new();
                 for member in pool {
-                    if (member.free && !request.allow_free)
-                        || !privacy_allowed(&member.model, request.confidential, context.catalogue)
-                    {
+                    if !privacy_allowed(&member.model, request.confidential, context.catalogue) {
+                        exclusions.push("confidential model".into());
+                        continue;
+                    }
+                    if member.free && !request.allow_free {
+                        exclusions.push("free model disabled".into());
                         continue;
                     }
                     let effort = request.effort.as_deref().or(member.effort.as_deref());
-                    let option = candidate(&member.model, effort, context)?;
+                    // One unusable member is excluded; the rest of the pool still competes.
+                    let option = match candidate(&member.model, effort, context) {
+                        Ok(option) => option,
+                        Err(RoutingError::UnsupportedEffort) => {
+                            exclusions.push("unsupported effort".into());
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if matches!(&option.readiness, RouteReadiness::Ready { .. }) {
                         selected = Some((&member.model, effort, option));
                         break;
@@ -347,7 +355,7 @@ pub fn resolve(
                 }
                 let (model, effort, primary) = selected
                     .or(first_unavailable)
-                    .ok_or(RoutingError::ConfidentialModel)?;
+                    .ok_or(RoutingError::NoEligiblePoolMember { exclusions })?;
                 (model, effort, Some(primary))
             } else {
                 let named = context

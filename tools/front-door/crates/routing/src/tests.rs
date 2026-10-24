@@ -194,7 +194,21 @@ fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
             row.trains_on_prompts = Some(true);
         }
     }
-    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
+    match resolve(&request, &context(&catalogue, &config, now()?)).unwrap_err() {
+        RoutingError::NoEligiblePoolMember { exclusions } => {
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "confidential model")
+            );
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "free model disabled")
+            );
+        }
+        error => panic!("unexpected pool error: {error}"),
+    }
     let mut query = query;
     query["allow_free"] = serde_json::json!(true);
     let request: RouteRequest = serde_json::from_value(query)?;
@@ -274,6 +288,41 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         resolve(&query, &context),
         Err(RoutingError::UnsupportedEffort)
     ));
+    Ok(())
+}
+#[test]
+fn pool_skips_a_member_without_the_requested_effort() -> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let mut members = Vec::new();
+    for (name, efforts) in [
+        ("fixture-low", vec!["low"]),
+        ("fixture-high", vec!["low", "high"]),
+    ] {
+        let model = ModelId::parse(&format!("codex/{name}"))?;
+        catalogue.models.push(ModelEntry {
+            model: model.clone(),
+            efforts: efforts.into_iter().map(Into::into).collect(),
+            evidence_ref: "synthetic-controls".into(),
+            family: None,
+            trains_on_prompts: None,
+        });
+        members.push(RoutePoolMember {
+            model,
+            effort: None,
+            free: false,
+        });
+    }
+    catalogue.pools.insert("mixed".into(), members);
+    let config = RoutingConfig::default();
+    let query = RouteRequest {
+        choice: RouteChoice::NamedRoute("mixed".into()),
+        effort: Some("high".into()),
+        confidential: false,
+        allow_free: false,
+        fallback: Fallback::None,
+    };
+    let route = resolve(&query, &context(&catalogue, &config, now()?))?;
+    assert_eq!(route.model, "fixture-high");
     Ok(())
 }
 fn availability() -> AvailabilityRecord {
@@ -753,6 +802,49 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
         120,
     )?];
     context.quota = &current;
+    assert_eq!(
+        reason(&resolve(&query, &context)?),
+        Some(&RouteExclusionReason::Exhausted)
+    );
+    let newer_unknown = [
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            1,
+            80,
+            120,
+        )?,
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Unknown,
+            2,
+            90,
+            120,
+        )?,
+    ];
+    context.quota = &newer_unknown;
+    assert!(reason(&resolve(&query, &context)?).is_none());
+    let expired_newest = [
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            1,
+            80,
+            120,
+        )?,
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            2,
+            90,
+            99,
+        )?,
+    ];
+    context.quota = &expired_newest;
     assert_eq!(
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::Exhausted)
