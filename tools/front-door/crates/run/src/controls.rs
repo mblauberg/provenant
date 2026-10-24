@@ -334,9 +334,25 @@ impl RunStore {
                     Ok(Observation::Exited(exit))
                         if exit.unresolved_cleanup && !exit.unresolved_pids.is_empty() =>
                     {
-                        Ok(Reconciled::Escaped {
-                            pids: exit.unresolved_pids,
-                        })
+                        if custody::any_pid_alive(&exit.unresolved_pids) {
+                            return Ok(Reconciled::Escaped {
+                                pids: exit.unresolved_pids,
+                            });
+                        }
+                        // None of the named processes is alive. A live guardian
+                        // republishes the settled exit; the next pass commits it.
+                        // Without one, only chair recovery can clear the fence.
+                        match custody::acquire_recovery(
+                            dir()?,
+                            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                            call.cancel,
+                            call.clock,
+                        ) {
+                            Ok(_) => Ok(uncertain(
+                                &"descendants are gone but no guardian can settle the exit; chair recovery required",
+                            )),
+                            Err(_) => Ok(Reconciled::Held),
+                        }
                     }
                     Ok(Observation::Exited(exit)) => {
                         let attempt = dir()?;

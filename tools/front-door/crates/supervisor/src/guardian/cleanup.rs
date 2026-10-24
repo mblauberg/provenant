@@ -116,31 +116,44 @@ impl Driver<'_> {
     ) {
         let began = Instant::now();
         let grace = Duration::from_millis(plan.descendant_grace_ms);
+        let group = child.id();
         let mut escalation = false;
         loop {
-            let signal = if escalation {
-                libc::SIGKILL
-            } else {
-                libc::SIGTERM
-            };
-            let outcome = stop_delivery_outcome(child.stop_group(escalation));
-            self.record_delivery(
-                self.reservation.provider.clone(),
-                machine::StopReason::ExplicitCancellation,
-                signal,
-                outcome,
-            );
-            if outcome != DeliveryOutcome::Delivered && !escalation {
-                push_warning(warnings, omitted, "cancel group signal not delivered");
-            }
-            let group = child.id();
-            let clear = self.refresh_census(child).is_some_and(|census| {
-                census.is_complete()
-                    && census.facts().all(|fact| {
-                        fact.identity.group_id != group || fact.zombie || fact.identity.pid == group
+            // A group signal cannot exclude members, so never send one while a
+            // spared or protected owner shares the group, or without a census.
+            if let Some(census) = self.refresh_census(child) {
+                let members = || {
+                    census.facts().filter(|fact| {
+                        fact.identity.group_id == group && fact.identity.pid != group
                     })
-            });
-            if clear || (escalation && began.elapsed() >= grace.saturating_mul(2)) {
+                };
+                let shielded = members().any(|fact| {
+                    self.protected.contains(&fact.identity)
+                        || self
+                            .spared
+                            .spared_identities()
+                            .any(|spared| *spared == fact.identity)
+                });
+                if shielded || (census.is_complete() && members().all(|fact| fact.zombie)) {
+                    return;
+                }
+                let signal = if escalation {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                };
+                let outcome = stop_delivery_outcome(child.stop_group(escalation));
+                self.record_delivery(
+                    self.reservation.provider.clone(),
+                    machine::StopReason::ExplicitCancellation,
+                    signal,
+                    outcome,
+                );
+                if outcome != DeliveryOutcome::Delivered && !escalation {
+                    push_warning(warnings, omitted, "cancel group signal not delivered");
+                }
+            }
+            if escalation && began.elapsed() >= grace.saturating_mul(2) {
                 return;
             }
             if !escalation && began.elapsed() >= grace {

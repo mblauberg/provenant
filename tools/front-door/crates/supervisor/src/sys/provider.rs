@@ -650,13 +650,12 @@ impl ProviderGroup {
     }
 
     /// Signal the provider's whole process group, for explicit cancellation
-    /// only. The unreaped leader (live or a WNOWAIT-observed zombie) reserves
-    /// the PGID, so the target cannot be a reused identity; once the leader is
-    /// consumed this refuses. Members that left the group are not reached.
+    /// only. While the leader is unreaped (live or a WNOWAIT zombie) it
+    /// reserves the PGID. After it is reaped, the group is signalled only if a
+    /// `kill(-pgid, 0)` probe shows a live member, which keeps the id
+    /// allocated (the probe-to-signal gap is the accepted residual). Members
+    /// that left the group are not reached.
     pub(crate) fn stop_group(&mut self, escalation: bool) -> io::Result<bool> {
-        if self.child.is_none() {
-            return Ok(false);
-        }
         let signal = if escalation {
             libc::SIGKILL
         } else {
@@ -665,9 +664,20 @@ impl ProviderGroup {
         if self.last_group_signal == Some(signal) {
             return Ok(false);
         }
+        if self.child.is_none() {
+            // SAFETY: signal 0 delivers nothing; it only probes the group.
+            if unsafe { libc::kill(-self.pid, 0) } != 0 {
+                let error = io::Error::last_os_error();
+                return if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(false)
+                } else {
+                    Err(error)
+                };
+            }
+        }
         // SAFETY: the provider was spawned as its own group leader
-        // (`process_group(0)`) and is still unreaped, so `-pid` names exactly
-        // the group it leads; the PGID cannot be reallocated while it exists.
+        // (`process_group(0)`), so `-pid` names exactly the group it leads; a
+        // live member (or the unreaped leader) keeps the PGID allocated.
         if unsafe { libc::kill(-self.pid, signal) } == 0 {
             self.last_group_signal = Some(signal);
             return Ok(true);
@@ -990,6 +1000,18 @@ impl Drop for ProviderGroup {
             permit.transfer(child);
         }
     }
+}
+
+/// Liveness probe only (signal 0): true unless every PID is provably absent.
+pub(crate) fn any_pid_alive(pids: &[i64]) -> bool {
+    pids.iter().any(|&pid| match i32::try_from(pid) {
+        Ok(pid) if pid > 0 => {
+            // SAFETY: signal 0 delivers nothing and cannot affect the target.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            alive || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+        _ => true,
+    })
 }
 
 fn provider_ancestry(

@@ -1019,6 +1019,10 @@ struct StoredObservation {
     #[serde(default)]
     publication_pending: bool,
 }
+/// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
+pub fn any_pid_alive(pids: &[i64]) -> bool {
+    crate::sys::provider::any_pid_alive(pids)
+}
 #[derive(Debug)]
 pub enum Observation {
     Live,

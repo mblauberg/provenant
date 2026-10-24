@@ -174,6 +174,15 @@ the provider exited, during cleanup. A member that left the group is never
 signalled; cleanup that ends with such tracked descendants possibly alive
 publishes their PIDs in the exit's `unresolved_pids`, and reconcile reports
 them as `escaped` (still fenced) rather than a bare `uncertain`.
+After publishing an unresolved exit the guardian stays alive, holding the
+leader, and keeps running cleanup: it polls for cancellation and for the group
+emptying. On cancel it signals the group (TERM, grace, KILL; a reaped leader
+needs a live `kill(-pgid, 0)` probe first) unless a spared or protected owner
+shares the group. When cleanup then proves quiescence it makes the reservation
+resolved and replaces `process-exit.json` once with the settled facts (the only
+replace of that file); a supervisor signal ends the wait. Reconcile reports
+`escaped` while a named pid is alive (signal-0 probe only); when none is, it
+reports `held` if a guardian holds the lease and `uncertain` otherwise.
 
 
 Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
