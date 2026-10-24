@@ -436,6 +436,49 @@ pub(crate) fn read_optional_file(
     }
 }
 
+/// Like `read_tracked_file`, but a symlink leaf is evidence too: its bytes are
+/// the link target, read with readlink and never followed.
+pub(crate) fn read_protected_entry(
+    root: &dyn SafeDir,
+    path: &RepoPath,
+    limit: u64,
+) -> Result<FileSnapshot, GitEvidenceError> {
+    use std::os::unix::ffi::OsStrExt;
+    let (parent, leaf) = open_parent(root, path)?;
+    let before = parent.metadata_at(&leaf, false)?;
+    if before.kind != provenant_supervisor::fs::FileKind::Symlink {
+        return read_tracked_file(root, path, limit);
+    }
+    let target = parent.read_link(&leaf)?;
+    let bytes = target.as_os_str().as_bytes().to_vec();
+    if bytes.len() as u64 > limit {
+        return Err(GitEvidenceError::TooLarge);
+    }
+    let after = parent.metadata_at(&leaf, false)?;
+    if !crate::stable_read::same_metadata(&before, &after) {
+        return Err(GitEvidenceError::ConcurrentChange);
+    }
+    let fingerprint = fingerprint(path, &bytes, after)?;
+    Ok(FileSnapshot { bytes, fingerprint })
+}
+
+pub(crate) fn read_optional_protected_entry(
+    root: &dyn SafeDir,
+    path: &RepoPath,
+    limit: u64,
+) -> Result<Option<FileSnapshot>, GitEvidenceError> {
+    let (parent, leaf) = match open_parent(root, path) {
+        Ok(parent) => parent,
+        Err(GitEvidenceError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match parent.metadata_at(&leaf, false) {
+        Ok(_) => read_protected_entry(root, path, limit).map(Some),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(crate) fn open_parent<'a>(
     root: &'a dyn SafeDir,
     path: &RepoPath,
