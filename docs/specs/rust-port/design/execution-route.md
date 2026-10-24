@@ -658,12 +658,15 @@ hooks/extensions/skills/plans/ai-tracking, and shared npm state. Disabled
 adapters refuse before returning grants; the recording feature exercises the
 prepared OpenCode recipe without enabling it. Agy's private-home test also
 proves controls are neither seeded nor copied back. These are policy tests,
-not new live smoke rows; Agy/Cursor activation and the outstanding #927 live
-rows remain unverified. The production Codex writer path passes the narrowed
+not new live smoke rows; Agy/Cursor activation and their live rows move to
+#1471. The production Codex writer path passes the narrowed
 provider profile to confinement compilation. A CLI-dispatch integration fixture
 probes the host config/hook/extension/npm write denials and provider-state
 symlink denial through that path; this is a fake-provider confinement test,
-not a new live provider smoke row. #927 remains open for the live rows.
+not a new live provider smoke row. The live rows for the enabled adapters are
+recorded: on 2026-10-25 a Claude writer lane ran Git (including a two-parent
+merge), node and npm under the narrowed grants, and Codex writer lanes run
+daily under them. Agy and Cursor stay refused until #1471.
 Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
 installation, so granting that shim alone does not make shell Git work.
 Host selection now prefers package-manager Git, then the real CLT executable
