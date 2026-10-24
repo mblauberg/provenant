@@ -191,6 +191,7 @@ pub mod errno {
 }
 
 pub(crate) mod reaper;
+pub mod resources;
 
 /// Construct the fixture binary's only child command through the same strict
 /// post-fork boundary used by the supervisor.

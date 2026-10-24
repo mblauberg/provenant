@@ -397,7 +397,7 @@ Libproc enumeration supplements permission-limited short BSD records with
 the public `KERN_PROC_PID` start-time prefix, checked across two native reads.
 Failed or racing identity reads remain unknown. The provider inherits that
 lease description. Supervisor records
-`darwin_census_and_writer_lease` settlement evidence; any missing proof stays
+`darwin_census_and_custody_lease` settlement evidence; any missing proof stays
 fenced. An unsampled `setsid` escape that closed the lease is the documented
 macOS residual. Run never converts an uncertain observation into absence.
  Continued resume

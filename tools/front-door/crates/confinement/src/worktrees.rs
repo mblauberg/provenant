@@ -16,8 +16,9 @@ use provenant_supervisor::census::{
     ProcessFact, ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
 };
 use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
+use provenant_supervisor::custody::WriterBinding;
 use provenant_supervisor::fs::{
-    FsError, LockGuard, LockMode, Metadata, PublishMode, SafeDir, canonicalize,
+    Directory, FsError, LockGuard, LockMode, Metadata, PublishMode, SafeDir, canonicalize,
 };
 use provenant_supervisor::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use serde::ser::SerializeStruct;
@@ -788,6 +789,48 @@ fn read_worktree_identity(
         return Err(WorktreeError::UnknownWriter);
     }
     Ok((verified, state, identity))
+}
+
+/// Turns a verified, registered worktree into the supervisor's writer custody:
+/// its `state/worktrees/<ProjectId>/<digest>` directory and a binding that
+/// names the worktree and Git directory by identity, never by raw path. The
+/// registration must still be active, for this project and branch, so a
+/// launch cannot claim custody of a worktree Provenant did not create.
+pub fn writer_custody(
+    project_state: &Directory,
+    project: ProjectId,
+    worktree: &VerifiedWorktree,
+    branch: &GitRefName,
+    base: GitOid,
+) -> Result<(Directory, WriterBinding), WorktreeError> {
+    worktree.repo().revalidate()?;
+    let canonical = canonicalize(worktree.path())?;
+    let state = project_state
+        .open_verified_directory(&state_dir_name(&canonical))
+        .map_err(|_| WorktreeError::UnknownWriter)?;
+    let bytes = read_bounded(&state, OsStr::new(IDENTITY), MAX_STATE_RECORD)
+        .map_err(|_| WorktreeError::UnknownWriter)?;
+    let identity: WorktreeIdentity =
+        serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
+    let root = worktree.identity();
+    if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
+        || !identity.active
+        || identity.project_id != project
+        || identity.root_device != root.device
+        || identity.root_inode != root.inode
+        || identity.path_digest != path_digest(&canonical)
+        || identity.branch != branch.as_str()
+    {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let binding = WriterBinding::from_verified(
+        worktree.repo().root_dir(),
+        worktree.repo().private_dir(),
+        branch.as_str(),
+        base,
+    )
+    .map_err(|_| WorktreeError::IdentityChanged)?;
+    Ok((state, binding))
 }
 
 fn ensure_unreserved(state: &dyn SafeDir) -> Result<(), WorktreeError> {
@@ -1896,6 +1939,40 @@ mod lifecycle_tests {
             fs::read_to_string(created.path.join("ignored.txt"))?,
             "keep me\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_custody_requires_the_active_registration() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/custody".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let worktree = verify_worktree(&fixture.repo, &created.path)?;
+        let project = test_context.binding.project_id();
+        let state_path = fixture
+            ._temp
+            .path()
+            .join("worktrees")
+            .join(project.to_string());
+        let project_state = Directory::open_anchor(&state_path)?;
+        let branch = GitRefName::branch("feature/custody")?;
+        let base = created.head;
+        let (state, _binding) = writer_custody(&project_state, project, &worktree, &branch, base)?;
+        assert!(state.metadata_at(OsStr::new(IDENTITY), false).is_ok());
+        let other = GitRefName::branch("feature/other")?;
+        assert!(matches!(
+            writer_custody(&project_state, project, &worktree, &other, base),
+            Err(WorktreeError::UnknownWriter)
+        ));
         Ok(())
     }
 

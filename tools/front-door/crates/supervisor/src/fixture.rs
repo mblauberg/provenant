@@ -933,7 +933,7 @@ pub fn acquire_writer(
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,
     clock: &dyn provenant_core::Clock,
-) -> crate::custody::Result<crate::custody::WriterLease> {
+) -> crate::custody::Result<crate::custody::CustodyLease> {
     let binding = crate::custody::WriterBinding::from_verified(
         &directory,
         &directory,
@@ -962,7 +962,7 @@ pub fn acquire_writer_with_binding(
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,
     clock: &dyn provenant_core::Clock,
-) -> crate::custody::Result<crate::custody::WriterLease> {
+) -> crate::custody::Result<crate::custody::CustodyLease> {
     crate::custody::acquire_writer_with_observer(
         directory,
         scope,
@@ -978,7 +978,7 @@ pub fn recovery_observation(recovery: &crate::custody::Recovery) -> crate::custo
     recovery.observe_with(&RecordedBootObserver)
 }
 pub fn advance_attempt(
-    writer: &mut crate::custody::WriterLease,
+    writer: &mut crate::custody::CustodyLease,
     next: crate::custody::Scope,
 ) -> crate::custody::Result<()> {
     writer.advance_with(next, &RecordedBootObserver)

@@ -138,7 +138,7 @@ publication. Failure keeps the durable reservation fenced.
 A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
 drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
 The exit's `settlement_evidence` records
-`darwin_census_and_writer_lease`, `linux_kernel_children`, `never_spawned` or
+`darwin_census_and_custody_lease`, `linux_kernel_children`, `never_spawned` or
 `unresolved`. Linux requires two identical complete per-thread kernel children
 snapshots, including stable thread membership, before cleanup settlement.
 The Linux global census skips rows whose process group or session is 0 (host
