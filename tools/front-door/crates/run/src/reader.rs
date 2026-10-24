@@ -3,8 +3,8 @@ use crate::{
     db::{decode, sql_int},
     *,
 };
-use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
-use provenant_records::{AttemptFact, OutputRef};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
+use provenant_records::{AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
@@ -61,6 +61,40 @@ impl Iterator for Attempts<'_> {
         Some(fact)
     }
 }
+/// Reviewer attribution from the stored observed route: the owning actor and
+/// the model family the route reports, or `Unknown` without an observed route.
+fn reviewer_fact(owner: Option<ActorId>, observed: Option<&RouteRecord>) -> Option<ReviewerFact> {
+    let actor_id = owner?;
+    let route = observed.filter(|r| r.provider.is_some() || r.model.is_some());
+    let family = route.map(|r| {
+        let model = r.model.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let model = model.rsplit('/').next().unwrap_or_default();
+        let known = if model.starts_with("claude") {
+            Some("anthropic")
+        } else if model.starts_with("gpt") || model.starts_with("o1") || model.starts_with("o3") {
+            Some("openai")
+        } else if model.starts_with("gemini") {
+            Some("google")
+        } else {
+            None
+        };
+        known
+            .map(str::to_owned)
+            .or_else(|| r.provider.as_ref().map(|p| p.to_ascii_lowercase()))
+            .unwrap_or_default()
+    });
+    Some(ReviewerFact {
+        provenance: if family.is_some() {
+            ReviewerProvenance::Observed
+        } else {
+            ReviewerProvenance::Unknown
+        },
+        actor_id,
+        family: family.filter(|f| !f.is_empty()),
+        model: route.and_then(|r| r.model.clone()),
+        outcome: None,
+    })
+}
 impl AttemptReader for RunStore {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact> {
         let r = self.record(id, call)?;
@@ -91,7 +125,7 @@ impl AttemptReader for RunStore {
             resolved_route: r.resolved_route.map(Into::into),
             usage: r.usage.into(),
             output_paths: vec![output.path.clone()],
-            reviewer: None,
+            reviewer: reviewer_fact(r.verified_owner, r.observed_route.as_ref()),
             delivery_id: r.delivery_id,
             subject: r.subject,
             head: r.head,

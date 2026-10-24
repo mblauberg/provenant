@@ -62,6 +62,9 @@ fn tier(route: &RouteProvenance) -> Option<ModelTier> {
         RouteProvenance::Unknown {} => None,
     }
 }
+/// Most candidates the exhaustive selection considers (2^16 subsets).
+const MAX_SEARCH: usize = 16;
+
 fn declared_family(route: &RouteProvenance) -> Option<&str> {
     match route {
         RouteProvenance::Observed { model_family, .. } => model_family.as_deref(),
@@ -197,24 +200,47 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
             c.fact.attempt_id,
         )
     });
-    let mut lenses = BTreeSet::new();
-    let mut families = BTreeSet::new();
-    let mut picked: Vec<&Candidate> = Vec::new();
-    for candidate in &candidates {
-        if picked.len() as u64 >= need {
-            break;
-        }
-        if !lenses.insert(lens_key(&candidate.fact.lens)) {
+    // Exhaustive choice over a bounded candidate list: distinct lenses and
+    // distinct cross-family reviewers, preferring an adversarial leg at
+    // terminal risk, then more counted reviews, then more cross-family legs.
+    let pool = &candidates[..candidates.len().min(MAX_SEARCH)];
+    let mut best: Option<(u32, (bool, usize, usize))> = None;
+    for mask in 0u32..(1u32 << pool.len()) {
+        let size = mask.count_ones() as u64;
+        if size > need {
             continue;
         }
-        if let Some(family) = candidate.cross_family
-            && !families.insert(family)
-        {
-            lenses.remove(&lens_key(&candidate.fact.lens));
+        let mut lenses = BTreeSet::new();
+        let mut families = BTreeSet::new();
+        let mut valid = true;
+        let (mut adv, mut cross) = (false, 0);
+        for (idx, c) in pool.iter().enumerate() {
+            if mask & (1 << idx) == 0 {
+                continue;
+            }
+            let lens = lens_key(&c.fact.lens);
+            adv |= terminal && lens == adversarial;
+            if !lenses.insert(lens) || c.cross_family.is_some_and(|f| !families.insert(f)) {
+                valid = false;
+                break;
+            }
+            cross += usize::from(c.cross_family.is_some());
+        }
+        if !valid {
             continue;
         }
-        picked.push(candidate);
+        let score = (adv, size as usize, cross);
+        if best.is_none_or(|(_, b)| score > b) {
+            best = Some((mask, score));
+        }
     }
+    let best_mask = best.map_or(0, |(m, _)| m);
+    let picked: Vec<&Candidate> = pool
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| best_mask & (1 << idx) != 0)
+        .map(|(_, c)| c)
+        .collect();
     let counted: Vec<AttemptId> = picked.iter().map(|c| c.fact.attempt_id).collect();
     if (picked.len() as u64) < need {
         note(
@@ -396,6 +422,34 @@ mod tests {
         let report = run(RiskTier::Substantial, &authors, &[good], &[]);
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.counted.len(), 1);
+    }
+
+    #[test]
+    fn selection_finds_distinct_lens_and_family_legs_a_greedy_pick_would_miss() {
+        let authors = [author(attested(ModelTier::Senior))];
+        let reviews = [
+            review(
+                2,
+                observed(ModelTier::Senior, "openai"),
+                Some("openai"),
+                "correctness",
+            ),
+            review(
+                3,
+                observed(ModelTier::Senior, "google"),
+                Some("google"),
+                "correctness",
+            ),
+            review(
+                4,
+                observed(ModelTier::Senior, "openai"),
+                Some("openai"),
+                "security",
+            ),
+        ];
+        let report = run(RiskTier::Crucial, &authors, &reviews, &[]);
+        assert_eq!(report.status, Status::Passed);
+        assert_eq!(report.counted.len(), 2);
     }
 
     #[test]
