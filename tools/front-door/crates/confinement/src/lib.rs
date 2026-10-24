@@ -19,7 +19,10 @@ pub use disclosure::scan_disclosure;
 pub use git_evidence::Git;
 pub use output_custody::OutputCustody;
 pub use permissions::ConfinementBackend;
-pub use plan::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanError, PlanRequest};
+pub use plan::{
+    CodexPolicy, ConfinedPlan, ExtensionPolicy, MAX_READ_ONLY_WRITABLE, PlanError, PlanRequest,
+    valid_read_only_writable,
+};
 pub use redact::Redactor;
 pub use repo::{ReadOnlyRepo, VerifiedRepo, VerifiedWorktree, verify_worktree};
 pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility};

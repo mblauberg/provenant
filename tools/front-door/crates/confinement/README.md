@@ -74,3 +74,12 @@ Merged pruning takes explicit branches and retains candidates whose tip is on
 the integration first-parent chain, including fast-forward merges. Linked trees
 with gitlinks require review. The unsafe library `since` path is removed; CLI
 step 4 owns translating its frozen history scope into explicit candidates.
+
+Read-only plans resolve Git reads through `PlanRequest::with_read_only_repo`
+using a host `ProjectBinding`; the common directory is never sourced from a
+lane's `.git` marker. Its subtree is readable and explicitly immutable.
+`ReadOnlyPolicy` loads the optional host-state project `read-only.json` and
+resolves `readOnlyWritable` (default empty) to existing repository-relative
+directories without following symlinks. Git and provider config components
+are refused, including config nested inside an allowed subtree. The compiler
+rechecks component traversal, held roots and hard-link safety before handoff.
