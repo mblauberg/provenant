@@ -565,11 +565,14 @@ mod tests {
         fs::set_permissions(&path_git, fs::Permissions::from_mode(0o700)).expect("path mode");
 
         assert_eq!(
-            crate::roots::resolve_git_binary(None, &[path_dir.join("missing"), path_git.clone()]),
+            provenant_cli::git::resolve_git_binary(
+                None,
+                &[path_dir.join("missing"), path_git.clone()]
+            ),
             Some(path_git.clone())
         );
         assert_eq!(
-            crate::roots::resolve_git_binary(Some(&override_git), &[path_git]),
+            provenant_cli::git::resolve_git_binary(Some(&override_git), &[path_git]),
             Some(override_git)
         );
     }

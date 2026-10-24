@@ -305,7 +305,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                     .collect(),
                 concurrency: 1,
                 parent: None,
-                lane_depth: 1,
+                lane_depth: Some(1),
                 parent_attempt: None,
             },
             attempts: tasks

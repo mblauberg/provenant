@@ -225,7 +225,7 @@ impl RunStore {
                 .join(id.to_string());
             let paths = LaunchPaths {
                 attempt_id: id,
-                lane_depth: request.lane_depth,
+                lane_depth: request.lane_depth.unwrap_or(1),
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),
@@ -250,7 +250,7 @@ impl RunStore {
                     continue;
                 }
             };
-            set_lane_environment(&mut plan.environment, request.lane_depth, id);
+            set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             // Record the exact project-relative exceptions of the plan that launches.
             let writable = plan
                 .confinement

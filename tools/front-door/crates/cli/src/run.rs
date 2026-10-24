@@ -603,7 +603,7 @@ pub fn submit(
             tasks: requests,
             concurrency,
             parent: None,
-            lane_depth,
+            lane_depth: Some(lane_depth),
             parent_attempt,
         },
         attempts,
@@ -804,6 +804,10 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
         parent_depth.as_deref(),
         parent_attempt.as_deref(),
         max_depth,
+        roots.state.as_path(),
+        std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .as_deref()
+            .map(Path::new),
     )
 }
 
@@ -823,6 +827,8 @@ fn lane_dispatch_values(
     parent_depth: Option<&str>,
     parent_attempt: Option<&str>,
     max_depth: u64,
+    state: &Path,
+    run_state: Option<&Path>,
 ) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = parent_depth
         .map(str::parse::<u64>)
@@ -844,6 +850,34 @@ fn lane_dispatch_values(
                 "parent attempt environment value is invalid",
             )
         })?;
+    if let Some(run_state) = run_state {
+        let invalid = || {
+            Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane environment must match its child Run store path",
+            )
+        };
+        let relative = run_state.strip_prefix(state).map_err(|_| invalid())?;
+        let mut parts = relative.components();
+        let mut depth = 0;
+        let mut parent = None;
+        while let Some(part) = parts.next() {
+            if part.as_os_str() != "children" {
+                return Err(invalid());
+            }
+            let id = parts
+                .next()
+                .and_then(|part| part.as_os_str().to_str())
+                .ok_or_else(invalid)?;
+            parent = Some(AttemptId::parse(id).map_err(|_| invalid())?);
+            depth += 1;
+        }
+        if depth == 0 || parent_depth != Some(depth) || parent_attempt != parent {
+            return Err(invalid());
+        }
+        return Ok((run::next_lane_depth(depth, max_depth)?, parent));
+    }
     let parent_depth = match (parent_depth, parent_attempt) {
         (None, None) => 0,
         (Some(depth), Some(_)) if depth >= 1 => depth,
@@ -1619,7 +1653,13 @@ mod lane_depth_tests {
     #[test]
     fn shared_submit_context_refuses_depth_above_the_limit() {
         let parent = AttemptId::from_bytes([7; 16]).to_string();
-        let result = lane_dispatch_values(Some("2"), Some(&parent), 2);
+        let state = Path::new("/state");
+        let child = state
+            .join("children")
+            .join(&parent)
+            .join("children")
+            .join(&parent);
+        let result = lane_dispatch_values(Some("2"), Some(&parent), 2, state, Some(&child));
         let Err(failure) = result else {
             panic!("depth above the configured maximum must be refused");
         };
@@ -1631,19 +1671,32 @@ mod lane_depth_tests {
     fn shared_submit_context_assigns_root_depth_and_parent() {
         let parent = AttemptId::from_bytes([8; 16]);
         let parent_text = parent.to_string();
-        let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2);
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent_text);
+        let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2, state, Some(&child));
         assert!(matches!(result, Ok((2, Some(found))) if found == parent));
     }
 
     #[test]
     fn shared_submit_context_refuses_incomplete_or_zero_nested_context() {
         let parent = AttemptId::from_bytes([9; 16]).to_string();
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent);
+        for (depth, parent_attempt) in [
+            (None, None),
+            (Some("2"), Some(parent.as_str())),
+            (Some("1"), Some("00000000000000000000000000000000")),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 3, state, Some(&child))
+                .expect_err("stripped or forged lineage must be refused");
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
         for (depth, parent_attempt) in [
             (Some("1"), None),
             (None, Some(parent.as_str())),
             (Some("0"), Some(parent.as_str())),
         ] {
-            let failure = lane_dispatch_values(depth, parent_attempt, 2)
+            let failure = lane_dispatch_values(depth, parent_attempt, 2, Path::new("/state"), None)
                 .expect_err("incomplete or zero nested context must be refused");
             assert_eq!(failure.status, Status::Refused);
             assert_eq!(failure.code, "LANE_CONTEXT");
@@ -1652,7 +1705,10 @@ mod lane_depth_tests {
 
     #[test]
     fn shared_submit_context_assigns_root_depth_without_parent() {
-        assert!(matches!(lane_dispatch_values(None, None, 2), Ok((1, None))));
+        assert!(matches!(
+            lane_dispatch_values(None, None, 2, Path::new("/state"), None),
+            Ok((1, None))
+        ));
     }
 }
 

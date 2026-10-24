@@ -697,7 +697,7 @@ fn writer_run(
             }],
             concurrency: 1,
             parent: None,
-            lane_depth: 1,
+            lane_depth: Some(1),
             parent_attempt: None,
         },
         attempts: vec![provenant_run::NewAttempt {
@@ -1139,6 +1139,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
+    )?;
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude"))?;
     fs::create_dir_all(home.join(".codex"))?;
@@ -1184,7 +1188,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         ));
         let paths = provenant_run::LaunchPaths {
             attempt_id: prepared.attempts[0].attempt_id,
-            lane_depth: 2,
+            lane_depth: 1,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
@@ -1243,9 +1247,24 @@ fn lane_prepare_isolates_nested_state() -> Result {
             launch
                 .environment
                 .iter()
-                .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "2")
+                .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "1")
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
+        let selected_git = fs::canonicalize(crate::roots::git_binary().ok_or("host Git")?)?;
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_GIT" && value == selected_git.as_os_str())
+        );
+        assert!(
+            confinement
+                .profile
+                .spec
+                .process_executables
+                .iter()
+                .any(|grant| grant.path == selected_git && grant.scope == PathScope::Exact)
+        );
         let permissions = confinement.plan.permissions();
         assert_eq!(permissions.scratch.path, staging.join("candidate-1"));
         if adapter == "codex" {
@@ -1265,8 +1284,12 @@ fn lane_prepare_isolates_nested_state() -> Result {
             let generated = permissions.scratch.path.join("provenant-mcp.json");
             let mcp: Value = serde_json::from_slice(&fs::read(generated)?)?;
             assert_eq!(
+                mcp["mcpServers"]["fabric"]["env"]["PROVENANT_GIT"],
+                selected_git.to_str().ok_or("Git path")?
+            );
+            assert_eq!(
                 mcp["mcpServers"]["fabric"]["env"][provenant_run::LANE_DEPTH_ENV],
-                "2"
+                "1"
             );
             let settings: Value = serde_json::from_slice(&fs::read(
                 permissions.scratch.path.join("provenant-settings.json"),
@@ -1366,7 +1389,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         if adapter == "codex" && !writer {
             fs::write(
                 rig.state.join("config.toml"),
-                "schema_version=1\n[knobs]\n'lanes.max_depth'=3\n",
+                "schema_version=1\n[knobs]\n'lanes.max_depth'=2\n",
             )?;
             let mut options = provenant_supervisor::exec::ExecOptions::new(
                 &launch.argv,
@@ -1390,7 +1413,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
                     .exists()
             );
             assert!(!rig.state.join("run.sqlite3").exists());
-            fs::remove_file(rig.state.join("config.toml"))?;
+            fs::write(
+                rig.state.join("config.toml"),
+                "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
+            )?;
         }
         verify_lane_profile(
             &mut launch,
@@ -1464,6 +1490,37 @@ pub(crate) fn lane_provider() -> Result {
     if code(&output) != 0 {
         return Err("configured MCP child failed".into());
     }
+    let stripped = env
+        .iter()
+        .filter(|(key, _)| {
+            key != provenant_run::LANE_DEPTH_ENV && key != provenant_run::PARENT_ATTEMPT_ENV
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
+    options.env = Some(&stripped);
+    options.stdin = Some(&input);
+    let stripped_output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(
+        code(&stripped_output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&stripped_output.stderr.bytes)
+    );
+    let reply = stripped_output
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        reply
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("stripped MCP reply")?["result"]["structuredContent"]["code"],
+        "invalid_input"
+    );
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
@@ -1580,7 +1637,7 @@ fn verify_lane_profile(
     let before = run_count()?;
     fs::write(
         state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.max_depth'=3\n",
+        "schema_version=1\n[knobs]\n'lanes.max_depth'=2\n",
     )?;
     let nested_frames =
         String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
@@ -1588,7 +1645,10 @@ fn verify_lane_profile(
     options.env = Some(&launch.environment);
     options.stdin = Some(nested_frames.as_bytes());
     let nested = executor.execute(options)?;
-    fs::remove_file(state.join("config.toml"))?;
+    fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
+    )?;
     assert_eq!(
         code(&nested),
         0,

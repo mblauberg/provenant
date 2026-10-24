@@ -65,7 +65,7 @@ pub(super) fn input() -> PreparedRun {
             }],
             concurrency: 1,
             parent: None,
-            lane_depth: 1,
+            lane_depth: Some(1),
             parent_attempt: None,
         },
         attempts: vec![NewAttempt {

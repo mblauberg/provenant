@@ -10,6 +10,8 @@ use std::{ffi::OsString, path::Path};
 /// Canonical runtime paths supplied by the composition edge.
 pub struct LaneRuntime<'a> {
     pub executable: &'a Path,
+    /// Canonical host-selected Git, also pinned in MCP and hook environments.
+    pub git: &'a Path,
     pub state: &'a Path,
     /// Isolated Run store for this attempt's children; never its own custody.
     pub child_state: &'a Path,
@@ -23,6 +25,7 @@ impl LaneRuntime<'_> {
     pub(crate) fn mcp(&self, harness: Harness) -> Result<Value, ProviderError> {
         if ![
             self.executable,
+            self.git,
             self.state,
             self.assets,
             self.child_state,
@@ -41,6 +44,7 @@ impl LaneRuntime<'_> {
             RUN_STATE_DIRECTORY_ENV: self.child_state,
             "HOME": self.home,
             "PROVENANT_ROOT": self.assets,
+            "PROVENANT_GIT": self.git,
         });
         Ok(entry)
     }
@@ -100,6 +104,7 @@ impl LaneRuntime<'_> {
     pub(crate) fn environment(&self, env: &mut Vec<(OsString, OsString)>) {
         env.extend([
             ("PROVENANT_ROOT".into(), self.assets.into()),
+            ("PROVENANT_GIT".into(), self.git.into()),
             ("PROVENANT_LANE_DEPTH".into(), self.depth.to_string().into()),
             (
                 "PROVENANT_PARENT_ATTEMPT_ID".into(),
@@ -117,10 +122,13 @@ impl LaneRuntime<'_> {
         setup: &mut Vec<SetupStep>,
         hooks: bool,
     ) {
-        profile.process_executables.push(exact(self.executable));
+        profile
+            .process_executables
+            .extend([exact(self.executable), exact(self.git)]);
         setup.push(SetupStep::CreateDir(self.state.join("routing")));
         profile.runtime_reads.extend([
             exact(self.executable),
+            exact(self.git),
             exact(self.assets.join("release.json")),
             exact(self.state.join("config.toml")),
             exact(self.state.join("host-id")),
@@ -149,9 +157,7 @@ impl LaneRuntime<'_> {
         if hooks {
             // Claude executes command hooks through its shell. This does not
             // enable the model's Bash tool.
-            profile
-                .process_executables
-                .extend([exact("/bin/sh"), exact("/usr/bin/git")]);
+            profile.process_executables.push(exact("/bin/sh"));
             let path = self.state.join("workflow");
             setup.push(SetupStep::CreateDir(path.clone()));
             profile.state_writes.push(subtree(path));

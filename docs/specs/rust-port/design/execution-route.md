@@ -352,7 +352,12 @@ Fabric writes are exact `fabric/fabric.sqlite3` and its WAL/SHM/journal paths,
 `fabric/locks/` for landing locks, and the exact host binding lock. Project
 bindings, config, host ID and routing observations are read-only; a lane looks
 up its parent's existing project binding rather than allocating another.
-Claude also gets its workflow checkpoint state and exact shell/Git hook helpers.
+Git is selected on the host through the shared resolver (`PROVENANT_GIT`
+override, otherwise the fixed list preferring Homebrew), canonicalised before
+preparation and pinned as `PROVENANT_GIT` in both provider and MCP environments.
+Every lane grants read and execution access to exactly that Git path. Fabric
+startup and hooks use the same resolver; they do not substitute Apple Git.
+Claude also gets its workflow checkpoint state and exact shell hook helper.
 
 Each attempt gets a dedicated child Run store at
 `RUN_STATE/children/<AttemptId>/`. The launch layer creates this directory and
@@ -382,7 +387,12 @@ environment and the generated MCP entry's explicit environment. MCP setup also
 pins `HOME` and `PROVENANT_ROOT`; lineage does not depend on the provider
 forwarding arbitrary environment variables. The shared CLI/Fabric submission
 path refuses a child above `lanes.max_depth`, default 2, before creating its
-records. Nested parent metadata remains separate from continuation ancestry and
+records. When `PROVENANT_RUN_STATE_DIR` is set, its path must consist of
+`children/<AttemptId>` pairs below the original state root. The pair count and
+last ID determine the parent depth and attempt; missing or disagreeing
+environment values refuse submission. A lane may deepen its granted child path
+but cannot reset its depth by stripping those variables.
+Nested parent metadata remains separate from continuation ancestry and
 grants no cancellation authority. This is a recursion limit, not an authority
 boundary.
 

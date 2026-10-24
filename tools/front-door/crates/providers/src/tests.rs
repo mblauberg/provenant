@@ -682,6 +682,7 @@ pub(super) fn fixture_input<'a>(
         nonce: [9; 16],
         provenant: crate::LaneRuntime {
             executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
+            git: std::path::Path::new("/fixture/git/bin/git"),
             state: std::path::Path::new("/fixture/state"),
             child_state: std::path::Path::new("/fixture/state/children/attempt"),
             home: std::path::Path::new("/fixture/home"),
@@ -745,6 +746,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             "TMPDIR",
             "LANG",
             "PROVENANT_ROOT",
+            "PROVENANT_GIT",
             "PROVENANT_LANE_DEPTH",
             "PROVENANT_PARENT_ATTEMPT_ID",
             "PROVENANT_RUN_STATE_DIR",
@@ -832,6 +834,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 || (id == "codex" && grant.path.starts_with("/fixture/home"))
                 || [
                     "/fixture/provenant/bin/provenant",
+                    "/fixture/git/bin/git",
                     "/fixture/provenant/release.json",
                     "/fixture/state/config.toml",
                     "/fixture/state/host-id",
@@ -1636,8 +1639,33 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                         .spec
                         .state_writes
                         .iter()
+                        .filter(|g| !g.path.starts_with("/fixture/state"))
                         .all(|g| g.path.starts_with(&dir))
                 );
+                let lane = spec
+                    .profile
+                    .spec
+                    .state_writes
+                    .iter()
+                    .filter(|g| g.path.starts_with("/fixture/state"))
+                    .collect::<Vec<_>>();
+                let mut expected = vec![
+                    crate::launch::subtree("/fixture/state/children/attempt"),
+                    crate::launch::subtree("/fixture/state/fabric/locks"),
+                    crate::launch::subtree("/fixture/state/workflow"),
+                ];
+                expected.extend(
+                    [
+                        "fabric/fabric.sqlite3",
+                        "fabric/fabric.sqlite3-wal",
+                        "fabric/fabric.sqlite3-shm",
+                        "fabric/fabric.sqlite3-journal",
+                        "host-binding.lock",
+                    ]
+                    .map(|name| crate::launch::exact(Path::new("/fixture/state").join(name))),
+                );
+                assert_eq!(lane.len(), expected.len());
+                assert!(expected.iter().all(|grant| lane.contains(&grant)));
             } else {
                 // The accepted design keeps runtime state per attempt. Only the
                 // selected identity's auth.json is linked into CODEX_HOME.

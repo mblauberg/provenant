@@ -242,7 +242,8 @@ coordination store. Root/path safety and file publication use supervisor APIs.
 Run owns schema and transactions; shared typed records live in records:
 
 - `RunRecord`: schema version, run/project IDs, core actor, operation ID,
-  immutable request digest, task IDs, parent/children, revision/generation,
+  immutable request digest, task IDs, continuation parent/children, optional nested
+  `parent_attempt`, revision/generation,
   created/closed times and closure state. The run index is in this same store.
 - `AttemptRecord`: IDs, optional `delivery_id`, retry/continuation parent,
   requested/resolved/applied/observed route/effort, confinement and subject
@@ -468,10 +469,18 @@ missing, malformed or changed attestations keep the fence.
 
 The 2026-10-24 lane decision permits basic nested dispatch with a lightweight
 recursion guard: the shared CLI/Fabric submission edge reads
-`PROVENANT_LANE_DEPTH` and `PROVENANT_PARENT_ATTEMPT_ID`, refuses a child above
+`PROVENANT_LANE_DEPTH` and `PROVENANT_PARENT_ATTEMPT_ID`. With
+`PROVENANT_RUN_STATE_DIR` set, it derives the current depth and parent from the
+count and final ID of `children/<AttemptId>` pairs below `roots.state`, and
+refuses missing or disagreeing environment values. It refuses a child above
 `lanes.max_depth` (default 2), and records both depth and submitting parent in
-`CanonicalRequest`. Run overwrites these environment values on each child
-launch. Continuations retain their original depth and nested parent separately
+`CanonicalRequest`. Its optional `lane_depth` and `parent_attempt` fields are
+omitted when absent, so pre-lane version-1 requests still decode and retain
+their sealed canonical digest. Launch treats absent depth as a root lane (1).
+`RunRecord.parent` remains the continuation target; `RunRecord.parent_attempt`
+stores the nested submitting attempt independently. Run overwrites these
+environment values on each child launch. Continuations retain their original
+depth and nested parent separately
 from their continuation target. This metadata is not cancellation authority;
 the explicit user decision supersedes requiring the capability below merely
 to dispatch a nested lane.

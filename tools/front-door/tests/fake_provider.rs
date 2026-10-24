@@ -257,6 +257,9 @@ fn account_placement() -> Result {
             nonce: [1; 16],
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
+                git: &std::fs::canonicalize(
+                    provenant_cli::git::git_binary().ok_or("Git unavailable")?,
+                )?,
                 state: &rig.state,
                 child_state: &rig.state.join(format!("children/{key}")),
                 home: &rig.home,

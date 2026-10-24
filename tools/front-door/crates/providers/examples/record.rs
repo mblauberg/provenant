@@ -835,11 +835,8 @@ fn main() -> Result<()> {
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
     let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-    let runtime = UtilityRuntime::new(
-        fs,
-        std::fs::canonicalize(which("git").ok_or("git")?)?,
-        &layout.home_git,
-    )?;
+    let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
+    let runtime = UtilityRuntime::new(fs, git.clone(), &layout.home_git)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,
@@ -958,6 +955,7 @@ fn main() -> Result<()> {
             nonce,
             provenant: provenant_providers::LaneRuntime {
                 executable: &args.provenant,
+                git: &git,
                 state: &args.root.join("provenant-state"),
                 child_state: &args.root.join("provenant-state/children/recording"),
                 home: &home,
