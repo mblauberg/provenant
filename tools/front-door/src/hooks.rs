@@ -45,6 +45,8 @@ struct AdvisoryInput {
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let deadline = Instant::now() + LOCAL_BUDGET;
     match hook.spec().handler {
+        Handler::ChairPrompt => crate::chair::hook(false, globals),
+        Handler::ChairStart => crate::chair::hook(true, globals),
         Handler::Guard => guard(globals, deadline),
         Handler::PreCompact => advisory(HookEvent::PreCompact, globals, deadline),
         Handler::Compact => advisory(HookEvent::SessionStart, globals, deadline),

@@ -1,6 +1,24 @@
 {
   "schema_version": 1,
   "knobs": {
+    "chair.auto_switch": {
+      "type": "bool", "default": false, "status": "wired",
+      "reader": "tools/front-door/src/chair.rs",
+      "effect": "Allow the Claude UserPromptSubmit hook to checkpoint and switch accounts at the quota threshold.",
+      "trade_off": "Off keeps switching manual; on opens a new chair pane when an explicitly allowed account has headroom."
+    },
+    "chair.switch_threshold": {
+      "type": "int", "min": 1, "max": 100, "default": 92, "status": "wired",
+      "reader": "tools/front-door/src/chair.rs",
+      "effect": "Switch when either the five-hour or weekly cached Claude usage reaches this percentage.",
+      "trade_off": "Lower switches sooner; higher leaves less headroom for the handoff."
+    },
+    "chair.switch_accounts": {
+      "type": "string_list", "default": [], "status": "wired",
+      "reader": "tools/front-door/src/chair.rs",
+      "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
+      "trade_off": "An explicit list controls which signed-in accounts may receive the chair."
+    },
     "effort.shift": {
       "type": "int", "min": -1, "max": 1, "default": 0, "status": "advisory",
       "reason": "No evidenced effort controls or task-class floor policy exist in the Rust routing catalogue.",

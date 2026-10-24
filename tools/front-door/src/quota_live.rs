@@ -563,3 +563,45 @@ fn agy_identity(dir: &Path) -> Option<String> {
         agy_fingerprint(&bytes)
     })
 }
+
+/// Explicit Claude registrations only. No auth stores, identity probes or
+/// implicit default directory discovery are involved in chair switching.
+pub(crate) fn registered_claude()
+-> Result<Vec<provenant_providers::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
+    use provenant_providers::identity::{Accounts, RegisteredAccount};
+    let home = crate::roots::home()?;
+    let root = std::env::var_os("AGENT_FABRIC_INSTANCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".agents"));
+    let file = root.join("config/telemetry.json");
+    if !file.exists() {
+        return Ok(vec![]);
+    }
+    let config = value(&file).map_err(|_| "invalid account registrations")?;
+    let Some(entries) = config.pointer("/accounts/claude") else {
+        return Ok(vec![]);
+    };
+    let entries = entries
+        .as_object()
+        .ok_or("invalid Claude account registrations")?;
+    let mut accounts = Vec::new();
+    for (label, options) in entries {
+        if options.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let Some(path) = options.get("identity_dir").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = expand(&home, path);
+        if !path.is_absolute() {
+            return Err("registered Claude directory must be absolute".into());
+        }
+        let path = fs::canonicalize(&path)?;
+        if !path.is_dir() {
+            return Err("registered Claude directory is unavailable".into());
+        }
+        accounts.push(RegisteredAccount::new("claude", label, path)?);
+    }
+    Accounts::new(accounts.clone())?;
+    Ok(accounts)
+}

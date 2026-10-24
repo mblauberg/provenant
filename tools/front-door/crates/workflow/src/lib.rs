@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bind;
+pub mod chair;
 pub mod coverage;
 mod persistence;
 pub mod receipt;
