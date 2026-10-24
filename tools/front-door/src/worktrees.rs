@@ -23,6 +23,8 @@ enum Error {
     #[error(transparent)]
     Worktree(#[from] WorktreeError),
     #[error(transparent)]
+    Permissions(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
@@ -188,7 +190,10 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                     },
                 }
             };
-            Data::Removed(worktrees::remove(&context, request, &cancel)?)
+            let removed = worktrees::remove(&context, request, &cancel)?;
+            let home = roots::home()?;
+            provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(&home)?;
+            Data::Removed(removed)
         }
     };
     drop(utility_home);

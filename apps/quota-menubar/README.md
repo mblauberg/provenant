@@ -10,6 +10,8 @@ The app reads all quota data from the CLI. It does not read credentials, tokens 
 
 For Claude, `~/.claude-pro`, `~/.claude-anese`, and `~/.claude-michael` remain signed in to their fixed accounts. Only `~/.claude` rotates between them, and the CLI selects that default profile with `CLAUDE_CONFIG_DIR` unset. The CLI matches accounts by a short hash of the authenticated identity, uses the freshest unexpired token for each account, and asks Claude Code to refresh an expired fixed-profile token before reading quota. Raw email addresses are not stored.
 
+The panel also lists lanes that need attention under "Needs attention": input required (24 hours), failed in the last hour, and lanes held in `queued`, `starting` or `settling` for over 10 minutes. It reads `provenant lanes --all --json` on each quota refresh, on panel open and once a minute, and shows nothing when no lane qualifies. Clicking a row opens `<state root>/runs/<run id>`.
+
 ## Build and run
 
 The app needs macOS 14 or later and the Swift toolchain. It has no third-party dependencies.

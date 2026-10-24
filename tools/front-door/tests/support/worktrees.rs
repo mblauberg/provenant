@@ -1021,6 +1021,8 @@ pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
 }
 
 fn create_list_and_remove_a_managed_worktree() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+
     let rig = repository()?;
     let base = git(&rig, &["rev-parse", "HEAD"])?;
     let created = ok(
@@ -1047,6 +1049,18 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .iter()
             .any(|tree| tree["branch"] == "refs/heads/feature/topic" && tree["dirty"] == "clean")
     );
+    let cache_root = rig.home.join("Library/Caches/provenant-lane-cargo");
+    fs::create_dir_all(&cache_root)?;
+    let cache = cache_root.join("d".repeat(64));
+    fs::create_dir(&cache)?;
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?;
+    let mut owner_marker = b"provenant-lane-cargo-owner-v1\n".to_vec();
+    owner_marker.extend_from_slice(
+        fs::canonicalize(rig.project.join(".worktrees/feature-topic"))?
+            .as_os_str()
+            .as_encoded_bytes(),
+    );
+    fs::write(cache.join(".provenant-worktree-owner"), owner_marker)?;
     let removed = ok(&rig, &["worktree", "remove", "feature/topic", "--json"])?;
     assert_eq!(
         removed["data"]["removed"]
@@ -1056,6 +1070,7 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
         1
     );
     assert!(!rig.project.join(".worktrees/feature-topic").exists());
+    assert!(!cache.exists(), "orphaned lane cache remains after removal");
     assert_eq!(
         ok(&rig, &["worktree", "list", "--json"])?["data"]
             .as_array()

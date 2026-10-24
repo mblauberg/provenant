@@ -4,7 +4,6 @@ pub mod accounts;
 pub mod check;
 pub mod domains;
 pub mod fabric;
-pub mod git;
 pub mod quota;
 pub mod route;
 pub mod run;
