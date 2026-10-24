@@ -193,6 +193,8 @@ pub struct GraphRun {
 
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
+/// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
+/// is, never resubmit, so a changed actor cannot launch duplicate work.
 /// Provider launch and terminal publication remain run's responsibility.
 pub trait AttemptOwner {
     type Error: Error + 'static;
@@ -204,6 +206,7 @@ pub trait AttemptOwner {
         route: &GraphRoute,
         access: AccessMode,
         worktree: Option<&str>,
+        stored_ref: Option<&str>,
     ) -> Result<AttemptObservation, Self::Error>;
 }
 
@@ -559,6 +562,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
 
+            let stored_ref = checkpoint.nodes[node_index]
+                .attempts
+                .last()
+                .and_then(|last| last.attempt_ref.clone());
             let observation = owner
                 .observe_or_start(
                     &key,
@@ -566,6 +573,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &route,
                     node.access,
                     node.worktree.as_deref(),
+                    stored_ref.as_deref(),
                 )
                 .map_err(GraphError::Run)?;
             let should_continue = {
@@ -912,6 +920,7 @@ mod tests {
         observations: VecDeque<AttemptObservation>,
         calls: Vec<(AttemptKey, GraphRoute)>,
         permissions: Vec<(AccessMode, Option<String>)>,
+        stored_refs: Vec<Option<String>>,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -924,7 +933,9 @@ mod tests {
             route: &GraphRoute,
             access: AccessMode,
             worktree: Option<&str>,
+            stored_ref: Option<&str>,
         ) -> Result<AttemptObservation, Self::Error> {
+            self.stored_refs.push(stored_ref.map(str::to_owned));
             self.calls.push((key.clone(), route.clone()));
             self.permissions.push((access, worktree.map(str::to_owned)));
             self.observations.pop_front().ok_or(NoObservation)
@@ -1246,6 +1257,11 @@ mod tests {
         let completed = resume(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(completed.status, GraphStatus::Complete);
         assert_eq!(owner.calls[0].0, owner.calls[1].0);
+        // The resumed observation sees the stored reference instead of resubmitting.
+        assert_eq!(
+            owner.stored_refs,
+            vec![None, Some("host/attempt".to_owned())]
+        );
         assert_eq!(
             pending.checkpoint.nodes[0].attempts[0].key,
             completed.checkpoint.nodes[0].attempts[0].key
@@ -1321,6 +1337,7 @@ mod file_tests {
             _: &str,
             _: &GraphRoute,
             _: AccessMode,
+            _: Option<&str>,
             _: Option<&str>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(AttemptObservation::Pending {
