@@ -501,6 +501,9 @@ pub struct Remove {
     /// Worktree to remove
     #[arg(required_unless_present = "merged", conflicts_with_all = ["merged", "integration", "branch", "since"])]
     pub name: Option<String>,
+    /// With NAME: also delete the branch when it is not merged (clean worktree only)
+    #[arg(long, conflicts_with = "merged")]
+    pub discard: bool,
     /// Remove worktrees already merged into the integration branch
     #[arg(long, requires_all = ["integration", "remove_scope"])]
     pub merged: bool,

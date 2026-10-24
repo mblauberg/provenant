@@ -69,7 +69,7 @@ provenant
   quota show | tick
   worktree create BRANCH [--base REV]
   worktree list
-  worktree remove NAME | --merged --integration REF (--branch NAME… | --since OID)
+  worktree remove NAME [--discard] | --merged --integration REF (--branch NAME… | --since OID)
   workflow …                              [workflow clap subtree]
   check config | install | harness | release
   check writing PATHS… [--rules general|academic|legal]
@@ -222,7 +222,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `telemetry stats` | `telemetry stats [--usage] [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--run-id RUN] [--detail]` | telemetry stats or the usage-ledger reader | `--usage` selects bounded usage-ledger stats; otherwise the Rust run-record reducer is used. Dates mean midnight UTC; timestamps need an offset; `since < until`. |
 | `worktree create` | `worktree create BRANCH [--base REV]` | confinement `worktrees::create(WorktreeCreate { branch, base })` | Creates `.worktrees/<BRANCH with / as ->`. An existing branch with `--base` is invalid; a new branch's base defaults to the project's `HEAD`, pinned and returned. `--repo` is dropped for global `--project`. |
 | `worktree list` | `worktree list` | confinement `worktrees::list(VerifiedRepo)` | Unpaged bounded list; no `--repo`. |
-| `worktree remove` | `worktree remove NAME` \| `worktree remove --merged --integration REF (--branch NAME… \| --since OID)` | confinement `worktrees::remove(WorktreeRemove::Name \| Merged { integration, scope })` | NAME conflicts with `--merged`. Scope is required, as supervisor states, rather than cli's optional scope. At most 100 branches. REF is pinned once. No force. |
+| `worktree remove` | `worktree remove NAME [--discard]` \| `worktree remove --merged --integration REF (--branch NAME… \| --since OID)` | confinement `worktrees::remove(WorktreeRemove::Name { name, discard } \| Merged { integration, scope })` | NAME conflicts with `--merged`. NAME removes a clean worktree, then deletes its branch when merged into the primary checkout's integration branch; otherwise the branch is kept (`not_merged`) and a note suggests `--discard`. `--discard` also deletes an unmerged branch and returns its head in `discarded`. `--merged` also deletes merged branches with no worktree, so no `prune-branches` verb exists: its explicit `--branch`/`--since` scope already stops a sweep. `--remote` is not offered: confined Git has no network or credentials, so remote deletion needs its own decision first. Scope is required, as supervisor states, rather than cli's optional scope. At most 100 branches. REF is pinned once. No force. |
 | `workflow …` | Workflow's own clap subtree, mounted unchanged | workflow requests | As for `fabric …`. |
 | `check config` | `check config [--limit N] [--cursor TOKEN]` | config validation | All checks: limit 1–100, default 50. |
 | `check install` | `check install [--source ABS] [--limit N] [--cursor TOKEN]` | config `check_install` | `--source` is a staged release, as for `install`, not a source checkout; one spelling, one meaning. |

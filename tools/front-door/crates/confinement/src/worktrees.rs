@@ -115,7 +115,10 @@ pub struct WorktreeCreate {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorktreeRemove {
-    Name(String),
+    /// Remove one clean worktree. Its branch is deleted when merged into the
+    /// primary checkout's integration branch; `discard` also deletes it when
+    /// unmerged.
+    Name { name: String, discard: bool },
     Merged {
         integration: String,
         scope: PruneScope,
@@ -231,7 +234,16 @@ pub enum RetainReason {
 pub struct RemoveOutcome {
     pub removed: Vec<WorktreeInfo>,
     pub pruned_refs: Vec<String>,
+    /// Unmerged branches deleted with `discard`. `head` is the commit the
+    /// branch pointed at, which recovers it while Git still holds the object.
+    pub discarded: Vec<DiscardedRef>,
     pub retained: Vec<RetainedBranch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DiscardedRef {
+    pub branch: String,
+    pub head: GitOid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1506,80 +1518,64 @@ struct PruneRange<'a> {
     tip: GitOid,
 }
 
-fn remove_merged_candidate(
+/// What becomes of a candidate branch. Decided before any worktree is touched,
+/// so an unmerged worktree is never removed by a merged sweep.
+#[derive(Clone, Copy, Debug)]
+enum Disposition {
+    Keep(RetainReason),
+    Merged,
+    Discard,
+}
+
+fn keep_disposition(
     context: &WorktreeContext<'_>,
     branch: &GitRefName,
+    tip: GitOid,
     range: PruneRange<'_>,
-    entries: &[GitWorktree],
-    branch_tips: &BTreeMap<GitRefName, GitOid>,
+    discard: bool,
     cancel: &CancelToken,
-    outcome: &mut RemoveOutcome,
-) -> Result<(), WorktreeError> {
+) -> Disposition {
     let PruneRange {
         integration,
         tip: integration_tip,
     } = range;
     if branch == integration {
-        retain(outcome, branch, RetainReason::IntegrationRef);
-        return Ok(());
+        return Disposition::Keep(RetainReason::IntegrationRef);
     }
-    let Some(tip) = branch_tips.get(branch).copied() else {
-        retain(outcome, branch, RetainReason::Changed);
-        return Ok(());
-    };
     if tip == integration_tip {
-        retain(outcome, branch, RetainReason::AtIntegrationTip);
-        return Ok(());
+        return Disposition::Keep(RetainReason::AtIntegrationTip);
     }
-    let entry = match matching_worktree(entries, branch, context.repo.root_path()) {
-        Ok(Some(entry)) => entry,
-        Ok(None) => {
-            retain(outcome, branch, RetainReason::Unregistered);
-            return Ok(());
-        }
-        Err(error) => {
-            retain(outcome, branch, retain_reason(&error));
-            return Ok(());
-        }
-    };
-    if entry.head != tip {
-        retain(outcome, branch, RetainReason::Changed);
-        return Ok(());
-    }
-    let merged = match is_ancestor(context, tip, integration_tip, cancel) {
-        Ok(merged) => merged,
-        Err(error) => {
-            retain(outcome, branch, retain_reason(&error));
-            return Ok(());
-        }
-    };
-    if !merged {
-        retain(outcome, branch, RetainReason::NotMerged);
-        return Ok(());
+    match is_ancestor(context, tip, integration_tip, cancel) {
+        Ok(true) => {}
+        Ok(false) if discard => return Disposition::Discard,
+        Ok(false) => return Disposition::Keep(RetainReason::NotMerged),
+        Err(error) => return Disposition::Keep(retain_reason(&error)),
     }
     match is_first_parent_commit(context, integration_tip, tip, cancel) {
-        Ok(true) => {
-            retain(outcome, branch, RetainReason::NoUniqueCommit);
-            return Ok(());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            retain(outcome, branch, retain_reason(&error));
-            return Ok(());
-        }
+        Ok(false) => Disposition::Merged,
+        Ok(true) => Disposition::Keep(RetainReason::NoUniqueCommit),
+        Err(error) => Disposition::Keep(retain_reason(&error)),
     }
-    if entry.locked || entry.prunable {
-        retain(outcome, branch, RetainReason::LockedOrPrunable);
-        return Ok(());
-    }
-    let removed = match remove_tree(context, entry, tip, cancel) {
-        Err(error) => {
-            retain(outcome, branch, retain_reason(&error));
+}
+
+/// Delete the local ref once its worktree is gone, under the exact expected
+/// tip, after rechecking that no other worktree has it checked out.
+fn settle_branch(
+    context: &WorktreeContext<'_>,
+    branch: &GitRefName,
+    tip: GitOid,
+    disposition: Disposition,
+    cancel: &CancelToken,
+    outcome: &mut RemoveOutcome,
+) -> Result<(), WorktreeError> {
+    let discard = match disposition {
+        Disposition::Keep(reason) => {
+            retain(outcome, branch, reason);
             return Ok(());
         }
-        Ok(removed) => removed,
+        Disposition::Merged => false,
+        Disposition::Discard => true,
     };
-    outcome.removed.push(removed.info.clone());
     context.repo.revalidate()?;
     let fresh = read_worktrees(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
@@ -1596,7 +1592,7 @@ fn remove_merged_candidate(
             retain(outcome, branch, retain_reason(&error));
             return Ok(());
         }
-    };
+    }
     context.repo.revalidate()?;
     let deleted = execute_git_mutation(
         context.executor,
@@ -1610,11 +1606,87 @@ fn remove_merged_candidate(
         cancel,
     );
     if deleted.is_ok_and(|result| exit_code(&result).ok() == Some(0)) {
-        outcome.pruned_refs.push(branch.short_name().to_owned());
+        let short = branch.short_name().to_owned();
+        if discard {
+            outcome.discarded.push(DiscardedRef {
+                branch: short,
+                head: tip,
+            });
+        } else {
+            outcome.pruned_refs.push(short);
+        }
     } else {
         retain(outcome, branch, RetainReason::Changed);
     }
     Ok(())
+}
+
+fn remove_merged_candidate(
+    context: &WorktreeContext<'_>,
+    branch: &GitRefName,
+    range: PruneRange<'_>,
+    entries: &[GitWorktree],
+    branch_tips: &BTreeMap<GitRefName, GitOid>,
+    cancel: &CancelToken,
+    outcome: &mut RemoveOutcome,
+) -> Result<(), WorktreeError> {
+    let Some(tip) = branch_tips.get(branch).copied() else {
+        retain(outcome, branch, RetainReason::Changed);
+        return Ok(());
+    };
+    let disposition = keep_disposition(context, branch, tip, range, false, cancel);
+    if let Disposition::Keep(reason) = disposition {
+        retain(outcome, branch, reason);
+        return Ok(());
+    }
+    let entry = match matching_worktree(entries, branch, context.repo.root_path()) {
+        Ok(entry) => entry,
+        Err(error) => {
+            retain(outcome, branch, retain_reason(&error));
+            return Ok(());
+        }
+    };
+    // Held until the ref is settled, so the writer lock covers the deletion.
+    let _held = match entry {
+        None => None,
+        Some(entry) => {
+            if entry.head != tip {
+                retain(outcome, branch, RetainReason::Changed);
+                return Ok(());
+            }
+            if entry.locked || entry.prunable {
+                retain(outcome, branch, RetainReason::LockedOrPrunable);
+                return Ok(());
+            }
+            match remove_tree(context, entry, tip, cancel) {
+                Ok(removed) => {
+                    outcome.removed.push(removed.info.clone());
+                    Some(removed)
+                }
+                Err(error) => {
+                    retain(outcome, branch, retain_reason(&error));
+                    return Ok(());
+                }
+            }
+        }
+    };
+    settle_branch(context, branch, tip, disposition, cancel, outcome)
+}
+
+/// The integration branch the primary checkout is on, pinned to its tip. A
+/// detached primary names no integration branch, so removal by name refuses.
+fn primary_integration(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<(GitRefName, GitOid), WorktreeError> {
+    let bytes = std::fs::read(context.repo.common_git_dir().join("HEAD"))
+        .map_err(|_| WorktreeError::InvalidOutput)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    let name = text
+        .trim_end()
+        .strip_prefix("ref: ")
+        .ok_or(WorktreeError::InvalidRequest)?;
+    pin_branch_ref(context, name, cancel)
 }
 
 /// Remove one clean managed linked worktree, or prune a caller-scoped set of
@@ -1630,13 +1702,32 @@ pub fn remove(
     let entries = read_worktrees(context, cancel)?;
     let mut outcome = RemoveOutcome::default();
     match request {
-        WorktreeRemove::Name(name) => {
+        WorktreeRemove::Name { name, discard } => {
             let branch = GitRefName::branch(&name).map_err(|_| WorktreeError::InvalidRequest)?;
+            let (integration, integration_tip) = primary_integration(context, cancel)?;
+            let branch_tips = read_branch_tips(context, cancel)?;
             let entry = matching_worktree(&entries, &branch, context.repo.root_path())?
                 .ok_or(WorktreeError::NotFound)?;
-            let head = entry.head;
-            let removed = remove_tree(context, entry, head, cancel)?;
-            outcome.removed.push(removed.info);
+            let tip = branch_tips
+                .get(&branch)
+                .copied()
+                .filter(|tip| *tip == entry.head)
+                .ok_or(WorktreeError::IdentityChanged)?;
+            let disposition = keep_disposition(
+                context,
+                &branch,
+                tip,
+                PruneRange {
+                    integration: &integration,
+                    tip: integration_tip,
+                },
+                discard,
+                cancel,
+            );
+            // A dirty or live worktree fails here, before any branch changes.
+            let removed = remove_tree(context, entry, tip, cancel)?;
+            outcome.removed.push(removed.info.clone());
+            settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
         }
         WorktreeRemove::Merged { integration, scope } => {
             let (integration, integration_tip) = pin_branch_ref(context, &integration, cancel)?;
@@ -2078,7 +2169,10 @@ mod lifecycle_tests {
                 matches!(
                     remove(
                         &context,
-                        WorktreeRemove::Name("feature/sequencer".into()),
+                        WorktreeRemove::Name {
+                            name: "feature/sequencer".into(),
+                            discard: false,
+                        },
                         &cancellation,
                     ),
                     Err(WorktreeError::GitOperationInProgress)
@@ -2101,7 +2195,10 @@ mod lifecycle_tests {
         );
         remove(
             &context,
-            WorktreeRemove::Name("feature/sequencer".into()),
+            WorktreeRemove::Name {
+                name: "feature/sequencer".into(),
+                discard: false,
+            },
             &cancellation,
         )?;
         Ok(())
@@ -2142,7 +2239,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &context,
-                WorktreeRemove::Name("main".to_owned()),
+                WorktreeRemove::Name {
+                    name: "main".to_owned(),
+                    discard: false,
+                },
                 &cancellation
             ),
             Err(WorktreeError::Primary)
@@ -2155,7 +2255,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &unknown_context,
-                WorktreeRemove::Name("feature/lifecycle".to_owned()),
+                WorktreeRemove::Name {
+                    name: "feature/lifecycle".to_owned(),
+                    discard: false,
+                },
                 &cancellation,
             ),
             Err(WorktreeError::UnknownWriter)
@@ -2164,7 +2267,10 @@ mod lifecycle_tests {
 
         let removed = remove(
             &context,
-            WorktreeRemove::Name("feature/lifecycle".to_owned()),
+            WorktreeRemove::Name {
+                name: "feature/lifecycle".to_owned(),
+                discard: false,
+            },
             &cancellation,
         )?;
         assert_eq!(removed.removed.len(), 1);
@@ -2225,7 +2331,10 @@ mod lifecycle_tests {
 
         let removed = remove(
             &context,
-            WorktreeRemove::Name("feature/existing".to_owned()),
+            WorktreeRemove::Name {
+                name: "feature/existing".to_owned(),
+                discard: false,
+            },
             &cancellation,
         )?;
         assert_eq!(removed.removed.len(), 1);
@@ -2281,7 +2390,10 @@ mod lifecycle_tests {
         assert_eq!(created.head, base);
         remove(
             &context,
-            WorktreeRemove::Name("feature/remote-base".to_owned()),
+            WorktreeRemove::Name {
+                name: "feature/remote-base".to_owned(),
+                discard: false,
+            },
             &cancellation,
         )?;
         Ok(())
@@ -2310,7 +2422,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &context,
-                WorktreeRemove::Name("feature/ignored".to_owned()),
+                WorktreeRemove::Name {
+                    name: "feature/ignored".to_owned(),
+                    discard: false,
+                },
                 &cancellation,
             ),
             Err(WorktreeError::Dirty)
@@ -2383,7 +2498,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &context,
-                WorktreeRemove::Name("feature/busy".to_owned()),
+                WorktreeRemove::Name {
+                    name: "feature/busy".to_owned(),
+                    discard: false,
+                },
                 &cancellation
             ),
             Err(WorktreeError::LiveWriter)
@@ -2400,7 +2518,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &context,
-                WorktreeRemove::Name("feature/busy".to_owned()),
+                WorktreeRemove::Name {
+                    name: "feature/busy".to_owned(),
+                    discard: false,
+                },
                 &cancellation
             ),
             Err(WorktreeError::UnknownWriter)
@@ -2408,7 +2529,10 @@ mod lifecycle_tests {
         state.unlink(OsStr::new(RESERVATION))?;
         remove(
             &context,
-            WorktreeRemove::Name("feature/busy".to_owned()),
+            WorktreeRemove::Name {
+                name: "feature/busy".to_owned(),
+                discard: false,
+            },
             &cancellation,
         )?;
         Ok(())
@@ -2599,7 +2723,10 @@ mod lifecycle_tests {
         assert!(matches!(
             remove(
                 &context,
-                WorktreeRemove::Name("feature/direct-gitlink".to_owned()),
+                WorktreeRemove::Name {
+                    name: "feature/direct-gitlink".to_owned(),
+                    discard: false,
+                },
                 &cancellation,
             ),
             Err(WorktreeError::UnknownWriter)
