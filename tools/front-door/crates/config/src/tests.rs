@@ -1035,7 +1035,7 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
             ..
         })
     ));
-    match set("lanes.max_concurency", "2") {
+    match set("lanes.max_concurrenc", "2") {
         Err(ConfigError::UnknownKnob { close, .. }) => {
             assert_eq!(close, ["lanes.max_concurrency"]);
         }
