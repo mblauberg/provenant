@@ -298,6 +298,45 @@ impl Driver<'_> {
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
+    /// The marker value every descendant of this attempt's provider inherits;
+    /// the guardian's identity makes it unique per attempt.
+    pub(super) fn attempt_mark(&self) -> OsString {
+        let guardian = &self.guardian;
+        format!(
+            "{}:{}:{}",
+            guardian.boot, guardian.pid, guardian.native_start
+        )
+        .into()
+    }
+
+    /// Live same-user processes outside the provider and any spared owner that
+    /// carry the attempt marker. They are added to `tracked`, so cleanup cannot
+    /// settle while one lives, and returned for signalling.
+    #[cfg(target_os = "macos")]
+    fn marked_escapees(
+        &mut self,
+        census: &crate::census::Census,
+        provider_pid: i64,
+        spared: &std::collections::BTreeSet<ProcessIdentity>,
+    ) -> Vec<ProcessIdentity> {
+        let mut entry = format!("{}=", crate::sys::census::ATTEMPT_MARK).into_bytes();
+        entry.extend_from_slice(self.attempt_mark().as_bytes());
+        let marked: Vec<_> = census
+            .facts()
+            .filter(|fact| {
+                !fact.zombie
+                    && fact.identity.pid != provider_pid
+                    && fact.identity != self.guardian
+                    && !spared.contains(&fact.identity)
+                    && i32::try_from(fact.identity.pid)
+                        .is_ok_and(|pid| crate::sys::census::darwin_carries_mark(pid, &entry))
+            })
+            .map(|fact| fact.identity.clone())
+            .collect();
+        self.tracked.extend(marked.iter().cloned());
+        marked
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn darwin_quiescent(
         &mut self,
@@ -385,6 +424,10 @@ impl Driver<'_> {
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
+            // A descendant that detached before the census saw it keeps the
+            // attempt marker; it is tracked here and ended below.
+            #[cfg(target_os = "macos")]
+            let marked = self.marked_escapees(&census, child.id(), &spared);
             // Reaping sends no signal, so an adopted zombie is reaped even when
             // descendant stops are not allowed; otherwise a fenced guardian
             // would pin it indefinitely.
@@ -457,6 +500,12 @@ impl Driver<'_> {
                         }
                     }
                     Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if self.descendant_stop_allowed {
+                for delivery in child.stop_marked(escalation, &marked) {
+                    self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }
             }
             self.persist_tracking(warnings, omitted);

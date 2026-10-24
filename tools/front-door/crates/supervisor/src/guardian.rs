@@ -1083,10 +1083,17 @@ impl Driver<'_> {
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
                 Ok(snapshot) if snapshot == self.executable_snapshot => {
+                    let name = OsString::from(crate::sys::census::ATTEMPT_MARK);
+                    let mut env: Vec<_> = env
+                        .iter()
+                        .filter(|(key, _)| *key != name)
+                        .cloned()
+                        .collect();
+                    env.push((name, self.attempt_mark()));
                     crate::sys::provider::ProviderGroup::spawn(
                         crate::sys::raw_exec::SpawnSpec {
                             argv,
-                            env: Some(env),
+                            env: Some(&env),
                             cwd,
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),

@@ -780,6 +780,21 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut gate)?;
             descendant.detach();
         }
+        "s2-detach-provider" => {
+            // Start a session-leading descendant that inherits the attempt
+            // marker, then exit at once so no census can follow the parent edge.
+            let root = std::env::current_dir()?;
+            let mut env = environment(&root);
+            env.extend(
+                std::env::vars_os().filter(|(name, _)| name == crate::sys::census::ATTEMPT_MARK),
+            );
+            let argv = argv_with_args(
+                "s2-setsid-descendant",
+                &[fixture_path(&args, 3)?.into_os_string()],
+            )?;
+            ChildGuard::new(crate::sys::fixture_command(&argv, &env, &root, true)?.spawn()?)
+                .detach();
+        }
         "s2-registered-owner" => {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)

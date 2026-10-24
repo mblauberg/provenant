@@ -1051,6 +1051,60 @@ fn darwin_start_stamp(pid: i32) -> Option<(u64, usize)> {
     Some((seconds.checked_mul(1_000_000)?.checked_add(micros)?, size))
 }
 
+/// Environment variable the guardian gives every provider launch. Descendants
+/// inherit it however they detach, so it identifies attempt membership after
+/// the parent edges that the census would follow are gone.
+pub(crate) const ATTEMPT_MARK: &str = "PROVENANT_ATTEMPT_MARK";
+
+/// Whether a same-user process's initial environment carries `entry`
+/// (`NAME=value`). Any failure, including another user's process or one that
+/// exited mid-read, reads as not marked: that pid is skipped, never fatal.
+#[cfg(target_os = "macos")]
+pub(crate) fn darwin_carries_mark(pid: i32, entry: &[u8]) -> bool {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0;
+    // SAFETY: the three-element MIB is live; null output requests the size.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 || size == 0 || size > LIMIT {
+        return false;
+    }
+    let mut buffer = vec![0_u8; size];
+    // SAFETY: buffer is initialised storage whose exact length is passed in
+    // size; sysctl writes at most that many bytes and borrows nothing after.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    status == 0 && size <= buffer.len() && environment_has(&buffer[..size], entry)
+}
+
+/// KERN_PROCARGS2 holds an `argc` word, then NUL-separated executable path,
+/// padding, arguments and environment. The entry is unique to one attempt, so
+/// an exact field match anywhere after the word is enough.
+#[cfg(any(target_os = "macos", test))]
+fn environment_has(buffer: &[u8], entry: &[u8]) -> bool {
+    !entry.is_empty()
+        && buffer
+            .get(std::mem::size_of::<i32>()..)
+            .is_some_and(|rest| rest.split(|byte| *byte == 0).any(|field| field == entry))
+}
+
 #[cfg(target_os = "macos")]
 fn darwin_cpu_micros(pid: i32) -> Option<u64> {
     use std::mem::{MaybeUninit, size_of};
@@ -1107,6 +1161,20 @@ pub fn current_process() -> crate::census::ProcessObservation {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn attempt_mark_matches_only_an_exact_environment_field() {
+        let entry = b"PROVENANT_ATTEMPT_MARK=boot:7:9";
+        let mut buffer = 2_i32.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(b"/bin/sh\0\0\0sh\0-c\0HOME=/x\0");
+        assert!(!environment_has(&buffer, entry));
+        buffer.extend_from_slice(b"PROVENANT_ATTEMPT_MARK=boot:7:90\0");
+        assert!(!environment_has(&buffer, entry));
+        buffer.extend_from_slice(entry);
+        buffer.push(0);
+        assert!(environment_has(&buffer, entry));
+        assert!(!environment_has(&buffer[..3], entry));
+    }
 
     #[test]
     fn darwin_pid_listing_retries_when_a_process_arrives_after_the_count() {
