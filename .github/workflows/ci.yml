@@ -167,6 +167,15 @@ jobs:
         run: |
           cargo build --release --locked -p provenant --bin provenant
 
+      - name: Package release and preview isolated installation
+        working-directory: tools/front-door
+        run: |
+          cargo run --locked --example package-release -- --out "$RUNNER_TEMP/release"
+          mkdir -p "$RUNNER_TEMP/home"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
+            --harness claude --harness codex --bin-dir "$RUNNER_TEMP/bin" --dry-run
+
   generic-checks:
     name: Spelling, workflows and Markdown links
     runs-on: ubuntu-latest

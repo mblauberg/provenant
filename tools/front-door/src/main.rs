@@ -6,6 +6,7 @@ mod hosts;
 mod install;
 mod overflow;
 mod quota_live;
+mod release_smoke;
 mod roots;
 mod usage;
 #[cfg(test)]
