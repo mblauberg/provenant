@@ -158,7 +158,7 @@ enum EdgeError {
 #[serde(untagged)]
 pub enum Data {
     List(provenant_routing::RouteList),
-    Resolved(provenant_records::ResolvedRoute),
+    Resolved(Box<provenant_records::ResolvedRoute>),
 }
 fn cached(roots: &Roots) -> Result<Vec<AvailabilityRecord>, EdgeError> {
     // Descend descriptor-relatively; no links, missing directories are not writes.
@@ -308,10 +308,19 @@ pub(crate) fn resolve_dispatch(
         access,
         host,
         |context, records| {
-            let resolved = provenant_routing::resolve_for_account_with_seed(
-                request, context, account, seed.0, seed.1,
+            let mut excluded_members = Vec::new();
+            let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
+                request,
+                context,
+                account,
+                seed.0,
+                seed.1,
+                &excluded_members,
             )?;
-            if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+            loop {
+                if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                    break;
+                }
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
                 let pools = free_pools(&resolved.adapter, || {
                     context.catalogue.is_free_model(&model)
@@ -324,46 +333,106 @@ pub(crate) fn resolve_dispatch(
                     pools: &pools,
                 };
                 if let Err(error) = admission.check(&resolved) {
-                    let can_skip_free = request.allow_free
-                        && matches!(&request.choice, RouteChoice::NamedRoute(_))
-                        && !pools.is_empty();
-                    if can_skip_free {
-                        let mut without_free = request.clone();
-                        without_free.allow_free = false;
-                        if let Ok(alternative) = provenant_routing::resolve_for_account_with_seed(
-                            &without_free,
+                    if !matches!(&request.choice, RouteChoice::NamedRoute(_))
+                        || resolved.pool_selection.is_none()
+                        || excluded_members.contains(&model)
+                    {
+                        return Err(error.into());
+                    }
+                    let reason = error.to_string();
+                    excluded_members.push(model);
+                    let mut replacement =
+                        match provenant_routing::resolve_for_account_with_seed_excluding(
+                            request,
                             context,
                             account,
                             seed.0,
                             seed.1,
-                        ) && (alternative.adapter != resolved.adapter
-                            || alternative.model != resolved.model)
-                            && matches!(&alternative.readiness, RouteReadiness::Ready { .. })
-                        {
-                            let alternative_model = ModelId::parse(&format!(
-                                "{}/{}",
-                                alternative.adapter, alternative.model
-                            ))?;
-                            let alternative_pools = free_pools(&alternative.adapter, || {
-                                context.catalogue.is_free_model(&alternative_model)
-                            });
-                            provenant_quota::Admission {
-                                now_unix_seconds,
-                                records,
-                                refusals: &[],
-                                pools: &alternative_pools,
+                            &excluded_members,
+                        ) {
+                            Ok(route)
+                                if matches!(&route.readiness, RouteReadiness::Ready { .. }) =>
+                            {
+                                route
                             }
-                            .check(&alternative)?;
-                            return Ok(alternative);
-                        }
+                            Ok(_) | Err(_) => return Err(error.into()),
+                        };
+                    if replacement.adapter == resolved.adapter
+                        && replacement.model == resolved.model
+                    {
+                        return Err(error.into());
                     }
-                    return Err(error.into());
+                    record_pool_redraw(&resolved, &mut replacement, &reason)?;
+                    resolved = replacement;
+                    continue;
                 }
+                break;
             }
             Ok(resolved)
         },
     )
     .map_err(|error| error.to_string())
+}
+
+fn record_pool_redraw(
+    rejected: &provenant_records::ResolvedRoute,
+    replacement: &mut provenant_records::ResolvedRoute,
+    reason: &str,
+) -> Result<(), RoutingError> {
+    let previous = rejected
+        .pool_selection
+        .as_ref()
+        .ok_or(RoutingError::Catalogue)?;
+    let current = replacement
+        .pool_selection
+        .as_mut()
+        .ok_or(RoutingError::Catalogue)?;
+    if previous.pool != current.pool {
+        return Err(RoutingError::Catalogue);
+    }
+    for rejected_candidate in previous
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.exclusion.as_deref() == Some("admission rejected"))
+    {
+        if let Some(candidate) = current
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.model == rejected_candidate.model)
+        {
+            candidate.exclusion = Some("admission rejected".into());
+            candidate.readiness = rejected_candidate.readiness.clone();
+        } else {
+            current.candidates.push(rejected_candidate.clone());
+        }
+    }
+    if let Some(previous_candidate) = previous
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == previous.pick)
+    {
+        if let Some(candidate) = current
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.model == previous_candidate.model)
+        {
+            candidate.exclusion = Some("admission rejected".into());
+            candidate.readiness = previous_candidate.readiness.clone();
+        } else {
+            let mut candidate = previous_candidate.clone();
+            candidate.exclusion = Some("admission rejected".into());
+            current.candidates.push(candidate);
+        }
+    }
+    let mut redraws = previous.redraws.clone();
+    redraws.push(provenant_records::RouteSelectionRedraw {
+        rejected_pick: previous.pick.clone(),
+        roll: previous.roll,
+        total_weight: previous.total_weight,
+        reason: reason.into(),
+    });
+    current.redraws = redraws;
+    Ok(())
 }
 /// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
 fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
@@ -611,10 +680,10 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => with_context(roots, None, &[], "local-preview", |context, _| {
-            Ok(Data::Resolved(provenant_routing::resolve(
+            Ok(Data::Resolved(Box::new(provenant_routing::resolve(
                 &query.to_domain()?,
                 context,
-            )?))
+            )?)))
         }),
         Route::Set(request) => {
             set_pool(roots, request)?;
@@ -784,11 +853,92 @@ pub fn run(
 }
 
 #[cfg(test)]
-mod free_pool_tests {
+mod route_tests {
+    use provenant_records::{
+        ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
+        RouteSelectionCandidate, RouteSelectionReceipt,
+    };
+    use std::error::Error;
+
     #[test]
     fn only_opencode_routes_draw_on_the_free_pool() {
         assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
         assert!(super::free_pools("opencode", || false).is_empty());
         assert!(super::free_pools("codex", || true).is_empty());
+    }
+
+    fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
+        let readiness = RouteReadiness::Ready {
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 200,
+        };
+        ResolvedRoute {
+            adapter: adapter.into(),
+            model: model.into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: None,
+            host: "fixture".into(),
+            alternatives: RouteAlternatives::default(),
+            exclusions: Vec::new(),
+            eligibility: RouteEligibility::Eligible,
+            readiness: readiness.clone(),
+            confidentiality: RouteConfidentiality {
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: Some(RouteSelectionReceipt {
+                pool: "junior".into(),
+                candidates: vec![RouteSelectionCandidate {
+                    model: format!("{adapter}/{model}"),
+                    weight: 1,
+                    factor_basis_points: 10_000,
+                    effort: None,
+                    readiness: Some(readiness),
+                    exclusion: None,
+                }],
+                roll,
+                total_weight: 10_000,
+                pick: format!("{adapter}/{model}"),
+                redraws: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn admission_redraw_history_is_retained_in_the_pool_receipt() -> Result<(), Box<dyn Error>> {
+        let first = resolved("codex", "paid", 17);
+        let mut second = resolved("claude", "ready", 3);
+        super::record_pool_redraw(&first, &mut second, "allowance exhausted")?;
+
+        let mut third = resolved("agy", "ready", 9);
+        third
+            .pool_selection
+            .as_mut()
+            .ok_or("third receipt")?
+            .candidates
+            .push(RouteSelectionCandidate {
+                model: "codex/paid".into(),
+                weight: 1,
+                factor_basis_points: 10_000,
+                effort: None,
+                readiness: None,
+                exclusion: Some("admission rejected".into()),
+            });
+        super::record_pool_redraw(&second, &mut third, "scoped provider refusal")?;
+        let value = serde_json::to_value(third)?;
+        let redraws = &value["pool_selection"]["redraws"];
+        assert_eq!(redraws[0]["rejected_pick"], "codex/paid");
+        assert_eq!(redraws[0]["roll"], 17);
+        assert_eq!(redraws[0]["reason"], "allowance exhausted");
+        assert_eq!(redraws[1]["rejected_pick"], "claude/ready");
+        assert_eq!(redraws[1]["roll"], 3);
+        assert_eq!(redraws[1]["reason"], "scoped provider refusal");
+        let rejected = value["pool_selection"]["candidates"]
+            .as_array()
+            .and_then(|candidates| candidates.iter().find(|row| row["model"] == "codex/paid"))
+            .ok_or("rejected candidate")?;
+        assert_eq!(rejected["exclusion"], "admission rejected");
+        assert_eq!(rejected["readiness"]["status"], "ready");
+        Ok(())
     }
 }

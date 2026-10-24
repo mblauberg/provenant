@@ -46,11 +46,9 @@ efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
 trains_on_prompts = false
 
-# Anthropic's current Effort docs also confirm max for Haiku 5.5:
-# https://platform.claude.com/docs/en/build-with-claude/effort
 [[models]]
 model = "claude/claude-haiku-5-5"
-efforts = ["low", "medium", "high", "xhigh", "max"]
+efforts = ["low", "medium", "high", "xhigh"]
 family = "anthropic"
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
@@ -162,7 +160,7 @@ principal = [
 ]
 writing = [
     { model = "agy/gemini-3.8-flash", weight = 4, efforts = ["low", "medium", "high"] },
-    { model = "claude/claude-haiku-5-5", weight = 4, efforts = ["low", "medium", "high", "xhigh", "max"] },
+    { model = "claude/claude-haiku-5-5", weight = 4, efforts = ["low", "medium", "high", "xhigh"] },
     { model = "agy/claude-sonnet-4-6", weight = 2, efforts = [] },
     { model = "claude/claude-sonnet-5-5", weight = 1, efforts = ["medium", "high", "xhigh"] },
     { model = "codex/gpt-6-luna", weight = 1, effort = "high", efforts = ["high", "xhigh"] },

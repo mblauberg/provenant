@@ -132,6 +132,15 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         ready_adapters: &'static [&'static str],
         expected_pick: Option<&'static str>,
         expect_effort_exclusion: bool,
+        all_disabled: bool,
+        codex_pacing: &'static str,
+        quota_used_basis_points: Option<u64>,
+        quota_reset_after_seconds: Option<i64>,
+        alternative_quota_used_basis_points: Option<u64>,
+        include_weekly_window: bool,
+        expected_codex_factor: Option<u32>,
+        expect_no_eligible: bool,
+        redraw: bool,
     }
     let cases = [
         Case {
@@ -141,6 +150,15 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
         },
         Case {
             name: "weight zero fallback",
@@ -149,6 +167,15 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["agy"],
             expected_pick: Some("gemini-3.8-flash"),
             expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "max",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
         },
         Case {
             name: "caller effort exclusion",
@@ -157,6 +184,100 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: true,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "pace clamps to minimum factor",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: Some(9_900),
+            quota_reset_after_seconds: Some(18_000),
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(2_500),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "pace clamps to maximum factor",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: Some(5_000),
+            quota_reset_after_seconds: Some(4_500),
+            alternative_quota_used_basis_points: Some(9_900),
+            include_weekly_window: true,
+            expected_codex_factor: Some(20_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "disabled members are not fallback candidates",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &[],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: true,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: true,
+            redraw: false,
+        },
+        Case {
+            name: "same-seed redraw removes the rejected member",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: true,
+        },
+        Case {
+            name: "unknown pace snapshot is neutral",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
         },
     ];
     let registry = [
@@ -206,23 +327,139 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
                 {"model":"claude/claude-haiku-5-5", "weight":case.weights[1], "effort":"high", "efforts":["medium","high","xhigh"]},
                 {"model":"agy/gemini-3.8-flash", "weight":case.weights[2], "effort":"medium", "efforts":["low","medium","high"]}
             ]},
-            "pacing": {"codex":"spend"}
+            "pacing": {"codex":case.codex_pacing}
         }))?;
-        let availability: Vec<_> = base_availability
+        let mut availability: Vec<_> = base_availability
             .iter()
-            .filter(|record| case.ready_adapters.contains(&record.adapter.as_str()))
+            .filter(|record| {
+                case.ready_adapters.contains(&record.adapter.as_str()) || case.all_disabled
+            })
             .cloned()
             .collect();
+        if case.all_disabled {
+            for record in &mut availability {
+                record.last_preflight_error = Some(provenant_providers::PreflightFailure::Disabled);
+            }
+        }
+        let quota = if let (Some(used_basis_points), Some(reset_after_seconds)) =
+            (case.quota_used_basis_points, case.quota_reset_after_seconds)
+        {
+            let mut observation = quota(
+                "codex/gpt-6-luna",
+                "opaque-account",
+                provenant_quota::QuotaStatus::Available,
+                1,
+                80,
+                120,
+            )?;
+            observation
+                .snapshot
+                .windows
+                .push(provenant_quota::QuotaWindow {
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points,
+                    resets_unix_seconds: Some(100 + reset_after_seconds),
+                });
+            if case.include_weekly_window {
+                observation
+                    .snapshot
+                    .windows
+                    .push(provenant_quota::QuotaWindow {
+                        pool: "seven_day".into(),
+                        window_seconds: Some(604_800),
+                        used_basis_points: 1_000,
+                        resets_unix_seconds: Some(100 + 604_800),
+                    });
+            }
+            let mut observations = vec![observation];
+            if let Some(used_basis_points) = case.alternative_quota_used_basis_points {
+                let mut alternative = quota(
+                    "codex/gpt-6-luna",
+                    "other-account",
+                    provenant_quota::QuotaStatus::Available,
+                    1,
+                    80,
+                    120,
+                )?;
+                alternative
+                    .snapshot
+                    .windows
+                    .push(provenant_quota::QuotaWindow {
+                        pool: "five_hour".into(),
+                        window_seconds: Some(18_000),
+                        used_basis_points,
+                        resets_unix_seconds: Some(100 + 18_000),
+                    });
+                observations.push(alternative);
+            }
+            observations
+        } else {
+            Vec::new()
+        };
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &availability;
         ctx.access = &access;
+        ctx.quota = &quota;
         let mut query = request("codex/gpt-6-luna")?;
         query.choice = RouteChoice::NamedRoute("trial".into());
         query.effort = Some(case.effort.into());
         query.confidential = true;
 
-        let route = resolve_with_seed(&query, &ctx, "operation-route-pools", 2)?;
+        let first_pick = case
+            .redraw
+            .then(|| resolve_with_seed(&query, &ctx, "operation-route-pools", 2))
+            .transpose()?;
+        let excluded_model = first_pick
+            .as_ref()
+            .map(|route| ModelId::parse(&format!("{}/{}", route.adapter, route.model)))
+            .transpose()?;
+        let result = if let Some(excluded_model) = &excluded_model {
+            resolve_for_account_with_seed_excluding(
+                &query,
+                &ctx,
+                None,
+                "operation-route-pools",
+                2,
+                std::slice::from_ref(excluded_model),
+            )
+        } else {
+            resolve_with_seed(&query, &ctx, "operation-route-pools", 2)
+        };
+        if case.expect_no_eligible {
+            match result {
+                Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
+                    assert!(exclusions.iter().any(|reason| reason.contains("disabled")));
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => panic!("disabled-only pool member was selected"),
+            }
+            let mut recoverable_availability = base_availability.clone();
+            for record in &mut recoverable_availability {
+                record.last_preflight_error = Some(if record.adapter == "claude" {
+                    provenant_providers::PreflightFailure::AuthRequired
+                } else {
+                    provenant_providers::PreflightFailure::Disabled
+                });
+            }
+            let mut recoverable_context = context(&catalogue, &config, now()?);
+            recoverable_context.registry = &registry;
+            recoverable_context.availability = &recoverable_availability;
+            recoverable_context.access = &access;
+            let recoverable =
+                resolve_with_seed(&query, &recoverable_context, "operation-route-pools", 2)?;
+            assert_eq!(
+                recoverable.adapter, "claude",
+                "recoverable member beats disabled"
+            );
+            assert_eq!(
+                reason(&recoverable),
+                Some(&RouteExclusionReason::AuthRequired)
+            );
+            continue;
+        }
+        let route = result?;
         let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
         assert_eq!(receipt["pool"], "trial", "{}", case.name);
         let candidate_rows = receipt["candidates"].as_array().ok_or("candidates")?;
@@ -241,15 +478,43 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         for candidate in candidate_rows {
             let factor = candidate["factor_basis_points"].as_u64().ok_or("factor")?;
             assert!((2_500..=20_000).contains(&factor), "{}", case.name);
-            assert_eq!(
-                candidate["readiness"].is_object(),
-                candidate["exclusion"] != "effort",
-                "{}",
-                case.name
-            );
+            if candidate["exclusion"] == "admission rejected" {
+                assert!(candidate["readiness"].is_null(), "{}", case.name);
+            } else {
+                assert_eq!(
+                    candidate["readiness"].is_object(),
+                    candidate["exclusion"] != "effort",
+                    "{}",
+                    case.name
+                );
+            }
             if candidate["exclusion"].is_null() && candidate["readiness"]["status"] == "ready" {
                 expected_total += candidate["weight"].as_u64().ok_or("weight")? * factor;
             }
+        }
+        let codex_candidate = candidate_rows
+            .iter()
+            .find(|candidate| candidate["model"] == "codex/gpt-6-luna")
+            .ok_or("codex candidate")?;
+        assert_eq!(
+            codex_candidate["factor_basis_points"].as_u64(),
+            case.expected_codex_factor.map(u64::from),
+            "{}",
+            case.name
+        );
+        if let Some(excluded_model) = &excluded_model {
+            let excluded_candidate = candidate_rows
+                .iter()
+                .find(|candidate| candidate["model"] == excluded_model.as_str())
+                .ok_or("excluded candidate")?;
+            assert_eq!(excluded_candidate["exclusion"], "admission rejected");
+            assert_ne!(
+                (&route.adapter, &route.model),
+                (
+                    &first_pick.as_ref().ok_or("first pick")?.adapter,
+                    &first_pick.as_ref().ok_or("first pick")?.model
+                )
+            );
         }
         assert_eq!(
             receipt["total_weight"].as_u64(),

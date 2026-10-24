@@ -19,11 +19,17 @@ zero-weight fallback members:
 | `design` | Claude Sonnet 5.5 w4, Agy Gemini@high w2, Claude Opus 5.5 w1 |
 
 The resolver draws among ready positive-weight members using weight multiplied
-by the provider pacing factor. Pacing policies and factor reporting are wired,
-but the factor is currently 1.0 pending quota-aware pacing. If no weighted
-member is ready, the first ready zero-weight member is selected; otherwise the
-receipt records candidate readiness and exclusions. Operation ID and task
-index seed selection so retries repeat the same choice. Only OpenCode `*-free` entries are marked free and they require
+by the provider pacing factor. `pace` uses the best fresh quota snapshot for
+the provider and its shortest window with a reset; it divides remaining
+quota headroom by remaining window time and clamps the factor to 0.25–2.0.
+Missing quota data uses 1.0. `spend` and `max` use 1.0; admission handles
+short rate-limit cooldowns, and a paid route remains eligible while credits
+remain. If no weighted member is ready, the first ready zero-weight member is
+selected; otherwise a recoverable unavailable member is preferred, and
+disabled members are excluded. If only disabled members remain, resolution
+returns their exclusions. The receipt records candidate readiness and
+exclusions. Operation ID and task index seed selection so retries repeat the
+same choice. Only OpenCode `*-free` entries are marked free and they require
 `--allow-free` (default false). Agy Gemini Flash is a paid subscription model.
 `--confidential` excludes training or unclassified members and fallbacks.
 There is no classifier or route-synonym inference. Effort is set only when the

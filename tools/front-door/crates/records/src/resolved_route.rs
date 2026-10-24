@@ -30,6 +30,17 @@ pub struct RouteSelectionReceipt {
     pub roll: u64,
     pub total_weight: u64,
     pub pick: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redraws: Vec<RouteSelectionRedraw>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSelectionRedraw {
+    pub rejected_pick: String,
+    pub roll: u64,
+    pub total_weight: u64,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

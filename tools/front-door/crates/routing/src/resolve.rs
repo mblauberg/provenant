@@ -234,15 +234,68 @@ fn pacing_policy(catalogue: &Catalogue, config: &RoutingConfig, model: &ModelId)
         .copied()
         .unwrap_or(PacingPolicy::Pace)
 }
-/// Hook for quota-aware pacing. The selector records the factor used so
-/// provider-specific pacing can be added after cut-over.
+const PACE_MIN_BASIS_POINTS: u32 = 2_500;
+const PACE_MAX_BASIS_POINTS: u32 = 20_000;
+const NEUTRAL_FACTOR_BASIS_POINTS: u32 = 10_000;
+
+/// Pace against the healthiest fresh account snapshot for this provider.
 fn pacing_factor_basis_points(
-    _policy: PacingPolicy,
-    _model: &ModelId,
-    _quota: &[QuotaObservation],
-    _now_seconds: i64,
+    policy: PacingPolicy,
+    model: &ModelId,
+    quota: &[QuotaObservation],
+    now_seconds: i64,
 ) -> u32 {
-    10_000
+    if policy != PacingPolicy::Pace {
+        return NEUTRAL_FACTOR_BASIS_POINTS;
+    }
+    quota
+        .iter()
+        .filter(|observation| {
+            observation.model.adapter() == model.adapter()
+                && observation.snapshot.schema_version == 1
+                && observation.snapshot.account.adapter == model.adapter()
+                && observation.snapshot.observed_unix_seconds <= now_seconds
+                && observation.expires_unix_seconds > now_seconds
+                && matches!(
+                    observation.snapshot.status,
+                    QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+                )
+        })
+        .filter_map(|observation| pace_snapshot_factor(&observation.snapshot, now_seconds))
+        .max()
+        .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS)
+}
+
+fn pace_snapshot_factor(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    now_seconds: i64,
+) -> Option<u32> {
+    let window = snapshot
+        .windows
+        .iter()
+        .filter_map(|window| {
+            let window_seconds = window.window_seconds?;
+            let reset_seconds = window.resets_unix_seconds?;
+            if window_seconds == 0 || reset_seconds <= now_seconds {
+                return None;
+            }
+            Some((window_seconds, window.used_basis_points, reset_seconds))
+        })
+        .min_by_key(|(window_seconds, _, _)| *window_seconds)?;
+    let (window_seconds, used_basis_points, reset_seconds) = window;
+    let remaining_seconds = u64::try_from(reset_seconds.checked_sub(now_seconds)?).ok()?;
+    let remaining_seconds = remaining_seconds.min(window_seconds);
+    if remaining_seconds == 0 {
+        return None;
+    }
+    let headroom_basis_points = 10_000_u64.saturating_sub(used_basis_points.min(10_000));
+    let factor = (u128::from(headroom_basis_points) * u128::from(window_seconds))
+        / u128::from(remaining_seconds);
+    let factor = factor.clamp(
+        u128::from(PACE_MIN_BASIS_POINTS),
+        u128::from(PACE_MAX_BASIS_POINTS),
+    );
+    u32::try_from(factor).ok()
 }
 
 fn availability_reason(
@@ -378,7 +431,7 @@ pub fn resolve_with_seed(
     operation_id: &str,
     task_index: u64,
 ) -> Result<ResolvedRoute, RoutingError> {
-    resolve_inner(request, context, Some((operation_id, task_index)))
+    resolve_inner(request, context, Some((operation_id, task_index)), &[])
 }
 
 /// Dispatch-only account filter; its routing decision also uses the stable
@@ -397,6 +450,26 @@ pub fn resolve_for_account_with_seed(
     account: Option<&str>,
     operation_id: &str,
     task_index: u64,
+) -> Result<ResolvedRoute, RoutingError> {
+    resolve_for_account_with_seed_excluding(
+        request,
+        context,
+        account,
+        operation_id,
+        task_index,
+        &[],
+    )
+}
+
+/// Resolve a seeded pool while excluding members rejected by a later dispatch
+/// gate. The operation and task seed stay fixed across each redraw.
+pub fn resolve_for_account_with_seed_excluding(
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    account: Option<&str>,
+    operation_id: &str,
+    task_index: u64,
+    excluded_members: &[ModelId],
 ) -> Result<ResolvedRoute, RoutingError> {
     let mut filtered = None;
     if let Some(account) = account {
@@ -441,8 +514,14 @@ pub fn resolve_for_account_with_seed(
                 ..*context
             },
             Some((operation_id, task_index)),
+            excluded_members,
         ),
-        None => resolve_inner(request, context, Some((operation_id, task_index))),
+        None => resolve_inner(
+            request,
+            context,
+            Some((operation_id, task_index)),
+            excluded_members,
+        ),
     }
 }
 
@@ -450,7 +529,7 @@ pub fn resolve(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
 ) -> Result<ResolvedRoute, RoutingError> {
-    resolve_inner(request, context, None)
+    resolve_inner(request, context, None, &[])
 }
 
 struct PoolPick {
@@ -462,6 +541,7 @@ fn resolve_inner(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
     seed: Option<(&str, u64)>,
+    excluded_members: &[ModelId],
 ) -> Result<ResolvedRoute, RoutingError> {
     context.validate()?;
     let (primary, pool_selection) = match &request.choice {
@@ -476,7 +556,7 @@ fn resolve_inner(
                 return Err(RoutingError::InvalidValue);
             }
             if let Some(pool) = effective_pool(context, name) {
-                let selected = select_pool(name, pool, request, context, seed)?;
+                let selected = select_pool(name, pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
             } else {
                 let named = context
@@ -542,25 +622,56 @@ fn resolve_inner(
     })
 }
 
-fn select_pool(
-    name: &str,
+struct ClassifiedPool {
+    candidates: Vec<RouteSelectionCandidate>,
+    routes: Vec<Option<RouteAlternative>>,
+    weighted: Vec<(usize, u64)>,
+    first_zero_ready: Option<usize>,
+    first_recoverable_unavailable: Option<usize>,
+    first_other_unavailable: Option<usize>,
+    exclusions: Vec<String>,
+}
+struct PoolDraw {
+    index: usize,
+    roll: u64,
+    total_weight: u64,
+}
+
+fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
     context: &RoutingContext<'_>,
-    seed: Option<(&str, u64)>,
-) -> Result<PoolPick, RoutingError> {
-    let mut candidates = Vec::with_capacity(members.len());
-    let mut routes = Vec::<Option<RouteAlternative>>::with_capacity(members.len());
-    let mut weighted = Vec::<(usize, u64)>::new();
-    let mut first_zero_ready = None;
-    let mut first_unavailable = None;
-    let mut exclusions = Vec::new();
-
+    excluded_members: &[ModelId],
+) -> Result<ClassifiedPool, RoutingError> {
+    let mut classified = ClassifiedPool {
+        candidates: Vec::with_capacity(members.len()),
+        routes: Vec::with_capacity(members.len()),
+        weighted: Vec::new(),
+        first_zero_ready: None,
+        first_recoverable_unavailable: None,
+        first_other_unavailable: None,
+        exclusions: Vec::new(),
+    };
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let policy = pacing_policy(context.catalogue, context.config, &member.model);
         let factor_basis_points =
             pacing_factor_basis_points(policy, &member.model, context.quota, context.now_seconds());
+        if excluded_members.contains(&member.model) {
+            classified
+                .exclusions
+                .push(format!("{}: admission rejected", member.model.as_str()));
+            classified.candidates.push(RouteSelectionCandidate {
+                model: member.model.as_str().into(),
+                weight: member.weight,
+                factor_basis_points,
+                effort,
+                readiness: None,
+                exclusion: Some("admission rejected".into()),
+            });
+            classified.routes.push(None);
+            continue;
+        }
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
@@ -577,7 +688,7 @@ fn select_pool(
         let mut readiness = None;
         let mut option = None;
         let exclusion = if let Some((kind, detail)) = exclusion {
-            exclusions.push(detail.to_owned());
+            classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
         } else {
             match candidate(&member.model, effort.as_deref(), context) {
@@ -585,28 +696,48 @@ fn select_pool(
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
                         if member.weight == 0 {
-                            if first_zero_ready.is_none() {
-                                first_zero_ready = Some(candidates.len());
+                            if classified.first_zero_ready.is_none() {
+                                classified.first_zero_ready = Some(classified.candidates.len());
                             }
                         } else {
                             let weight = u64::from(member.weight)
                                 .saturating_mul(u64::from(factor_basis_points));
-                            weighted.push((candidates.len(), weight));
+                            classified
+                                .weighted
+                                .push((classified.candidates.len(), weight));
                         }
-                    } else if first_unavailable.is_none() {
-                        first_unavailable = Some(candidates.len());
+                    } else if let RouteReadiness::Unavailable { reason } = &resolved.readiness {
+                        match reason {
+                            RouteExclusionReason::Disabled => classified
+                                .exclusions
+                                .push(format!("{}: disabled", member.model.as_str())),
+                            RouteExclusionReason::StaleAvailability
+                            | RouteExclusionReason::AuthRequired
+                            | RouteExclusionReason::Exhausted => {
+                                if classified.first_recoverable_unavailable.is_none() {
+                                    classified.first_recoverable_unavailable =
+                                        Some(classified.candidates.len());
+                                }
+                            }
+                            _ => {
+                                if classified.first_other_unavailable.is_none() {
+                                    classified.first_other_unavailable =
+                                        Some(classified.candidates.len());
+                                }
+                            }
+                        }
                     }
                     option = Some(resolved);
                     None
                 }
                 Err(RoutingError::UnsupportedEffort) => {
-                    exclusions.push("unsupported effort".into());
+                    classified.exclusions.push("unsupported effort".into());
                     Some("effort".into())
                 }
                 Err(error) => return Err(error),
             }
         };
-        candidates.push(RouteSelectionCandidate {
+        classified.candidates.push(RouteSelectionCandidate {
             model: member.model.as_str().into(),
             weight: member.weight,
             factor_basis_points,
@@ -614,10 +745,18 @@ fn select_pool(
             readiness,
             exclusion,
         });
-        routes.push(option);
+        classified.routes.push(option);
     }
+    Ok(classified)
+}
 
-    let total_weight = weighted
+fn draw_pool(
+    name: &str,
+    classified: &ClassifiedPool,
+    seed: Option<(&str, u64)>,
+) -> Result<PoolDraw, RoutingError> {
+    let total_weight = classified
+        .weighted
         .iter()
         .fold(0_u64, |total, (_, weight)| total.saturating_add(*weight));
     let roll = if total_weight > 0 {
@@ -628,7 +767,7 @@ fn select_pool(
     };
     let selected_index = if total_weight > 0 {
         let mut remainder = roll;
-        weighted.iter().find_map(|(index, weight)| {
+        classified.weighted.iter().find_map(|(index, weight)| {
             if remainder < *weight {
                 Some(*index)
             } else {
@@ -637,20 +776,54 @@ fn select_pool(
             }
         })
     } else {
-        first_zero_ready.or(first_unavailable)
+        classified
+            .first_zero_ready
+            .or(classified.first_recoverable_unavailable)
+            .or(classified.first_other_unavailable)
     };
-    let index = selected_index.ok_or(RoutingError::NoEligiblePoolMember { exclusions })?;
-    let route = routes
-        .get_mut(index)
-        .and_then(Option::take)
-        .ok_or(RoutingError::Catalogue)?;
-    let receipt = RouteSelectionReceipt {
-        pool: name.into(),
-        candidates,
+    let index = selected_index.ok_or_else(|| RoutingError::NoEligiblePoolMember {
+        exclusions: classified.exclusions.clone(),
+    })?;
+    Ok(PoolDraw {
+        index,
         roll,
         total_weight,
+    })
+}
+
+fn selection_receipt(
+    name: &str,
+    classified: &ClassifiedPool,
+    draw: &PoolDraw,
+    route: &RouteAlternative,
+) -> RouteSelectionReceipt {
+    RouteSelectionReceipt {
+        pool: name.into(),
+        candidates: classified.candidates.clone(),
+        roll: draw.roll,
+        total_weight: draw.total_weight,
         pick: format!("{}/{}", route.adapter, route.model),
-    };
+        redraws: Vec::new(),
+    }
+}
+
+fn select_pool(
+    name: &str,
+    members: &[RoutePoolMember],
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    seed: Option<(&str, u64)>,
+    excluded_members: &[ModelId],
+) -> Result<PoolPick, RoutingError> {
+    let classified = classify_pool(members, request, context, excluded_members)?;
+    let draw = draw_pool(name, &classified, seed)?;
+    let route = classified
+        .routes
+        .get(draw.index)
+        .and_then(Option::as_ref)
+        .cloned()
+        .ok_or(RoutingError::Catalogue)?;
+    let receipt = selection_receipt(name, &classified, &draw, &route);
     Ok(PoolPick { route, receipt })
 }
 
