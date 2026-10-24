@@ -205,12 +205,8 @@ impl Targets {
         for target in &mut self.harnesses {
             target.skills_dir = destination(&target.skills_dir)?;
             target.mcp_file = destination(&target.mcp_file)?;
-            target.hook_file = target.hook_file.as_deref().map(&destination).transpose()?;
-            target.instruction = target
-                .instruction
-                .as_deref()
-                .map(&destination)
-                .transpose()?;
+            target.hook_file = target.hook_file.as_deref().map(destination).transpose()?;
+            target.instruction = target.instruction.as_deref().map(destination).transpose()?;
         }
         let global = destination(&self.home.join(".agents/AGENTS.md"))?;
         if self
@@ -1384,7 +1380,7 @@ fn permitted_entry(
                             &link,
                             state_root,
                             &Path::new("skills").join(name),
-                        )
+                        ) || asset_target(&link, state_root, &Path::new("library").join(name))
                     })
             )
         })

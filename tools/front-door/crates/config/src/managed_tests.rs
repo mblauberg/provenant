@@ -2265,6 +2265,12 @@ fn compiled_replace_disposition_refuses_missing_assets_and_links_library_skills(
         legacy.join("skills/autopilot")
     );
     assert!(!f.targets.roots.state.as_path().exists());
+    let mut f = Fixture::new();
+    let legacy = f.home.join("legacy-checkout");
+    f.targets.legacy_checkout = Some(legacy.clone());
+    let skills = f.targets.harnesses[0].skills_dir.clone();
+    fs::create_dir_all(&skills).unwrap();
+    symlink(legacy.join("skills/autopilot"), skills.join("autopilot")).unwrap();
     for relative in ["skills/autopilot", "library/playwright"] {
         let dir = f.source.join(relative);
         fs::create_dir_all(&dir).unwrap();

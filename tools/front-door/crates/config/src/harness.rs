@@ -283,9 +283,7 @@ pub(crate) fn capture(
             }
         }
         if target.harness == Harness::Opencode {
-            bytes = rewrite_instruction_array(
-                &bytes, release, targets, previous, &mut plan, path,
-            )?;
+            bytes = rewrite_instruction_array(&bytes, release, targets, previous, &mut plan, path)?;
             if let Some(array) = crate::splice::get(&bytes, &["instructions"])? {
                 let array = array
                     .as_array()
@@ -442,16 +440,41 @@ fn rewrite_instruction_array(
     let array = array
         .as_array()
         .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
+    let legacy = if let Some(checkout) = &targets.legacy_checkout {
+        let target = targets
+            .harnesses
+            .iter()
+            .find(|target| target.harness == Harness::Opencode)
+            .ok_or(InstallError::HarnessSelection)?;
+        crate::legacy::legacy_links(&targets.home, checkout, target)?
+    } else {
+        Vec::new()
+    };
     let mut out = bytes.to_vec();
-    for (i, value) in array.iter().enumerate() {
+    // Reverse order keeps recorded array indices valid for removals.
+    for (i, value) in array.iter().enumerate().rev() {
         let mut asset = None;
-        if let Some(checkout) = &targets.legacy_checkout {
-            if value.as_str() == targets.home.join(".agents/AGENTS.md").to_str() {
-                asset = Some("instructions/AGENTS.md");
+        if let Some(link) = legacy.iter().find(|link| {
+            link.area == crate::legacy::LegacyArea::OpenCodeInstruction
+                && value.as_str() == link.target.to_str()
+        }) {
+            if !link.retained {
+                out = crate::splice::set(&out, &["instructions", &i.to_string()], None)?;
+                plan.changes
+                    .entry(path.into())
+                    .or_default()
+                    .push(SelectorChange {
+                        selector: format!("json:/instructions/{i}"),
+                        before: Some(value.clone()),
+                        after: None,
+                    });
+                continue;
             }
-            if value.as_str() == checkout.join("HARNESS.md").to_str() {
-                asset = Some("instructions/HARNESS.md");
-            }
+            asset = Some(match link.name.as_str() {
+                "home-doctrine" => "instructions/AGENTS.md",
+                "companion" => "instructions/HARNESS.md",
+                _ => return Err(InstallError::Manifest("unsupported legacy instruction")),
+            });
         }
         if let Some(receipt) = previous {
             for entry in &receipt.entries {
@@ -761,6 +784,14 @@ fn legacy_links(
                     let replacement = match link.area {
                         LegacyArea::Skills if link.name.is_empty() => {
                             // Replace the link itself with a managed directory.
+                            if !release.files.keys().any(|p| {
+                                (p.starts_with("skills") || p.starts_with("library"))
+                                    && p.ends_with("SKILL.md")
+                            }) {
+                                return Err(InstallError::Manifest(
+                                    "missing legacy replacement asset",
+                                ));
+                            }
                             plan.removals.insert(path);
                             None
                         }
