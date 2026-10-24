@@ -1,6 +1,7 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 mod context;
 
+pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
 pub use context::{Context, publish};
 

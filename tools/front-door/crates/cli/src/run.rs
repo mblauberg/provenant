@@ -284,7 +284,11 @@ impl run::Providers for Registry<'_> {
                 end -= 1;
             }
             reason.truncate(end);
-            if let Some(pool) = pool {
+            // Routing reads the shared quota store, which a lane can neither
+            // read nor write: a nested refusal stays in the attempt reason
+            // rather than landing in a child store nothing routes from.
+            let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
+            if let Some(pool) = pool.as_deref().filter(|_| !lane) {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
                     crate::quota::persist_provider_refusal(
                         state_root,

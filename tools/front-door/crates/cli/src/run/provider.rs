@@ -92,6 +92,17 @@ fn prepare_with(
         let directory = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
+        // Inside a lane CODEX_HOME is the attempt's private state, whose
+        // auth.json links the parent's registered login. Carry that original
+        // account directory so a nested dispatch links the same credential.
+        let directory = if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+            canonical(&directory.join("auth.json"))
+                .ok()
+                .and_then(|credential| credential.parent().map(Path::to_path_buf))
+                .unwrap_or(directory)
+        } else {
+            directory
+        };
         if let Ok(directory) = canonical(&directory)
             && let Ok(executable) = locate("codex")
             && let Ok(key) = provenant_providers::accounts::detect(
@@ -231,11 +242,17 @@ fn prepare_with(
         let entry = entries
             .iter()
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
-        let account = entry
+        let account = match entry
             .filter(|entry| matches!(entry.adapter.as_str(), "claude" | "codex"))
             .map(|entry| entry.registered())
             .transpose()
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(account) => account,
+            Err(error) => {
+                reasons.push(format!("{label}: account: {error}"));
+                continue;
+            }
+        };
         if matches!(adapter.id(), "codex" | "claude") && account.is_none() {
             reasons.push(format!(
                 "{label}: account is not registered; use accounts register"
@@ -259,12 +276,18 @@ fn prepare_with(
         };
         let scratch = staging.join(format!("candidate-{candidate}"));
         let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
-        apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)?;
-        apply_setup(
-            &[SetupStep::CreateDir(private_state.clone())],
-            &[&paths.provider_state],
-            None,
-        )?;
+        if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
+            .and_then(|()| {
+                apply_setup(
+                    &[SetupStep::CreateDir(private_state.clone())],
+                    &[&paths.provider_state],
+                    None,
+                )
+            })
+        {
+            reasons.push(format!("{label}: {error}"));
+            continue;
+        }
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
         let child_state = state_root
             .join("children")
@@ -280,7 +303,7 @@ fn prepare_with(
         )
         .and_then(|request| match writer.as_ref() {
             Some(_) => ConfinedPlan::new(request).map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &cwd, &git, request),
+            None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
         }) {
             Ok(plan) => plan,
             Err(error) => {
@@ -297,29 +320,13 @@ fn prepare_with(
                 config_dir: account.directory(),
                 scratch,
             };
-            let authority = provenant_providers::claude::CredentialAuthority::for_dispatch(
-                paths.run_id.to_string(),
-                &login,
-                paths.deadline_unix_ms,
-            )
-            .map_err(|e| e.to_string())?;
-            let record = serde_json::to_vec(&authority).map_err(|e| e.to_string())?;
-            let attempt = paths
-                .provider_state
-                .parent()
-                .ok_or("attempt directory missing")?;
-            let parent = Directory::open_anchor(attempt).map_err(|e| e.to_string())?;
-            let publication = parent
-                .atomic_write(
-                    std::ffi::OsStr::new("credential-authority.json"),
-                    ".authority-",
-                    &record,
-                    provenant_supervisor::fs::PublishMode::Replace,
-                )
-                .map_err(|e| e.to_string())?;
-            if !matches!(publication, provenant_supervisor::fs::Publication::Durable) {
-                return Err("credential authority durability unconfirmed".into());
-            }
+            let authority = match credential_authority(paths, &login) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    reasons.push(format!("{label}: {error}"));
+                    continue;
+                }
+            };
             let now = || u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
             match provenant_providers::claude::refresh_for_account_authorised(
                 &executor,
@@ -342,13 +349,7 @@ fn prepare_with(
             "claude" => fixture_token.or(refreshed.as_ref()),
             _ => None,
         };
-        let provider_route = match adapter_route(&route) {
-            Ok(route) => route,
-            Err(error) => {
-                reasons.push(format!("{label}: {error}"));
-                continue;
-            }
-        };
+        let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
@@ -576,10 +577,42 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
     }
 }
 
-fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
+fn adapter_route(route: &ResolvedRoute) -> ResolvedRoute {
     let mut provider_route = route.clone();
     provider_route.alternatives = Default::default();
-    Ok(provider_route)
+    provider_route
+}
+
+/// Record this dispatch's credential authority durably beside the attempt
+/// before any refresh may act on it.
+fn credential_authority(
+    paths: &run::LaunchPaths,
+    login: &provenant_providers::claude::Login<'_>,
+) -> Result<provenant_providers::claude::CredentialAuthority, String> {
+    let authority = provenant_providers::claude::CredentialAuthority::for_dispatch(
+        paths.run_id.to_string(),
+        login,
+        paths.deadline_unix_ms,
+    )
+    .map_err(|e| e.to_string())?;
+    let record = serde_json::to_vec(&authority).map_err(|e| e.to_string())?;
+    let attempt = paths
+        .provider_state
+        .parent()
+        .ok_or("attempt directory missing")?;
+    let parent = Directory::open_anchor(attempt).map_err(|e| e.to_string())?;
+    let publication = parent
+        .atomic_write(
+            std::ffi::OsStr::new("credential-authority.json"),
+            ".authority-",
+            &record,
+            provenant_supervisor::fs::PublishMode::Replace,
+        )
+        .map_err(|e| e.to_string())?;
+    if !matches!(publication, provenant_supervisor::fs::Publication::Durable) {
+        return Err("credential authority durability unconfirmed".into());
+    }
+    Ok(authority)
 }
 
 fn confinement_request(
@@ -635,6 +668,7 @@ fn confinement_request(
 /// project before deriving any Git read authority from that binding.
 fn read_only_plan(
     roots: &provenant_core::Roots,
+    state_root: &Path,
     project: ProjectId,
     cwd: &Path,
     git: &Path,
@@ -643,12 +677,12 @@ fn read_only_plan(
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
-    let utility = UtilityRuntime::new(
-        std::sync::Arc::new(LocalFs),
-        git,
-        roots.state.as_path().join("tmp/git-home"),
-    )
-    .map_err(|error| error.to_string())?;
+    // Its home lives under the run state root: inside a lane that is the
+    // child store, since the shared state root is not writable there.
+    let utility_home = state_root.join("tmp/git-home");
+    crate::fabric::private_dir(state_root, &utility_home).map_err(|error| error.to_string())?;
+    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home)
+        .map_err(|error| error.to_string())?;
     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
         .map_err(|error| error.to_string())?;

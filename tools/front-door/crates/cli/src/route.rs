@@ -193,7 +193,18 @@ fn with_context<T>(
     for record in availability {
         provenant_routing::validate_availability(record, &record.adapter)?;
     }
-    let quota_records = crate::quota::read_cache(roots)?;
+    // A lane holds no grant on the shared quota store: route without a
+    // snapshot there rather than refusing the nested dispatch.
+    let quota_records = match crate::quota::read_cache(roots) {
+        Ok(records) => records,
+        Err(crate::quota::EdgeError::Fs(error))
+            if error.is_permission_denied()
+                && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(error.into()),
+    };
     let quota = quota_observations(&catalogue, availability, &quota_records)?;
     let timestamp = jiff::Timestamp::now();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;

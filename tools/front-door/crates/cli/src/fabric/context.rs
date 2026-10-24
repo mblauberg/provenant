@@ -29,7 +29,7 @@ pub struct Context {
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_supervisor::fs::canonicalize(path)?)
 }
-fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
+pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
     let mut dir = match Directory::open_anchor(root) {
         Ok(dir) => dir,
         Err(error) if error.is_not_found() => {

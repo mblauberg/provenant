@@ -1718,6 +1718,23 @@ fn verify_lane_profile(
         run_count()? > before,
         "confined child admission created no run"
     );
+    // The child must be admitted as a target, not merely leave a record.
+    let accepted = nested
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let targets = &accepted
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
+    assert_eq!(
+        targets.as_array().map(Vec::len),
+        Some(1),
+        "confined child was not admitted: {targets}"
+    );
     assert!(!state.join("run.sqlite3").exists());
     let denied = [
         attempt.join("custody.lock"),

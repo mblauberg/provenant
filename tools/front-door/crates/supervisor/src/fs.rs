@@ -194,6 +194,10 @@ impl FsError {
     pub fn is_exists(&self) -> bool {
         self.raw_os_error() == Some(errno::EEXIST)
     }
+    /// A sandbox or mode denial, as opposed to a missing or malformed path.
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self.raw_os_error(), Some(errno::EPERM | errno::EACCES))
+    }
     pub fn is_symlink(&self) -> bool {
         matches!(self, Self::Symlink { .. }) || self.is_loop()
     }
