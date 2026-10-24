@@ -245,6 +245,27 @@ pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult 
 }
 
 #[test]
+fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    let skipped = vec![SkippedRoute {
+        route: "claude".into(),
+        kind: SkipKind::AuthRequired,
+        detail: "account work: sign in again".into(),
+    }];
+    store.record_skipped_routes(id, &skipped, &call)?;
+    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    assert_eq!(started.skipped_routes, skipped);
+    assert_eq!(store.record(id, &call)?.skipped_routes, skipped);
+    Ok(())
+}
+
+#[test]
 fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

@@ -318,6 +318,30 @@ pub enum AttemptState {
         reason: Option<String>,
     },
 }
+/// Why a fallback candidate did not launch. Typed so `lanes` and `output` can
+/// show a skipped leg without reading prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipKind {
+    /// Readiness, adapter, policy or executable unavailable for the route.
+    Unavailable,
+    /// The account was unregistered, unreadable or unavailable to probe.
+    Account,
+    /// The account needs sign-in or its credential refresh failed.
+    AuthRequired,
+    /// Per-candidate state or setup could not be prepared.
+    Setup,
+    /// Confinement, continuation or provider preparation refused the candidate.
+    Refused,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkippedRoute {
+    /// `adapter/model`, or the adapter alone for an account-level skip.
+    pub route: String,
+    pub kind: SkipKind,
+    pub detail: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRecord {
@@ -374,6 +398,9 @@ pub struct AttemptRecord {
     pub result: Option<ArtifactRecord>,
     pub publication_error: Option<String>,
     pub exit_evidence: Option<ArtifactRecord>,
+    /// Fallback candidates that did not launch before this attempt did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_routes: Vec<SkippedRoute>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -9,7 +9,7 @@ use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{Directory, FileKind, PublishMode, entropy_128};
-use run::RouteRecord;
+use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
 pub(super) fn prepare(
@@ -141,7 +141,7 @@ fn prepare_with(
     let timestamp = jiff::Timestamp::now().as_second();
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut availability = Vec::new();
-    let mut reasons = Vec::new();
+    let mut reasons: Vec<SkippedRoute> = Vec::new();
     let probe = Probe {
         roots: registry.roots,
         executor: &executor,
@@ -157,9 +157,10 @@ fn prepare_with(
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {
             Ok(record) => availability.push(record),
-            Err(error) => reasons.push(format!(
-                "{} account {}: {error}",
-                entry.adapter, entry.label
+            Err(error) => reasons.push(skip(
+                &entry.adapter,
+                SkipKind::Account,
+                format!("account {}: {error}", entry.label),
             )),
         }
     }
@@ -238,24 +239,32 @@ fn prepare_with(
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
-            reasons.push(format!("{label}: unknown adapter"));
+            reasons.push(skip(&label, SkipKind::Unavailable, "unknown adapter"));
             continue;
         };
         let adapter = registration.adapter;
         if !adapter.execution_enabled() {
-            reasons.push(format!("{label}: provider execution is disabled"));
+            reasons.push(skip(
+                &label,
+                SkipKind::Unavailable,
+                "provider execution is disabled",
+            ));
             continue;
         }
         if let provenant_records::RouteReadiness::Unavailable { reason } = &route.readiness {
-            reasons.push(format!("{label}: {reason:?}"));
+            reasons.push(skip(&label, SkipKind::Unavailable, format!("{reason:?}")));
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
-            reasons.push(format!("{label}: {error}"));
+            reasons.push(skip(&label, SkipKind::Unavailable, error));
             continue;
         }
         if !matches!(adapter.id(), "codex" | "claude" | "opencode") {
-            reasons.push(format!("{label}: provider launch is not supported here"));
+            reasons.push(skip(
+                &label,
+                SkipKind::Unavailable,
+                "provider launch is not supported here",
+            ));
             continue;
         }
         let entry = entries
@@ -268,20 +277,22 @@ fn prepare_with(
         {
             Ok(account) => account,
             Err(error) => {
-                reasons.push(format!("{label}: account: {error}"));
+                reasons.push(skip(&label, SkipKind::Account, format!("account: {error}")));
                 continue;
             }
         };
         if matches!(adapter.id(), "codex" | "claude") && account.is_none() {
-            reasons.push(format!(
-                "{label}: account is not registered; use accounts register"
+            reasons.push(skip(
+                &label,
+                SkipKind::Account,
+                "account is not registered; use accounts register",
             ));
             continue;
         }
         let executable = match locate(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
-                reasons.push(format!("{label}: {error}"));
+                reasons.push(skip(&label, SkipKind::Unavailable, error));
                 continue;
             }
         };
@@ -304,7 +315,7 @@ fn prepare_with(
                 )
             })
         {
-            reasons.push(format!("{label}: {error}"));
+            reasons.push(skip(&label, SkipKind::Setup, error));
             continue;
         }
         let continuation = match resume {
@@ -317,7 +328,7 @@ fn prepare_with(
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error) => {
-                    reasons.push(format!("{label}: {error}"));
+                    reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
                 }
             },
@@ -347,7 +358,7 @@ fn prepare_with(
         }) {
             Ok(planned) => planned,
             Err(error) => {
-                reasons.push(format!("{label}: {error}"));
+                reasons.push(skip(&label, SkipKind::Refused, error));
                 continue;
             }
         };
@@ -363,7 +374,7 @@ fn prepare_with(
             let authority = match credential_authority(paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
-                    reasons.push(format!("{label}: {error}"));
+                    reasons.push(skip(&label, SkipKind::AuthRequired, error));
                     continue;
                 }
             };
@@ -378,7 +389,7 @@ fn prepare_with(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
-                    reasons.push(format!("{label}: account {}: {error}; sign in again with CLAUDE_CONFIG_DIR={} claude auth login", entry.map_or("unknown", |e| e.label.as_str()), account.directory().display()));
+                    reasons.push(skip(&label, SkipKind::AuthRequired, format!("account {}: {error}; sign in again with CLAUDE_CONFIG_DIR={} claude auth login", entry.map_or("unknown", |e| e.label.as_str()), account.directory().display())));
                     continue;
                 }
             }
@@ -418,7 +429,7 @@ fn prepare_with(
         }) {
             Ok(spec) => spec,
             Err(error) => {
-                reasons.push(format!("{label}: {error}"));
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
@@ -428,7 +439,11 @@ fn prepare_with(
             .map(|account| account.directory());
         let setup_roots = [scratch, private_state, roots.state.as_path()];
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
-            reasons.push(format!("{label}: setup failed: {error}"));
+            reasons.push(skip(
+                &label,
+                SkipKind::Setup,
+                format!("setup failed: {error}"),
+            ));
             continue;
         }
         let provider = RouteRecord {
@@ -445,6 +460,7 @@ fn prepare_with(
             Stdin::Null => Vec::new(),
         };
         return Ok(run::PreparedLaunch {
+            skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,
             stdin,
@@ -460,7 +476,20 @@ fn prepare_with(
             }),
         });
     }
-    Err(reasons.join("; "))
+    Err(reasons
+        .iter()
+        .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
+/// A candidate that did not launch, typed by why it was skipped.
+fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> SkippedRoute {
+    SkippedRoute {
+        route: route.to_owned(),
+        kind,
+        detail: detail.into(),
+    }
 }
 
 /// The continuation of `prior` on this candidate route. It must be the very

@@ -119,6 +119,24 @@ impl RunStore {
         }
         Ok(ticket)
     }
+    /// Record fallback candidates that did not launch, while the attempt is queued.
+    pub(crate) fn record_skipped_routes(
+        &self,
+        id: AttemptId,
+        skipped: &[SkippedRoute],
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let old = self.record(id, call)?;
+            if old.state != AttemptState::Queued {
+                return Err(RunError::Conflict);
+            }
+            let mut next = old.clone();
+            next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
+            next.skipped_routes = skipped.to_vec();
+            update_attempt(tx, &old, &next)
+        })
+    }
     /// Move a queued attempt to `starting` with a fresh custody generation
     /// and its applied route, just before supervisor handoff. `head` is the
     /// checkout HEAD the host observed for a read-only lane; never lane output.
