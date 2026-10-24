@@ -317,7 +317,8 @@ share a destination; each harness entry belongs to the target whose paths admit
 it. Install replaces only the selected targets and carries the rest over;
 `check install` verifies every recorded target. Uninstall selects the target
 matching an environment-supplied home, or else every recorded target of the
-harness. Version-one receipts keep this shape, so no schema bump. No cross-file or two-host atomicity is claimed.
+harness. The receipt shape is unchanged, so version-one receipts still load.
+No cross-file or two-host atomicity is claimed.
 
 ### Harness registry
 
