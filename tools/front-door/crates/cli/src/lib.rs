@@ -590,6 +590,23 @@ mod tests {
         invalid(&["output", &"11".repeat(16)]);
     }
     #[test]
+    fn lanes_accept_repeatable_state_and_since_filters() {
+        valid(&[
+            "lanes",
+            "--all",
+            "--state",
+            "running",
+            "--state",
+            "input_required",
+            "--since",
+            "24h",
+        ]);
+        valid(&["lanes", "--since", "2026-10-25T00:00:00.000000Z"]);
+        invalid(&["lanes", "--since"]);
+        invalid(&["lanes", "--state", "unknown"]);
+        invalid(&["lanes", "--wait", "10", "--since", "24h"]);
+    }
+    #[test]
     fn manifest_and_writer_authority_do_not_mix() {
         valid(&[
             "route",

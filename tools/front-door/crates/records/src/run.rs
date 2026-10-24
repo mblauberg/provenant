@@ -301,6 +301,9 @@ pub struct AttemptRecord {
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
+    /// Most recent supervisor-observed stdout/stderr activity while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<WallTime>,
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
