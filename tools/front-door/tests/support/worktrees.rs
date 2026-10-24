@@ -1209,6 +1209,40 @@ fn lane_prepare_isolates_nested_state() -> Result {
         ],
     )?;
     let worktree = rig.project.join(".worktrees/writer");
+    // The repository's Cargo config names a checked-in rustc wrapper.
+    fs::create_dir_all(worktree.join(".cargo"))?;
+    fs::write(
+        worktree.join(".cargo/config.toml"),
+        "[build]\nrustc-wrapper = \".cargo/rustc-wrapper.sh\"\n",
+    )?;
+    fs::write(
+        worktree.join(".cargo/rustc-wrapper.sh"),
+        "#!/bin/sh\nexec \"$@\"\n",
+    )?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            worktree.join(".cargo/rustc-wrapper.sh"),
+            fs::Permissions::from_mode(0o755),
+        )?;
+    }
+    let worktree_arg = worktree.to_str().ok_or("worktree path")?;
+    git(&rig, &["-C", worktree_arg, "add", ".cargo"])?;
+    git(
+        &rig,
+        &[
+            "-C",
+            worktree_arg,
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "wrapper",
+        ],
+    )?;
     let (roots, context) = writer_context(&rig)?;
     let identity = command(&rig, &["fabric", "identity", "--json"])?;
     assert_eq!(
@@ -1228,6 +1262,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         fs::create_dir_all(home.join(path))?;
     }
     fs::write(home.join(".rustup/settings.toml"), b"fixture settings")?;
+    for secret in ["credentials.toml", "credentials", "config.toml"] {
+        fs::write(home.join(".cargo").join(secret), b"synthetic credential")?;
+    }
     fs::create_dir_all(home.join("Library/Keychains"))?;
     fs::write(
         home.join("Library/Keychains/login.keychain-db"),
@@ -1867,6 +1904,9 @@ fn verify_lane_profile(
         let argv = ["/bin/sh", "-c", concat!(
             "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
             "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
+            "for f in credentials.toml credentials config.toml; do ",
+            "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done; ",
+            "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
             "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
             "git --version && git status --porcelain && ",
             "cargo test --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\""

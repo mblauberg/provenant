@@ -86,6 +86,7 @@ fn prepare(
         subtree(package),
     ];
     let mut runtime_reads = vec![subtree(package)];
+    let mut process_executables = vec![exact(input.executable)];
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -100,6 +101,7 @@ fn prepare(
         access,
         &mut runtime_reads,
         &mut tool_exec_roots,
+        &mut process_executables,
         &mut env,
         &mut setup,
     );
@@ -120,7 +122,7 @@ fn prepare(
         setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![exact(input.executable)],
+                process_executables,
                 allow_process_fork: true,
                 runtime_reads,
                 authentication: vec![AuthenticationProfile {

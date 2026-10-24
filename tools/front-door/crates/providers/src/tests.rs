@@ -1769,10 +1769,7 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
-        (
-            "CARGO_HOME",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-        ),
+        ("CARGO_HOME", "/fixture/scratch/cargo-home"),
         (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
@@ -1800,6 +1797,19 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             "{path}"
         );
     }
+    // The existing registry is linked read-only into scratch Cargo home, and the
+    // user's Cargo configuration and credentials are not granted.
+    assert!(launch.setup.contains(&crate::launch::SetupStep::Symlink {
+        link: "/fixture/scratch/cargo-home/registry".into(),
+        target: "/fixture/home/.cargo/registry".into(),
+    }));
+    assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
+        !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
+    }));
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/home/.cargo")
+            && !grant.path.starts_with("/fixture/home/.rustup")
+    }));
     // Only lane grants are writable: never the private config or the user's home.
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
         !grant.path.starts_with("/fixture/state/claude-config")
@@ -1870,4 +1880,47 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     let turn = observed.unwrap();
     assert_eq!(turn.model, "gpt-6-luna");
     assert_eq!(turn.effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn rust_tools_exec_only_the_checked_in_rustc_wrapper() {
+    let root = std::env::temp_dir().join(format!("provenant-wrapper-{}", std::process::id()));
+    let repo = root.join("repo");
+    let _ = std::fs::remove_dir_all(&root);
+    let wrapper = repo.join("tools/front-door/.cargo/rustc-wrapper.sh");
+    std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+    // Other scripts, hidden directories and build output are never granted.
+    std::fs::write(wrapper.with_file_name("other.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::create_dir_all(repo.join(".hidden/.cargo")).unwrap();
+    std::fs::write(repo.join(".hidden/.cargo/rustc-wrapper.sh"), "").unwrap();
+    std::fs::create_dir_all(repo.join("target/.cargo")).unwrap();
+    std::fs::write(repo.join("target/.cargo/rustc-wrapper.sh"), "").unwrap();
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = read_only_plan(root.to_str().unwrap(), Some("login"));
+    let prompt = Prompt::new("fixture".into());
+    let spec = crate::codex::Codex
+        .prepare(fixture_input(&route, &plan, &prompt, &repo, None))
+        .unwrap();
+    let executables: Vec<_> = spec
+        .profile
+        .spec
+        .process_executables
+        .iter()
+        .map(|grant| (grant.path.clone(), grant.scope))
+        .collect();
+    assert!(executables.contains(&(
+        wrapper,
+        provenant_confinement::permissions::PathScope::Exact
+    )));
+    assert_eq!(
+        executables
+            .iter()
+            .filter(|(path, _)| path.ends_with("rustc-wrapper.sh"))
+            .count(),
+        1,
+        "{executables:?}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
 }

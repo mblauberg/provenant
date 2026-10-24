@@ -249,6 +249,7 @@ pub(crate) fn rust_tools(
     access: Access,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
+    process_executables: &mut Vec<PathGrant>,
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
@@ -262,7 +263,9 @@ pub(crate) fn rust_tools(
             &authority.cargo_cache().path
         }
     };
-    let cargo_home = cache.join("cargo-home");
+    // Cargo home is attempt scratch in both modes, so the host can link the
+    // existing registry cache (read-only) into it. Build output lives in `cache`.
+    let cargo_home = input.confined.permissions().scratch.path.join("cargo-home");
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ and cargo-home/ after launch, so anchor the cache.
@@ -302,15 +305,54 @@ pub(crate) fn rust_tools(
         }
     }
     if access == Access::ReadOnly {
-        setup.extend([
-            SetupStep::CreateDir(cargo_home.clone()),
-            SetupStep::CreateDir(target),
-            SetupStep::Symlink {
-                link: cargo_home.join("registry"),
-                target: cargo.join("registry"),
-            },
-        ]);
+        setup.push(SetupStep::CreateDir(target));
     }
+    setup.extend([
+        SetupStep::CreateDir(cargo_home.clone()),
+        SetupStep::Symlink {
+            link: cargo_home.join("registry"),
+            target: cargo.join("registry"),
+        },
+    ]);
+    // The repository's Cargo config may name a script as `build.rustc-wrapper`.
+    // Only those exact files become executable, not the worktree.
+    process_executables.extend(rustc_wrappers(input.cwd).into_iter().map(exact));
+}
+
+/// Regular `.cargo/rustc-wrapper.sh` files near the working directory
+/// (depth-bounded, no symlinks, no hidden directories other than `.cargo`).
+fn rustc_wrappers(cwd: &Path) -> Vec<PathBuf> {
+    const DEPTH: usize = 3;
+    const LIMIT: usize = 8;
+    fn walk(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if found.len() >= LIMIT {
+                return;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if kind.is_file() && name == "rustc-wrapper.sh" && directory.ends_with(".cargo") {
+                found.push(entry.path());
+            } else if kind.is_dir()
+                && depth < DEPTH
+                && (name == ".cargo" || !name.starts_with('.'))
+                && !matches!(&*name, "target" | "node_modules")
+            {
+                walk(&entry.path(), depth + 1, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(cwd, 0, &mut found);
+    found
 }
 
 /// The CLI's own install directory: the parent of a `bin/` directory, or the

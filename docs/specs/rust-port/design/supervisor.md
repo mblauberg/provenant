@@ -247,7 +247,7 @@ clock supplies timestamps; no locale or Python-start-string emulation remains.
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
 read roots, network policy and named capabilities. Hold verified path anchors;
 reject traversal, symlinked state/lock leaves, credential roots and broad home
-or tmp grants. Writers may change their linked tree, private Git index/HEAD,
+or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE,
 objects and exactly their branch/ref lock/reflog. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
 and protected instructions immutable. The task's network policy never blocks the
@@ -282,8 +282,8 @@ for the queued submission path.
 
 Shell-capable Claude writers use the same Rust recipe as Codex: immutable
 `~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and
-`~/.rustup/settings.toml`, with `CARGO_HOME` and `CARGO_TARGET_DIR` inside the
-exact lane cache. Host Cargo configuration and credentials receive no grant.
+`~/.rustup/settings.toml`, with `CARGO_TARGET_DIR` inside the exact lane cache and
+`CARGO_HOME` in attempt scratch (registry linked read-only). Host Cargo configuration and credentials receive no grant.
 On macOS with CLT installed, the recipe selects
 `/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
 with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree

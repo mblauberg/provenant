@@ -517,12 +517,19 @@ missing required anchors refuse prelaunch. Codex also pins
 can use the repository's readable config without loading the user's global
 hooks, includes or credential helpers or failing on a denied global-config read.
 
-Writer `CARGO_TARGET_DIR` and `CARGO_HOME` select `target/` and `cargo-home/`
-inside the exact cache bound by `WorktreeWriteAuthority`. The host prepares
-the cache under writer custody before anchoring; Cargo creates its children
-after launch. Writer Cargo state does not link into the user's registry or
-credentials. Build output may execute within the granted cache, and host
-Cargo/rustup configuration and toolchains remain immutable.
+Writer `CARGO_TARGET_DIR` selects `target/` inside the exact cache bound by
+`WorktreeWriteAuthority`. The host prepares the cache under writer custody
+before anchoring; Cargo creates its children after launch. Writer `CARGO_HOME`
+is `cargo-home/` in attempt scratch, as for read-only lanes, with only its
+`registry` linked to the user's existing cache, so offline resolution finds
+crates without any credential or config grant. Build output may execute within
+the granted cache, and host Cargo/rustup configuration and toolchains remain
+immutable. Where the worktree carries a `.cargo/rustc-wrapper.sh` (bounded
+search below the working directory; no symlinks, hidden directories or
+`target`), exactly that regular file gains exec. The rest of the worktree stays
+non-executable. Writers also get exact write access to the linked worktree's
+private `COMMIT_EDITMSG`, `AUTO_MERGE` and `AUTO_MERGE.lock`, so `git commit`
+completes; the common `.git` stays read-only apart from the listed ref grants.
 
 OpenCode's discovery recipe grants literal directory reads of `.agents`,
 `.claude` and `.codex` along cwd ancestry. These reads never grant their child

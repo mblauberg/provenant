@@ -661,7 +661,7 @@ struct WorktreeWriteGrants {
     private_git_dir: PathGrant,
     common_git_dir: PathGrant,
     index: [PathGrant; 2],
-    head: [PathGrant; 4],
+    head: [PathGrant; 7],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
 }
@@ -685,8 +685,17 @@ impl WorktreeWriteGrants {
             private_git_dir: subtree(private.to_owned()),
             common_git_dir: subtree(common.to_owned()),
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
-            head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                .map(|name| exact(private.join(name))),
+            // `git commit` writes its message buffer and clears AUTO_MERGE here.
+            head: [
+                "HEAD",
+                "HEAD.lock",
+                "logs/HEAD",
+                "logs/HEAD.lock",
+                "COMMIT_EDITMSG",
+                "AUTO_MERGE",
+                "AUTO_MERGE.lock",
+            ]
+            .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
             selected_ref: [
                 format!("refs/heads/{branch}"),
@@ -709,7 +718,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v2\0");
+        digest.update(b"provenant-worktree-git-grants-v3\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -2945,6 +2954,9 @@ mod tests {
         push_worktree_rule(&mut source, &verified_grants)?;
         assert!(source.contains("(require-not (subpath "));
         assert!(source.contains(&format!("{}/objects/info", common.display())));
+        // `git commit` needs its message buffer, only in the private directory.
+        assert!(source.contains(&format!("\"{}\"", private.join("COMMIT_EDITMSG").display())));
+        assert!(!source.contains(&format!("\"{}\"", common.join("COMMIT_EDITMSG").display())));
         for relative in [
             "config",
             "config.lock",
