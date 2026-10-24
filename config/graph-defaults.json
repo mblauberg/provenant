@@ -1,8 +1,0 @@
-{
-  "schema": "provenant.graph-defaults.v1",
-  "description": "Graph runner static ceilings (docs/specs/harness/graph-runner.md). pool_caps bound concurrent provider slots per (adapter, model, account) across every graph; default covers adapters not listed. A pool in cooldown contributes zero.",
-  "pool_caps": { "opencode": 2, "cursor": 1, "agy": 2, "codex": 3, "claude": 3, "default": 1 },
-  "tick_seconds": 2,
-  "probe_seconds": 30,
-  "gate_grace_seconds": 3
-}
