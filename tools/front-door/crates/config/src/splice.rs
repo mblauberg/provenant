@@ -41,6 +41,16 @@ pub(crate) fn set(
 /// Reformat a validated JSON settings document while retaining its source key
 /// order.
 pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
+    let document = read_document(source, Limits::CONFIG)?;
+    if document.tokens().iter().any(|token| {
+        matches!(
+            token.kind,
+            JsoncTokenKind::LineComment | JsoncTokenKind::BlockComment
+        )
+    }) {
+        let _: Value = document.decode()?;
+        return Ok(source.to_vec());
+    }
     let mut output = Vec::with_capacity(source.len());
     let mut index = 0;
     let mut depth = 0usize;
@@ -131,6 +141,7 @@ pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
         index += 1;
     }
     output.push(b'\n');
+    let _: Value = read_document(&output, Limits::CONFIG)?.decode()?;
     Ok(output)
 }
 
@@ -1078,6 +1089,12 @@ mod tests {
             text,
             "{\n  \"z\": {\n    \"one\": 1,\n    \"two\": 2\n  },\n  \"a\": [\n    {\n      \"x\": true,\n      \"y\": false\n    }\n  ]\n}\n"
         );
+    }
+
+    #[test]
+    fn pretty_json_keeps_spliced_jsonc_comments() {
+        let source = b"{\n  // keep this comment\n  \"owned\": {\"value\": true}\n}\n";
+        assert_eq!(super::pretty_json(source).expect("valid JSONC"), source);
     }
 
     #[test]

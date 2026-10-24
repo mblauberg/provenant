@@ -23,6 +23,16 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, Debug, Default)]
+struct InstallCounts {
+    links: usize,
+    hooks: usize,
+    mcp: usize,
+    notes: usize,
+    findings: usize,
+    other: usize,
+}
+
 #[derive(Debug)]
 enum EdgeError {
     Root(super::roots::RootError),
@@ -333,7 +343,7 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let mut counts = BTreeMap::<&str, [usize; 5]>::new();
+            let mut counts = BTreeMap::<&str, InstallCounts>::new();
             for action in &outcome.actions {
                 let target = action
                     .path
@@ -341,20 +351,18 @@ fn output_install(
                     .map(|path| install_target(&path))
                     .unwrap_or("target");
                 let selector = action.selector.to_ascii_lowercase();
-                let bucket = if selector.contains("hook") {
-                    Some(1)
+                let target_counts = counts.entry(target).or_default();
+                if selector.contains("hook") {
+                    target_counts.hooks += 1;
                 } else if selector.contains("mcp") {
-                    Some(2)
+                    target_counts.mcp += 1;
                 } else if matches!(
                     action.before.as_ref().or(action.after.as_ref()),
                     Some(provenant_records::OwnedValue::Link { .. })
                 ) {
-                    Some(0)
+                    target_counts.links += 1;
                 } else {
-                    None
-                };
-                if let Some(bucket) = bucket {
-                    counts.entry(target).or_default()[bucket] += 1;
+                    target_counts.other += 1;
                 }
             }
             for manual in &outcome.manual_includes {
@@ -363,7 +371,7 @@ fn output_install(
                     .to_path_buf()
                     .map(|path| install_target(&path))
                     .unwrap_or("target");
-                counts.entry(target).or_default()[3] += 1;
+                counts.entry(target).or_default().notes += 1;
             }
             for finding in &outcome.findings {
                 let target = finding
@@ -371,7 +379,7 @@ fn output_install(
                     .to_path_buf()
                     .map(|path| install_target(&path))
                     .unwrap_or("target");
-                counts.entry(target).or_default()[4] += 1;
+                counts.entry(target).or_default().findings += 1;
             }
             if counts.is_empty() {
                 counts.entry("target").or_default();
@@ -379,8 +387,23 @@ fn output_install(
             let mut human = format!("{command}:\n");
             for (target, count) in counts {
                 human.push_str(&format!(
-                    "  {target}: {} links, {} hooks, {} MCP, {} notes; {} findings\n",
-                    count[0], count[1], count[2], count[3], count[4]
+                    "  {target}: {} links, {} hooks, {} MCP, {} notes; {} findings; {} other\n",
+                    count.links, count.hooks, count.mcp, count.notes, count.findings, count.other
+                ));
+            }
+            for manual in &outcome.manual_includes {
+                let path = manual
+                    .path
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                let include = manual
+                    .include
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                human.push_str(&format!(
+                    "manual include required: add {include} to {path}\n"
                 ));
             }
             let read_only = outcome.dry_run;
@@ -408,7 +431,7 @@ fn install_target(path: &Path) -> &'static str {
     } else if path.contains("/.config/agents/") {
         "Agents"
     } else {
-        "Git"
+        "Other"
     }
 }
 
