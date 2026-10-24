@@ -1769,10 +1769,7 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
-        (
-            "CARGO_HOME",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-        ),
+        ("CARGO_HOME", "/fixture/scratch/cargo-home"),
         (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
@@ -1800,6 +1797,19 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             "{path}"
         );
     }
+    // The existing registry is linked read-only into scratch Cargo home, and the
+    // user's Cargo configuration and credentials are not granted.
+    assert!(launch.setup.contains(&crate::launch::SetupStep::Symlink {
+        link: "/fixture/scratch/cargo-home/registry".into(),
+        target: "/fixture/home/.cargo/registry".into(),
+    }));
+    assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
+        !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
+    }));
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/home/.cargo")
+            && !grant.path.starts_with("/fixture/home/.rustup")
+    }));
     // Only lane grants are writable: never the private config or the user's home.
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
         !grant.path.starts_with("/fixture/state/claude-config")
@@ -1870,4 +1880,26 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     let turn = observed.unwrap();
     assert_eq!(turn.model, "gpt-6-luna");
     assert_eq!(turn.effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn rust_tools_exec_repository_scripts_in_the_working_directory() {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = read_only_plan("/fixture", Some("login"));
+    let prompt = Prompt::new("fixture".into());
+    let spec = crate::codex::Codex
+        .prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))
+        .unwrap();
+    let exec = &spec.profile.spec.tool_exec_roots;
+    assert!(exec.iter().any(|g| g.path == Path::new("/fixture/repo")
+        && g.scope == provenant_confinement::permissions::PathScope::Subtree));
+    // Exec does not widen reads: the worktree was already readable.
+    assert!(!exec.iter().any(|g| g.path == Path::new("/fixture/home")));
 }

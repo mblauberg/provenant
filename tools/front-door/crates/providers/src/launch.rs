@@ -262,7 +262,9 @@ pub(crate) fn rust_tools(
             &authority.cargo_cache().path
         }
     };
-    let cargo_home = cache.join("cargo-home");
+    // Cargo home is attempt scratch in both modes, so the host can link the
+    // existing registry cache (read-only) into it. Build output lives in `cache`.
+    let cargo_home = input.confined.permissions().scratch.path.join("cargo-home");
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ and cargo-home/ after launch, so anchor the cache.
@@ -302,15 +304,19 @@ pub(crate) fn rust_tools(
         }
     }
     if access == Access::ReadOnly {
-        setup.extend([
-            SetupStep::CreateDir(cargo_home.clone()),
-            SetupStep::CreateDir(target),
-            SetupStep::Symlink {
-                link: cargo_home.join("registry"),
-                target: cargo.join("registry"),
-            },
-        ]);
+        setup.push(SetupStep::CreateDir(target));
     }
+    setup.extend([
+        SetupStep::CreateDir(cargo_home.clone()),
+        SetupStep::Symlink {
+            link: cargo_home.join("registry"),
+            target: cargo.join("registry"),
+        },
+    ]);
+    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
+    // Children inherit this profile, so exec stays confined; read and write
+    // grants and the protected and credential denials are unchanged.
+    tool_exec_roots.push(subtree(input.cwd));
 }
 
 /// The CLI's own install directory: the parent of a `bin/` directory, or the
