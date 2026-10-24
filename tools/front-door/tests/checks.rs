@@ -1,9 +1,15 @@
 mod support;
 use support::{Result, TestRig, code};
 
+// Install inspection intentionally refuses a device crossing from its anchor.
+// CI supplies a temporary root on the checkout device; /tmp can be a tmpfs.
+fn check_rig() -> Result<TestRig> {
+    TestRig::in_directory(&std::env::temp_dir())
+}
+
 #[test]
 fn config_defects_are_findings_and_install_absence_is_not_success() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
@@ -77,7 +83,7 @@ fn legal(rig: &TestRig) -> Result {
 }
 #[test]
 fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     std::fs::create_dir_all(&rig.state)?;
     let config = format!(
         "schema_version=1\n{}",
@@ -131,7 +137,7 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
 #[test]
 fn malformed_inspected_config_and_install_are_findings_but_escape_is_error() -> Result {
     use std::fs;
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     fs::create_dir_all(rig.state.join("install"))?;
     fs::write(rig.state.join("config.toml"), "schema_version = [")?;
     assert_eq!(code(&rig.command(&["check", "config", "--json"])?), 1);
@@ -153,7 +159,7 @@ fn malformed_inspected_config_and_install_are_findings_but_escape_is_error() -> 
 #[test]
 fn harness_uses_tracked_yaml_links_anchors_and_json_routes() -> Result {
     use std::fs;
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     fs::create_dir_all(rig.project.join("skills/example/evals"))?;
     fs::write(
         rig.project.join("skills/example/SKILL.md"),
@@ -204,7 +210,7 @@ fn harness_uses_tracked_yaml_links_anchors_and_json_routes() -> Result {
 #[test]
 fn release_scans_added_then_deleted_blobs_and_commit_identity_bytes() -> Result {
     use std::fs;
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     legal(&rig)?;
     let base = commit(&rig, "base")?;
     let clean = rig.command(&["check", "release", "--json"])?;
@@ -263,7 +269,7 @@ fn release_scans_added_then_deleted_blobs_and_commit_identity_bytes() -> Result 
 #[test]
 fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
     use std::fs;
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "base")?;
     fs::remove_file(rig.project.join("NOTICE"))?;
@@ -297,7 +303,7 @@ fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
 
 #[test]
 fn harness_accepts_recorded_agent_skill_and_openai_sidecar() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     let dir = rig.project.join("skills/refactor");
     std::fs::create_dir_all(dir.join("agents"))?;
     // These external-format files are tracked tool inputs, not Python oracles.
@@ -334,7 +340,7 @@ fn harness_accepts_recorded_agent_skill_and_openai_sidecar() -> Result {
 }
 #[test]
 fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "legal baseline")?;
     git(&rig, &["gc", "--quiet"])?;
@@ -387,7 +393,7 @@ fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Resu
 }
 #[test]
 fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     legal(&rig)?;
     let base = commit(&rig, "base")?;
     std::fs::write(
@@ -418,7 +424,7 @@ fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
 
 #[test]
 fn check_target_outside_a_checkout_is_invalid_input() -> Result {
-    let mut rig = TestRig::new()?;
+    let mut rig = check_rig()?;
     rig.project = rig.root.join("not-a-checkout");
     std::fs::create_dir(&rig.project)?;
     let output = rig.command(&["check", "harness", "--json"])?;
@@ -429,7 +435,7 @@ fn check_target_outside_a_checkout_is_invalid_input() -> Result {
 
 #[test]
 fn harness_ignores_inline_code_links_and_checks_real_links() -> Result {
-    let rig = TestRig::new()?;
+    let rig = check_rig()?;
     let path = rig.project.join("README.md");
     std::fs::write(
         &path,
