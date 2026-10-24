@@ -4,6 +4,7 @@ mod checks;
 mod install;
 mod overflow;
 mod roots;
+mod worktrees;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
 use provenant_records::{CommandError, CommandResult, Outcome, VersionInfo};
 use serde::Serialize;
@@ -233,15 +234,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ),
             }
         }
-        Command::Worktree(worktree) => match worktree {
-            provenant_cli::Worktree::Create { .. } => {
-                unavailable("worktree create", "confinement", globals)
-            }
-            provenant_cli::Worktree::List => unavailable("worktree list", "confinement", globals),
-            provenant_cli::Worktree::Remove(_) => {
-                unavailable("worktree remove", "confinement", globals)
-            }
-        },
+        Command::Worktree(worktree) => worktrees::run(worktree, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => match hook {
             provenant_cli::Hook::Claude(hook) => match hook {

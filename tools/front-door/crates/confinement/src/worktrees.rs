@@ -100,8 +100,14 @@ pub enum WorktreeRemove {
     Name(String),
     Merged {
         integration: String,
-        branches: Vec<String>,
+        scope: PruneScope,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PruneScope {
+    Branches(Vec<String>),
+    Since(GitOid),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1414,20 +1420,39 @@ pub fn remove(
             let removed = remove_tree(context, entry, head, cancel)?;
             outcome.removed.push(removed.info);
         }
-        WorktreeRemove::Merged {
-            integration,
-            branches: names,
-        } => {
+        WorktreeRemove::Merged { integration, scope } => {
             let (integration, integration_tip) = pin_branch_ref(context, &integration, cancel)?;
             let branch_tips = read_branch_tips(context, cancel)?;
-            if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
-                return Err(WorktreeError::InvalidRequest);
-            }
             let mut branches = BTreeMap::new();
-            for name in names {
-                let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
-                if branches.insert(branch.clone(), ()).is_some() {
-                    return Err(WorktreeError::InvalidRequest);
+            match scope {
+                PruneScope::Branches(names) => {
+                    if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
+                        return Err(WorktreeError::InvalidRequest);
+                    }
+                    for name in names {
+                        let branch =
+                            GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
+                        if branches.insert(branch, ()).is_some() {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                    }
+                }
+                PruneScope::Since(bound) => {
+                    if !is_ancestor(context, bound, integration_tip, cancel)? {
+                        return Err(WorktreeError::InvalidRequest);
+                    }
+                    // Scope ancestry-proven tips to the pinned graph delta.
+                    // Squash merges lack exact-head proof here and stay put.
+                    for (branch, tip) in &branch_tips {
+                        if is_ancestor(context, *tip, integration_tip, cancel)?
+                            && !is_ancestor(context, *tip, bound, cancel)?
+                        {
+                            branches.insert(branch.clone(), ());
+                        }
+                    }
+                    if branches.len() > MAX_PRUNE_BRANCHES {
+                        return Err(WorktreeError::InvalidRequest);
+                    }
                 }
             }
             for branch in branches.keys() {
@@ -1938,7 +1963,7 @@ mod lifecycle_tests {
             &context,
             WorktreeRemove::Merged {
                 integration: "main".to_owned(),
-                branches: vec!["feature/merged".to_owned()],
+                scope: PruneScope::Branches(vec!["feature/merged".to_owned()]),
             },
             &cancellation,
         )?;
@@ -2001,10 +2026,10 @@ mod lifecycle_tests {
             &context,
             WorktreeRemove::Merged {
                 integration: "main".to_owned(),
-                branches: vec![
+                scope: PruneScope::Branches(vec![
                     "feature/old-ancestor".to_owned(),
                     "feature/unmerged".to_owned(),
-                ],
+                ]),
             },
             &cancellation,
         )?;
@@ -2106,7 +2131,7 @@ mod lifecycle_tests {
             &context,
             WorktreeRemove::Merged {
                 integration: "main".to_owned(),
-                branches: vec!["feature/merged-gitlink".to_owned()],
+                scope: PruneScope::Branches(vec!["feature/merged-gitlink".to_owned()]),
             },
             &cancellation,
         )?;
