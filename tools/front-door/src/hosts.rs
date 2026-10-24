@@ -68,7 +68,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
         Ok(meta) if !meta.file_type().is_file() => return CredentialPresence::Unknown,
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return CredentialPresence::Unavailable,
+        Err(_) => return CredentialPresence::Unknown,
     }
     if !cfg!(target_os = "macos") {
         return CredentialPresence::Absent;
