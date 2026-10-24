@@ -1256,7 +1256,7 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
 }
 
 #[test]
-fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
+fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() -> Result {
     let mut rig = TestRig::new()?;
     loopback_peer(&mut rig)?;
     std::fs::write(rig.root.join("ssh"), "#!/bin/sh\nexit 97\n")?;
@@ -1265,88 +1265,57 @@ fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
     let prompt = prompt.to_str().ok_or("prompt path")?;
     let worktree = rig.project.to_str().ok_or("worktree path")?.to_owned();
     let worktree = worktree.as_str();
-    let (status, writer) = json_command(
-        &rig,
-        &[
+    let writer = |host: &str, operation: &str, place: &[&str]| -> Result<(i64, Value)> {
+        let mut args = vec![
             "dispatch",
             "--host",
-            "workshop",
+            host,
             "--mode",
             "worktree-write",
-            "--worktree",
-            worktree,
             "--model",
             "codex/gpt-6-luna",
             "--operation-id",
-            "remote-writer",
+            operation,
             "--prompt-file",
             prompt,
             "--json",
-        ],
-    )?;
+        ];
+        args.extend_from_slice(place);
+        json_command(&rig, &args)
+    };
+    // --worktree is a path on this host, so a peer writer cannot use it.
+    let (status, refused) = writer("workshop", "remote-writer", &["--worktree", worktree])?;
     assert_ne!(status, 0);
-    assert_eq!(writer["error"]["code"], "UNSUPPORTED", "{writer}");
-    assert!(
-        writer["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("#1457")),
-        "{writer}"
+    assert_eq!(
+        refused["error"]["code"], "WORKTREE_NOT_APPLICABLE",
+        "{refused}"
     );
     // The local host's own ID is local placement, not a peer: the writer is
-    // then judged by its worktree (the primary checkout is refused), never by
-    // the peer-host rule.
+    // then judged by its worktree (the primary checkout is refused), and a
+    // peer's --branch does not apply.
     let output = rig.command(&["fabric", "identity", "--json"])?;
     let identity: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let local = identity["data"]["host"].as_str().ok_or("host")?;
     for (host, operation) in [(local, "local-writer"), ("local", "local-alias-writer")] {
-        let (status, local_writer) = json_command(
-            &rig,
-            &[
-                "dispatch",
-                "--host",
-                host,
-                "--mode",
-                "worktree-write",
-                "--worktree",
-                worktree,
-                "--model",
-                "codex/gpt-6-luna",
-                "--operation-id",
-                operation,
-                "--prompt-file",
-                prompt,
-                "--json",
-            ],
-        )?;
+        let (status, local_writer) = writer(host, operation, &["--worktree", worktree])?;
         assert_ne!(status, 0);
         assert_ne!(
-            local_writer["error"]["code"], "UNSUPPORTED",
-            "{local_writer}"
-        );
-        assert!(
-            !local_writer.to_string().contains("#1457"),
+            local_writer["error"]["code"], "WORKTREE_NOT_APPLICABLE",
             "{local_writer}"
         );
     }
+    let (status, local_branch) = writer(
+        "local",
+        "local-branch-writer",
+        &["--branch", "peer/x", "--base", "main"],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(local_branch["error"]["code"], "INVALID", "{local_branch}");
     // An unrecognised name is unknown, not a refused peer.
-    let (status, unknown_writer) = json_command(
-        &rig,
-        &[
-            "dispatch",
-            "--host",
-            "laptop",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            worktree,
-            "--model",
-            "codex/gpt-6-luna",
-            "--operation-id",
-            "unknown-writer",
-            "--prompt-file",
-            prompt,
-            "--json",
-        ],
+    let (status, unknown_writer) = writer(
+        "laptop",
+        "unknown-writer",
+        &["--branch", "peer/x", "--base", "main"],
     )?;
     assert_ne!(status, 0);
     assert_eq!(
@@ -1370,6 +1339,132 @@ fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
     )?;
     assert_ne!(status, 0);
     assert_eq!(unknown["error"]["code"], "UNKNOWN_HOST", "{unknown}");
+    rig.assert_legacy_unchanged()
+}
+
+fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut argv = vec!["-C", cwd.to_str().ok_or("git cwd")?];
+    argv.extend_from_slice(args);
+    let output = rig.execute(Path::new("/usr/bin/git"), &argv, None)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
+}
+
+#[test]
+fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let project = rig.project.clone();
+    let commit = [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+    ];
+    git(
+        &rig,
+        &project,
+        &[
+            &commit[..],
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        ]
+        .concat(),
+    )?;
+    let base = git(&rig, &project, &["rev-parse", "HEAD"])?;
+    let remote = rig.root.join("remote.git");
+    git(
+        &rig,
+        &rig.root,
+        &["init", "-q", "--bare", remote.to_str().ok_or("remote")?],
+    )?;
+    git(
+        &rig,
+        &project,
+        &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+    )?;
+    git(
+        &rig,
+        &project,
+        &["push", "-q", "origin", "HEAD:refs/heads/main"],
+    )?;
+    // A commit only this clone has is not a base the peer can share.
+    git(
+        &rig,
+        &project,
+        &[
+            &commit[..],
+            &["commit", "-q", "--allow-empty", "-m", "local"],
+        ]
+        .concat(),
+    )?;
+    let unpushed = git(&rig, &project, &["rev-parse", "HEAD"])?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "commit nothing")?;
+    let prompt = prompt.to_str().ok_or("prompt path")?.to_owned();
+    let dispatch = |operation: &str, branch: &str, base: &str| {
+        json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "workshop",
+                "--mode",
+                "worktree-write",
+                "--branch",
+                branch,
+                "--base",
+                base,
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--prompt-file",
+                &prompt,
+                "--json",
+            ],
+        )
+    };
+    let (status, placed) = dispatch("peer-writer", "peer/writer", "origin/main")?;
+    assert_eq!(
+        status,
+        0,
+        "{placed} {}",
+        std::fs::read_to_string(rig.root.join("peer-stderr")).unwrap_or_default()
+    );
+    let worktree = &placed["data"]["worktree"];
+    assert_eq!(worktree["host"], peer.to_string(), "{placed}");
+    assert_eq!(worktree["branch"], "peer/writer");
+    let path = Path::new(worktree["path"].as_str().ok_or("worktree path")?);
+    assert_eq!(git(&rig, path, &["rev-parse", "HEAD"])?, base);
+    let run = placed["data"]["run_id"]
+        .as_str()
+        .ok_or("run id")?
+        .to_owned();
+    // Replaying the operation recovers the receipt and its worktree.
+    let (_, replayed) = dispatch("peer-writer", "peer/writer", "origin/main")?;
+    assert_eq!(replayed["data"]["run_id"], run.as_str(), "{replayed}");
+    assert_eq!(replayed["data"]["worktree"], *worktree);
+    let (status, lanes) = json_command(&rig, &["lanes", "--id", &run, "--json"])?;
+    assert_eq!(status, 0, "{lanes}");
+    assert_eq!(
+        lanes["data"]["lanes"][0]["attempt_id"],
+        placed["data"]["lanes"][0]["attempt_id"]
+    );
+
+    let (status, taken) = dispatch("peer-writer-again", "peer/writer", "origin/main")?;
+    assert_ne!(status, 0);
+    assert_eq!(taken["error"]["code"], "BRANCH_EXISTS", "{taken}");
+    let (status, unreachable) = dispatch("peer-writer-local", "peer/local", &unpushed)?;
+    assert_ne!(status, 0);
+    assert_eq!(
+        unreachable["error"]["code"], "BASE_UNREACHABLE",
+        "{unreachable}"
+    );
     rig.assert_legacy_unchanged()
 }
 

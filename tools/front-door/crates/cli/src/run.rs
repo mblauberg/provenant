@@ -616,7 +616,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
         None => Err(Fail::new(
             Status::Invalid,
             "WORKTREE_REQUIRED",
-            "worktree-write access needs --worktree",
+            "worktree-write access needs --worktree, or --branch and --base with a peer --host",
         )),
         Some(_) if !writer => Err(Fail::new(
             Status::Invalid,
@@ -779,7 +779,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         ))
     };
     worktree_access(
-        matches!(access.mode, Mode::WorktreeWrite),
+        matches!(access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
         access.worktree.as_deref(),
     )?;
     if matches!(access.network, Switch::On)
@@ -788,8 +788,9 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     {
         return unsupported("network, capability or read-root access");
     }
-    // Naming this host is ordinary local placement in any mode; a writer
-    // needs its worktree on this machine, so only a peer is refused.
+    // Naming this host is ordinary local placement in any mode. A peer writer
+    // names a new branch the peer creates, since --worktree is a local path.
+    let mut new_worktree = None;
     if let Some(host) = command.host.as_deref() {
         if remote::names_local_host(edge, host)? {
             command.host = None;
@@ -797,13 +798,16 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             if !remote::names_peer(edge, host)? {
                 return Err(remote::unknown_host(host));
             }
-            return Err(Fail::new(
-                Status::Refused,
-                "UNSUPPORTED",
-                "worktree-write dispatch to a peer host is not available in this build (#1457); \
-                 use --mode read-only",
-            ));
+            new_worktree = Some(remote::new_worktree(&command)?);
         }
+    }
+    if command.branch.is_some() && new_worktree.is_none() {
+        return Err(Fail::new(
+            Status::Invalid,
+            "INVALID",
+            "--branch and --base create a writer worktree on a peer --host with \
+             --mode worktree-write; on this host use `provenant worktree create` and --worktree",
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -962,6 +966,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 concurrency,
                 knobs: command.knobs,
                 provider_timeout: command.provider_timeout,
+                new_worktree,
             },
             command.wait,
         );

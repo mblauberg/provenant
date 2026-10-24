@@ -12,6 +12,17 @@ use serde::{Deserialize, Serialize};
 pub struct SubmissionReceipt {
     pub operation_id: OperationId,
     pub targets: Vec<AttemptTarget>,
+    /// The writer worktree a peer created for this submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PeerWorktree>,
+}
+
+/// Where a peer writer's commits stay when nothing delivers them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerWorktree {
+    pub path: String,
+    pub branch: String,
 }
 
 /// A bounded page of attempt records. `next_after` is supplied only when a

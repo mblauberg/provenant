@@ -51,6 +51,19 @@ pub struct SubmittedTask {
     pub delivery_id: Option<DeliveryId>,
     #[serde(default)]
     pub deliver: Option<provenant_records::run::WriterDeliveryRequest>,
+    /// A writer worktree the receiving peer creates in its own clone, in place
+    /// of a `worktree` path. Omitted when absent, so read-only requests stay
+    /// readable by a peer that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_worktree: Option<NewWorktree>,
+}
+
+/// A new branch at `base`, which the peer resolves after fetching its remotes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewWorktree {
+    pub base: String,
+    pub branch: String,
 }
 
 bounded_input! {
@@ -176,6 +189,12 @@ pub enum FacadeError {
     ConfinementRefused,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
+    #[error(
+        "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
+    )]
+    BaseUnreachable,
+    #[error("writer branch already exists on the peer; choose another --branch")]
+    BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
     OutputTooLarge,
     #[error("stored state is corrupt")]
@@ -208,6 +227,8 @@ impl FacadeError {
             ("confinement_refused", _) => Self::ConfinementRefused,
             ("lane_depth", _) => Self::LaneDepth,
             ("worktree_missing", _) => Self::WorktreeMissing,
+            ("base_unreachable", _) => Self::BaseUnreachable,
+            ("branch_exists", _) => Self::BranchExists,
             ("output_too_large", _) => Self::OutputTooLarge,
             ("state_corrupt", _) => Self::StateCorrupt,
             ("publication_failed", _) => Self::PublicationFailed,
@@ -233,6 +254,8 @@ impl FacadeError {
             Self::LaneDepth => "lane_depth",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
+            Self::BaseUnreachable => "base_unreachable",
+            Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt => "state_corrupt",
             Self::PublicationFailed => "publication_failed",
