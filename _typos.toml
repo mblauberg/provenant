@@ -396,14 +396,6 @@ run_dir_finalize = "run_dir_finalize"
 [type.toml.extend-identifiers]
 "licence" = "licence"
 
-[type.ts.extend-identifiers]
-"caf" = "caf"
-"initialize" = "initialize"
-"initialized" = "initialized"
-"initializedBeforeEof" = "initializedBeforeEof"
-"tail_linez" = "tail_linez"
-"uncatalogued" = "uncatalogued"
-
 [type.yaml.extend-identifiers]
 "Unparseable" = "Unparseable"
 "distill" = "distill"

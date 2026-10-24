@@ -225,7 +225,6 @@ jobs:
           version: "1.31.1"
           # Audit exactly the surfaces this job is path-filtered on.
           inputs: ".github/workflows"
-          config: .github/zizmor.yml
           online-audits: "false"
           advanced-security: "false"
           annotations: "true"
