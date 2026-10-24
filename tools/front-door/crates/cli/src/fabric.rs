@@ -1,6 +1,10 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 mod context;
 
+pub(crate) use context::private_dir;
+/// Shared identity/config setup for CLI leaves and the binary MCP transport.
+pub use context::{Context, publish};
+
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
     roots: provenant_core::Roots,
@@ -409,7 +413,7 @@ pub enum Landing {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum EdgeError {
+pub enum EdgeError {
     #[error(transparent)]
     Exec(#[from] provenant_supervisor::exec::ExecError),
     #[error(transparent)]
@@ -432,6 +436,8 @@ pub(crate) enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
+    #[error("Git executable is unavailable")]
+    GitUnavailable,
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)

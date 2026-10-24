@@ -439,7 +439,123 @@
       ],
       "type": "object"
     },
-    "name": "fabric_identity"
+    "name": "fabric_identity",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "client": {
+          "type": "string"
+        },
+        "common_dir": {
+          "additionalProperties": false,
+          "properties": {
+            "relative_to_root": {
+              "additionalProperties": false,
+              "properties": {
+                "encoding": {
+                  "enum": [
+                    "utf8",
+                    "native_bytes"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "encoding",
+                "path"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "relative_to_root"
+          ],
+          "type": "object"
+        },
+        "cwd": {
+          "additionalProperties": false,
+          "properties": {
+            "relative_to_root": {
+              "additionalProperties": false,
+              "properties": {
+                "encoding": {
+                  "enum": [
+                    "utf8",
+                    "native_bytes"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "encoding",
+                "path"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "relative_to_root"
+          ],
+          "type": "object"
+        },
+        "federation": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "inbox": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "host": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "actor",
+            "agent",
+            "host"
+          ],
+          "type": "object"
+        },
+        "project": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client",
+        "common_dir",
+        "cwd",
+        "federation",
+        "host",
+        "inbox",
+        "project"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Send and read mail with explicit cursors.",
@@ -985,7 +1101,81 @@
       ],
       "type": "object"
     },
-    "name": "fabric_mail"
+    "name": "fabric_mail",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": "integer"
+            },
+            "result": {
+              "const": "marked_read"
+            }
+          },
+          "required": [
+            "cursor",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": "integer"
+            },
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "read"
+            }
+          },
+          "required": [
+            "cursor",
+            "page",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "result": {
+              "const": "sent"
+            }
+          },
+          "required": [
+            "id",
+            "result"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Create and manage fenced project tasks.",
@@ -1592,7 +1782,125 @@
       ],
       "type": "object"
     },
-    "name": "fabric_task"
+    "name": "fabric_task",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "proof": {
+              "type": "object"
+            },
+            "result": {
+              "const": "claimed"
+            }
+          },
+          "required": [
+            "proof",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "const": "created"
+            },
+            "task": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "result",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "const": "finished"
+            },
+            "task": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "result",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "listed"
+            }
+          },
+          "required": [
+            "page",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "const": "released"
+            },
+            "task": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "result",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "const": "updated"
+            },
+            "task": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "result",
+            "task"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Read the activity journal or append a note.",
@@ -2098,7 +2406,82 @@
       ],
       "type": "object"
     },
-    "name": "fabric_events"
+    "name": "fabric_events",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "const": "noted"
+            },
+            "seq": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "result",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": "integer"
+            },
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "read"
+            },
+            "run_events_pending": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean"
+            },
+            "unknown_hosts": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 100,
+              "minItems": 0,
+              "type": "array"
+            }
+          },
+          "required": [
+            "cursor",
+            "page",
+            "result",
+            "run_events_pending",
+            "timed_out",
+            "unknown_hosts"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Manage advisory work claims.",
@@ -2632,7 +3015,113 @@
       ],
       "type": "object"
     },
-    "name": "fabric_claim"
+    "name": "fabric_claim",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "type": "object"
+            },
+            "proof": {
+              "type": "object"
+            },
+            "result": {
+              "const": "acquired"
+            }
+          },
+          "required": [
+            "claim",
+            "proof",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "listed"
+            }
+          },
+          "required": [
+            "page",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "result": {
+              "const": "released"
+            }
+          },
+          "required": [
+            "id",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "type": "object"
+            },
+            "result": {
+              "const": "renewed"
+            }
+          },
+          "required": [
+            "claim",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "type": "object"
+            },
+            "result": {
+              "const": "verified"
+            }
+          },
+          "required": [
+            "claim",
+            "result"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Manage landing leases and observe a generation.",
@@ -3182,7 +3671,110 @@
       ],
       "type": "object"
     },
-    "name": "fabric_landing"
+    "name": "fabric_landing",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "landing": {
+              "type": "object"
+            },
+            "proof": {
+              "type": "object"
+            },
+            "result": {
+              "const": "acquired"
+            }
+          },
+          "required": [
+            "landing",
+            "proof",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            },
+            "result": {
+              "const": "released"
+            }
+          },
+          "required": [
+            "id",
+            "reference",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "landing": {
+              "type": "object"
+            },
+            "result": {
+              "const": "renewed"
+            }
+          },
+          "required": [
+            "landing",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "landing": {
+              "type": "object"
+            },
+            "result": {
+              "const": "verified"
+            }
+          },
+          "required": [
+            "landing",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "landing": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "result": {
+              "const": "waited"
+            },
+            "timed_out": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "landing",
+            "result",
+            "timed_out"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Submit one batch to the run service.",
@@ -3729,7 +4321,50 @@
       ],
       "type": "object"
     },
-    "name": "fabric_submit"
+    "name": "fabric_submit",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "attempt": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "host": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{32}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "attempt",
+              "host"
+            ],
+            "type": "object"
+          },
+          "maxItems": 100,
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [
+        "operation_id",
+        "targets"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "List, inspect, wait for, cancel or resume runs.",
@@ -4292,7 +4927,163 @@
       ],
       "type": "object"
     },
-    "name": "fabric_run"
+    "name": "fabric_run",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "type": "object"
+            },
+            "result": {
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "attempt",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "next_after": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "attempt": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        },
+                        "host": {
+                          "anyOf": [
+                            {
+                              "pattern": "^[0-9a-f]{32}$",
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "attempt",
+                        "host"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items",
+                "next_after",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "page",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "type": "object"
+            },
+            "result": {
+              "const": "resume"
+            }
+          },
+          "required": [
+            "attempt",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "type": "object"
+            },
+            "result": {
+              "const": "status"
+            }
+          },
+          "required": [
+            "attempt",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempts": {
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 0,
+              "type": "array"
+            },
+            "condition": {
+              "enum": [
+                "any",
+                "all"
+              ],
+              "type": "string"
+            },
+            "result": {
+              "const": "wait"
+            },
+            "satisfied": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "attempts",
+            "condition",
+            "result",
+            "satisfied",
+            "timed_out"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
@@ -4796,7 +5587,28 @@
       ],
       "type": "object"
     },
-    "name": "fabric_graph"
+    "name": "fabric_graph",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint": {
+          "type": "object"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "complete",
+            "cancelled"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint",
+        "status"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Read bounded output or fetch a manifest artefact.",
@@ -5288,7 +6100,230 @@
       ],
       "type": "object"
     },
-    "name": "fabric_output"
+    "name": "fabric_output",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifact": {
+              "additionalProperties": false,
+              "properties": {
+                "digest": {
+                  "anyOf": [
+                    {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "path": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "digest",
+                "path"
+              ],
+              "type": "object"
+            },
+            "bytes": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "items": {
+                        "maximum": 255,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "maxItems": 131072,
+                      "minItems": 0,
+                      "type": "array"
+                    },
+                    "encoding": {
+                      "const": "bytes"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "encoding"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "encoding": {
+                      "const": "utf8"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "encoding"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "digest": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "artifact"
+            },
+            "target": {
+              "additionalProperties": false,
+              "properties": {
+                "attempt": {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                "host": {
+                  "anyOf": [
+                    {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "attempt",
+                "host"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "artifact",
+            "bytes",
+            "digest",
+            "kind",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "items": {
+                        "maximum": 255,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "maxItems": 65536,
+                      "minItems": 0,
+                      "type": "array"
+                    },
+                    "encoding": {
+                      "const": "bytes"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "encoding"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "encoding": {
+                      "const": "utf8"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "encoding"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "digest": {
+              "type": "string"
+            },
+            "eof": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "chunk"
+            },
+            "next_offset": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "offset": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "part": {
+              "enum": [
+                "stdout",
+                "stderr"
+              ],
+              "type": "string"
+            },
+            "target": {
+              "additionalProperties": false,
+              "properties": {
+                "attempt": {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                "host": {
+                  "anyOf": [
+                    {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "attempt",
+                "host"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "bytes",
+            "digest",
+            "eof",
+            "kind",
+            "next_offset",
+            "offset",
+            "part",
+            "target"
+          ],
+          "type": "object"
+        }
+      ]
+    }
   },
   {
     "description": "List peer hosts and readiness observations.",
@@ -5746,6 +6781,38 @@
       ],
       "type": "object"
     },
-    "name": "fabric_hosts"
+    "name": "fabric_hosts",
+    "outputSchema": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "execution",
+          "host"
+        ],
+        "type": "object"
+      },
+      "maxItems": 100,
+      "minItems": 0,
+      "type": "array"
+    }
   }
 ]

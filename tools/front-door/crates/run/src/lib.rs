@@ -4,6 +4,7 @@ mod admission;
 mod artifacts;
 mod controls;
 mod db;
+mod delivery;
 mod holder;
 mod launch;
 mod plan;
@@ -15,11 +16,13 @@ pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
+pub use delivery::HostDeliveryContext;
 pub use holder::{HolderContext, RootSeed, RunHolder};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,
 };
+pub use plan::read_only_plan;
 pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
 
 pub use db::{ExecutionContext, Request, RunStore};
@@ -31,8 +34,24 @@ pub use reader::{
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
 
+pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
+pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
+
+/// Return the depth of the run being dispatched under this lane.
+pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
+    let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
+    if depth > max_depth {
+        return Err(RunError::DepthExceeded { depth, max_depth });
+    }
+    Ok(depth)
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("host writer delivery failed at {0:?}; inspect the attempt delivery receipt")]
+    Delivery(WriterDeliveryStage),
+    #[error("provider evidence could not be committed: {0}")]
+    ProviderEvidence(String),
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {0}")]
@@ -63,6 +82,10 @@ pub enum RunError {
     TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
+    #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
+    DepthExceeded { depth: u64, max_depth: u64 },
+    #[error("nested lane depth overflowed")]
+    DepthOverflow,
     #[error("host queue is full")]
     Capacity,
     #[error("run store is contended or its call budget expired")]
@@ -85,6 +108,8 @@ pub enum RunError {
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]

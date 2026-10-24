@@ -30,14 +30,113 @@ impl ProcessObserver for CensusGateObserver {
     }
 
     fn observe(&self, pid: i64) -> ProcessObservation {
+        if pid != i64::from(std::process::id())
+            && std::env::var_os("PROVENANT_STATE_DIR")
+                .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
+        {
+            // Hold the guardian at its first post-spawn lookup until the
+            // immediate-exit child is a zombie. Darwin reports that as Absent.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match fixture::RecordedBootObserver.observe(pid) {
+                    ProcessObservation::Present(fact) if !fact.zombie => {}
+                    ProcessObservation::Present(_) | ProcessObservation::Absent => {
+                        let Some(state) =
+                            std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
+                        else {
+                            return ProcessObservation::Unknown(
+                                provenant_supervisor::census::ObservationIssue::Io,
+                            );
+                        };
+                        if std::fs::write(state.join("s2-provider-observed-absent"), b"exited")
+                            .is_err()
+                        {
+                            return ProcessObservation::Unknown(
+                                provenant_supervisor::census::ObservationIssue::Io,
+                            );
+                        }
+                        return ProcessObservation::Absent;
+                    }
+                    other => return other,
+                }
+                assert!(Instant::now() < deadline, "provider did not exit");
+                std::thread::yield_now();
+            }
+        }
         fixture::RecordedBootObserver.observe(pid)
     }
 
     fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
+        if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
+            let counter = PathBuf::from(root).join("s2-census-errors-left");
+            if let Ok(bytes) = std::fs::read(&counter) {
+                let left: u32 = serde_json::from_slice(&bytes)
+                    .map_err(|error| CensusError::ProcessList(io::Error::other(error)))?;
+                if left > 0 {
+                    std::fs::write(&counter, (left - 1).to_string())
+                        .map_err(CensusError::ProcessList)?;
+                    return Err(CensusError::ProcessList(io::Error::other(
+                        "transient census failure",
+                    )));
+                }
+            }
+        }
         let census = fixture::RecordedBootObserver.census(max_entries)?;
+        let census = if std::env::var_os("PROVENANT_STATE_DIR")
+            .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
+        {
+            // Omit the provider's row even when Linux lists its zombie, so
+            // refresh_census must obtain the explicit Absent observation.
+            Census::from_observations(
+                census
+                    .facts()
+                    .filter(|fact| fact.parent_pid != i64::from(std::process::id()))
+                    .cloned(),
+                census
+                    .unknown_pids()
+                    .iter()
+                    .map(|(pid, issue)| (*pid, *issue)),
+                [],
+                census.is_complete(),
+                false,
+                max_entries,
+            )?
+        } else {
+            census
+        };
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
+            && std::fs::remove_file(state.join("s2-tracking-failure")).is_ok()
+        {
+            let writer = state
+                .parent()
+                .ok_or_else(|| CensusError::ProcessList(io::Error::other("missing root")))?
+                .join("tracking-writer");
+            std::fs::rename(
+                writer.join("reservation.json"),
+                writer.join("reservation.saved"),
+            )
+            .map_err(CensusError::ProcessList)?;
+            std::fs::create_dir(writer.join("reservation.json"))
+                .map_err(CensusError::ProcessList)?;
+        }
+
         let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from) else {
             return Ok(census);
         };
+        if let Some(root) = state_dir.parent()
+            && root.join("tracking-writer/reservation.json").is_dir()
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(state_dir.join("s2-tracking-failures"))
+                .and_then(|mut file| file.write_all(b"x"))
+                .map_err(CensusError::ProcessList)?;
+        }
+        if std::fs::remove_file(state_dir.join("s2-census-skip-gate-once")).is_ok() {
+            return Ok(census);
+        }
         let gate = state_dir.join(S2_CENSUS_GATE_ONCE);
         match std::fs::remove_file(&gate) {
             Ok(()) => {}
@@ -284,7 +383,7 @@ fn wait_for_descendant(path: &Path, identity: &ProcessIdentity) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("provider descendant was not durably tracked").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
 }
 fn wait_for_registry_reads(home: &Path, minimum: u64) -> Result<()> {
@@ -301,7 +400,7 @@ fn wait_for_registry_reads(home: &Path, minimum: u64) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("guardian did not revisit nested registration").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
 }
 fn wait_for_file(path: &Path) -> Result<()> {
@@ -313,7 +412,7 @@ fn wait_for_file(path: &Path) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("fixture marker was not published").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
 }
 fn wait_for_identity_absence(identity: &ProcessIdentity) -> Result<()> {
@@ -327,8 +426,124 @@ fn wait_for_identity_absence(identity: &ProcessIdentity) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("fixture descendant did not exit").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
+}
+fn immediate_exit_identity_survives_absent_observation(root: &Path) -> Result<()> {
+    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-provider-exit-first"),
+        b"gate",
+    )?;
+    let (_writer, handle) = start(root, "immediate", "bytes", &[], CapturePlan::default())?;
+    let exit = exited(&handle)?;
+    let reservation = std::fs::read_to_string(root.join("immediate-writer/reservation.json"))?;
+    assert!(
+        !exit.unresolved_cleanup,
+        "exit={exit:?}, reservation={reservation}"
+    );
+    let record: serde_json::Value = serde_json::from_str(&reservation)?;
+    assert!(record["provider"].is_object(), "{reservation}");
+    assert!(
+        root.join("PROVENANT_STATE_DIR/s2-provider-observed-absent")
+            .exists()
+    );
+    Ok(())
+}
+fn cleanup_retries_a_transient_census_failure(root: &Path) -> Result<()> {
+    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-census-errors-left"),
+        b"30",
+    )?;
+    let (_writer, handle) = start(root, "transient", "bytes", &[], CapturePlan::default())?;
+    let exit = exited(&handle)?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning == "cleanup census unavailable; retrying")
+            .count(),
+        1,
+        "{exit:?}"
+    );
+    assert_eq!(exit.omitted_warnings, 0);
+    Ok(())
+}
+fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
+    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-tracking-failure"),
+        b"fail",
+    )?;
+    let socket = root.join("tracking.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "tracking",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read(root.join("PROVENANT_STATE_DIR/s2-tracking-failures"))
+        .map_or(true, |bytes| bytes.len() < 4)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "journal failures were not retried"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    std::fs::remove_dir(root.join("tracking-writer/reservation.json"))?;
+    std::fs::rename(
+        root.join("tracking-writer/reservation.saved"),
+        root.join("tracking-writer/reservation.json"),
+    )?;
+    drop(held);
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, None);
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning == "descendant journal publication failed")
+            .count(),
+        1,
+        "{exit:?}"
+    );
+    Ok(())
+}
+fn live_provider_publishes_initial_checkpoint(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-census-skip-gate-once"), b"skip first census")?;
+    std::fs::write(state.join(S2_CENSUS_GATE_ONCE), b"hold second live census")?;
+    let socket = root.join("initial.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "initial",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state.join(S2_CENSUS_PAUSED))?;
+    // Allow one loop turn even if spawning took more than the census interval.
+    // Pause the second census before the periodic checkpoint; Run must already
+    // have an initial observation of the healthy provider.
+    let checkpoint = std::fs::read(root.join("initial-attempt/process.json"));
+    std::fs::write(state.join(S2_CENSUS_RELEASE), b"resume")?;
+    drop(held);
+    let exit = exited(&handle)?;
+    let checkpoint: serde_json::Value = serde_json::from_slice(&checkpoint?)?;
+    assert!(checkpoint["provider"].is_object());
+    assert_eq!(checkpoint["phase"], "running");
+    assert_eq!(exit.stop_reason, None);
+    Ok(())
 }
 fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
     let (_writer, handle) = start(
@@ -347,7 +562,11 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
         Some(provenant_supervisor::exec::Termination::Exit(0))
     );
     assert!(exit.terminal_observed);
-    assert!(!exit.unresolved_cleanup);
+    assert!(
+        !exit.unresolved_cleanup,
+        "{exit:?}; reservation={:?}",
+        std::fs::read_to_string(root.join("normal-writer/reservation.json"))
+    );
     #[cfg(target_os = "macos")]
     {
         let record: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -439,7 +658,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
         if Instant::now() >= deadline {
             return Err(io::Error::other("publication pending was not observable").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
     drop(writer);
     let clock = SystemClock::new();
@@ -984,7 +1203,7 @@ fn wait_for_zombie(identity: &ProcessIdentity) -> Result<()> {
                 return Ok(());
             }
             ProcessObservation::Absent => return Ok(()),
-            _ if Instant::now() < deadline => std::thread::yield_now(),
+            _ if Instant::now() < deadline => std::thread::park_timeout(Duration::from_millis(5)),
             other => {
                 return Err(io::Error::other(format!("provider did not exit: {other:?}")).into());
             }
@@ -1040,7 +1259,7 @@ fn bounded_reap(child: &mut std::process::Child) -> Result<()> {
         if Instant::now() >= end {
             return Err(io::Error::other("fixture did not reap").into());
         }
-        std::thread::yield_now();
+        std::thread::park_timeout(Duration::from_millis(5));
     }
 }
 fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
@@ -1191,26 +1410,97 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     Ok(())
 }
 
-const TESTS: &[&str] = &[
-    "writer_is_fenced_after_every_descriptor_closes",
-    "normal_exit_and_terminal_beyond_capture_cap",
-    "cancelled_reader_preserves_healthy_custody_and_cancel_escalates",
-    "publication_failure_retains_the_lease_and_retries_without_overwrite",
-    "never_spawned_cancel_is_published_and_the_fence_can_advance",
-    "terminal_frame_closes_provider_stdin",
-    "owner_death_keeps_guardian_and_writer_live",
-    "guardian_loss_never_invents_exit_or_releases_the_reservation",
-    "capture_failure_never_requests_a_stop",
-    "wall_deadline_is_the_execution_bound",
-    "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
-    "nested_owner_stays_protected_when_native_custody_proof_is_uncertain",
-    "stale_complete_census_does_not_signal_a_late_shared_group_owner",
-    "guardian_sigterm_uses_supervisor_signal_path",
-    "guardian_sigint_uses_supervisor_signal_path",
-    "guardian_sighup_uses_supervisor_signal_path",
-    "checkpoint_failure_preserves_terminal_publication",
-    "checkpoint_enospc_while_provider_lives_never_signals_it",
-    "natural_exit_races_cancel",
+type Case = (&'static str, fn(&Path) -> Result<()>);
+const CASES: &[Case] = &[
+    (
+        "live_provider_publishes_initial_checkpoint",
+        live_provider_publishes_initial_checkpoint,
+    ),
+    (
+        "descendant_journal_failure_is_reported",
+        descendant_journal_failure_is_reported,
+    ),
+    (
+        "writer_is_fenced_after_every_descriptor_closes",
+        writer_is_fenced_after_every_descriptor_closes,
+    ),
+    (
+        "normal_exit_and_terminal_beyond_capture_cap",
+        normal_exit_and_terminal_beyond_capture_cap,
+    ),
+    (
+        "cancelled_reader_preserves_healthy_custody_and_cancel_escalates",
+        cancelled_reader_preserves_healthy_custody_and_cancel_escalates,
+    ),
+    (
+        "publication_failure_retains_the_lease_and_retries_without_overwrite",
+        publication_failure_retains_the_lease_and_retries_without_overwrite,
+    ),
+    (
+        "never_spawned_cancel_is_published_and_the_fence_can_advance",
+        never_spawned_cancel_is_published_and_the_fence_can_advance,
+    ),
+    (
+        "terminal_frame_closes_provider_stdin",
+        terminal_frame_closes_provider_stdin,
+    ),
+    (
+        "owner_death_keeps_guardian_and_writer_live",
+        owner_death_keeps_guardian_and_writer_live,
+    ),
+    (
+        "guardian_loss_never_invents_exit_or_releases_the_reservation",
+        guardian_loss_never_invents_exit_or_releases_the_reservation,
+    ),
+    (
+        "capture_failure_never_requests_a_stop",
+        capture_failure_never_requests_a_stop,
+    ),
+    (
+        "wall_deadline_is_the_execution_bound",
+        wall_deadline_is_the_execution_bound,
+    ),
+    (
+        "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
+        setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+    ),
+    (
+        "nested_owner_stays_protected_when_native_custody_proof_is_uncertain",
+        nested_owner_stays_protected_when_native_custody_proof_is_uncertain,
+    ),
+    (
+        "stale_complete_census_does_not_signal_a_late_shared_group_owner",
+        stale_complete_census_does_not_signal_a_late_shared_group_owner,
+    ),
+    (
+        "guardian_sigterm_uses_supervisor_signal_path",
+        guardian_sigterm_uses_supervisor_signal_path,
+    ),
+    (
+        "guardian_sigint_uses_supervisor_signal_path",
+        guardian_sigint_uses_supervisor_signal_path,
+    ),
+    (
+        "guardian_sighup_uses_supervisor_signal_path",
+        guardian_sighup_uses_supervisor_signal_path,
+    ),
+    (
+        "checkpoint_failure_preserves_terminal_publication",
+        checkpoint_failure_preserves_terminal_publication,
+    ),
+    (
+        "checkpoint_enospc_while_provider_lives_never_signals_it",
+        checkpoint_enospc_while_provider_lives_never_signals_it,
+    ),
+    ("natural_exit_races_cancel", natural_exit_races_cancel),
+    (
+        "immediate_exit_identity_survives_absent_observation",
+        immediate_exit_identity_survives_absent_observation,
+    ),
+    (
+        "cleanup_retries_a_transient_census_failure",
+        cleanup_retries_a_transient_census_failure,
+    ),
 ];
 
 fn settle_writers(root: &Path) -> Result<()> {
@@ -1235,62 +1525,15 @@ fn settle_writers(root: &Path) -> Result<()> {
 }
 
 fn run_case(name: &str) -> Result<()> {
+    // Darwin's per-user TMPDIR can exceed sockaddr_un's path bound once the
+    // fixture's socket names are appended; keep this private root short.
     let root = tempfile::Builder::new().prefix("s2-").tempdir_in("/tmp")?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
-    let result = match name {
-        "writer_is_fenced_after_every_descriptor_closes" => {
-            writer_is_fenced_after_every_descriptor_closes(root.path())
-        }
-        "normal_exit_and_terminal_beyond_capture_cap" => {
-            normal_exit_and_terminal_beyond_capture_cap(root.path())
-        }
-        "cancelled_reader_preserves_healthy_custody_and_cancel_escalates" => {
-            cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root.path())
-        }
-        "publication_failure_retains_the_lease_and_retries_without_overwrite" => {
-            publication_failure_retains_the_lease_and_retries_without_overwrite(root.path())
-        }
-        "never_spawned_cancel_is_published_and_the_fence_can_advance" => {
-            never_spawned_cancel_is_published_and_the_fence_can_advance(root.path())
-        }
-        "terminal_frame_closes_provider_stdin" => terminal_frame_closes_provider_stdin(root.path()),
-        "owner_death_keeps_guardian_and_writer_live" => {
-            owner_death_keeps_guardian_and_writer_live(root.path())
-        }
-        "guardian_loss_never_invents_exit_or_releases_the_reservation" => {
-            guardian_loss_never_invents_exit_or_releases_the_reservation(root.path())
-        }
-        "capture_failure_never_requests_a_stop" => {
-            capture_failure_never_requests_a_stop(root.path())
-        }
-        "wall_deadline_is_the_execution_bound" => wall_deadline_is_the_execution_bound(root.path()),
-        "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative" => {
-            setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root.path())
-        }
-        "nested_owner_stays_protected_when_native_custody_proof_is_uncertain" => {
-            nested_owner_stays_protected_when_native_custody_proof_is_uncertain(root.path())
-        }
-        "stale_complete_census_does_not_signal_a_late_shared_group_owner" => {
-            stale_complete_census_does_not_signal_a_late_shared_group_owner(root.path())
-        }
-        "guardian_sigterm_uses_supervisor_signal_path" => {
-            guardian_sigterm_uses_supervisor_signal_path(root.path())
-        }
-        "guardian_sigint_uses_supervisor_signal_path" => {
-            guardian_sigint_uses_supervisor_signal_path(root.path())
-        }
-        "guardian_sighup_uses_supervisor_signal_path" => {
-            guardian_sighup_uses_supervisor_signal_path(root.path())
-        }
-        "checkpoint_failure_preserves_terminal_publication" => {
-            checkpoint_failure_preserves_terminal_publication(root.path())
-        }
-        "checkpoint_enospc_while_provider_lives_never_signals_it" => {
-            checkpoint_enospc_while_provider_lives_never_signals_it(root.path())
-        }
-        "natural_exit_races_cancel" => natural_exit_races_cancel(root.path()),
-        _ => return Err(io::Error::new(io::ErrorKind::NotFound, "unknown custody test").into()),
-    };
+    let case = CASES
+        .iter()
+        .find(|(label, _)| *label == name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown custody test"))?;
+    let result = (case.1)(root.path());
     if result.is_ok() {
         settle_writers(root.path())?;
         cleanup.disarm();
@@ -1332,7 +1575,8 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    fixture::run_libtest(&args, TESTS, |name| {
+    let names: Vec<_> = CASES.iter().map(|(name, _)| *name).collect();
+    fixture::run_libtest(&args, &names, |name| {
         run_case(name).map_err(|error| io::Error::other(error.to_string()))
     })?;
     Ok(())

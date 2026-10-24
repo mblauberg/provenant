@@ -4,6 +4,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
+/// Run storage for children submitted by one confined attempt.
+pub const RUN_STATE_DIRECTORY_ENV: &str = "PROVENANT_RUN_STATE_DIR";
+
 pub const STATE_DIRECTORY_ENV: &str = "PROVENANT_STATE_DIR";
 const DEFAULT_STATE_SUFFIX: &str = ".local/share/provenant/v1";
 

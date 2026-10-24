@@ -512,10 +512,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         authority_digest: Digest::from_bytes([94; 32]),
                         provider_timeout_seconds: 60,
                         delivery_id: None,
+                        deliver: None,
                     })
                     .collect(),
                 concurrency: 1,
                 parent: None,
+                lane_depth: Some(1),
+                parent_attempt: None,
             },
             attempts: tasks
                 .iter()
@@ -791,6 +794,35 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         usize::from(event_limit)
     );
     assert_eq!(run_events["result"]["data"]["truncated"], false);
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
+    let mut rig = TestRig::new()?;
+    // The host binds the project before a read-only lane looks it up.
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    rig.env.extend([
+        (provenant_run::LANE_DEPTH_ENV.into(), "2".into()),
+        (
+            provenant_run::PARENT_ATTEMPT_ENV.into(),
+            "11111111111111111111111111111111".into(),
+        ),
+    ]);
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"nested-depth","tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}],"concurrency":1}}}),
+        ],
+    )?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["code"], "lane_depth",
+        "{result}"
+    );
+    assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }
 

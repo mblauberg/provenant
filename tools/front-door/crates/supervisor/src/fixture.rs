@@ -166,8 +166,15 @@ pub fn guardian_exit_status(
 }
 
 fn process_identity_is_live(identity: &crate::census::ProcessIdentity) -> bool {
+    // End-to-end command fixtures launch the production guardian, while
+    // lower-level custody fixtures explicitly inject the recorded boot.
+    let observation = if identity.boot == "fixture-recorded-boot-v1" {
+        RecordedBootObserver.observe(identity.pid)
+    } else {
+        crate::census::SystemProcessObserver.observe(identity.pid)
+    };
     matches!(
-        RecordedBootObserver.observe(identity.pid),
+        observation,
         crate::census::ProcessObservation::Present(fact) if fact.identity == *identity
     )
 }

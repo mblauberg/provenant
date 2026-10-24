@@ -5,7 +5,7 @@ use provenant_confinement::permissions::{
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
-use provenant_providers::{PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
+use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{Directory, entropy_128};
@@ -19,6 +19,32 @@ pub(super) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
 ) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        resolve_executable,
+        None,
+    )
+}
+
+fn prepare_with(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate: impl Fn(&str) -> Result<PathBuf, String>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
+    // Only fixture builds may stand a supplied token in for host authority.
+    #[cfg(not(feature = "fixture"))]
+    let fixture_token: Option<&provenant_providers::claude::OauthToken> = {
+        let _ = fixture_token;
+        None
+    };
     if resume.is_some() {
         return Err(
             "continuation needs a provider session; providers do not expose sessions yet".into(),
@@ -27,6 +53,10 @@ pub(super) fn prepare(
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let state_root = registry.state_root.ok_or("state root is unavailable")?;
+    let assets = registry.assets.ok_or("product assets are unavailable")?;
+    let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let provenant_executable = canonical(&provenant_executable)?;
+    let git = canonical(&provenant_supervisor::git::git_executable().ok_or("Git unavailable")?)?;
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
@@ -48,9 +78,143 @@ pub(super) fn prepare(
         .ok_or("current user identity is unavailable")?
         .name;
 
-    let resolved = crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
+    let executor = provenant_supervisor::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    let settings = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )
+    .map_err(|e| e.to_string())?
+    .domains
+    .accounts;
+    let mut entries: Vec<_> = settings.entries.into_values().collect();
+    if !entries.iter().any(|e| e.adapter == "codex") {
+        let directory = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        // Inside a lane CODEX_HOME is the attempt's private state, whose
+        // auth.json links the parent's registered login. Carry that original
+        // account directory so a nested dispatch links the same credential.
+        let directory = if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+            canonical(&directory.join("auth.json"))
+                .ok()
+                .and_then(|credential| credential.parent().map(Path::to_path_buf))
+                .unwrap_or(directory)
+        } else {
+            directory
+        };
+        if let Ok(directory) = canonical(&directory)
+            && let Ok(executable) = locate("codex")
+            && let Ok(key) = provenant_providers::accounts::detect(
+                &executor,
+                "codex",
+                &executable,
+                &home,
+                &user,
+                &directory,
+                &paths.scratch,
+            )
+        {
+            entries.push(provenant_providers::accounts::Registration {
+                adapter: "codex".into(),
+                label: "default".into(),
+                key,
+                directory,
+            });
+        }
+    }
+    // This profile exposes no stored OpenCode login: every free request uses
+    // the same keyless allowance on this host, rather than an inferred user.
+    if locate("opencode").is_ok() {
+        entries.push(provenant_providers::accounts::Registration {
+            adapter: "opencode".into(),
+            label: "keyless".into(),
+            key: "keyless".into(),
+            directory: paths.provider_state.clone(),
+        });
+    }
+    let timestamp = jiff::Timestamp::now().as_second();
+    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
+    let mut availability = Vec::new();
     let mut reasons = Vec::new();
-    for route in candidates(resolved) {
+    let probe = Probe {
+        executor: &executor,
+        home: &home,
+        user: &user,
+        scratch: &paths.scratch,
+    };
+    for entry in &entries {
+        match locate(&entry.adapter).and_then(|executable| {
+            observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
+        }) {
+            Ok(record) => availability.push(record),
+            Err(error) => reasons.push(format!(
+                "{} account {}: {error}",
+                entry.adapter, entry.label
+            )),
+        }
+    }
+    let digest = task.authority_digest.to_string();
+    let mut access = Vec::new();
+    for adapter in ["codex", "claude", "opencode"] {
+        // Repository-bound read-only grants are checked per candidate below.
+        if confinement_request(
+            project_id,
+            &cwd,
+            &home,
+            &paths.scratch,
+            &paths.provider_state,
+            writer.as_ref(),
+            adapter,
+        )
+        .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
+        .is_ok()
+        {
+            access.push(provenant_routing::AccessContext {
+                adapter,
+                disclosure_ref: &digest,
+                confinement_ref: &digest,
+            });
+        }
+    }
+    let requested_adapter = match &task.route {
+        run::RequestedRoute::Model { model, .. } => {
+            model.split_once('/').map(|(adapter, _)| adapter)
+        }
+        run::RequestedRoute::Named { .. } => None,
+    };
+    let selected = task
+        .account
+        .as_deref()
+        .map(|label| {
+            let mut matching = entries.iter().filter(|e| {
+                (e.label == label || e.key == label)
+                    && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
+            });
+            let entry = matching.next().ok_or_else(|| {
+                format!("account {label} is not registered for the requested route")
+            })?;
+            if matching.any(|other| other.key != entry.key) {
+                return Err(format!(
+                    "account alias {label} is ambiguous; use its exact registered key"
+                ));
+            }
+            Ok(entry.key.as_str())
+        })
+        .transpose()?;
+    let host = provenant_config::bind_host(roots, &provenant_supervisor::fs::LocalFs)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    let resolved = crate::route::resolve_dispatch(
+        &route_request(task)?,
+        roots,
+        selected,
+        (paths.operation_id.as_str(), paths.task_index),
+        &availability,
+        &access,
+        &host,
+    )?;
+    for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let Some(registration) = REGISTRY
             .iter()
@@ -64,25 +228,40 @@ pub(super) fn prepare(
             reasons.push(format!("{label}: provider execution is disabled"));
             continue;
         }
-        if adapter.id() == "claude" {
-            reasons.push(format!(
-                "{label}: Claude credential authority is not available in this revision"
-            ));
+        if let provenant_records::RouteReadiness::Unavailable { reason } = &route.readiness {
+            reasons.push(format!("{label}: {reason:?}"));
             continue;
         }
-        if adapter.id() != "codex" {
+        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
+            reasons.push(format!("{label}: {error}"));
+            continue;
+        }
+        if !matches!(adapter.id(), "codex" | "claude" | "opencode") {
             reasons.push(format!("{label}: provider launch is not supported here"));
             continue;
         }
-        let executable = match resolve_executable("codex") {
-            Ok(path) => path,
+        let entry = entries
+            .iter()
+            .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
+        let account = match entry
+            .filter(|entry| matches!(entry.adapter.as_str(), "claude" | "codex"))
+            .map(|entry| entry.registered())
+            .transpose()
+        {
+            Ok(account) => account,
             Err(error) => {
-                reasons.push(format!("{label}: {error}"));
+                reasons.push(format!("{label}: account: {error}"));
                 continue;
             }
         };
-        let provider_route = match adapter_route(&route) {
-            Ok(route) => route,
+        if matches!(adapter.id(), "codex" | "claude") && account.is_none() {
+            reasons.push(format!(
+                "{label}: account is not registered; use accounts register"
+            ));
+            continue;
+        }
+        let executable = match locate(adapter.id()) {
+            Ok(path) => path,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
                 continue;
@@ -90,26 +269,88 @@ pub(super) fn prepare(
         };
         // A read-only lane's scratch is its private temporary directory, which
         // terminal commit and withdrawal remove; writer scratch keeps settlement.
-        let scratch = if writer.is_some() {
+        // A failed setup never poisons the next explicit fallback candidate.
+        let staging = if writer.is_some() {
             &paths.scratch
         } else {
             &paths.temporary
         };
-        let private_state = &paths.provider_state;
-        let plan = match confinement_plan(
+        let scratch = staging.join(format!("candidate-{candidate}"));
+        let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
+        if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
+            .and_then(|()| {
+                apply_setup(
+                    &[SetupStep::CreateDir(private_state.clone())],
+                    &[&paths.provider_state],
+                    None,
+                )
+            })
+        {
+            reasons.push(format!("{label}: {error}"));
+            continue;
+        }
+        let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let child_state = state_root
+            .join("children")
+            .join(paths.attempt_id.to_string());
+        let plan = match confinement_request(
             project_id,
             &cwd,
             &home,
             scratch,
             private_state,
             writer.as_ref(),
-        ) {
+            adapter.id(),
+        )
+        .and_then(|request| match writer.as_ref() {
+            Some(_) => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+            None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
+        }) {
             Ok(plan) => plan,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
                 continue;
             }
         };
+        let refreshed = if adapter.id() == "claude" && fixture_token.is_none() {
+            let account = account.as_ref().ok_or("Claude account is not registered")?;
+            let login = provenant_providers::claude::Login {
+                executable: &executable,
+                home: &home,
+                user: &user,
+                config_dir: account.directory(),
+                scratch,
+            };
+            let authority = match credential_authority(paths, &login) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    reasons.push(format!("{label}: {error}"));
+                    continue;
+                }
+            };
+            let now = || u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
+            match provenant_providers::claude::refresh_for_account_authorised(
+                &executor,
+                &login,
+                account,
+                &now,
+                paths.deadline_unix_ms,
+                &authority,
+            ) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    reasons.push(format!("{label}: account {}: {error}; sign in again with CLAUDE_CONFIG_DIR={} claude auth login", entry.map_or("unknown", |e| e.label.as_str()), account.directory().display()));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let token = match adapter.id() {
+            "claude" => fixture_token.or(refreshed.as_ref()),
+            _ => None,
+        };
+        let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
@@ -121,10 +362,20 @@ pub(super) fn prepare(
             executable: &executable,
             home: &home,
             user: &user,
-            account: None,
-            token: None,
+            account: account.as_ref(),
+            token,
             cwd: &cwd,
             nonce,
+            provenant: LaneRuntime {
+                executable: &provenant_executable,
+                git: &git,
+                state: roots.state.as_path(),
+                child_state: &child_state,
+                home: &home,
+                depth: paths.lane_depth,
+                attempt: paths.attempt_id,
+                assets,
+            },
         }) {
             Ok(spec) => spec,
             Err(error) => {
@@ -132,15 +383,23 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        if let Err(error) = apply_setup(&spec.setup, &[scratch, private_state]) {
+        let transcript_account = account
+            .as_ref()
+            .filter(|_| adapter.id() == "claude")
+            .map(|account| account.directory());
+        let setup_roots = [scratch, private_state, roots.state.as_path()];
+        if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
         let provider = RouteRecord {
-            provider: Some(route.adapter),
-            model: Some(route.model),
+            provider: Some(route.adapter.clone()),
+            model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort,
-            account_label: None,
+            account_label: entry.map(|e| e.label.clone()),
+            account_key: route.account_key,
+            pool_selection: route.pool_selection.clone(),
+            ..Default::default()
         };
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
@@ -161,6 +420,135 @@ pub(super) fn prepare(
         });
     }
     Err(reasons.join("; "))
+}
+
+/// Host context for fresh account identity and version probes.
+struct Probe<'a> {
+    executor: &'a provenant_supervisor::exec::SystemExecutor,
+    home: &'a Path,
+    user: &'a std::ffi::OsStr,
+    scratch: &'a Path,
+}
+
+/// Each explicit fallback candidate has its own private state, and only the
+/// launched one holds Codex's rollout. Exactly one candidate may match.
+pub(super) fn observe_codex_rollout(
+    provider_state: &Path,
+    thread: &str,
+) -> Result<provenant_providers::codex_rollout::Turn, provenant_providers::ProviderError> {
+    use provenant_providers::ProviderError;
+    let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
+    let mut observed = Err(ProviderError::UnknownIdentity);
+    for entry in entries.take(64) {
+        let name = entry
+            .map_err(|_| ProviderError::UnknownIdentity)?
+            .file_name();
+        let candidate = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("candidate-"));
+        if !candidate.is_some_and(|index| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            continue;
+        }
+        match provenant_providers::codex_rollout::observe(&provider_state.join(&name), thread) {
+            Ok(_) if observed.is_ok() => return Err(ProviderError::IdentityMismatch),
+            Ok(turn) => observed = Ok(turn),
+            Err(ProviderError::UnknownIdentity) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    observed
+}
+
+fn observe_account(
+    entry: &provenant_providers::accounts::Registration,
+    executable: &Path,
+    probe: &Probe<'_>,
+    catalogue_revision: &str,
+    timestamp: i64,
+) -> Result<provenant_providers::AvailabilityRecord, String> {
+    let Probe {
+        executor,
+        home,
+        user,
+        scratch,
+    } = *probe;
+    let directory = canonical(&entry.directory)?;
+    if directory != entry.directory
+        || (entry.adapter == "claude" && directory != home.join(format!(".claude-{}", entry.label)))
+    {
+        return Err(format!(
+            "{} account {} has no fixed canonical identity directory",
+            entry.adapter, entry.label
+        ));
+    }
+    let detected = if entry.adapter == "opencode" {
+        entry.key.clone()
+    } else {
+        provenant_providers::accounts::detect(
+            executor,
+            &entry.adapter,
+            executable,
+            home,
+            user,
+            &directory,
+            scratch,
+        )
+        .map_err(|e| {
+            format!(
+                "{} account {}: {e}; re-register the signed-in identity",
+                entry.adapter, entry.label
+            )
+        })?
+    };
+    if detected != entry.key {
+        return Err(format!(
+            "{} account {} changed identity; re-register it",
+            entry.adapter, entry.label
+        ));
+    }
+    let argv = [executable.as_os_str().to_owned(), "--version".into()];
+    let mut options = provenant_supervisor::exec::ExecOptions::new(
+        &argv,
+        scratch,
+        std::time::Duration::from_secs(4),
+    );
+    let env = [
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    options.env = Some(&env);
+    options.stdout = provenant_supervisor::exec::StreamPolicy::Capture { limit: 128 };
+    options.stderr = provenant_supervisor::exec::StreamPolicy::Discard;
+    use provenant_supervisor::exec::Executor;
+    let out = executor.execute(options).map_err(|e| e.to_string())?;
+    if out.termination != provenant_supervisor::exec::Termination::Exit(0)
+        || out.timed_out
+        || out.stdout.truncated
+    {
+        return Err("provider version is unavailable".into());
+    }
+    let version = String::from_utf8(out.stdout.bytes)
+        .map_err(|_| "invalid provider version")?
+        .trim()
+        .to_owned();
+    if version.is_empty() {
+        return Err("provider version is unavailable".into());
+    }
+    Ok(provenant_providers::AvailabilityRecord {
+        schema_version: 1,
+        adapter: entry.adapter.clone(),
+        executable: executable.to_string_lossy().into_owned(),
+        version,
+        fixture_ref: format!("activated/{}/fresh", entry.adapter),
+        catalogue_revision: catalogue_revision.into(),
+        account_key: Some(entry.key.clone()),
+        observed_models: Vec::new(),
+        last_preflight_error: None,
+        observed_unix_seconds: timestamp,
+        expires_unix_seconds: timestamp.saturating_add(300),
+    })
 }
 
 fn candidates(resolved: ResolvedRoute) -> Vec<ResolvedRoute> {
@@ -188,29 +576,57 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
         eligibility: alternative.eligibility.clone(),
         readiness: alternative.readiness.clone(),
         confidentiality: alternative.confidentiality.clone(),
+        pool_selection: base.pool_selection.clone(),
     }
 }
 
-fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
-    let prefix = format!("{}/", route.adapter);
-    let model = route
-        .model
-        .strip_prefix(&prefix)
-        .ok_or("resolved model does not match its provider")?;
+fn adapter_route(route: &ResolvedRoute) -> ResolvedRoute {
     let mut provider_route = route.clone();
-    provider_route.model = model.to_owned();
     provider_route.alternatives = Default::default();
-    Ok(provider_route)
+    provider_route
 }
 
-fn confinement_plan(
+/// Record this dispatch's credential authority durably beside the attempt
+/// before any refresh may act on it.
+fn credential_authority(
+    paths: &run::LaunchPaths,
+    login: &provenant_providers::claude::Login<'_>,
+) -> Result<provenant_providers::claude::CredentialAuthority, String> {
+    let authority = provenant_providers::claude::CredentialAuthority::for_dispatch(
+        paths.run_id.to_string(),
+        login,
+        paths.deadline_unix_ms,
+    )
+    .map_err(|e| e.to_string())?;
+    let record = serde_json::to_vec(&authority).map_err(|e| e.to_string())?;
+    let attempt = paths
+        .provider_state
+        .parent()
+        .ok_or("attempt directory missing")?;
+    let parent = Directory::open_anchor(attempt).map_err(|e| e.to_string())?;
+    let publication = parent
+        .atomic_write(
+            std::ffi::OsStr::new("credential-authority.json"),
+            ".authority-",
+            &record,
+            provenant_supervisor::fs::PublishMode::Replace,
+        )
+        .map_err(|e| e.to_string())?;
+    if !matches!(publication, provenant_supervisor::fs::Publication::Durable) {
+        return Err("credential authority durability unconfirmed".into());
+    }
+    Ok(authority)
+}
+
+fn confinement_request(
     project_id: ProjectId,
     cwd: &Path,
     home: &Path,
     scratch: &Path,
     private_state: &Path,
     writer: Option<&run::WriterLaunch>,
-) -> Result<ConfinedPlan, String> {
+    adapter: &str,
+) -> Result<PlanRequest, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
             WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, home)
@@ -222,7 +638,7 @@ fn confinement_plan(
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
-    ConfinedPlan::new(PlanRequest {
+    Ok(PlanRequest {
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
             read_only: None,
@@ -239,7 +655,7 @@ fn confinement_plan(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: Some("login".into()),
+            selected_authentication: (adapter == "codex").then(|| "login".into()),
             include_continuation: false,
             network: Vec::new(),
             capabilities: Vec::new(),
@@ -249,10 +665,71 @@ fn confinement_plan(
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
     })
-    .map_err(|error| error.to_string())
 }
 
-fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+/// Verify the selected repository on the host and match the persisted dispatch
+/// project before deriving any Git read authority from that binding.
+fn read_only_plan(
+    roots: &provenant_core::Roots,
+    state_root: &Path,
+    project: ProjectId,
+    cwd: &Path,
+    git: &Path,
+    request: PlanRequest,
+) -> Result<ConfinedPlan, String> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
+    // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
+    // Its home lives under the run state root: inside a lane that is the
+    // child store, since the shared state root is not writable there.
+    let utility_home = state_root.join("tmp/git-home");
+    crate::fabric::private_dir(state_root, &utility_home).map_err(|error| error.to_string())?;
+    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home)
+        .map_err(|error| error.to_string())?;
+    let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let cancel = provenant_core::CancelToken::new();
+    // Find the root without opening a protected-history repo: read-only
+    // repositories may use native object alternates. A malformed Git marker
+    // must refuse, never fall through to a non-Git workspace.
+    let mut repository = None;
+    for ancestor in cwd.ancestors() {
+        let directory = Directory::open_anchor(ancestor).map_err(|error| error.to_string())?;
+        match directory.metadata_at(std::ffi::OsStr::new(".git"), false) {
+            Ok(_) => {
+                repository = Some(
+                    utility
+                        .open_read_repo(&executor, ancestor, budget, &cancel)
+                        .map_err(|error| error.to_string())?,
+                );
+                break;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let location = provenant_config::ProjectLocation::new(
+        repository
+            .as_ref()
+            .map_or(cwd, |repo| repo.common_git_dir()),
+    )
+    .map_err(|error| error.to_string())?;
+    let binding = provenant_config::lookup_project(roots, &location, &LocalFs)
+        .map_err(|error| error.to_string())?
+        .ok_or("dispatch project binding missing")?;
+    if binding.project_id() != project {
+        return Err("repository does not match dispatch project binding".into());
+    }
+    match repository {
+        Some(repo) => run::read_only_plan(&roots.state, &repo, &binding, request)
+            .map_err(|error| error.to_string()),
+        // Non-Git workspaces have no Git metadata or repository exceptions.
+        None => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+    }
+}
+
+pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
@@ -267,25 +744,35 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
     provenant_supervisor::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-/// Setup stays strictly below the run-owned scratch or private state roots.
-/// Traversal opens each component without following links.
-fn apply_setup(steps: &[SetupStep], roots: &[&Path]) -> Result<(), String> {
+/// Generated files stay in scratch and links in scratch or private state.
+/// Directories may use any run-owned root, including trusted shared state, and
+/// the selected Claude account's `projects/` tree. Traversal never follows links.
+fn apply_setup(
+    steps: &[SetupStep],
+    roots: &[&Path],
+    claude_account: Option<&Path>,
+) -> Result<(), String> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => {
-                let (parent, name) = setup_parent(roots, path, true)?;
-                match parent.mkdir(name, 0o700) {
-                    Ok(()) => parent.sync().map_err(|error| error.to_string())?,
-                    // Fallback candidates share one attempt's paths.
-                    Err(error) if error.is_exists() => {}
-                    Err(error) => return Err(error.to_string()),
-                }
-                parent
-                    .open_verified_directory(name)
-                    .map_err(|error| error.to_string())?;
+                let transcript_root =
+                    claude_account.filter(|directory| path.starts_with(directory.join("projects")));
+                let (parent, name) = match transcript_root {
+                    Some(directory) => setup_parent(&[directory], path, true)?,
+                    None => setup_parent(roots, path, true)?,
+                };
+                setup_directory(&parent, name)?;
+            }
+            SetupStep::WriteFile { path, bytes } => {
+                let (parent, name) = setup_parent(&roots[..1], path, false)?;
+                let mut file = parent.create_new(name).map_err(|error| error.to_string())?;
+                use std::io::Write;
+                file.write_all(bytes).map_err(|error| error.to_string())?;
+                file.sync().map_err(|error| error.to_string())?;
+                parent.sync().map_err(|error| error.to_string())?;
             }
             SetupStep::Symlink { link, target } => {
-                let (parent, name) = setup_parent(roots, link, false)?;
+                let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
                 parent
                     .symlink(target, name)
                     .map_err(|error| error.to_string())?;
@@ -315,18 +802,33 @@ fn setup_parent<'a>(
     let name = names.pop().ok_or("provider setup path names its root")?;
     let mut directory = Directory::open_anchor(root).map_err(|error| error.to_string())?;
     for component in names {
-        if create {
-            match directory.mkdir(component, 0o700) {
-                Ok(()) => directory.sync().map_err(|error| error.to_string())?,
+        directory = if create {
+            setup_directory(&directory, component)?
+        } else {
+            directory
+                .open_verified_directory(component)
+                .map_err(|error| error.to_string())?
+        };
+    }
+    Ok((directory, name))
+}
+
+// Existing shared ancestors need only read access in a confined MCP.
+fn setup_directory(parent: &Directory, name: &std::ffi::OsStr) -> Result<Directory, String> {
+    match parent.open_verified_directory(name) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.is_not_found() => {
+            match parent.mkdir(name, 0o700) {
+                Ok(()) => parent.sync().map_err(|error| error.to_string())?,
                 Err(error) if error.is_exists() => {}
                 Err(error) => return Err(error.to_string()),
             }
+            parent
+                .open_verified_directory(name)
+                .map_err(|error| error.to_string())
         }
-        directory = directory
-            .open_verified_directory(component)
-            .map_err(|error| error.to_string())?;
+        Err(error) => Err(error.to_string()),
     }
-    Ok((directory, name))
 }
 
 /// Fixture access to the production plan builder; installed builds omit it.
@@ -338,19 +840,66 @@ pub fn writer_fixture_plan(
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
 ) -> Result<ConfinedPlan, String> {
-    confinement_plan(
+    let request = confinement_request(
         project,
         cwd,
         home,
         &paths.scratch,
         &paths.provider_state,
         Some(writer),
+        "codex",
+    )?;
+    ConfinedPlan::new(request).map_err(|error| error.to_string())
+}
+
+/// Exercise production preparation against a fake external provider executable.
+/// A supplied Claude token stands in for the host authority and refresh path.
+#[cfg(feature = "fixture")]
+pub fn prepare_fixture(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt: &str,
+    paths: &run::LaunchPaths,
+    executable: &Path,
+    token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt,
+        paths,
+        None,
+        |_| canonical(executable),
+        token,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let base =
+            std::env::temp_dir().join(format!("provenant-candidates-{}", std::process::id()));
+        let thread = "01234567-89ab-cdef-0123-456789abcdef";
+        let day = base.join("candidate-1/sessions/2026/10/24");
+        std::fs::create_dir_all(base.join("candidate-0"))?;
+        std::fs::create_dir_all(&day)?;
+        std::fs::write(
+            day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+            ),
+        )?;
+        let observed = observe_codex_rollout(&base, thread);
+        std::fs::remove_dir_all(&base)?;
+        assert_eq!(observed?.model, "gpt-6-luna");
+        Ok(())
+    }
 
     #[test]
     fn setup_stays_below_run_owned_roots_without_following_links()
@@ -374,8 +923,34 @@ mod tests {
                     },
                 ],
                 &roots,
+                None,
             )?;
             assert!(scratch.join("cargo-home/nested").is_dir());
+            apply_setup(
+                &[SetupStep::CreateDir(outside.join("projects/session"))],
+                &roots,
+                Some(&outside),
+            )?;
+            assert!(outside.join("projects/session").is_dir());
+            assert!(
+                apply_setup(
+                    &[SetupStep::CreateDir(outside.join("credentials/new"))],
+                    &roots,
+                    Some(&outside)
+                )
+                .is_err()
+            );
+            assert!(
+                apply_setup(
+                    &[SetupStep::Symlink {
+                        link: outside.join("projects/link"),
+                        target: state.clone()
+                    }],
+                    &roots,
+                    Some(&outside)
+                )
+                .is_err()
+            );
             std::os::unix::fs::symlink(&outside, scratch.join("escape"))?;
             for step in [
                 SetupStep::CreateDir(outside.join("x")),
@@ -387,7 +962,7 @@ mod tests {
                     target: outside.clone(),
                 },
             ] {
-                assert!(apply_setup(&[step], &roots).is_err());
+                assert!(apply_setup(&[step], &roots, None).is_err());
             }
             assert!(!outside.join("x").exists());
             Ok(())

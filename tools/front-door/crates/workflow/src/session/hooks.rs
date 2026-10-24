@@ -50,6 +50,11 @@ enum HostOutput<'a> {
         message: &'a str,
     },
 }
+#[derive(Clone, Copy)]
+enum ExcerptState {
+    Complete,
+    Truncated,
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartOutput<'a> {
@@ -126,7 +131,7 @@ fn render(
     } else {
         String::new()
     };
-    let mut stdout = encode(event, &diagnostic, &retained, false);
+    let mut stdout = encode(event, &diagnostic, &retained, ExcerptState::Complete);
     if stdout.len() > HOOK_OUTPUT_LIMIT {
         // Search UTF-8 boundaries against encoded bytes. Raw bytes and escaped
         // JSON bytes are different measures; subtracting the excess can erase
@@ -145,7 +150,7 @@ fn render(
                 event,
                 &diagnostic,
                 retained.get(..end).unwrap_or_default(),
-                true,
+                ExcerptState::Truncated,
             );
             if candidate.len() <= HOOK_OUTPUT_LIMIT {
                 low = middle;
@@ -158,7 +163,7 @@ fn render(
             event,
             &diagnostic,
             retained.get(..end).unwrap_or_default(),
-            true,
+            ExcerptState::Truncated,
         );
     }
     HookContext {
@@ -170,9 +175,9 @@ fn render(
     }
 }
 
-fn encode(event: HookEvent, diagnostic: &str, retained: &str, truncated: bool) -> Vec<u8> {
+fn encode(event: HookEvent, diagnostic: &str, retained: &str, excerpt: ExcerptState) -> Vec<u8> {
     let mut text = diagnostic.to_owned();
-    if truncated {
+    if matches!(excerpt, ExcerptState::Truncated) {
         text.push_str("\n[Checkpoint excerpt; use workflow session show with this ID for the complete Markdown.]");
     }
     if !retained.is_empty() {

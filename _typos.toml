@@ -4,6 +4,10 @@ locale = "en-au"
 # Code spans quote identifiers verbatim, including upstream API spellings.
 extend-ignore-re = ["`[^`\\n]+`"]
 
+[files]
+# Bench tasks replay recorded diffs verbatim, wrapped fragments included.
+extend-exclude = ["bench/tasks/*.patch"]
+
 [default.extend-words]
 # UI terminology, hyphenated prefixes and a cited publication title.
 dialogs = "dialogs"
@@ -102,6 +106,10 @@ run_dir_finalize = "run_dir_finalize"
 "unparseable" = "unparseable"
 "unrecognized" = "unrecognized"
 "visualizes" = "visualizes"
+
+[type.json.extend-words]
+# Icon Composer schema key image-name-specializations.
+specializations = "specializations"
 
 [type.json.extend-identifiers]
 # Anthropic usage response field.

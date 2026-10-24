@@ -1,0 +1,52 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-gray:1.00000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "name": "gate",
+          "image-name": "gate.svg",
+          "glass": true
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "lighting": "individual",
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
+    },
+    {
+      "layers": [
+        {
+          "name": "strands",
+          "glass": false,
+          "image-name-specializations": [
+            {
+              "value": "strands.svg"
+            },
+            {
+              "appearance": "dark",
+              "value": "strands-dark.svg"
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "specular": false,
+      "lighting": "individual"
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

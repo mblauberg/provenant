@@ -1,5 +1,5 @@
 //! Fabric process composition: MCP, fixed peer ingress and host observations.
-mod context;
+use provenant_cli::fabric::Context;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
     stdio,
@@ -43,12 +43,10 @@ pub enum EdgeError {
     Io(#[from] io::Error),
     #[error("invalid Fabric setup")]
     Invalid,
-    #[error("Git executable is unavailable")]
-    GitUnavailable,
 }
 
 struct Factory {
-    context: context::Context,
+    context: Context,
     clock: SystemClock,
     backoff: ThreadWait,
     executor: SystemExecutor,
@@ -352,7 +350,7 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
         let home = crate::roots::home()?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         if let Some(client) = client {
             context.config.client_label = serde_json::to_value(client)?
                 .as_str()
@@ -396,7 +394,7 @@ fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::err
     let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
     let roots = crate::roots::roots(globals, &assets, &cwd)?;
     let home = crate::roots::home()?;
-    let context = context::Context::open(roots, &home, &cwd)?;
+    let context = Context::open(roots, &home, &cwd)?;
     Ok(Factory {
         context,
         clock: SystemClock::new(),
@@ -461,7 +459,7 @@ pub fn peer(globals: &provenant_cli::Globals) -> u8 {
         };
         let assets = crate::roots::product_root()?;
         let roots = crate::roots::roots(globals, &assets, &cwd)?;
-        let mut context = context::Context::open(roots, &home, &cwd)?;
+        let mut context = Context::open(roots, &home, &cwd)?;
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -718,7 +716,7 @@ fn landing_error_code(error: &(dyn std::error::Error + 'static)) -> &'static str
 
 #[allow(clippy::too_many_arguments)]
 fn landing_local(
-    context: &context::Context,
+    context: &Context,
     executor: &SystemExecutor,
     proof: LandingProof,
     operation_id: &provenant_core::OperationId,
@@ -918,9 +916,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
     match error {
         RunError::NotFound => FacadeError::NotFound,
-        RunError::Refused | RunError::Writer(_) | RunError::Confinement(_) => {
-            FacadeError::ConfinementRefused
-        }
+        RunError::Refused => FacadeError::ConfinementRefused,
+        RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
+        RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
         RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
@@ -935,6 +933,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     match fail.code {
         "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
+        "LANE_DEPTH" => FacadeError::LaneDepth,
+        "LANE_CONTEXT" | "PARENT_ATTEMPT" => FacadeError::InvalidInput,
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
@@ -964,7 +964,12 @@ impl BinaryRunOwner<'_> {
     ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: ctx.roots.state.clone(),
+            state_root: provenant_cli::run::execution_state(
+                &ctx.roots,
+                &self.factory.home,
+                &crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?,
+            )
+            .map_err(fail_error)?,
             project_id: ctx.identity.project,
             actor_id: ctx.identity.inbox.actor,
             read_prompts: false,
@@ -1022,6 +1027,7 @@ impl BinaryRunOwner<'_> {
                     all: true,
                     limit: 100,
                     after: 0,
+                    newest_first: false,
                 },
                 call,
             )
@@ -1234,6 +1240,7 @@ impl BinaryRunOwner<'_> {
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
                 delivery_id: task.delivery_id,
+                deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
             });
         }
@@ -1611,6 +1618,7 @@ impl BinaryRunOwner<'_> {
                             all: true,
                             limit: u64::from(limit),
                             after: after_sequence,
+                            newest_first: false,
                         },
                         &call,
                     )
@@ -1709,6 +1717,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: Some(1),
             knobs: vec![],

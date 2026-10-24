@@ -1,7 +1,6 @@
 {"thread_id":"FIXTURE_SESSION_IDENTIFIER","type":"thread.started"}
 {"type":"turn.started"}
-{"item":{"id":"item_0","text":"I’ll create `note.txt` in the current directory with the requested content.","type":"agent_message"},"type":"item.completed"}
-{"item":{"aggregated_output":"","command":"/bin/zsh -lc \"printf 'ok' > note.txt\"","exit_code":null,"id":"item_1","status":"in_progress","type":"command_execution"},"type":"item.started"}
-{"item":{"aggregated_output":"","command":"/bin/zsh -lc \"printf 'ok' > note.txt\"","exit_code":0,"id":"item_1","status":"completed","type":"command_execution"},"type":"item.completed"}
-{"item":{"id":"item_2","text":"ok","type":"agent_message"},"type":"item.completed"}
-{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":24960,"input_tokens":27405,"output_tokens":67,"reasoning_output_tokens":0}}
+{"item":{"aggregated_output":"","command":"/bin/zsh -lc \"pwd && printf 'ok' > note.txt\"","exit_code":null,"id":"item_0","status":"in_progress","type":"command_execution"},"type":"item.started"}
+{"item":{"aggregated_output":"FIXTURE_ROOT/worktree\n","command":"/bin/zsh -lc \"pwd && printf 'ok' > note.txt\"","exit_code":0,"id":"item_0","status":"completed","type":"command_execution"},"type":"item.completed"}
+{"item":{"id":"item_1","text":"ok","type":"agent_message"},"type":"item.completed"}
+{"type":"turn.completed","usage":{"cache_write_input_tokens":0,"cached_input_tokens":24832,"input_tokens":27123,"output_tokens":46,"reasoning_output_tokens":0}}

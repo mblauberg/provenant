@@ -33,7 +33,9 @@ build.
 The binary defaults to `$CARGO_TARGET_DIR/release/provenant` (or the workspace's
 `target/release/provenant` without that variable). Pass `--binary PATH` to package
 another release build, for example one built with an explicit target triple.
-Build and package from the same checkout before changing product assets.
+Run `cargo build --release --locked --bin provenant` after source changes and
+before packaging. The packager refuses a binary whose embedded source digest
+does not match the current build's source digest.
 
 ## Install
 
@@ -53,16 +55,23 @@ PROVENANT="$RELEASE/bin/provenant"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
 ```
 
-Review every planned change and unresolved entry before applying it; a
-failed preview prevents writes. Hooks default off. `--hooks on` requires a
-fixture-backed `HookSpec` for each handler. An exact legacy entry marked `replace` is replaced
-only when that handler is available. Otherwise the installer preserves it
-byte-for-byte and reports it as unresolved. `check install` reports unresolved
-legacy entries as findings with exit 1 and compares the installed binary,
-assets, receipt and owned selectors without repair. To remove an installation,
-run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes
-only unchanged owned entries and keeps the state and release assets. Reapply
-`install` after resolving a partial-write error.
+Review every planned change and unresolved entry before applying it; a failed
+preview prevents writes. Hooks default off. `--hooks on` registers hooks for
+each selected harness that has a fixture-backed `HookSpec` (Claude today) and
+refuses only when none does. To install into a further Claude config directory,
+rerun `install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry
+then goes to that directory's `.claude.json`. Each directory is a separate
+target in the one receipt, so runs accumulate and touch only the selected
+directory. An exact legacy entry marked
+`replace` is replaced only when that handler is available. Otherwise the
+installer preserves it byte-for-byte and reports it as unresolved. `check
+install` reports unresolved legacy entries as findings with exit 1 and compares
+the installed binary, assets, receipt and owned selectors of every recorded
+target, whatever the environment, without repair. To remove an installation,
+run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes only
+unchanged owned entries and keeps the state and release assets. With
+`CLAUDE_CONFIG_DIR` (or `CODEX_HOME`) set, uninstall removes only that
+directory's target; without it, every recorded target of the harness. Reapply `install` after resolving a partial-write error.
 
 `build.rs` stamps the source and asset digests; the packaging example produces
 typed `release.json` with the binary and product assets. The CLI grammar is frozen in

@@ -2,7 +2,7 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{AttemptId, RunId};
+use provenant_core::{AttemptId, OperationId, RunId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
@@ -48,6 +48,12 @@ pub struct Decoded {
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
+    pub attempt_id: AttemptId,
+    pub operation_id: OperationId,
+    pub task_index: u64,
+    pub lane_depth: u64,
+    pub run_id: RunId,
+    pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
     /// Private temporary directory for a read-only lane, never a shared system
@@ -67,7 +73,13 @@ pub trait Providers {
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
-    fn decode(&self, route: &RouteRecord, stdout: &[u8], exit: &ExitObservation) -> Decoded;
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+    ) -> std::result::Result<Decoded, String>;
 }
 enum HandOff {
     /// Failed before anything was sent to a guardian.
@@ -97,7 +109,7 @@ pub enum RefusalKind {
 }
 
 impl RunStore {
-    pub(crate) fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
+    pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
         let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
         let request: CanonicalRequest = decode(&raw)?;
@@ -184,11 +196,14 @@ impl RunStore {
             if record.state != AttemptState::Queued {
                 continue;
             }
-            let task = request
+            let (task_index, task) = request
                 .tasks
                 .iter()
-                .find(|t| t.task_id == record.task_id)
+                .enumerate()
+                .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
+            let task_index = u64::try_from(task_index)
+                .map_err(|_| RunError::Validation("attempt task index"))?;
             let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
             let prompt = String::from_utf8(prompt)
                 .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
@@ -222,11 +237,19 @@ impl RunStore {
                 .join("attempts")
                 .join(id.to_string());
             let paths = LaunchPaths {
+                attempt_id: id,
+                operation_id: record.operation_id.clone(),
+                task_index,
+                lane_depth: request.lane_depth.unwrap_or(1),
+                run_id: record.run_id,
+                deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)
+                    .unwrap_or(0)
+                    .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),
             };
-            let plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
+            let mut plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
                     crate::writer::settle_launch_staging(&attempt)?;
@@ -246,6 +269,7 @@ impl RunStore {
                     continue;
                 }
             };
+            set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             // Record the exact project-relative exceptions of the plan that launches.
             let writable = plan
                 .confinement
@@ -319,7 +343,7 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        let holder_context = context(record).map_err(|e| local(&e))?;
+        let mut holder_context = context(record).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
@@ -364,6 +388,30 @@ impl RunStore {
                 return Err(local(&error));
             }
         }
+        if let Some(deliver) = &task.deliver {
+            let prepare = || -> Result<Vec<u8>> {
+                let mut holder: HolderContext = decode(&holder_context)?;
+                let writer = task
+                    .writer
+                    .as_ref()
+                    .ok_or(RunError::Validation("delivery requires a writer"))?;
+                let host = holder
+                    .host_delivery
+                    .take()
+                    .ok_or(RunError::Validation("delivery lacks host context"))?;
+                holder.host_delivery = Some(host.prepare(writer, deliver)?);
+                holder.encode()
+            };
+            match prepare() {
+                Ok(context) => holder_context = context,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(local(&error));
+                }
+            }
+        }
         if let Some(confinement) = &plan.confinement {
             if let Some(writer) = &confinement.writer
                 && let Err(error) =
@@ -384,11 +432,14 @@ impl RunStore {
                 }
             }
         }
-        let route = format!(
-            "{}/{}",
-            plan.route.provider.as_deref().unwrap_or_default(),
-            plan.route.model.as_deref().unwrap_or_default()
-        );
+        // Route records name models as `adapter/model`; prefix only a
+        // provider-native one (which may itself contain `/`).
+        let provider = plan.route.provider.as_deref().unwrap_or_default();
+        let model = plan.route.model.as_deref().unwrap_or_default();
+        let route = match model.strip_prefix(provider) {
+            Some(rest) if rest.starts_with('/') => model.to_owned(),
+            _ => format!("{provider}/{model}"),
+        };
         let command = ProviderCommand {
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
@@ -435,5 +486,46 @@ impl RunStore {
             )?;
             Ok(())
         })
+    }
+}
+
+fn set_lane_environment(
+    environment: &mut Vec<(OsString, OsString)>,
+    depth: u64,
+    parent: AttemptId,
+) {
+    set_environment_value(environment, LANE_DEPTH_ENV, depth.to_string());
+    set_environment_value(environment, PARENT_ATTEMPT_ENV, parent.to_string());
+}
+
+fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str, value: String) {
+    let name = OsString::from(name);
+    environment.retain(|(existing, _)| existing != &name);
+    environment.push((name, OsString::from(value)));
+}
+
+#[cfg(test)]
+mod lane_environment_tests {
+    use super::*;
+
+    #[test]
+    fn lane_environment_overrides_adapter_values() {
+        let parent = AttemptId::from_bytes([6; 16]);
+        let mut environment = vec![
+            (OsString::from(LANE_DEPTH_ENV), OsString::from("99")),
+            (OsString::from("OTHER"), OsString::from("kept")),
+        ];
+        set_lane_environment(&mut environment, 2, parent);
+        assert_eq!(
+            environment,
+            vec![
+                (OsString::from("OTHER"), OsString::from("kept")),
+                (OsString::from(LANE_DEPTH_ENV), OsString::from("2")),
+                (
+                    OsString::from(PARENT_ATTEMPT_ENV),
+                    OsString::from(parent.to_string())
+                ),
+            ]
+        );
     }
 }

@@ -11,17 +11,19 @@ use super::{
 #[cfg(target_os = "linux")]
 use crate::machine::{DeliveryFailure, DeliveryOutcome};
 use crate::{
-    census::{Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup},
+    census::{
+        Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup, ProcessObservation,
+    },
     exec::Termination,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
-#[cfg(target_os = "linux")]
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -64,9 +66,6 @@ impl<'a> Watch<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
-    pub(crate) child_changed: bool,
-    /// Indices into the `Watch` slice passed to `wait`.
-    pub(crate) ready: Vec<usize>,
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
@@ -203,11 +202,6 @@ impl GuardianReactor {
                 #[cfg(target_os = "macos")]
                 self.read_kqueue(&mut event)?;
             }
-            for (index, fd) in pollfds.iter().enumerate().skip(1) {
-                if fd.revents != 0 {
-                    event.ready.push(index - 1);
-                }
-            }
             return Ok(event);
         }
     }
@@ -251,7 +245,7 @@ impl GuardianReactor {
             // SAFETY: an exact-size successful signalfd read initialised info.
             let info = unsafe { info.assume_init() };
             match info.ssi_signo as i32 {
-                libc::SIGCHLD => event.child_changed = true,
+                libc::SIGCHLD => {}
                 libc::SIGTERM | libc::SIGINT | libc::SIGHUP => event.supervisor_signal = true,
                 _ => {}
             }
@@ -296,7 +290,7 @@ impl GuardianReactor {
                     continue;
                 }
                 match item.ident as i32 {
-                    libc::SIGCHLD => event.child_changed = true,
+                    libc::SIGCHLD => {}
                     libc::SIGTERM | libc::SIGINT | libc::SIGHUP => event.supervisor_signal = true,
                     _ => {}
                 }
@@ -395,6 +389,95 @@ pub(crate) struct AdoptedDelivery {
     pub(crate) outcome: DeliveryOutcome,
 }
 
+/// The child cannot exec until the observer has captured its native identity.
+/// Command::spawn waits for exec, so a short-lived helper handles the parent end
+/// of the handshake. It is joined on every path before custody is returned.
+fn spawn_identified(
+    mut command: Command,
+    lease: &crate::fs::LockGuard,
+    env: &[(OsString, OsString)],
+    boot: &str,
+    permit: Permit,
+) -> io::Result<(Child, ProcessIdentity, Permit)> {
+    let observer =
+        super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
+    let (mut parent, channel) = UnixStream::pair()?;
+    parent.set_read_timeout(Some(Duration::from_secs(5)))?;
+    parent.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // SAFETY: this hook runs only after fork. It uses async-signal-safe
+    // syscalls on the inherited owned socket, stack bytes and a bounded wait;
+    // no allocation or lock is used. channel remains live through spawn.
+    unsafe {
+        command.pre_exec(move || identity_gate(channel.as_raw_fd()));
+    }
+    child::configure_command(
+        &mut command,
+        &[lease.handoff_file().as_fd()],
+        Some(env),
+        false,
+    )?;
+    let worker = std::thread::Builder::new()
+        .name("provider-identity".into())
+        .spawn(move || {
+            let mut pid = [0_u8; 4];
+            parent.read_exact(&mut pid)?;
+            match observer.observe(i64::from(i32::from_ne_bytes(pid))) {
+                ProcessObservation::Present(fact) => {
+                    parent.write_all(&[1])?;
+                    Ok(fact.identity)
+                }
+                _ => {
+                    parent.write_all(&[0])?;
+                    Err(io::Error::other(
+                        "provider identity unavailable before exec",
+                    ))
+                }
+            }
+        })?;
+    let spawned = command.spawn();
+    // On pre-exec failure, closing the child's socket wakes the helper too.
+    drop(command);
+    let identity = worker
+        .join()
+        .map_err(|_| io::Error::other("provider identity observer failed"))
+        .and_then(|identity| identity);
+    match (spawned, identity) {
+        (Ok(child), Ok(identity)) => Ok((child, identity, permit)),
+        (Ok(child), Err(error)) => {
+            permit.transfer(child);
+            Err(error)
+        }
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn identity_gate(fd: i32) -> io::Result<()> {
+    // SAFETY: getpid has no pointers and is async-signal-safe after fork.
+    let pid = unsafe { libc::getpid() }.to_ne_bytes();
+    // SAFETY: fd is the hook's live inherited socket; pid is a four-byte stack
+    // buffer. send retains no pointer. MSG_NOSIGNAL avoids an inherited handler.
+    if unsafe { libc::send(fd, pid.as_ptr().cast(), pid.len(), libc::MSG_NOSIGNAL) } != 4 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll borrows one writable stack record with a live socket fd;
+    // the five-second deadline bounds a lost helper before exec.
+    if unsafe { libc::poll(&mut poll, 1, 5_000) } <= 0 {
+        return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
+    }
+    let mut accepted = 0_u8;
+    // SAFETY: read writes at most one byte to live exclusive stack storage;
+    // fd is readable or closed after poll and no pointer is retained.
+    if unsafe { libc::read(fd, (&mut accepted as *mut u8).cast(), 1) } != 1 || accepted != 1 {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(())
+}
+
 /// Provider owner. Dropping this value transfers the direct child to its
 /// pre-reserved bounded reaper without signalling it; normal cleanup must call
 /// `stop` and `cleanup` explicitly while the unreaped child reserves its PID.
@@ -420,9 +503,9 @@ impl ProviderGroup {
         env: &[(OsString, OsString)],
         cwd: &Path,
         input: bool,
-        out: bool,
-        err: bool,
+        capture: crate::custody::CapturePlan,
         lease: &crate::fs::LockGuard,
+        boot: &str,
     ) -> io::Result<Self> {
         let (program, args) = argv
             .split_first()
@@ -442,15 +525,17 @@ impl ProviderGroup {
             .current_dir(cwd)
             .process_group(0)
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
-            .stdout(if out { Stdio::piped() } else { Stdio::null() })
-            .stderr(if err { Stdio::piped() } else { Stdio::null() });
-        child::configure_command(
-            &mut command,
-            &[lease.handoff_file().as_fd()],
-            Some(env),
-            false,
-        )?;
-        let child = command.spawn()?;
+            .stdout(if capture.stdout.piped() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(if capture.stderr.piped() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
+        let (child, identity, permit) = spawn_identified(command, lease, env, boot, permit)?;
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,
             _ => {
@@ -468,7 +553,7 @@ impl ProviderGroup {
             pid,
             last_direct_signal: None,
             observed: None,
-            provider_identity: None,
+            provider_identity: Some(identity),
             owned_descendants: BTreeSet::new(),
             spared_descendants: BTreeSet::new(),
             last_adopted_signal: BTreeMap::new(),
@@ -496,6 +581,10 @@ impl ProviderGroup {
 
     pub(crate) fn id(&self) -> i64 {
         i64::from(self.pid)
+    }
+
+    pub(crate) fn identity(&self) -> Option<&ProcessIdentity> {
+        self.provider_identity.as_ref()
     }
 
     pub(crate) fn watches(&self) -> Vec<Watch<'_>> {

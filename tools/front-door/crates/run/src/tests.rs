@@ -62,9 +62,12 @@ pub(super) fn input() -> PreparedRun {
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
+                deliver: None,
             }],
             concurrency: 1,
             parent: None,
+            lane_depth: Some(1),
+            parent_attempt: None,
         },
         attempts: vec![NewAttempt {
             task_id: task,
@@ -79,9 +82,10 @@ pub(super) fn route() -> RouteRecord {
         model: Some("fixture/model".into()),
         effort: Some("high".into()),
         account_label: None,
+        ..Default::default()
     }
 }
-fn publication() -> TerminalPublication<'static> {
+pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
         outcome: Outcome::Succeeded,
         finished_at: WallTime::from_micros(200).unwrap(),
@@ -265,6 +269,38 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
             .attempts(AttemptFilter::default(), &call)?
             .count(),
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
+    let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+    artifacts::seal(
+        &directory,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "last_output_at": expected,
+            "publication_pending": false
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    assert_eq!(
+        store
+            .record(input.attempts[0].attempt_id, &call)?
+            .last_output_at,
+        Some(expected)
     );
     Ok(())
 }

@@ -194,19 +194,25 @@ impl FsError {
     pub fn is_exists(&self) -> bool {
         self.raw_os_error() == Some(errno::EEXIST)
     }
+    /// A sandbox or mode denial, as opposed to a missing or malformed path.
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self.raw_os_error(), Some(errno::EPERM | errno::EACCES))
+    }
     pub fn is_symlink(&self) -> bool {
         matches!(self, Self::Symlink { .. }) || self.is_loop()
     }
-    pub fn is_loop(&self) -> bool {
+    fn is_loop(&self) -> bool {
         self.raw_os_error() == Some(errno::ELOOP)
     }
     pub fn is_cross_device(&self) -> bool {
         self.raw_os_error() == Some(errno::EXDEV)
     }
-    pub fn is_not_directory(&self) -> bool {
+    #[cfg(test)]
+    fn is_not_directory(&self) -> bool {
         self.raw_os_error() == Some(errno::ENOTDIR)
     }
-    pub fn is_unsupported(&self) -> bool {
+    #[cfg(test)]
+    fn is_unsupported(&self) -> bool {
         self.raw_os_error().is_some_and(|code| {
             [
                 errno::EINVAL,

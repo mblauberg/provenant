@@ -15,12 +15,23 @@ use provenant_supervisor::{
 };
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
 };
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InstallCounts {
+    links: usize,
+    hooks: usize,
+    mcp: usize,
+    notes: usize,
+    findings: usize,
+    other: usize,
+}
 
 #[derive(Debug)]
 enum EdgeError {
@@ -100,13 +111,25 @@ fn selected_targets(
     Ok((environment, targets))
 }
 
+/// Resolves targets as install does, so `CLAUDE_CONFIG_DIR`/`CODEX_HOME`
+/// select the matching recorded target. Without them, uninstall acts on every
+/// recorded target of each harness, at its recorded paths.
 fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targets, EdgeError> {
     let environment = environment(globals, None)?;
-    Ok(Targets::new(
+    let mut targets = cli::install::configured_targets(
         environment.roots,
         &environment.home,
         harnesses,
-    ))
+        &LocalFs,
+        environment.claude.as_deref(),
+        environment.codex.as_deref(),
+        None,
+    )
+    .map_err(EdgeError::Install)?;
+    targets
+        .resolve_destinations(&LocalFs)
+        .map_err(EdgeError::Install)?;
+    Ok(targets)
 }
 
 fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
@@ -320,34 +343,52 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let mut counts = [0usize; 3];
+            let mut counts = BTreeMap::<&str, InstallCounts>::new();
             for action in &outcome.actions {
-                counts[match action.disposition {
-                    provenant_config::Disposition::Create => 0,
-                    provenant_config::Disposition::Replace => 1,
-                    provenant_config::Disposition::Remove => 2,
-                }] += 1;
-            }
-            let mut human = format!(
-                "{command}: {} action(s) ({} create, {} replace, {} remove)\n",
-                outcome.actions.len(),
-                counts[0],
-                counts[1],
-                counts[2]
-            );
-            const LISTED: usize = 20;
-            for action in outcome.actions.iter().take(LISTED) {
-                let path = action
+                let target = action
                     .path
                     .to_path_buf()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                human.push_str(&format!("{:?}: {path}\n", action.disposition));
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                let selector = action.selector.to_ascii_lowercase();
+                let target_counts = counts.entry(target).or_default();
+                if selector.contains("hook") {
+                    target_counts.hooks += 1;
+                } else if selector.contains("mcp") {
+                    target_counts.mcp += 1;
+                } else if matches!(
+                    action.before.as_ref().or(action.after.as_ref()),
+                    Some(provenant_records::OwnedValue::Link { .. })
+                ) {
+                    target_counts.links += 1;
+                } else {
+                    target_counts.other += 1;
+                }
             }
-            if outcome.actions.len() > LISTED {
+            for manual in &outcome.manual_includes {
+                let target = manual
+                    .path
+                    .to_path_buf()
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                counts.entry(target).or_default().notes += 1;
+            }
+            for finding in &outcome.findings {
+                let target = finding
+                    .path
+                    .to_path_buf()
+                    .map(|path| install_target(&path))
+                    .unwrap_or("target");
+                counts.entry(target).or_default().findings += 1;
+            }
+            if counts.is_empty() {
+                counts.entry("target").or_default();
+            }
+            let mut human = format!("{command}:\n");
+            for (target, count) in counts {
                 human.push_str(&format!(
-                    "... and {} more (use --json for the full list)\n",
-                    outcome.actions.len() - LISTED
+                    "  {target}: {} links, {} hooks, {} MCP, {} notes; {} findings; {} other\n",
+                    count.links, count.hooks, count.mcp, count.notes, count.findings, count.other
                 ));
             }
             for manual in &outcome.manual_includes {
@@ -365,17 +406,6 @@ fn output_install(
                     "manual include required: add {include} to {path}\n"
                 ));
             }
-            for finding in &outcome.findings {
-                human.push_str(&format!(
-                    "{}: {}\n",
-                    finding.rule,
-                    finding
-                        .path
-                        .to_path_buf()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
-                ));
-            }
             let read_only = outcome.dry_run;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, InstallData::success(outcome)),
@@ -385,6 +415,23 @@ fn output_install(
             )
         }
         Err(error) => install_error(command, &error, globals),
+    }
+}
+
+fn install_target(path: &Path) -> &'static str {
+    let path = path.to_string_lossy();
+    if path.contains("/.claude/") || path.ends_with("/.claude") || path.ends_with("/.claude.json") {
+        "Claude"
+    } else if path.contains("/.codex/") || path.ends_with("/.codex") {
+        "Codex"
+    } else if path.contains("/.cursor/") || path.ends_with("/.cursor") {
+        "Cursor"
+    } else if path.contains("/.config/opencode/") {
+        "OpenCode"
+    } else if path.contains("/.config/agents/") {
+        "Agents"
+    } else {
+        "Other"
     }
 }
 

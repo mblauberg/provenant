@@ -63,7 +63,7 @@ fn choices(values: &[&str]) -> Value {
 fn nullable(schema: Value) -> Value {
     json!({"anyOf":[schema,{"type":"null"}]})
 }
-fn array(items: Value, min: usize, max: usize) -> Value {
+fn array(items: Value, min: u64, max: u64) -> Value {
     json!({"type":"array","items":items,"minItems":min,"maxItems":max})
 }
 fn reference(name: &str) -> Value {
@@ -94,6 +94,122 @@ fn tagged(tag: &str, variants: Value) -> Value {
         }
     }
     json!({"oneOf":schemas})
+}
+fn output_object(fields: Value) -> Value {
+    object(fields)
+}
+fn output_page(item: Value) -> Value {
+    output_object(json!({
+        "items":array(item,0,100),
+        "truncated":{"type":"boolean"}
+    }))
+}
+fn output_attempt_target() -> Value {
+    output_object(json!({
+        "attempt":pattern("^[0-9a-f]{32}$"),
+        "host":nullable(pattern("^[0-9a-f]{32}$"))
+    }))
+}
+fn output_artifact() -> Value {
+    output_object(json!({
+        "path":{"type":"object"},
+        "digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))
+    }))
+}
+fn output_absolute_path() -> Value {
+    output_object(json!({
+        "relative_to_root":output_object(json!({
+            "encoding":choices(&["utf8","native_bytes"]),
+            "path":{"type":"string"}
+        }))
+    }))
+}
+fn output_schema(kind: ToolKind) -> Value {
+    let any_object = json!({"type":"object"});
+    let text_value = json!({"type":"string"});
+    let integer_value = json!({"type":"integer","minimum":0});
+    let bool_value = json!({"type":"boolean"});
+    let proof = any_object.clone();
+    match kind {
+        ToolKind::Identity => output_object(json!({
+            "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
+            "inbox":output_object(json!({"host":pattern("^[0-9a-f]{32}$"),"agent":text_value,"actor":pattern("^[0-9a-f]{32}$")})),
+            "client":text_value,"cwd":output_absolute_path(),"common_dir":output_absolute_path(),
+            "federation":{"anyOf":[any_object,{"type":"null"}]}
+        })),
+        ToolKind::Mail => tagged(
+            "result",
+            json!({
+                "sent":{"id":text_value},
+                "read":{"page":output_page(any_object),"cursor":{"type":"integer"}},
+                "marked_read":{"cursor":{"type":"integer"}}
+            }),
+        ),
+        ToolKind::Task => tagged(
+            "result",
+            json!({
+                "created":{"task":any_object},"listed":{"page":output_page(any_object.clone())},
+                "claimed":{"proof":proof},"updated":{"task":any_object},
+                "finished":{"task":any_object},"released":{"task":any_object}
+            }),
+        ),
+        ToolKind::Events => tagged(
+            "result",
+            json!({
+                "read":{"page":output_page(any_object),"cursor":{"type":"integer"},"timed_out":bool_value,
+                    "unknown_hosts":array(text_value,0,100),"run_events_pending":bool_value},
+                "noted":{"seq":{"type":"integer"}}
+            }),
+        ),
+        ToolKind::Claim => tagged(
+            "result",
+            json!({
+                "acquired":{"proof":proof,"claim":any_object},"renewed":{"claim":any_object},
+                "verified":{"claim":any_object},"released":{"id":text_value},
+                "listed":{"page":output_page(any_object)}
+            }),
+        ),
+        ToolKind::Landing => tagged(
+            "result",
+            json!({
+                "acquired":{"proof":proof,"landing":any_object},"renewed":{"landing":any_object},
+                "verified":{"landing":any_object},"released":{"id":text_value,"reference":text_value},
+                "waited":{"landing":{"anyOf":[any_object,{"type":"null"}]},"timed_out":bool_value}
+            }),
+        ),
+        ToolKind::Submit => output_object(json!({
+            "operation_id":text_value,"targets":array(output_attempt_target(),0,100)
+        })),
+        ToolKind::Run => tagged(
+            "result",
+            json!({
+                "list":{"page":output_object(json!({"items":array(any_object.clone(),0,100),"next_after":{"anyOf":[output_attempt_target(),{"type":"null"}]},"truncated":bool_value}))},
+                "status":{"attempt":any_object},"wait":{"condition":choices(&["any","all"]),"attempts":array(any_object.clone(),0,100),"satisfied":bool_value,"timed_out":bool_value},
+                "cancel":{"attempt":any_object},"resume":{"attempt":any_object}
+            }),
+        ),
+        ToolKind::Output => tagged(
+            "kind",
+            json!({
+                "chunk":{"target":output_attempt_target(),"part":choices(&["stdout","stderr"]),"offset":integer_value,
+                    "next_offset":integer_value,"eof":bool_value,"digest":text_value,
+                    "bytes":tagged("encoding",json!({"utf8":{"data":text_value},"bytes":{"data":array(integer(0,255),0,provenant_records::run::OUTPUT_LIMIT)}}))},
+                "artifact":{"target":output_attempt_target(),"artifact":output_artifact(),"digest":text_value,
+                    "bytes":tagged("encoding",json!({"utf8":{"data":text_value},"bytes":{"data":array(integer(0,255),0,MAX_FETCH_BYTES)}}))}
+            }),
+        ),
+        ToolKind::Hosts => array(
+            output_object(json!({
+                "host":text_value,"available":bool_value,
+                "execution":{"anyOf":[bool_value,{"type":"null"}]}
+            })),
+            0,
+            100,
+        ),
+        ToolKind::Graph => output_object(json!({
+            "status":choices(&["pending","complete","cancelled"]),"checkpoint":any_object
+        })),
+    }
 }
 fn proof(key: &str, landing: bool) -> Value {
     let mut fields = json!({key: reference("Id"), "generation":integer(0,u64::MAX),"token":array(integer(0,255),16,16)});
@@ -179,7 +295,7 @@ fn build_catalogue() -> Vec<Value> {
         (
             "Submit one batch to the run service.",
             json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id"))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
+                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,100),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64)}
             }),
         ),
         (
@@ -213,11 +329,11 @@ fn build_catalogue() -> Vec<Value> {
     TOOL_NAMES
         .iter()
         .zip(tools)
-        .map(|((_, name), (description, operations))| {
+        .map(|((kind, name), (description, operations))| {
             let mut input = tagged("op", operations);
             input["type"] = json!("object");
             input["$defs"] = definitions();
-            json!({"name":name,"description":description,"inputSchema":input})
+            json!({"name":name,"description":description,"inputSchema":input,"outputSchema":output_schema(*kind)})
         })
         .collect()
 }
@@ -225,6 +341,22 @@ fn build_catalogue() -> Vec<Value> {
 pub fn catalogue() -> &'static [Value] {
     static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
     CATALOGUE.get_or_init(build_catalogue)
+}
+
+pub fn legacy_catalogue() -> &'static [Value] {
+    static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
+    CATALOGUE.get_or_init(|| {
+        catalogue()
+            .iter()
+            .map(|tool| {
+                let mut tool = tool.clone();
+                if let Some(fields) = tool.as_object_mut() {
+                    fields.remove("outputSchema");
+                }
+                tool
+            })
+            .collect()
+    })
 }
 
 /// Diagnose only a rejected serde value. Runtime is the validation owner;

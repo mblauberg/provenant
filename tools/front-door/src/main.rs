@@ -1,6 +1,10 @@
 // The process edge composes typed owners and owns ordinary result delivery.
+mod bench;
 mod chair;
 mod checks;
+#[cfg(test)]
+#[path = "../tests/support/compose.rs"]
+mod compose_tests;
 mod fabric;
 mod hooks;
 mod hosts;
@@ -189,6 +193,41 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
     match command {
         Command::Hosts(command) => hosts::run(command, globals),
+        Command::Accounts(command) => {
+            run_edge(
+                &inv.leaf,
+                globals,
+                |edge| match provenant_cli::accounts::execute(
+                    &command, edge.roots, edge.home, edge.cwd,
+                ) {
+                    Ok(data) => provenant_cli::run::Reply {
+                        human: data
+                            .entries
+                            .values()
+                            .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
+                            .collect(),
+                        result: CommandResult::new(&inv.leaf, Outcome::Ok, serde_json::json!(data)),
+                    },
+                    Err(message) => {
+                        let mut result = CommandResult::new(
+                            &inv.leaf,
+                            Outcome::Refused,
+                            serde_json::Value::Null,
+                        );
+                        result.error = Some(CommandError {
+                            code: "ACCOUNT".into(),
+                            message,
+                            cause: None,
+                            repair: None,
+                        });
+                        provenant_cli::run::Reply {
+                            result,
+                            human: String::new(),
+                        }
+                    }
+                },
+            )
+        }
         Command::Root => {
             #[derive(Serialize)]
             struct RootInfo {
@@ -425,11 +464,60 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals),
+        Command::Bench(command) => bench::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
     }
 }
 fn main() -> ExitCode {
+    // Fake provider identity probes for production account observation.
+    #[cfg(test)]
+    match std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .and_then(|arg| arg.to_str())
+    {
+        Some("--version") => {
+            let _ = writeln!(io::stdout().lock(), "fixture-provider 1.0.0");
+            return ExitCode::SUCCESS;
+        }
+        Some("auth") => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                r#"{{"loggedIn":true,"email":"fixture@example.test"}}"#
+            );
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+    // The compose fixture's lanes run in its `compose` worktree; other
+    // provider fixtures exercise lane MCP and nesting.
+    #[cfg(test)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("exec"))
+        && std::env::current_dir().is_ok_and(|cwd| cwd.ends_with(".worktrees/compose"))
+    {
+        return match compose_tests::provider() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "compose provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(test)]
+    if std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|arg| arg == "exec" || arg == "-p")
+    {
+        return match worktree_tests::lane_provider() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "lane provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(test)]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--writer-provider")) {
         return match worktree_tests::provider(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
@@ -528,35 +616,4 @@ fn main() -> ExitCode {
         );
     }
     ExitCode::from(status)
-}
-
-#[cfg(test)]
-mod tests {
-    #[allow(unused_imports)]
-    use std::{fs, os::unix::fs::PermissionsExt};
-
-    #[test]
-    fn git_resolver_prefers_override_then_candidates_and_checks_executable() {
-        let root = tempfile::tempdir().expect("temp dir");
-        let override_dir = root.path().join("override");
-        let path_dir = root.path().join("path");
-        fs::create_dir_all(&override_dir).expect("override dir");
-        fs::create_dir_all(&path_dir).expect("path dir");
-        let override_git = override_dir.join("git");
-        let path_git = path_dir.join("git");
-        fs::write(&override_git, b"git").expect("override binary");
-        fs::write(&path_git, b"git").expect("path binary");
-        fs::set_permissions(&override_git, fs::Permissions::from_mode(0o700))
-            .expect("override mode");
-        fs::set_permissions(&path_git, fs::Permissions::from_mode(0o700)).expect("path mode");
-
-        assert_eq!(
-            crate::roots::resolve_git_binary(None, &[path_dir.join("missing"), path_git.clone()]),
-            Some(path_git.clone())
-        );
-        assert_eq!(
-            crate::roots::resolve_git_binary(Some(&override_git), &[path_git]),
-            Some(override_git)
-        );
-    }
 }

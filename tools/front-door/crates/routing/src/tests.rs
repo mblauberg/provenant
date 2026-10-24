@@ -58,8 +58,8 @@ fn exact_unknown_is_retained_but_never_upgraded_or_activated()
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    let route = resolve(&request("codex/gpt-6.1-sol")?, &context)?;
-    assert_eq!(route.model, "gpt-6.1-sol");
+    let route = resolve(&request("codex/unlisted-exact-id")?, &context)?;
+    assert_eq!(route.model, "unlisted-exact-id");
     assert_eq!(route.effort, None);
     assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
     assert!(matches!(
@@ -96,6 +96,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
                 effort: Some("low".into()),
             },
         )]),
+        ..RoutingConfig::default()
     };
     let context = context(&catalogue, &config, now()?);
     let mut query = RouteRequest {
@@ -120,81 +121,505 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     ));
     Ok(())
 }
-#[test]
-fn utility_pool_resolves_and_confidential_skips_training_members()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    catalogue
-        .models
-        .iter_mut()
-        .find(|row| row.model.as_str() == "claude/claude-haiku-5-5")
-        .expect("utility member is catalogued")
-        .trains_on_prompts = Some(true);
-    let config = RoutingConfig::default();
-    let mut context = context(&catalogue, &config, now()?);
-    let mut query = RouteRequest {
-        choice: RouteChoice::NamedRoute("utility".into()),
-        effort: None,
-        confidential: true,
-        allow_free: false,
-        fallback: Fallback::Models(BoundedModels::new(vec![
-            ModelId::parse("claude/claude-haiku-5-5")?,
-            ModelId::parse("codex/unclassified")?,
-        ])?),
-    };
-    let route = resolve(&query, &context)?;
-    assert_eq!(route.model, "gpt-6-luna");
-    assert!(route.alternatives.as_slice().is_empty());
-    query.fallback = Fallback::None;
 
-    query.confidential = false;
-    assert_eq!(resolve(&query, &context)?.model, "claude-haiku-5-5");
+#[test]
+fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct Case {
+        name: &'static str,
+        effort: &'static str,
+        weights: [u64; 3],
+        ready_adapters: &'static [&'static str],
+        expected_pick: Option<&'static str>,
+        expect_effort_exclusion: bool,
+        all_disabled: bool,
+        codex_pacing: &'static str,
+        quota_used_basis_points: Option<u64>,
+        quota_reset_after_seconds: Option<i64>,
+        alternative_quota_used_basis_points: Option<u64>,
+        include_weekly_window: bool,
+        expected_codex_factor: Option<u32>,
+        expect_no_eligible: bool,
+        redraw: bool,
+    }
+    let cases = [
+        Case {
+            name: "weighted ready members",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "weight zero fallback",
+            effort: "high",
+            weights: [4, 4, 0],
+            ready_adapters: &["agy"],
+            expected_pick: Some("gemini-3.8-flash"),
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "max",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "caller effort exclusion",
+            effort: "xhigh",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: true,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "pace clamps to minimum factor",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: Some(9_900),
+            quota_reset_after_seconds: Some(18_000),
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(2_500),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "pace clamps to maximum factor",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: Some(5_000),
+            quota_reset_after_seconds: Some(4_500),
+            alternative_quota_used_basis_points: Some(9_900),
+            include_weekly_window: true,
+            expected_codex_factor: Some(20_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+        Case {
+            name: "disabled members are not fallback candidates",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &[],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: true,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: true,
+            redraw: false,
+        },
+        Case {
+            name: "same-seed redraw removes the rejected member",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "spend",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: true,
+        },
+        Case {
+            name: "unknown pace snapshot is neutral",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            all_disabled: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: None,
+            quota_reset_after_seconds: None,
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            expect_no_eligible: false,
+            redraw: false,
+        },
+    ];
     let registry = [
         provenant_providers::Registration {
-            adapter: &provenant_providers::claude::Claude,
+            adapter: &RECORDED_CODEX,
             quota_source: None,
         },
         provenant_providers::Registration {
-            adapter: &RecordedFixture(&provenant_providers::codex::Codex),
+            adapter: &RECORDED_CLAUDE,
+            quota_source: None,
+        },
+        provenant_providers::Registration {
+            adapter: &RECORDED_AGY,
             quota_source: None,
         },
     ];
-    let mut records = [availability()];
-    records[0].observed_models = vec!["gpt-6-luna".into()];
-    let access = [AccessContext {
-        adapter: "codex",
-        disclosure_ref: "policy",
-        confinement_ref: "grant",
-    }];
-    context.registry = &registry;
-    context.availability = &records;
-    context.access = &access;
-    let route = resolve(&query, &context)?;
-    assert_eq!(route.model, "gpt-6-luna");
-    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "claude",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "agy",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let catalogue = Catalogue::bundled()?;
+    let mut base_availability = vec![availability()];
+    for adapter in ["claude", "agy"] {
+        let mut record = availability();
+        record.adapter = adapter.into();
+        base_availability.push(record);
+    }
+
+    for case in cases {
+        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "routes": {},
+            "pools": { "trial": [
+                {"model":"codex/gpt-6-luna", "weight":case.weights[0], "effort":"high", "efforts":["medium","high","xhigh"]},
+                {"model":"claude/claude-haiku-5-5", "weight":case.weights[1], "effort":"high", "efforts":["medium","high","xhigh"]},
+                {"model":"agy/gemini-3.8-flash", "weight":case.weights[2], "effort":"medium", "efforts":["low","medium","high"]}
+            ]},
+            "pacing": {"codex":case.codex_pacing}
+        }))?;
+        let mut availability: Vec<_> = base_availability
+            .iter()
+            .filter(|record| {
+                case.ready_adapters.contains(&record.adapter.as_str()) || case.all_disabled
+            })
+            .cloned()
+            .collect();
+        if case.all_disabled {
+            for record in &mut availability {
+                record.last_preflight_error = Some(provenant_providers::PreflightFailure::Disabled);
+            }
+        }
+        let quota = if let (Some(used_basis_points), Some(reset_after_seconds)) =
+            (case.quota_used_basis_points, case.quota_reset_after_seconds)
+        {
+            let mut observation = quota(
+                "codex/gpt-6-luna",
+                "opaque-account",
+                provenant_quota::QuotaStatus::Available,
+                1,
+                80,
+                120,
+            )?;
+            observation
+                .snapshot
+                .windows
+                .push(provenant_quota::QuotaWindow {
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points,
+                    resets_unix_seconds: Some(100 + reset_after_seconds),
+                });
+            if case.include_weekly_window {
+                observation
+                    .snapshot
+                    .windows
+                    .push(provenant_quota::QuotaWindow {
+                        pool: "seven_day".into(),
+                        window_seconds: Some(604_800),
+                        used_basis_points: 1_000,
+                        resets_unix_seconds: Some(100 + 604_800),
+                    });
+            }
+            let mut observations = vec![observation];
+            if let Some(used_basis_points) = case.alternative_quota_used_basis_points {
+                let mut alternative = quota(
+                    "codex/gpt-6-luna",
+                    "other-account",
+                    provenant_quota::QuotaStatus::Available,
+                    1,
+                    80,
+                    120,
+                )?;
+                alternative
+                    .snapshot
+                    .windows
+                    .push(provenant_quota::QuotaWindow {
+                        pool: "five_hour".into(),
+                        window_seconds: Some(18_000),
+                        used_basis_points,
+                        resets_unix_seconds: Some(100 + 18_000),
+                    });
+                observations.push(alternative);
+            }
+            observations
+        } else {
+            Vec::new()
+        };
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.registry = &registry;
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &quota;
+        let mut query = request("codex/gpt-6-luna")?;
+        query.choice = RouteChoice::NamedRoute("trial".into());
+        query.effort = Some(case.effort.into());
+        query.confidential = true;
+
+        let first_pick = case
+            .redraw
+            .then(|| resolve_with_seed(&query, &ctx, "operation-route-pools", 2))
+            .transpose()?;
+        let excluded_model = first_pick
+            .as_ref()
+            .map(|route| ModelId::parse(&format!("{}/{}", route.adapter, route.model)))
+            .transpose()?;
+        let result = if let Some(excluded_model) = &excluded_model {
+            resolve_for_account_with_seed_excluding(
+                &query,
+                &ctx,
+                None,
+                "operation-route-pools",
+                2,
+                std::slice::from_ref(excluded_model),
+            )
+        } else {
+            resolve_with_seed(&query, &ctx, "operation-route-pools", 2)
+        };
+        if case.expect_no_eligible {
+            match result {
+                Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
+                    assert!(exclusions.iter().any(|reason| reason.contains("disabled")));
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => panic!("disabled-only pool member was selected"),
+            }
+            let mut recoverable_availability = base_availability.clone();
+            for record in &mut recoverable_availability {
+                record.last_preflight_error = Some(if record.adapter == "claude" {
+                    provenant_providers::PreflightFailure::AuthRequired
+                } else {
+                    provenant_providers::PreflightFailure::Disabled
+                });
+            }
+            let mut recoverable_context = context(&catalogue, &config, now()?);
+            recoverable_context.registry = &registry;
+            recoverable_context.availability = &recoverable_availability;
+            recoverable_context.access = &access;
+            let recoverable =
+                resolve_with_seed(&query, &recoverable_context, "operation-route-pools", 2)?;
+            assert_eq!(
+                recoverable.adapter, "claude",
+                "recoverable member beats disabled"
+            );
+            assert_eq!(
+                reason(&recoverable),
+                Some(&RouteExclusionReason::AuthRequired)
+            );
+            continue;
+        }
+        let route = result?;
+        let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
+        assert_eq!(receipt["pool"], "trial", "{}", case.name);
+        let candidate_rows = receipt["candidates"].as_array().ok_or("candidates")?;
+        assert_eq!(candidate_rows.len(), 3);
+        assert_eq!(
+            candidate_rows
+                .iter()
+                .map(|candidate| candidate["weight"].as_u64().ok_or("weight"))
+                .collect::<Result<Vec<_>, _>>()?,
+            case.weights,
+            "{}",
+            case.name
+        );
+        assert!(receipt["roll"].as_u64().is_some());
+        let mut expected_total = 0_u64;
+        for candidate in candidate_rows {
+            let factor = candidate["factor_basis_points"].as_u64().ok_or("factor")?;
+            assert!((2_500..=20_000).contains(&factor), "{}", case.name);
+            if candidate["exclusion"] == "admission rejected" {
+                assert!(candidate["readiness"].is_null(), "{}", case.name);
+            } else {
+                assert_eq!(
+                    candidate["readiness"].is_object(),
+                    candidate["exclusion"] != "effort",
+                    "{}",
+                    case.name
+                );
+            }
+            if candidate["exclusion"].is_null() && candidate["readiness"]["status"] == "ready" {
+                expected_total += candidate["weight"].as_u64().ok_or("weight")? * factor;
+            }
+        }
+        let codex_candidate = candidate_rows
+            .iter()
+            .find(|candidate| candidate["model"] == "codex/gpt-6-luna")
+            .ok_or("codex candidate")?;
+        assert_eq!(
+            codex_candidate["factor_basis_points"].as_u64(),
+            case.expected_codex_factor.map(u64::from),
+            "{}",
+            case.name
+        );
+        if let Some(excluded_model) = &excluded_model {
+            let excluded_candidate = candidate_rows
+                .iter()
+                .find(|candidate| candidate["model"] == excluded_model.as_str())
+                .ok_or("excluded candidate")?;
+            assert_eq!(excluded_candidate["exclusion"], "admission rejected");
+            assert_ne!(
+                (&route.adapter, &route.model),
+                (
+                    &first_pick.as_ref().ok_or("first pick")?.adapter,
+                    &first_pick.as_ref().ok_or("first pick")?.model
+                )
+            );
+        }
+        assert_eq!(
+            receipt["total_weight"].as_u64(),
+            Some(expected_total),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            receipt["candidates"]
+                .as_array()
+                .ok_or("candidates")?
+                .iter()
+                .any(|candidate| candidate["exclusion"] == "effort"),
+            case.expect_effort_exclusion,
+            "{}",
+            case.name
+        );
+        if let Some(expected) = case.expected_pick {
+            assert_eq!(route.model, expected, "{}", case.name);
+        } else {
+            assert_eq!(
+                receipt["pick"],
+                format!("{}/{}", route.adapter, route.model)
+            );
+        }
+        let picked = candidate_rows
+            .iter()
+            .find(|candidate| candidate["model"] == receipt["pick"])
+            .ok_or("picked candidate")?;
+        if expected_total == 0 {
+            assert_eq!(picked["weight"], 0, "{}", case.name);
+        } else {
+            let roll = receipt["roll"].as_u64().ok_or("roll")?;
+            let mut lower = 0_u64;
+            let mut matched_interval = false;
+            for candidate in candidate_rows.iter().filter(|candidate| {
+                candidate["exclusion"].is_null() && candidate["readiness"]["status"] == "ready"
+            }) {
+                let weight = candidate["weight"].as_u64().ok_or("weight")?;
+                if weight == 0 {
+                    continue;
+                }
+                let upper =
+                    lower + weight * candidate["factor_basis_points"].as_u64().ok_or("factor")?;
+                if candidate["model"] == receipt["pick"] {
+                    assert!((lower..upper).contains(&roll), "{}", case.name);
+                    matched_interval = true;
+                }
+                lower = upper;
+            }
+            assert!(matched_interval, "{}", case.name);
+        }
+        if case.name == "weighted ready members" {
+            let repeated = resolve_with_seed(&query, &ctx, "operation-route-pools", 2)?;
+            assert_eq!(
+                serde_json::to_value(&repeated)?["pool_selection"],
+                receipt,
+                "same operation and task index must repeat the selection"
+            );
+            let next_task = resolve_with_seed(&query, &ctx, "operation-route-pools", 3)?;
+            assert_ne!(
+                serde_json::to_value(&next_task)?["pool_selection"]["roll"],
+                receipt["roll"],
+                "task index participates in the roll"
+            );
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
+fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let query = serde_json::json!({"choice":{"kind":"named_route","value":"utility"},"effort":null,"confidential":true});
-    let request: RouteRequest = serde_json::from_value(query.clone())?;
-    assert_eq!(
-        resolve(&request, &context(&catalogue, &config, now()?))?
-            .effort
-            .as_deref(),
-        Some("low")
+    catalogue.pools.insert(
+        "free-check".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("codex/gpt-6-luna")?,
+                weight: 1,
+                effort: Some("low".into()),
+                efforts: vec!["low".into()],
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("opencode/opencode/deepseek-v4.1-flash-free")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: true,
+            },
+        ],
     );
-    // Confidential callers cannot use the paid members in this fixture.
-    for row in &mut catalogue.models {
-        if row.model.adapter() != "opencode" {
-            row.trains_on_prompts = Some(true);
-        }
-    }
-    match resolve(&request, &context(&catalogue, &config, now()?)).unwrap_err() {
+    catalogue
+        .models
+        .iter_mut()
+        .find(|row| row.model.as_str() == "codex/gpt-6-luna")
+        .expect("codex member is catalogued")
+        .trains_on_prompts = Some(true);
+    let config = RoutingConfig::default();
+    let ctx = context(&catalogue, &config, now()?);
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute("free-check".into());
+    query.confidential = true;
+    match resolve(&query, &ctx).unwrap_err() {
         RoutingError::NoEligiblePoolMember { exclusions } => {
             assert!(
                 exclusions
@@ -209,13 +634,24 @@ fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
         }
         error => panic!("unexpected pool error: {error}"),
     }
-    let mut query = query;
-    query["allow_free"] = serde_json::json!(true);
-    let request: RouteRequest = serde_json::from_value(query)?;
-    assert_eq!(
-        resolve(&request, &context(&catalogue, &config, now()?))?.model,
-        "opencode/deepseek-v4.1-flash-free"
-    );
+    // OpenCode is not activated in the bundled registry, so opting in moves the
+    // free member past the free gate to the activation gate, never to fallback.
+    query.allow_free = true;
+    match resolve(&query, &ctx).unwrap_err() {
+        RoutingError::NoEligiblePoolMember { exclusions } => {
+            assert!(
+                !exclusions
+                    .iter()
+                    .any(|reason| reason == "free model disabled")
+            );
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "opencode/opencode/deepseek-v4.1-flash-free: disabled")
+            );
+        }
+        error => panic!("unexpected pool error: {error}"),
+    }
     Ok(())
 }
 
@@ -290,41 +726,6 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
     ));
     Ok(())
 }
-#[test]
-fn pool_skips_a_member_without_the_requested_effort() -> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    let mut members = Vec::new();
-    for (name, efforts) in [
-        ("fixture-low", vec!["low"]),
-        ("fixture-high", vec!["low", "high"]),
-    ] {
-        let model = ModelId::parse(&format!("codex/{name}"))?;
-        catalogue.models.push(ModelEntry {
-            model: model.clone(),
-            efforts: efforts.into_iter().map(Into::into).collect(),
-            evidence_ref: "synthetic-controls".into(),
-            family: None,
-            trains_on_prompts: None,
-        });
-        members.push(RoutePoolMember {
-            model,
-            effort: None,
-            free: false,
-        });
-    }
-    catalogue.pools.insert("mixed".into(), members);
-    let config = RoutingConfig::default();
-    let query = RouteRequest {
-        choice: RouteChoice::NamedRoute("mixed".into()),
-        effort: Some("high".into()),
-        confidential: false,
-        allow_free: false,
-        fallback: Fallback::None,
-    };
-    let route = resolve(&query, &context(&catalogue, &config, now()?))?;
-    assert_eq!(route.model, "fixture-high");
-    Ok(())
-}
 fn availability() -> AvailabilityRecord {
     AvailabilityRecord {
         schema_version: 1,
@@ -332,7 +733,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "recordings-20261024-utility-v1".into(),
+        catalogue_revision: "route-pools-20261025-v2".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         last_preflight_error: None,
@@ -350,6 +751,7 @@ fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::e
     let listed = list(
         &RouteListQuery {
             adapter: Some("codex".into()),
+            pool: None,
         },
         &context,
     )?;
@@ -589,6 +991,9 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
 /// A test-only activation gate, with the provider's real mechanics otherwise
 /// unchanged. No fixture activation is exported from the library or registry.
 struct RecordedFixture(&'static dyn provenant_providers::Adapter);
+static RECORDED_CODEX: RecordedFixture = RecordedFixture(&provenant_providers::codex::Codex);
+static RECORDED_CLAUDE: RecordedFixture = RecordedFixture(&provenant_providers::claude::Claude);
+static RECORDED_AGY: RecordedFixture = RecordedFixture(&provenant_providers::agy::Agy);
 impl provenant_providers::Adapter for RecordedFixture {
     fn id(&self) -> &'static str {
         self.0.id()
@@ -947,12 +1352,16 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
         vec![
             RoutePoolMember {
                 model: ModelId::parse("codex/test")?,
+                weight: 1,
                 effort: None,
+                efforts: vec![],
                 free: false,
             },
             RoutePoolMember {
                 model: ModelId::parse("claude/test")?,
+                weight: 1,
                 effort: None,
+                efforts: vec![],
                 free: false,
             },
         ],

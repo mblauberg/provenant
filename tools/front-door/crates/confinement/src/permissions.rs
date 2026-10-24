@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-#[cfg(target_os = "macos")]
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -20,7 +21,7 @@ use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termina
 use provenant_supervisor::fs::Metadata;
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, SafeFs};
+use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -28,6 +29,10 @@ use thiserror::Error;
 use crate::repo::{GitRefName, VerifiedWorktree};
 
 const MAX_PATH_BYTES: usize = 4096;
+const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
+const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
+const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
+const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 #[cfg(any(target_os = "macos", test))]
 const MAX_PATH_GRANTS: usize = 128;
 #[cfg(any(target_os = "macos", test))]
@@ -112,6 +117,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 "#;
 #[cfg(target_os = "macos")]
@@ -191,6 +197,10 @@ pub enum PermissionError {
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
     HeadRead(#[source] std::io::Error),
+    #[error("lane cache sweep could not complete: {0}")]
+    CacheSweepIo(#[source] std::io::Error),
+    #[error("lane cache contents exceed the sweep depth bound")]
+    CacheSweepDepth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -311,6 +321,11 @@ pub struct WorktreeWriteAuthority {
 }
 
 impl WorktreeWriteAuthority {
+    /// Exact lane-only cache already bound into this writer authority.
+    pub fn cargo_cache(&self) -> &PathGrant {
+        &self.cargo_cache
+    }
+
     pub fn for_worktree(
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
@@ -362,6 +377,185 @@ pub fn worktree_cargo_cache(
     };
     validate_noncredential_grant(&grant)?;
     Ok(grant)
+}
+
+/// Remove only marked lane caches whose recorded worktree incarnation is absent.
+/// A sweep can race a lane preparing its cache only if the lane forged its own marker.
+pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, PermissionError> {
+    use provenant_supervisor::fs::LocalFs;
+    use std::io;
+
+    validate_absolute(home)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    match std::fs::symlink_metadata(&cache_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    }
+    let root = LocalFs
+        .open_anchor(&cache_root)
+        .map_err(PermissionError::Filesystem)?;
+    let mut removed = 0;
+    let mut failures = Vec::new();
+    for entry in root.entries().map_err(PermissionError::Filesystem)? {
+        let name = match entry {
+            Ok(name) => name,
+            Err(error) => {
+                failures.push(format!("unreadable lane cache entry: {error}"));
+                continue;
+            }
+        };
+        match prune_worktree_cache(root.as_ref(), &name) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(error) => failures.push(format!("{:?}: {error}", name)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(PermissionError::CacheSweepIo(std::io::Error::other(
+            failures.join("; "),
+        )));
+    }
+    Ok(removed)
+}
+
+fn prune_worktree_cache(
+    root: &dyn provenant_supervisor::fs::SafeDir,
+    name: &OsStr,
+) -> Result<bool, PermissionError> {
+    use std::io;
+
+    let Some(digest) = name.to_str() else {
+        return Ok(false);
+    };
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+    let metadata = match root.metadata_at(name, false) {
+        Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+        Ok(_) => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o7777 != 0o700
+    {
+        return Ok(false);
+    }
+    let cache = match root.open_verified_directory(name) {
+        Ok(cache) => cache,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    let marker_name = OsStr::new(CARGO_CACHE_OWNER);
+    let marker_meta = match cache.metadata_at(marker_name, false) {
+        Ok(metadata)
+            if metadata.kind == FileKind::Regular
+                && metadata.links == 1
+                && metadata.uid == provenant_supervisor::fs::effective_uid() =>
+        {
+            metadata
+        }
+        Ok(_) => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if marker_meta.size > 8192 {
+        return Ok(false);
+    }
+    let mut marker = Vec::with_capacity(marker_meta.size as usize);
+    let file = match cache.open_read(marker_name) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(PermissionError::Filesystem(error)),
+    };
+    if let Err(error) = file.take(8193).read_to_end(&mut marker) {
+        return Err(PermissionError::CacheSweepIo(error));
+    }
+    if marker.len() > 8192 {
+        return Ok(false);
+    }
+    if marker.starts_with(LEGACY_CARGO_CACHE_OWNER_PREFIX) {
+        return Ok(false);
+    }
+    if !marker.starts_with(CARGO_CACHE_OWNER_PREFIX) {
+        return Ok(false);
+    }
+    let owner_bytes = &marker[CARGO_CACHE_OWNER_PREFIX.len()..];
+    // Legacy markers have no inode identity, so retain them rather than guess.
+    if owner_bytes.len() <= 16 {
+        return Ok(false);
+    }
+    let (identity, path_bytes) = owner_bytes.split_at(16);
+    let recorded_device = u64::from_le_bytes(
+        identity[..8]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
+    let recorded_inode = u64::from_le_bytes(
+        identity[8..]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
+    if path_bytes.is_empty() {
+        return Ok(false);
+    }
+    let owner = PathBuf::from(OsString::from_vec(path_bytes.to_vec()));
+    if !owner.is_absolute()
+        || owner
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(&owner) {
+        Ok(metadata) if metadata.dev() == recorded_device && metadata.ino() == recorded_inode => {
+            return Ok(false);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    }
+    remove_cache_contents(cache.as_ref())?;
+    drop(cache);
+    root.rmdir(name).map_err(PermissionError::Filesystem)?;
+    Ok(true)
+}
+
+fn remove_cache_contents(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+) -> Result<(), PermissionError> {
+    remove_cache_contents_at(directory, 0)
+}
+
+fn remove_cache_contents_at(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+    depth: usize,
+) -> Result<(), PermissionError> {
+    if depth >= MAX_CACHE_SWEEP_DEPTH {
+        return Err(PermissionError::CacheSweepDepth);
+    }
+    for entry in directory.entries().map_err(PermissionError::Filesystem)? {
+        let name = entry.map_err(PermissionError::Filesystem)?;
+        let metadata = directory
+            .metadata_at(&name, false)
+            .map_err(PermissionError::Filesystem)?;
+        if metadata.kind == FileKind::Directory {
+            let child = directory
+                .open_verified_directory(&name)
+                .map_err(PermissionError::Filesystem)?;
+            remove_cache_contents_at(child.as_ref(), depth + 1)?;
+            drop(child);
+            directory
+                .rmdir(&name)
+                .map_err(PermissionError::Filesystem)?;
+        } else {
+            directory
+                .unlink(&name)
+                .map_err(PermissionError::Filesystem)?;
+        }
+    }
+    Ok(())
 }
 
 fn verify_cache_metadata(
@@ -429,6 +623,22 @@ pub fn prepare_writer_directories(
                 || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
             {
                 verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+            }
+            if traversed == authority.cargo_cache.path {
+                let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+                let identity = worktree.identity();
+                marker.extend_from_slice(&identity.device.to_le_bytes());
+                marker.extend_from_slice(&identity.inode.to_le_bytes());
+                marker.extend_from_slice(worktree.path().as_os_str().as_encoded_bytes());
+                directory
+                    .atomic_write(
+                        OsStr::new(CARGO_CACHE_OWNER),
+                        ".provenant-owner-",
+                        &marker,
+                        0o600,
+                        PublishMode::Replace,
+                    )
+                    .map_err(PermissionError::Filesystem)?;
             }
         }
     }
@@ -1666,6 +1876,11 @@ fn push_worktree_rule(
     let worktree = sbpl_path(&grants.worktree.path)?;
     let git_dir = sbpl_path(&grants.private_git_dir.path)?;
     let common_dir = sbpl_path(&grants.common_git_dir.path)?;
+    // Git in the lane reads its repository as read-only lanes do (#1061);
+    // writes stay limited to the exact grants below.
+    source.push_str(&format!(
+        "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
+    ));
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
@@ -2924,6 +3139,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -3052,6 +3268,7 @@ mod tests {
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
         assert!(sbpl.contains("(deny file-link)"));
+        assert!(sbpl.contains("(allow sysctl-read)"));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -3102,6 +3319,17 @@ mod tests {
             "shell: {:?}; {}",
             shell_outcome.termination,
             String::from_utf8_lossy(&shell_outcome.stderr.bytes)
+        );
+        let memory_outcome = run(&executables[5], &[Path::new("-n"), Path::new("hw.memsize")]);
+        assert!(
+            successful_probe(&memory_outcome)
+                && String::from_utf8_lossy(&memory_outcome.stdout.bytes)
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|bytes| bytes > 0),
+            "hw.memsize sysctl-read failed under the compiled provider profile: {:?}; {}",
+            memory_outcome.termination,
+            String::from_utf8_lossy(&memory_outcome.stderr.bytes)
         );
         assert!(successful_probe(&run(
             &executables[0],
@@ -3378,5 +3606,99 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn lane_cache_sweep_removes_only_marked_caches_for_missing_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let orphan = cache_root.join("a".repeat(64));
+        let live = cache_root.join("b".repeat(64));
+        let unknown = cache_root.join("c".repeat(64));
+        let legacy = cache_root.join("d".repeat(64));
+        for cache in [&orphan, &live, &unknown, &legacy] {
+            std::fs::create_dir(cache)?;
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let existing_worktree = home.join("worktree");
+        std::fs::create_dir(&existing_worktree)?;
+        let old_worktree = home.join("removed-worktree");
+        std::fs::create_dir(&old_worktree)?;
+        let old_identity = std::fs::metadata(&old_worktree)?;
+        std::fs::rename(&old_worktree, home.join("previous-worktree"))?;
+        std::fs::create_dir(&old_worktree)?;
+        for (cache, owner, identity) in [
+            (&orphan, old_worktree, old_identity),
+            (
+                &live,
+                existing_worktree.clone(),
+                std::fs::metadata(&existing_worktree)?,
+            ),
+        ] {
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&identity.ino().to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
+        }
+        let legacy_owner = home.join("legacy-worktree");
+        std::fs::write(
+            legacy.join(CARGO_CACHE_OWNER),
+            [
+                LEGACY_CARGO_CACHE_OWNER_PREFIX,
+                legacy_owner.as_os_str().as_encoded_bytes(),
+            ]
+            .concat(),
+        )?;
+        std::fs::create_dir(orphan.join("release"))?;
+        std::fs::write(orphan.join("release/provenant"), b"lane artifact")?;
+
+        assert_eq!(prune_orphaned_worktree_cargo_caches(home)?, 1);
+        assert!(!orphan.exists());
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        assert!(legacy.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn lane_cache_sweep_skips_deep_cache_and_continues() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let deep = cache_root.join("a".repeat(64));
+        let ordinary = cache_root.join("b".repeat(64));
+        for cache in [&deep, &ordinary] {
+            std::fs::create_dir(cache)?;
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let missing_owner = home.join("missing-worktree");
+        let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+        marker.extend_from_slice(&1_u64.to_le_bytes());
+        marker.extend_from_slice(&2_u64.to_le_bytes());
+        marker.extend_from_slice(missing_owner.as_os_str().as_encoded_bytes());
+        for cache in [&deep, &ordinary] {
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), &marker)?;
+        }
+        let mut nested = deep.clone();
+        for _ in 0..MAX_CACHE_SWEEP_DEPTH + 1 {
+            nested.push("nested");
+            std::fs::create_dir(&nested)?;
+        }
+
+        let error = prune_orphaned_worktree_cargo_caches(home)
+            .expect_err("deep cache is skipped and reported after the sweep");
+        assert!(error.to_string().contains(&"a".repeat(64)));
+        assert!(deep.is_dir());
+        assert!(!ordinary.exists());
+        Ok(())
     }
 }

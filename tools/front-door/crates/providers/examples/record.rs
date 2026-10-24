@@ -72,6 +72,8 @@ struct Args {
     write: bool,
     skip_live: bool,
     executable: PathBuf,
+    provenant: PathBuf,
+    assets: PathBuf,
     endpoint: String,
 }
 
@@ -117,6 +119,19 @@ fn args() -> Result<Args> {
         write,
         skip_live,
         executable: std::fs::canonicalize(found)?,
+        provenant: std::fs::canonicalize(
+            flags
+                .remove("--provenant")
+                .map(PathBuf::from)
+                .or_else(|| which("provenant"))
+                .ok_or("--provenant or provenant on PATH")?,
+        )?,
+        assets: std::fs::canonicalize(
+            flags
+                .remove("--assets")
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?),
+        )?,
         endpoint: endpoint.into(),
     })
 }
@@ -313,6 +328,16 @@ fn setup(steps: &[SetupStep]) -> Result<()> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => private_dir(path)?,
+            SetupStep::WriteFile { path, bytes } => {
+                use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
             SetupStep::Symlink { link, target } => match std::fs::read_link(link) {
                 Ok(existing) if &existing == target => {}
                 Ok(_) => return Err("conflicting link".into()),
@@ -335,7 +360,7 @@ fn route(args: &Args) -> ResolvedRoute {
         effort: args.effort.clone(),
         catalogue_revision: "recording".into(),
         // This recorder measures provider activation, not signed-in identity.
-        account_key: None,
+        account_key: Some("recording".into()),
         host: "recording".into(),
         alternatives: Default::default(),
         exclusions: Vec::new(),
@@ -346,6 +371,7 @@ fn route(args: &Args) -> ResolvedRoute {
         confidentiality: provenant_records::RouteConfidentiality {
             evidence_ref: "recording".into(),
         },
+        pool_selection: None,
     }
 }
 
@@ -764,6 +790,47 @@ fn successful_bash(stream: &[u8]) -> bool {
     false
 }
 
+/// Codex streams carry no answering model: only its private rollout under the
+/// recording's `CODEX_HOME` can establish one. Other adapters report it in-stream.
+fn answering_model(
+    adapter: &str,
+    session: Option<&str>,
+    stream_model: Option<&str>,
+    codex_home: &Path,
+) -> Option<String> {
+    if adapter == "codex" {
+        session
+            .and_then(|thread| provenant_providers::codex_rollout::observe(codex_home, thread).ok())
+            .map(|turn| turn.model)
+    } else {
+        stream_model.map(str::to_owned)
+    }
+}
+
+#[test]
+fn codex_answering_model_comes_from_the_private_rollout() {
+    let home = std::env::temp_dir().join(format!("provenant-record-{}", std::process::id()));
+    let day = home.join("sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    std::fs::write(
+        day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":thread}}),
+            json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+        ),
+    )
+    .unwrap();
+    let observed = answering_model("codex", Some(thread), None, &home);
+    let unbound = answering_model("codex", None, Some("argv-model"), &home);
+    let claude = answering_model("claude", None, Some("claude-sonnet-5"), &home);
+    std::fs::remove_dir_all(&home).unwrap();
+    assert_eq!(observed.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(unbound, None);
+    assert_eq!(claude.as_deref(), Some("claude-sonnet-5"));
+}
+
 #[test]
 fn bash_proof_needs_a_matching_successful_tool_result() {
     let request = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"printf provenant-shell-proof"}}]}}"#;
@@ -810,11 +877,8 @@ fn main() -> Result<()> {
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
     let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-    let runtime = UtilityRuntime::new(
-        fs,
-        std::fs::canonicalize(which("git").ok_or("git")?)?,
-        &layout.home_git,
-    )?;
+    let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
+    let runtime = UtilityRuntime::new(fs, git.clone(), &layout.home_git)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,
@@ -887,11 +951,31 @@ fn main() -> Result<()> {
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);
-            Some(refresh_if_expiring(&executor, &login, &now, deadline)?)
+            Some(refresh_if_expiring(
+                &executor, &login, &now, deadline, None,
+            )?)
         }
         _ => None,
     };
+    let state = args.root.join("provenant-state");
+    private_dir(&state)?;
+    for child in ["fabric", "projects", "runs", "workflow"] {
+        private_dir(&state.join(child))?;
+    }
     let route = route(&args);
+    // Continuations bind an account key; register the login source the recording uses.
+    let account = provenant_providers::accounts::Registration {
+        adapter: args.adapter.clone(),
+        label: "recording".into(),
+        key: "recording".into(),
+        directory: home.join(if args.adapter == "codex" {
+            ".codex"
+        } else {
+            ".claude"
+        }),
+    }
+    .registered()
+    .ok();
     let mut records = Vec::new();
     let mut continuation = None;
     let mut last_profile = None;
@@ -922,10 +1006,20 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
-            account: None,
+            account: account.as_ref(),
             token: token.as_ref(),
             cwd,
             nonce,
+            provenant: provenant_providers::LaneRuntime {
+                executable: &args.provenant,
+                git: &git,
+                state: &args.root.join("provenant-state"),
+                child_state: &args.root.join("provenant-state/children/recording"),
+                home: &home,
+                depth: 1,
+                attempt: provenant_core::AttemptId::from_bytes(nonce),
+                assets: &args.assets,
+            },
         })?;
         spec.profile.observations = expected(&spec.profile, args.writer);
         if args.skip_live {
@@ -943,11 +1037,16 @@ fn main() -> Result<()> {
         let mut stream = spec.stream;
         adapter.observe(&mut stream, &run.outcome.stdout.bytes)?;
         let outcome = adapter.finish(stream, exit(&run.outcome))?;
+        let model = answering_model(
+            &args.adapter,
+            outcome.session(),
+            outcome.model(),
+            &layout.state,
+        );
         eprintln!(
-            "{session}: exit={:?} status={:?} model={:?} stderr={}",
+            "{session}: exit={:?} status={:?} model={model:?} stderr={}",
             run.outcome.termination,
             outcome.status(),
-            outcome.model(),
             String::from_utf8_lossy(&run.outcome.stderr.bytes)
                 .chars()
                 .take(2000)
@@ -971,7 +1070,7 @@ fn main() -> Result<()> {
         if session == "fresh" {
             continuation = Some(adapter.continuation(&outcome, &route, "recording")?);
         }
-        records.push((session, run, outcome, writer_shell_proof));
+        records.push((session, run, outcome, model, writer_shell_proof));
         last_profile = Some((plan, spec.profile));
     }
 
@@ -1046,7 +1145,7 @@ fn main() -> Result<()> {
         .trim()
         .to_owned();
     let platform = platform()?;
-    for (session, run, outcome, writer_shell_proof) in &records {
+    for (session, run, outcome, model, writer_shell_proof) in &records {
         let redacted = redactor.stream(&run.outcome.stdout.bytes)?;
         let argv: Vec<String> = run
             .argv
@@ -1068,7 +1167,7 @@ fn main() -> Result<()> {
             "access_mode": access,
             "process_exit": exit(&run.outcome).code,
             "outcome": format!("{:?}", outcome.status()),
-            "answering_model": outcome.model(),
+            "answering_model": model,
             "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
             "writer_shell_proof": writer_shell_proof,
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),

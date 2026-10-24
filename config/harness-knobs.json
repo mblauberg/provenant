@@ -38,6 +38,11 @@
       "effect": "Default number of lanes one batch runs at once, resolved from the base profile only; task-class values do not apply. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
     },
+    "lanes.max_depth": {
+      "type": "int", "min": 1, "default": 2, "status": "wired",
+      "effect": "Maximum nested lane depth, including the first dispatched lane.",
+      "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
+    },
     "context.ceiling_tokens": {
       "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "advisory",
       "reason": "Rust dispatch has no context-compaction path to consume a token ceiling.",

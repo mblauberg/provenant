@@ -154,8 +154,10 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human = rig.execute_os(binary, &human_args, None)?;
     assert_eq!(code(&human), 0);
     let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
-    assert!(human_stdout.contains("create"));
-    assert!(human_stdout.contains("action(s)"));
+    assert!(human_stdout.contains("links"));
+    assert!(human_stdout.contains("hooks"));
+    assert!(human_stdout.contains("MCP"));
+    assert!(human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
     fs::create_dir_all(&rig.state)?;

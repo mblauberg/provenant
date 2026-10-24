@@ -23,6 +23,7 @@ protocols, Agent Skills format, MCP and Git survive as external contracts.
 Our verbs, tools, records and layouts change together. The installed product
 root stays frozen until cut-over under F0. Delete each old owner and its tests
 when its replacement and retained callers land; install once after integration.
+Fabric events stay mappable to ACP events; this design includes no adapter.
 Do not build selectors, adapters, recorded old-runtime judges or differential
 oracles. Native verification below replaces old parity gates. Leave old
 state stores and transcripts untouched; cut-over only reads the import source.
@@ -728,7 +729,7 @@ Libraries use thiserror enums with typed sources and relevant IDs/paths, without
 raw secret values. Expected contention, stale fences and uncertainty are data.
 Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `stale_fence`, `home_unavailable`, `peer_version`, `launch_unknown`,
-`continuation_unsupported`, `confinement_refused`, `worktree_missing`, `output_too_large`, `state_corrupt`,
+`continuation_unsupported`, `confinement_refused`, `lane_depth`, `worktree_missing`, `output_too_large`, `state_corrupt`,
 `publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. Use CLI's exits: 0 success,
 1 failed/refused/findings, 2 invalid input/version, 3 cannot proceed (setup,

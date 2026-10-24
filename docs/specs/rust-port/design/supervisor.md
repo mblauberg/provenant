@@ -7,6 +7,22 @@ Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
 below. The [cross-area decisions](README.md#cross-area-decisions) bind state,
 layout, commands, waits, records and hooks; cli owns the exact flag freeze.
 
+## Audit implementation notes
+
+The supervisor audit captures provider identity before exec with a bounded
+child/observer handshake, retries transient cleanup census failures and feeds
+cleanup/publication outcomes into the machine. CPU/cancellation and safety
+census observations stay at 100 ms; process checkpoints publish immediately and
+then at 1 s intervals, with unchanged-byte writes skipped. Routine identity and
+tracking updates atomically replace the reservation; the exit publisher's
+reservation commit hook is reserved for the final cleanup facts. Census retries
+and journal failures warn once per failure episode. The reservation's census
+completeness describes the latest observation; exit warnings retain prior journal
+failures. Terminal grace uses `root_flush_ms`; the unused private `terminal_ms`
+field is removed. See the crate's [port notes](../../../../tools/front-door/crates/supervisor/PORT.md#supervisor-audit-corrections)
+for the remaining consumer wiring and platform limits. `PathIo`, strict utility
+text decoding and typed reconcile remain required APIs despite missing callers.
+
 ## Purpose
 
 `provenant-supervisor` holds processes, output and kernel locks from launch
@@ -256,17 +272,53 @@ with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
 
+Shell-capable Claude writers use the same Rust recipe as Codex: immutable
+`~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and
+`~/.rustup/settings.toml`, with `CARGO_HOME` and `CARGO_TARGET_DIR` inside the
+exact lane cache. Host Cargo configuration and credentials receive no grant.
+On macOS with CLT installed, the recipe selects
+`/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
+with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
+is executable. This lets the compiler/linker load `libxcrun.dylib` and SDK
+resources without a read or write grant to Xcode apps or CLT's parent.
+Without CLT, this recipe promises no macOS Rust build support. Shell Git is
+host-selected and linked at `scratch/bin/git`; the exact selected executable
+and non-system linked libraries remain immutable. The required macOS lane
+preparation regression checks Git and builds/runs a test crate through the
+compiled Claude writer profile using a cloned immutable toolchain and isolated
+home. It does not prove a live provider's Bash or environment scrubbing.
+
 For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every
 packed branch, and common `config`/`config.lock` cannot be narrowed to one
 `branch.<name>` section. Remote-tracking refs, packed refs and common config
-therefore remain host-owned. The launch composition must fetch on the host
-before dispatch, let the lane push an explicit `HEAD:<branch>`, then fetch
-and set `branch.<name>.remote`/`merge` on the host after confirmed lane exit;
-verify `git status -sb` reports the upstream. The directory preparation and
-cache grants are implemented in confinement; the full fetch/push/upstream
-conformance row and runtime composition remain outstanding. A lane's
-`git push -u` may push successfully but fail to persist upstream locally.
+therefore remain host-owned. A writer `TaskRequest` may explicitly carry
+`deliver: {remote, branch, open_pr}`. Run binds the configured remote's single
+push URL and lane branch under writer custody, then fetches before provider
+launch. After a complete, identity-verified successful writer exit and terminal
+confinement checks, the live host holder pushes the final commit OID to
+`refs/heads/<branch>`, fetches that destination into its remote-tracking ref,
+and requires it to equal the lane's final head. It sets the lane branch's
+`remote`, `merge` and `pushRemote` config and verifies upstream and status
+before optionally running `gh pr create --head <branch> --fill` for the bound
+repository. Host commands run from the protected primary root with the lane's
+Git directory, so relative credential helpers cannot select lane files. Helper
+search paths and configuration paths exclude the writer worktree; shell SSH
+overrides and opaque shell credential helpers are refused before dispatch.
+Plain executable helpers and gh's standard credential helper remain supported.
+Hooks, fsmonitor, implicit tag pushes and submodule pushes are disabled.
+
+The host's normal credential discovery environment travels only on the private
+guardian handoff pipe, separately from the provider environment. Embedded HTTP
+URL credentials are refused rather than exposed as process arguments. Neither
+provider prose nor generic terminal recovery can start delivery. Cancelled,
+failed, stopped and recovered attempts never initiate it. A sealed start marker
+prevents repeating external effects after interruption; terminal publication
+retains a typed delivered, failed-stage or interrupted receipt and the selected
+head for chair pickup. The local bare-remote conformance test covers host fetch,
+linked-worktree commit, push, tracking/upstream verification, receipt publication
+and interrupted delivery without a second push. Live host credential and PR
+acceptance remains a chair gate for #1246 and #1255.
 
 The providers owner loads and verifies profile fixtures, then constructs the typed
 profile data consumed by confinement. Provider profiles contain fixture-proven

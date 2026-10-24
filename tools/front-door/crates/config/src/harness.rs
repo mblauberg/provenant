@@ -27,7 +27,9 @@ fn limits(harness: Harness) -> Limits {
 
 pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
     match h {
-        Harness::Claude => home.join(".claude.json"),
+        // Claude Code keeps `.claude.json` beside `CLAUDE_CONFIG_DIR` when set.
+        Harness::Claude if base == home.join(".claude") => home.join(".claude.json"),
+        Harness::Claude => base.join(".claude.json"),
         Harness::Codex => base.join("config.toml"),
         Harness::Cursor => base.join("mcp.json"),
         Harness::Agy => base.join("config/mcp_config.json"),
@@ -58,14 +60,19 @@ fn selector(h: Harness) -> &'static str {
     }
 }
 fn mcp(h: Harness, targets: &Targets) -> Result<Json, InstallError> {
-    let binary = targets.bin_dir.join("provenant");
+    mcp_entry(
+        h,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+    )
+}
+
+/// The installer and confined lanes use the same stdio registration.
+pub fn mcp_entry(h: Harness, binary: &Path, state: &Path) -> Result<Json, InstallError> {
     let binary = binary
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP command requires UTF-8"))?;
-    let state = targets
-        .roots
-        .state
-        .as_path()
+    let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("MCP state path requires UTF-8"))?;
     let args = ["--state-dir", state, "fabric", "mcp", "--client", name(h)];
@@ -456,6 +463,7 @@ pub(crate) fn capture(
                 });
             }
             if updated != old {
+                updated = crate::splice::pretty_json(&updated)?;
                 plan.files.insert(
                     hook.clone(),
                     Value::File {
@@ -886,6 +894,7 @@ impl Targets {
                 let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
                 if !default.harnesses.is_empty() {
                     if !self.configured_homes.contains(&target.harness) {
+                        self.environment_homes.insert(target.harness);
                         let instruction = target
                             .instruction
                             .as_ref()

@@ -122,6 +122,49 @@ fn invalid_first_request_does_not_commit_an_era() {
 }
 
 #[test]
+fn modern_tools_list_publishes_output_schemas_for_every_tool() {
+    let mut protocol = Protocol::default();
+    let discover = json!({"jsonrpc":"2.0","id":"discover","method":"server/discover",
+        "params":{"_meta":{VERSION:MODERN,CAPABILITIES:{}}}});
+    assert!(matches!(
+        protocol.receive(&serde_json::to_vec(&discover).unwrap()),
+        Action::Reply(_)
+    ));
+    let list = json!({"jsonrpc":"2.0","id":"list","method":"tools/list",
+        "params":{"_meta":{VERSION:MODERN,CAPABILITIES:{}}}});
+    let Action::Reply(reply) = protocol.receive(&serde_json::to_vec(&list).unwrap()) else {
+        panic!("expected tool catalogue")
+    };
+    let tools = reply["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 11);
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool["outputSchema"].is_object() || tool["outputSchema"].is_array())
+    );
+}
+
+#[test]
+fn legacy_tools_list_omits_modern_output_schemas() {
+    let mut protocol = Protocol::default();
+    let Action::Reply(initialized) = protocol.receive(
+        br#"{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}"#,
+    ) else {
+        panic!("expected legacy initialisation")
+    };
+    assert_eq!(initialized["result"]["protocolVersion"], LEGACY);
+    protocol.receive(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    let Action::Reply(reply) =
+        protocol.receive(br#"{"jsonrpc":"2.0","id":"list","method":"tools/list"}"#)
+    else {
+        panic!("expected legacy tool catalogue")
+    };
+    let tools = reply["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 11);
+    assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
+}
+
+#[test]
 fn malformed_optional_modern_metadata_does_not_commit_an_era() {
     for metadata in [
         json!({VERSION:MODERN,CAPABILITIES:{},CLIENT_INFO:true}),

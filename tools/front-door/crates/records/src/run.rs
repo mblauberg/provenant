@@ -17,6 +17,12 @@ pub struct CanonicalRequest {
     pub tasks: Vec<TaskRequest>,
     pub concurrency: u64,
     pub parent: Option<AttemptId>,
+    /// Depth assigned to this run when it was dispatched from a lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_depth: Option<u64>,
+    /// Attempt whose provider submitted this nested run, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
 }
 impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
@@ -56,6 +62,9 @@ pub struct TaskRequest {
     pub authority_digest: Digest,
     #[serde(default)]
     pub writer: Option<WriterRequest>,
+    /// Explicit authority for host delivery, separate from the writer sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<WriterDeliveryRequest>,
     pub provider_timeout_seconds: u64,
     pub delivery_id: Option<DeliveryId>,
 }
@@ -66,6 +75,52 @@ pub struct TaskRequest {
 pub struct WriterRequest {
     pub project: std::path::PathBuf,
     pub worktree: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterDeliveryRequest {
+    /// A configured remote name, never a URL supplied by a provider.
+    pub remote: String,
+    /// Short destination branch name; the host pushes an explicit full refspec.
+    pub branch: String,
+    #[serde(default)]
+    pub open_pr: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriterDeliveryStage {
+    Prepare,
+    Head,
+    Push,
+    Fetch,
+    Upstream,
+    Verify,
+    PullRequest,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriterDeliveryState {
+    Delivered {
+        pull_request: Option<String>,
+    },
+    /// The writer succeeded, but host delivery needs chair pickup. No retry.
+    Failed {
+        stage: WriterDeliveryStage,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterDeliveryReceipt {
+    pub schema_version: u64,
+    pub remote: String,
+    pub branch: String,
+    pub head: Option<GitOid>,
+    pub state: WriterDeliveryState,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -109,6 +164,12 @@ pub struct RouteRecord {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub account_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_selection: Option<crate::RouteSelectionReceipt>,
 }
 impl From<RouteRecord> for crate::RouteFact {
     fn from(r: RouteRecord) -> Self {
@@ -159,7 +220,11 @@ pub struct RunRecord {
     pub operation_id: OperationId,
     pub request_digest: Digest,
     pub task_ids: Vec<TaskId>,
+    /// Continuation target, independently of nested dispatch metadata.
     pub parent: Option<AttemptId>,
+    /// Attempt that submitted this nested run; grants no cancellation authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
     pub children: Vec<RunId>,
     pub revision: u64,
     pub generation: u64,
@@ -281,10 +346,15 @@ pub struct AttemptRecord {
     pub read_only_writable: Vec<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<WriterDeliveryReceipt>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
+    /// Most recent supervisor-observed stdout/stderr activity while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<WallTime>,
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
@@ -337,4 +407,22 @@ pub struct RunCursor {
     pub actor_id: ActorId,
     pub selection: String,
     pub sequence: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_without_lane_metadata_retains_its_sealed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = serde_json::json!({
+            "schema_version": 1, "tasks": [], "concurrency": 1, "parent": null
+        });
+        let digest = CanonicalV1::record_digest("run-request", 1, &original)?;
+        let request: CanonicalRequest = serde_json::from_value(original.clone())?;
+        assert_eq!(request.digest()?, digest);
+        assert_eq!(serde_json::to_value(request)?, original);
+        Ok(())
+    }
 }
