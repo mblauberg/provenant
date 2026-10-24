@@ -4,6 +4,9 @@ use provenant_core::OperationId;
 use provenant_records::{ResolvedRoute, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
+/// A newer reading clears a refusal only below this use (95%).
+const CLEAR_HEADROOM_BASIS_POINTS: u64 = 9500;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Refusal {
@@ -119,9 +122,8 @@ impl Admission<'_> {
                                 .peekable();
                             windows.peek().is_some()
                                 && windows.all(|w| {
-                                    w.used_basis_points < 10000
-                                        || w.resets_unix_seconds
-                                            .is_some_and(|r| r <= self.now_unix_seconds)
+                                    // A lapsed reset alone cannot clear a refusal.
+                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
                                 })
                         })
                 });
@@ -250,6 +252,70 @@ mod admission_tests {
             .admit(&route(), &"operation".parse().unwrap()),
             Err(QuotaError::Refused("allowance exhausted"))
         ));
+    }
+    #[test]
+    fn refusal_without_pool_keeps_bounded_wait() {
+        let mut record = record(QuotaStatus::Available);
+        let snapshot = record.snapshot.as_mut().unwrap();
+        snapshot.observed_unix_seconds = 1000;
+        snapshot.windows[0].used_basis_points = 3000;
+        snapshot.windows[0].resets_unix_seconds = Some(-2600);
+        snapshot.windows.push(QuotaWindow {
+            window_seconds: None,
+            pool: "pool-b".into(),
+            used_basis_points: 1000,
+            resets_unix_seconds: Some(303400),
+        });
+        let refusal = Refusal {
+            account: record.account.clone(),
+            model: route().model,
+            pool: None,
+            observed_unix_seconds: 1000,
+            resets_unix_seconds: None,
+        };
+        for (now, allowed) in [(1000, false), (4599, false), (4600, true)] {
+            assert_eq!(
+                Admission {
+                    now_unix_seconds: now,
+                    records: std::slice::from_ref(&record),
+                    refusals: std::slice::from_ref(&refusal),
+                    pools: &["pool-a".into(), "pool-b".into()],
+                }
+                .admit(&route(), &"operation".parse().unwrap())
+                .is_ok(),
+                allowed,
+                "now={now}"
+            );
+        }
+    }
+    #[test]
+    fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {
+        for (used, allowed) in [(9700, false), (9600, false), (9500, false), (9499, true)] {
+            let mut record = record(QuotaStatus::Available);
+            let snapshot = record.snapshot.as_mut().unwrap();
+            snapshot.observed_unix_seconds = 4990;
+            snapshot.windows[0].used_basis_points = used;
+            snapshot.windows[0].resets_unix_seconds = Some(1400);
+            let refusal = Refusal {
+                account: record.account.clone(),
+                model: route().model,
+                pool: Some("pool-a".into()),
+                observed_unix_seconds: 4980,
+                resets_unix_seconds: None,
+            };
+            assert_eq!(
+                Admission {
+                    now_unix_seconds: 5000,
+                    records: &[record],
+                    refusals: &[refusal],
+                    pools: &["pool-a".into()],
+                }
+                .admit(&route(), &"operation".parse().unwrap())
+                .is_ok(),
+                allowed,
+                "used={used}"
+            );
+        }
     }
     #[test]
     fn stale_exhausted_snapshot_does_not_clear_newer_refusal() {
