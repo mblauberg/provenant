@@ -489,12 +489,24 @@ fn read_text(source: impl Read) -> Result<String, Fail> {
     String::from_utf8(bytes)
         .map_err(|_| Fail::new(Status::Invalid, "INVALID", "input is not UTF-8"))
 }
-/// Exactly one of `ADAPTER/ID` or a named route.
+/// Exactly one of `ADAPTER/ID` or a named route. `ADAPTER/ID@EFFORT`, the
+/// form route receipts print, is accepted when no separate effort is given.
 pub fn requested(
     model: Option<&str>,
     route: Option<&str>,
     effort: Option<String>,
 ) -> Result<run::RequestedRoute, Fail> {
+    let (model, effort) = match model.and_then(|m| m.rsplit_once('@')) {
+        Some(_) if effort.is_some() => {
+            return Err(Fail::new(
+                Status::Invalid,
+                "INVALID",
+                "give the effort once: ADAPTER/ID@EFFORT or --effort",
+            ));
+        }
+        Some((model, suffix)) => (Some(model), Some(suffix.to_owned())),
+        None => (model, effort),
+    };
     match (model, route) {
         (Some(model), None) => {
             let id = ModelId::parse(model)

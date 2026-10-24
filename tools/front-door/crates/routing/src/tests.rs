@@ -1306,14 +1306,10 @@ fn distinct_accounts_of_one_adapter_are_valid_resolution_inputs()
         120,
     )?];
     context.quota = &observations;
+    // Without an override, the exhausted first registration is skipped.
     let resolved = resolve(&query, &context)?;
-    assert_eq!(resolved.account_key.as_deref(), Some("opaque-account"));
-    assert!(matches!(
-        resolved.readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Exhausted
-        }
-    ));
+    assert_eq!(resolved.account_key.as_deref(), Some("second-account"));
+    assert!(matches!(resolved.readiness, RouteReadiness::Ready { .. }));
     let selected = resolve_for_account(&query, &context, Some("second-account"))?;
     assert_eq!(selected.account_key.as_deref(), Some("second-account"));
     assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));

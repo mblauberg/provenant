@@ -330,6 +330,56 @@ fn availability_reason(
     }
     None
 }
+fn account_reason<'q>(
+    reg: &Registration,
+    model: &ModelId,
+    listed: bool,
+    availability: &AvailabilityRecord,
+    access: Option<&AccessContext<'_>>,
+    context: &'q RoutingContext<'_>,
+) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
+    let mut reason = availability_reason(reg, Some(availability), context);
+    if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
+        reason = Some(RouteExclusionReason::DisclosureDenied);
+    }
+    if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
+        reason = Some(RouteExclusionReason::ConfinementUnavailable);
+    }
+    // Known catalogue controls can use the fresh executable/account preflight.
+    // An unlisted exact ID additionally needs a current provider observation.
+    if reason.is_none()
+        && !listed
+        && !availability
+            .observed_models
+            .iter()
+            .any(|m| m == model.model())
+    {
+        reason = Some(RouteExclusionReason::UnverifiedModel);
+    }
+    let quota = context
+        .quota
+        .iter()
+        .filter(|q| {
+            q.model == *model
+                && q.snapshot.schema_version == 1
+                && q.snapshot.account.adapter == model.adapter()
+                && Some(&q.snapshot.account.account_key) == availability.account_key.as_ref()
+                && q.snapshot.observed_unix_seconds <= context.now_seconds()
+                && q.snapshot.observed_unix_seconds < q.expires_unix_seconds
+                && context.now_seconds() < q.expires_unix_seconds
+        })
+        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
+    if reason.is_none()
+        && let Some(q) = quota
+    {
+        reason = match q.snapshot.status {
+            QuotaStatus::Exhausted => Some(RouteExclusionReason::Exhausted),
+            QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
+            _ => None,
+        };
+    }
+    (reason, quota)
+}
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
@@ -347,49 +397,33 @@ fn candidate(
     }) {
         return Err(RoutingError::UnsupportedEffort);
     }
-    let availability = context
+    let access = context.access.iter().find(|a| a.adapter == model.adapter());
+    // Several registered accounts may serve one adapter: take a ready one with
+    // the most pacing headroom, so exhausted accounts are skipped rather than
+    // chosen by registration order.
+    let evaluated: Vec<_> = context
         .availability
         .iter()
-        .find(|a| a.adapter == model.adapter());
-    let access = context.access.iter().find(|a| a.adapter == model.adapter());
-    let mut reason = availability_reason(reg, availability, context);
-    if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
-        reason = Some(RouteExclusionReason::DisclosureDenied);
-    }
-    if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
-        reason = Some(RouteExclusionReason::ConfinementUnavailable);
-    }
-    // Known catalogue controls can use the fresh executable/account preflight.
-    // An unlisted exact ID additionally needs a current provider observation.
-    if reason.is_none()
-        && entry.is_none()
-        && availability.is_none_or(|a| !a.observed_models.iter().any(|m| m == model.model()))
-    {
-        reason = Some(RouteExclusionReason::UnverifiedModel);
-    }
-    let account = availability.and_then(|a| a.account_key.clone());
-    let quota = context
-        .quota
-        .iter()
-        .filter(|q| {
-            q.model == *model
-                && q.snapshot.schema_version == 1
-                && q.snapshot.account.adapter == model.adapter()
-                && Some(&q.snapshot.account.account_key) == account.as_ref()
-                && q.snapshot.observed_unix_seconds <= context.now_seconds()
-                && q.snapshot.observed_unix_seconds < q.expires_unix_seconds
-                && context.now_seconds() < q.expires_unix_seconds
+        .filter(|a| a.adapter == model.adapter())
+        .map(|a| {
+            let (reason, quota) = account_reason(reg, model, entry.is_some(), a, access, context);
+            let headroom = quota
+                .and_then(|q| pace_snapshot_factor(&q.snapshot, context.now_seconds()))
+                .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS);
+            (a, reason, headroom)
         })
-        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
-    if reason.is_none()
-        && let Some(q) = quota
-    {
-        reason = match q.snapshot.status {
-            QuotaStatus::Exhausted => Some(RouteExclusionReason::Exhausted),
-            QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
-            _ => None,
-        };
-    }
+        .collect();
+    let best = evaluated
+        .iter()
+        .filter(|(_, reason, _)| reason.is_none())
+        .max_by_key(|(_, _, headroom)| *headroom)
+        .or_else(|| evaluated.first());
+    let availability = best.map(|(a, _, _)| *a);
+    let reason = match best {
+        Some((_, reason, _)) => reason.clone(),
+        None => availability_reason(reg, None, context),
+    };
+    let account = availability.and_then(|a| a.account_key.clone());
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable { reason },
         (None, Some(a)) => RouteReadiness::Ready {
