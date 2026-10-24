@@ -1,0 +1,178 @@
+[
+  {
+    "access_mode": "read_only",
+    "activation_eligible": true,
+    "answering_model": "gemini-3.8-flash",
+    "argv": [
+      "FIXTURE_HOME/.local/bin/agy",
+      "--output-format",
+      "stream-json",
+      "--disable-slash-commands",
+      "--print-timeout",
+      "900s",
+      "--model",
+      "gemini-3.8-flash",
+      "--print",
+      "Reply with the word ok"
+    ],
+    "cli_version": "1.4.7",
+    "confinement": "sandbox-exec deny-default profile, observations in agy/confinement.json",
+    "fixture": "agy/live-read_only-fresh.jsonl",
+    "id": "agy-live-read_only-fresh",
+    "keychain_ipc_proof": false,
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok",
+    "session_mode": "fresh",
+    "sha256": "3267049bdc23fa1677a0fc7b80d98d608ee9dcddbe6f2349c7228ce1c3562394",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "subprocess_env_scrub": false,
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ],
+    "writer_shell_proof": false
+  },
+  {
+    "access_mode": "read_only",
+    "activation_eligible": true,
+    "answering_model": "gemini-3.8-flash",
+    "argv": [
+      "FIXTURE_HOME/.local/bin/agy",
+      "--output-format",
+      "stream-json",
+      "--disable-slash-commands",
+      "--print-timeout",
+      "900s",
+      "--conversation",
+      "FIXTURE_SESSION_IDENTIFIER",
+      "--model",
+      "gemini-3.8-flash",
+      "--print",
+      "Reply with the word ok again"
+    ],
+    "cli_version": "1.4.7",
+    "confinement": "sandbox-exec deny-default profile, observations in agy/confinement.json",
+    "fixture": "agy/live-read_only-resume.jsonl",
+    "id": "agy-live-read_only-resume",
+    "keychain_ipc_proof": false,
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok again",
+    "session_mode": "resume",
+    "sha256": "077768821603da3955cf6b27b4167e0ea4d7f8c69ed86d3deeb723a3d3153fe1",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "subprocess_env_scrub": false,
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ],
+    "writer_shell_proof": false
+  },
+  {
+    "access_mode": "worktree_write",
+    "activation_eligible": true,
+    "answering_model": "gemini-3.8-flash",
+    "argv": [
+      "FIXTURE_HOME/.local/bin/agy",
+      "--output-format",
+      "stream-json",
+      "--disable-slash-commands",
+      "--print-timeout",
+      "900s",
+      "--mode",
+      "accept-edits",
+      "--model",
+      "gemini-3.8-flash",
+      "--print",
+      "Using only your file-writing tool, with no shell commands and no listing or reading of other files, create the file note.txt in the current directory containing the word ok, then reply with the word ok"
+    ],
+    "cli_version": "1.4.7",
+    "confinement": "sandbox-exec deny-default profile, observations in agy/confinement.json",
+    "fixture": "agy/live-worktree_write-fresh.jsonl",
+    "id": "agy-live-worktree_write-fresh",
+    "keychain_ipc_proof": false,
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Using only your file-writing tool, with no shell commands and no listing or reading of other files, create the file note.txt in the current directory containing the word ok, then reply with the word ok",
+    "session_mode": "fresh",
+    "sha256": "8f6955e108c672d1857ab0bb793ca7d00f9aeff9b5e3cdf41fd6f2ede47ab3db",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "subprocess_env_scrub": false,
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ],
+    "writer_shell_proof": false
+  },
+  {
+    "access_mode": "worktree_write",
+    "activation_eligible": true,
+    "answering_model": "gemini-3.8-flash",
+    "argv": [
+      "FIXTURE_HOME/.local/bin/agy",
+      "--output-format",
+      "stream-json",
+      "--disable-slash-commands",
+      "--print-timeout",
+      "900s",
+      "--mode",
+      "accept-edits",
+      "--conversation",
+      "FIXTURE_SESSION_IDENTIFIER",
+      "--model",
+      "gemini-3.8-flash",
+      "--print",
+      "Reply with the word ok again"
+    ],
+    "cli_version": "1.4.7",
+    "confinement": "sandbox-exec deny-default profile, observations in agy/confinement.json",
+    "fixture": "agy/live-worktree_write-resume.jsonl",
+    "id": "agy-live-worktree_write-resume",
+    "keychain_ipc_proof": false,
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok again",
+    "session_mode": "resume",
+    "sha256": "8965e0400617d041c036d9bb2afad5fbad0eeb3fc51dccb1494402c2fb68f5df",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "subprocess_env_scrub": false,
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ],
+    "writer_shell_proof": false
+  }
+]

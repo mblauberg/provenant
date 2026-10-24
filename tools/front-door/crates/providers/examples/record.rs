@@ -53,9 +53,13 @@ const SHELL_PROOF_COMMAND: &str = r#"test -z "${CLAUDE_CODE_OAUTH_TOKEN+x}" && t
 const SHELL_RESUME_PROMPT: &str = "Use Bash to run git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok again";
 /// Writers must prove an in-sandbox tool edit, not just a reply.
 const WRITER_PROMPT: &str = "Create the file note.txt in the current directory containing the word ok, then reply with the word ok";
+/// Agy's headless mode ends the turn on a denied command, so its writer is
+/// told to edit without a shell.
+const AGY_WRITER_PROMPT: &str = "Using only your file-writing tool, with no shell commands and no listing or reading of other files, create the file note.txt in the current directory containing the word ok, then reply with the word ok";
 const SHELL_WRITER_PROMPT: &str = "Use Bash to run printf ok > note.txt in the current directory and git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok";
 const BRANCH: &str = "provenant-probe";
-const PROBE_TOOLS: [&str; 6] = [
+const PROBE_TOOLS: [&str; 7] = [
+    "/bin/ln",
     "/bin/cat",
     "/usr/bin/touch",
     "/bin/dd",
@@ -108,6 +112,7 @@ fn args() -> Result<Args> {
         "codex" => ("codex", "api.openai.com"),
         "claude" => ("claude", "api.anthropic.com"),
         "opencode" => ("opencode", "opencode.ai"),
+        "agy" => ("agy", "generativelanguage.googleapis.com"),
         _ => return Err("no recorder form for this adapter".into()),
     };
     let found = which(binary).ok_or("executable not on PATH")?;
@@ -652,6 +657,51 @@ fn probes(
     Ok(list)
 }
 
+/// Narrowed-grant denials (#927, #1044), probed but not stored: no symlink can
+/// be created in writable state, and no user configuration, hook, extension or
+/// plugin directory takes a new entry. Each must be denied.
+fn narrowed_denials(home: &Path, plan: &ConfinedPlan) -> Vec<(String, Probe)> {
+    let permissions = plan.permissions();
+    let writable = permissions
+        .private_state
+        .as_ref()
+        .unwrap_or(&permissions.scratch);
+    let mut list = vec![(
+        "symlink in writable state".to_owned(),
+        probe(
+            FixtureOperation::StateWrite,
+            "/bin/ln",
+            &[
+                Path::new("-s"),
+                Path::new("/usr/bin/true"),
+                &writable.path.join("probe-link"),
+            ],
+        ),
+    )];
+    let configuration = [
+        ".gemini/config",
+        ".gemini/antigravity-cli/plugins",
+        ".gemini/antigravity-cli/plugin_data",
+        ".gemini/antigravity-cli/bin",
+        ".claude/hooks",
+        ".codex/rules",
+        ".cursor/extensions",
+    ];
+    for relative in configuration {
+        let directory = home.join(relative);
+        if directory.is_dir() {
+            list.push((
+                format!("new entry in {relative}"),
+                touch(
+                    FixtureOperation::UndeclaredWrite,
+                    directory.join("provenant-probe"),
+                ),
+            ));
+        }
+    }
+    list
+}
+
 fn observe(
     context: &Context<'_>,
     command_prefix: &[OsString],
@@ -975,10 +1025,14 @@ fn main() -> Result<()> {
                 },
                 protected_roots: vec![exact(&cwd.join("AGENTS.md"))],
                 secret_roots: vec![subtree(&layout.secret)],
-                // Only Codex reads a credential inside the sandbox. Claude's
-                // token arrives in its environment; OpenCode's free models
-                // need none.
-                selected_authentication: (args.adapter == "codex").then(|| "login".into()),
+                // Codex reads its login file and Agy the login keychain inside
+                // the sandbox. Claude's token arrives in its environment;
+                // OpenCode's free models need none.
+                selected_authentication: match args.adapter.as_str() {
+                    "codex" => Some("login".into()),
+                    "agy" => Some("keychain".into()),
+                    _ => None,
+                },
                 include_continuation: false,
                 network: vec![],
                 capabilities: vec![],
@@ -1010,20 +1064,26 @@ fn main() -> Result<()> {
     } else {
         "recording".into()
     };
-    let account = provenant_providers::accounts::Registration {
-        adapter: args.adapter.clone(),
-        label: "recording".into(),
-        key: account_key.clone(),
-        org_fingerprint: None,
-        directory,
-        plan: None,
-        priority: None,
-        billing_anchor: None,
-        limits: None,
-    }
-    .registered()?;
+    // Agy has no signed-in identity source, so it records without a registered
+    // account; its route carries a fixed opaque key only to bind a continuation.
+    let account = (args.adapter != "agy")
+        .then(|| {
+            provenant_providers::accounts::Registration {
+                adapter: args.adapter.clone(),
+                label: "recording".into(),
+                key: account_key.clone(),
+                org_fingerprint: None,
+                directory,
+                plan: None,
+                priority: None,
+                billing_anchor: None,
+                limits: None,
+            }
+            .registered()
+        })
+        .transpose()?;
     let token = match (args.adapter.as_str(), &account) {
-        ("claude", account) => {
+        ("claude", Some(account)) => {
             let scratch = args.root.join("refresh");
             private_dir(&scratch)?;
             let login = Login {
@@ -1053,6 +1113,8 @@ fn main() -> Result<()> {
     let mut session_ids = Vec::new();
     let fresh_prompt = if args.writer && args.adapter == "claude" {
         SHELL_WRITER_PROMPT
+    } else if args.writer && args.adapter == "agy" {
+        AGY_WRITER_PROMPT
     } else if args.writer {
         WRITER_PROMPT
     } else {
@@ -1077,7 +1139,7 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
-            account: Some(&account),
+            account: account.as_ref(),
             token: token.as_ref(),
             cwd,
             nonce,
@@ -1197,6 +1259,13 @@ fn main() -> Result<()> {
             .into());
         }
         observed.insert(item.operation, result);
+    }
+    for (label, item) in narrowed_denials(&home, &plan) {
+        let (result, stderr) = observe(&context, &prefix, cwd, &env, &item)?;
+        eprintln!("narrowed {label}: {result:?} {}", stderr.trim());
+        if result != FixtureOutcome::Denied {
+            return Err(format!("{label} was {result:?}, expected Denied").into());
+        }
     }
     if profile.spec.loopback_server {
         observed.insert(FixtureOperation::LoopbackServer, FixtureOutcome::Allowed);
