@@ -1292,6 +1292,67 @@ fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
             .is_some_and(|m| m.contains("#1457")),
         "{writer}"
     );
+    // The local host's own ID is local placement, not a peer: the writer is
+    // then judged by its worktree (the primary checkout is refused), never by
+    // the peer-host rule.
+    let output = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?;
+    for (host, operation) in [(local, "local-writer"), ("local", "local-alias-writer")] {
+        let (status, local_writer) = json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                host,
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                worktree,
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--prompt-file",
+                prompt,
+                "--json",
+            ],
+        )?;
+        assert_ne!(status, 0);
+        assert_ne!(
+            local_writer["error"]["code"], "UNSUPPORTED",
+            "{local_writer}"
+        );
+        assert!(
+            !local_writer.to_string().contains("#1457"),
+            "{local_writer}"
+        );
+    }
+    // An unrecognised name is unknown, not a refused peer.
+    let (status, unknown_writer) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "laptop",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "unknown-writer",
+            "--prompt-file",
+            prompt,
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(
+        unknown_writer["error"]["code"], "UNKNOWN_HOST",
+        "{unknown_writer}"
+    );
     let (status, unknown) = json_command(
         &rig,
         &[

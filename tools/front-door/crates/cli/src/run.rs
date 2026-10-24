@@ -769,7 +769,7 @@ pub fn submit(
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
     reply_waited("dispatch", dispatch_inner(command, edge))
 }
-fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     let access = &command.access;
     let unsupported = |what: &str| {
         Err(Fail::new(
@@ -788,13 +788,22 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     {
         return unsupported("network, capability or read-root access");
     }
-    if command.host.is_some() && matches!(access.mode, Mode::WorktreeWrite) {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "worktree-write dispatch to a peer host is not available in this build (#1457); \
-             use --mode read-only",
-        ));
+    // Naming this host is ordinary local placement in any mode; a writer
+    // needs its worktree on this machine, so only a peer is refused.
+    if let Some(host) = command.host.as_deref() {
+        if remote::names_local_host(edge, host)? {
+            command.host = None;
+        } else if matches!(command.access.mode, Mode::WorktreeWrite) {
+            if !remote::names_peer(edge, host)? {
+                return Err(remote::unknown_host(host));
+            }
+            return Err(Fail::new(
+                Status::Refused,
+                "UNSUPPORTED",
+                "worktree-write dispatch to a peer host is not available in this build (#1457); \
+                 use --mode read-only",
+            ));
+        }
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();

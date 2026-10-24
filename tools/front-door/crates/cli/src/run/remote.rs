@@ -342,6 +342,32 @@ fn render(
     (data, format!("host {}\n{human}", hosts.join(",")))
 }
 
+/// Whether `host`, a peer label or host ID, names this machine.
+/// `local`, `localhost`, this host's ID, or a peer label resolving to it.
+pub(super) fn names_local_host(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
+    if matches!(host, "local" | "localhost") {
+        return Ok(true);
+    }
+    let peer = Peer::open(edge)?;
+    let local = peer.context.identity.host;
+    Ok(HostId::parse(host).is_ok_and(|id| id == local)
+        || peer.context.peer_host(host) == Some(local))
+}
+
+pub(super) fn names_peer(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
+    Ok(Peer::open(edge)?.context.peer_host(host).is_some())
+}
+
+pub(super) fn unknown_host(host: &str) -> Fail {
+    Fail::new(
+        Status::Invalid,
+        "UNKNOWN_HOST",
+        format!(
+            "no configured peer named {host}; use `local` for this host or see `provenant fabric host list`"
+        ),
+    )
+}
+
 pub(super) fn dispatch(
     edge: &Edge<'_>,
     host: &str,
@@ -350,13 +376,10 @@ pub(super) fn dispatch(
 ) -> Result<(Value, String, bool), Fail> {
     let peer = Peer::open(edge)?;
     let project = peer.project()?;
-    let host = peer.context.peer_host(host).ok_or_else(|| {
-        Fail::new(
-            Status::Invalid,
-            "UNKNOWN_HOST",
-            format!("no configured peer named {host}; see `provenant fabric host list`"),
-        )
-    })?;
+    let host = peer
+        .context
+        .peer_host(host)
+        .ok_or_else(|| unknown_host(host))?;
     let timeout_ms = batch
         .provider_timeout
         .checked_mul(1000)

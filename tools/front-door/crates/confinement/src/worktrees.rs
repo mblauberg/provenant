@@ -70,6 +70,15 @@ pub enum WorktreeError {
     PrimaryMoved,
     #[error("worktree result path cannot be represented safely")]
     PathEncoding,
+    #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
+        "the partial checkout and new branch were removed, so it is safe to retry"
+    } else {
+        "the partial checkout or branch it made could not be fully removed; inspect .worktrees and the branch before retrying"
+    })]
+    CreateFailed {
+        cause: Box<WorktreeError>,
+        rolled_back: bool,
+    },
     #[error(transparent)]
     Filesystem(#[from] FsError),
     #[error(transparent)]
@@ -90,7 +99,11 @@ pub struct WorktreeContext<'a> {
     pub utility: &'a UtilityRuntime,
     pub workers: &'a dyn WorkerObserver,
     pub clock: &'a dyn Clock,
+    /// Bounds Git reads. Keep it short: a stuck read is a defect to surface.
     pub utility_budget: UtilityBudget,
+    /// Bounds Git mutations. A checkout writes the whole tree and can
+    /// legitimately take minutes on a large repository, so it is far longer.
+    pub mutation_budget: UtilityBudget,
     pub lock_budget: WaitBudget,
 }
 
@@ -831,7 +844,8 @@ fn read_worktree_identity(
 /// its `state/worktrees/<ProjectId>/<digest>` directory and a binding that
 /// names the worktree and Git directory by identity, never by raw path. The
 /// registration must still be active, for this project and branch, so a
-/// launch cannot claim custody of a worktree Provenant did not create.
+/// launch cannot claim custody of a worktree Provenant did not create. A
+/// missing state record is `NotFound`; every other failure is `UnknownWriter`.
 pub fn writer_custody(
     project_state: &Directory,
     project: ProjectId,
@@ -841,9 +855,17 @@ pub fn writer_custody(
 ) -> Result<(Directory, WriterBinding), WorktreeError> {
     worktree.repo().revalidate()?;
     let canonical = canonicalize(worktree.path())?;
+    // No state record at all means `provenant worktree create` never made this
+    // tree; callers report that apart from a damaged or stale record.
     let state = project_state
         .open_verified_directory(&state_dir_name(&canonical))
-        .map_err(|_| WorktreeError::UnknownWriter)?;
+        .map_err(|error| {
+            if error.is_not_found() {
+                WorktreeError::NotFound
+            } else {
+                WorktreeError::UnknownWriter
+            }
+        })?;
     let bytes = read_bounded(&state, OsStr::new(IDENTITY), MAX_STATE_RECORD)
         .map_err(|_| WorktreeError::UnknownWriter)?;
     let identity: WorktreeIdentity =
@@ -999,8 +1021,10 @@ fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState 
     }
 }
 
-/// Create a clean linked checkout at a pinned commit. Failed registration after
-/// Git succeeds leaves a visible tree with unknown state; no guessed rollback.
+/// Create a clean linked checkout at a pinned commit. A failed or killed
+/// `worktree add` is rolled back (see `roll_back_failed_add`). Failed
+/// registration after Git succeeds leaves a visible tree with unknown state;
+/// no guessed rollback.
 pub fn create(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
@@ -1124,7 +1148,7 @@ pub fn create(
         return Err(WorktreeError::UnknownWriter);
     }
     let primary_head = primary_head(context, cancel)?;
-    execute_mutation(
+    if let Err(cause) = execute_mutation(
         context,
         GitMutation::WorktreeAdd {
             branch: branch.clone(),
@@ -1133,7 +1157,18 @@ pub fn create(
             create_branch,
         },
         cancel,
-    )?;
+    ) {
+        let rolled_back = roll_back_failed_add(
+            context,
+            &target,
+            create_branch.then_some((&branch, base)),
+            cancel,
+        );
+        return Err(WorktreeError::CreateFailed {
+            cause: Box::new(cause),
+            rolled_back,
+        });
+    }
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
@@ -1196,6 +1231,75 @@ pub fn create(
     })
 }
 
+/// Undo a `worktree add` that failed or was killed part-way. Only what this
+/// call made is touched: `target` was verified absent before the add, its
+/// admin entry is found by the `gitdir` file that points at it, and the branch
+/// goes only when this call created it, it still points at `base` and no
+/// worktree has it checked out. Anything that cannot be confirmed is left and
+/// reported as not rolled back. Returns whether nothing of ours remains.
+fn roll_back_failed_add(
+    context: &WorktreeContext<'_>,
+    target: &Path,
+    created_branch: Option<(&GitRefName, GitOid)>,
+    cancel: &CancelToken,
+) -> bool {
+    let mut clean = remove_admin_entry(context.repo.common_git_dir(), target);
+    clean &= match std::fs::remove_dir_all(target) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    };
+    let Some((branch, base)) = created_branch else {
+        return clean;
+    };
+    let Ok(entries) = read_worktrees(context, cancel) else {
+        return false;
+    };
+    if entries
+        .iter()
+        .any(|entry| entry.branch.as_ref() == Some(branch))
+    {
+        return false;
+    }
+    match read_branch_tips(context, cancel) {
+        Ok(tips) => match tips.get(branch) {
+            None => clean,
+            Some(tip) if *tip == base => {
+                clean
+                    && execute_mutation(
+                        context,
+                        GitMutation::DeleteRef {
+                            name: branch.clone(),
+                            expected_old_oid: base,
+                        },
+                        cancel,
+                    )
+                    .is_ok()
+            }
+            Some(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Remove the `<common git dir>/worktrees/<name>` entry whose `gitdir` names
+/// `target`. Returns false when a matching entry could not be removed.
+fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
+    let wanted = target.join(".git");
+    let Ok(entries) = std::fs::read_dir(common_git_dir.join("worktrees")) else {
+        return true;
+    };
+    let mut removed = true;
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read(entry.path().join("gitdir")) else {
+            continue;
+        };
+        if text.trim_ascii_end() == wanted.as_os_str().as_encoded_bytes() {
+            removed &= std::fs::remove_dir_all(entry.path()).is_ok();
+        }
+    }
+    removed
+}
+
 /// The primary checkout's `HEAD` file (it lives in the common git dir, so a
 /// linked worktree finds it too) and, when symbolic, the commit it resolves to,
 /// so a reset or commit on the same branch also counts as a move. Read
@@ -1248,7 +1352,7 @@ fn execute_mutation(
         context.repo,
         context.utility,
         mutation,
-        context.utility_budget,
+        context.mutation_budget,
         cancel,
     )?;
     if exit_code(&outcome)? != 0 {
@@ -1502,7 +1606,7 @@ fn remove_merged_candidate(
             name: branch.clone(),
             expected_old_oid: tip,
         },
-        context.utility_budget,
+        context.mutation_budget,
         cancel,
     );
     if deleted.is_ok_and(|result| exit_code(&result).ok() == Some(0)) {
@@ -1683,6 +1787,7 @@ mod lifecycle_tests {
         clock: SystemClock,
         lock_budget: WaitBudget,
         utility_budget: UtilityBudget,
+        mutation_budget: UtilityBudget,
     }
 
     impl<'a> TestContext<'a> {
@@ -1716,6 +1821,7 @@ mod lifecycle_tests {
                 clock,
                 lock_budget,
                 utility_budget: fixture.budget()?,
+                mutation_budget: fixture.budget()?,
             })
         }
 
@@ -1729,6 +1835,7 @@ mod lifecycle_tests {
                 workers: &self.workers,
                 clock: &self.clock,
                 utility_budget: self.utility_budget,
+                mutation_budget: self.mutation_budget,
                 lock_budget: self.lock_budget,
             }
         }
@@ -1754,6 +1861,101 @@ mod lifecycle_tests {
             &env,
             &git_args,
         )?;
+        Ok(())
+    }
+
+    /// Runs `git worktree add` to completion, then reports it timed out: the
+    /// tree and branch exist, as when a slow checkout is killed part-way.
+    struct TimesOutWorktreeAdd<'a>(&'a provenant_supervisor::exec::SystemExecutor);
+
+    impl Executor for TimesOutWorktreeAdd<'_> {
+        fn execute(
+            &self,
+            options: provenant_supervisor::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+            let adds = options.argv.iter().any(|arg| arg == "add");
+            let mut outcome = self.0.execute(options)?;
+            if adds {
+                outcome.timed_out = true;
+                outcome.termination = Termination::Signal(15);
+            }
+            Ok(outcome)
+        }
+    }
+
+    fn branch_exists(fixture: &Fixture, name: &str) -> bool {
+        fixture
+            .run(&["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")])
+            .is_ok()
+    }
+
+    #[test]
+    fn timed_out_add_rolls_back_its_checkout_and_new_branch() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let faulty = TimesOutWorktreeAdd(&fixture.executor);
+        let mut context = test_context.context();
+        context.executor = &faulty;
+        let request = || WorktreeCreate {
+            branch: "feature/slow".to_owned(),
+            base: Some("HEAD".to_owned()),
+        };
+        let failed = create(&context, request(), &cancel());
+        let Err(WorktreeError::CreateFailed { cause, rolled_back }) = failed else {
+            return Err(format!("expected CreateFailed, got {failed:?}").into());
+        };
+        assert!(rolled_back);
+        assert!(matches!(
+            *cause,
+            WorktreeError::Utility(UtilityError::TimedOut)
+        ));
+        assert!(
+            !fixture
+                .root
+                .join(WORKTREE_ROOT)
+                .join("feature-slow")
+                .exists()
+        );
+        assert!(!branch_exists(&fixture, "feature/slow"));
+        let admin = fixture.repo.common_git_dir().join("worktrees");
+        assert!(!admin.exists() || fs::read_dir(admin)?.next().is_none());
+        // The retry that the leftover state used to block now succeeds.
+        let retried = create(&test_context.context(), request(), &cancel())?;
+        assert!(retried.path.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn timed_out_add_keeps_a_branch_it_did_not_create() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "feature/existing"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let faulty = TimesOutWorktreeAdd(&fixture.executor);
+        let mut context = test_context.context();
+        context.executor = &faulty;
+        let failed = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/existing".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        );
+        assert!(matches!(
+            failed,
+            Err(WorktreeError::CreateFailed {
+                rolled_back: true,
+                ..
+            })
+        ));
+        assert!(branch_exists(&fixture, "feature/existing"));
+        assert!(
+            !fixture
+                .root
+                .join(WORKTREE_ROOT)
+                .join("feature-existing")
+                .exists()
+        );
         Ok(())
     }
 
