@@ -4,6 +4,9 @@ use provenant_core::OperationId;
 use provenant_records::{ResolvedRoute, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
+/// A newer reading clears a refusal only below this use (95%).
+const CLEAR_HEADROOM_BASIS_POINTS: u64 = 9500;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Refusal {
@@ -111,7 +114,7 @@ impl Admission<'_> {
                             w.pool == *pool
                                 // A lapsed reset is not evidence that the provider
                                 // has rolled over a window refused after that reset.
-                                && w.used_basis_points < 9500
+                                && w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
                         })
                     })
             });
@@ -217,7 +220,7 @@ mod admission_tests {
         record
     }
     #[test]
-    fn unscoped_refusal_keeps_bounded_wait_with_unrelated_windows() {
+    fn refusal_without_pool_keeps_bounded_wait() {
         let mut record = record(QuotaStatus::Available);
         let snapshot = record.snapshot.as_mut().unwrap();
         snapshot.observed_unix_seconds = 1000;
