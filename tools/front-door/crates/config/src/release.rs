@@ -385,7 +385,7 @@ pub(crate) fn inventory_with_cleanup(
         root: &Path,
         tail: &Path,
         depth: usize,
-        fs: &dyn SafeFs,
+        dir: Box<dyn provenant_supervisor::fs::SafeDir>,
         output: &mut Vec<PathBuf>,
         count: &mut usize,
         remove_staging: bool,
@@ -393,7 +393,6 @@ pub(crate) fn inventory_with_cleanup(
         if depth > 64 {
             return Err(InstallError::Manifest("inventory bounds"));
         }
-        let dir = directory(&root.join(tail), false, fs)?;
         for entry in dir.entries()? {
             let name = entry?;
             *count += 1;
@@ -412,9 +411,15 @@ pub(crate) fn inventory_with_cleanup(
                 continue;
             }
             match metadata.kind {
-                FileKind::Directory if allowed_directory(&path) => {
-                    walk(root, &path, depth + 1, fs, output, count, remove_staging)?
-                }
+                FileKind::Directory if allowed_directory(&path) => walk(
+                    root,
+                    &path,
+                    depth + 1,
+                    dir.open_verified_directory(&name)?,
+                    output,
+                    count,
+                    remove_staging,
+                )?,
                 FileKind::Regular if path == Path::new("release.json") => {}
                 FileKind::Regular => output.push(path),
                 _ => return Err(InstallError::Tampered(root.join(path))),
@@ -427,7 +432,7 @@ pub(crate) fn inventory_with_cleanup(
         root,
         Path::new(""),
         0,
-        fs,
+        directory(root, false, fs)?,
         &mut output,
         &mut 0,
         remove_staging,

@@ -702,7 +702,7 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                let legacy = snapshots.harness.authorized.contains(path);
+                let legacy = snapshots.harness.authorised.contains(path);
                 if !immutable && !was_owned && !adopt_binary && !legacy && want.selector != "config"
                 {
                     return Err(InstallError::Conflict(path.clone()));
@@ -1136,29 +1136,47 @@ pub(crate) fn directory(
     create: bool,
     fs: &dyn SafeFs,
 ) -> Result<Box<dyn SafeDir>, InstallError> {
-    let mut dir = fs.root(path.is_absolute())?;
+    normal_absolute(path)?;
+    // Bootstrap absolute destinations without following any path component.
+    // A selected path may have mount ancestors (e.g. a separately mounted
+    // HOME or temporary release root). Re-anchor only a held, identity-checked
+    // no-follow mount handle; never reopen an absolute path through aliases.
+    let mut dir = fs.root(true)?;
     for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                dir = match dir.open_verified_directory(name) {
-                    Ok(next) => next,
-                    Err(error) if create && error.is_not_found() => {
-                        match dir.mkdir(name, 0o700) {
-                            Ok(()) => dir.sync()?,
-                            Err(e) if e.is_exists() => {}
-                            Err(e) => return Err(e.into()),
-                        }
-                        dir.open_verified_directory(name)?
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        dir = match dir.open_verified_directory(name) {
+            Ok(next) => next,
+            Err(error) if error.is_cross_device() => {
+                let before = dir.metadata_at(name, false)?;
+                let child = dir.open_directory(name, false)?;
+                let opened = child.metadata()?;
+                let after = dir.metadata_at(name, false)?;
+                if before.kind != FileKind::Directory
+                    || opened.kind != FileKind::Directory
+                    || after.kind != FileKind::Directory
+                    || !before.same_identity(&opened)
+                    || !opened.same_identity(&after)
+                {
+                    return Err(FsError::RaceRefused { name: name.into() }.into());
+                }
+                child.into_anchor()?
             }
-            _ => return Err(InstallError::Path(path.into())),
-        }
+            Err(error) if create && error.is_not_found() => {
+                match dir.mkdir(name, 0o700) {
+                    Ok(()) => dir.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                dir.open_verified_directory(name)?
+            }
+            Err(error) => return Err(error.into()),
+        };
     }
     Ok(dir)
 }
+
 pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>, InstallError> {
     let Some(parent) = path.parent() else {
         return Err(InstallError::Path(path.into()));

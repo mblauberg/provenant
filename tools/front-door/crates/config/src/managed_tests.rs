@@ -549,6 +549,12 @@ impl FaultDir {
     }
 }
 impl SafeDir for FaultDir {
+    fn into_anchor(self: Box<Self>) -> TestFsResult<Box<dyn SafeDir>> {
+        Ok(Box::new(Self {
+            inner: self.inner.into_anchor()?,
+            state: self.state,
+        }))
+    }
     fn metadata(&self) -> TestFsResult<Metadata> {
         self.inner.metadata()
     }
@@ -2298,4 +2304,23 @@ fn compiled_replace_disposition_refuses_missing_assets_and_links_library_skills(
             .ends_with("library/playwright")
     );
     assert!(f.plan().actions().is_empty());
+}
+
+#[test]
+fn absolute_bootstrap_refuses_intermediate_state_and_release_symlinks() {
+    let f = Fixture::new();
+    let foreign = f.home.join("foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(foreign.join("sentinel"), b"untouched").unwrap();
+    for root in [
+        f.targets.roots.state.as_path().to_path_buf(),
+        f.source.clone(),
+    ] {
+        fs::create_dir_all(&root).unwrap();
+        let link = root.join("escaped");
+        symlink(&foreign, &link).unwrap();
+        assert!(directory(&link.join("nested"), true, &LocalFs).is_err());
+        assert!(!foreign.join("nested").exists());
+        assert_eq!(fs::read(foreign.join("sentinel")).unwrap(), b"untouched");
+    }
 }

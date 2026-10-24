@@ -69,7 +69,7 @@ selected harness changes. Stop selected clients and config editors through
 `check install`; pass `--legacy-checkout` only for exact entries from that
 checkout. The installer does not discover launchd services or delete paths that
 are absent from its printed plan. Retiring an already installed collector needs
-separate host-specific authorization and verification. Preserve old ledger,
+separate host-specific authorisation and verification. Preserve old ledger,
 transcript and collector data.
 
 ## Provider quota

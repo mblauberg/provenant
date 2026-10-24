@@ -178,7 +178,7 @@ pub(crate) struct HarnessPlan {
     pub removals: BTreeSet<PathBuf>,
     pub owned: Vec<OwnedEntry>,
     pub changes: BTreeMap<PathBuf, Vec<SelectorChange>>,
-    pub authorized: BTreeSet<PathBuf>,
+    pub authorised: BTreeSet<PathBuf>,
 }
 fn capture_one(
     path: &Path,
@@ -775,7 +775,7 @@ fn legacy_links(
             }) = snap
                 && actual == link.target
             {
-                plan.authorized.insert(path.clone());
+                plan.authorised.insert(path.clone());
                 if !link.retained || matches!(link.area, LegacyArea::GitHook) {
                     // Hooks are off; retained handlers cannot register until
                     // CLI owns a fixture-backed HookSpec.

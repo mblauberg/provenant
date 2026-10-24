@@ -2,7 +2,7 @@
 
 These fixtures come from isolated command-line observations on macOS arm64. Every client process received `env -i` with fresh `/private/tmp` values for `HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and the XDG config/data/state/cache directories. The working directory was also fresh under `/private/tmp`. No real harness home/config was read, no provider was called, and no user credentials were present in the child environment.
 
-`/private/tmp/provenant-contracts.<random>` was normalized to `/FIXTURE_ROOT` in the fixture data. The fake executable only logged `argv` and returned MCP initialize, tools/list, resources/list, and prompts/list responses; it made no network calls and exposed no tools.
+`/private/tmp/provenant-contracts.<random>` was normalised to `/FIXTURE_ROOT` in the fixture data. The fake executable only logged `argv` and returned MCP initialize, tools/list, resources/list, and prompts/list responses; it made no network calls and exposed no tools.
 
 | Harness | Version | Capture and parsed expectation |
 | --- | --- | --- |
@@ -14,8 +14,8 @@ These fixtures come from isolated command-line observations on macOS arm64. Ever
 
 ## Files
 
-- `claude-code-2.1.310/`: observed config shape, sanitized listing, and directly captured stdio argv.
-- `codex-cli-0.163.0/`: observed TOML config shape and sanitized `mcp list --json` output.
-- `agy-1.4.6/`: observed JSON config shape and sanitized `mcp list` output.
+- `claude-code-2.1.310/`: observed config shape, sanitised listing, and directly captured stdio argv.
+- `codex-cli-0.163.0/`: observed TOML config shape and sanitised `mcp list --json` output.
+- `agy-1.4.6/`: observed JSON config shape and sanitised `mcp list` output.
 
-The config fixtures are sanitized test vectors: substitute `/FIXTURE_ROOT` with a temp directory before executing them. Do not treat the Codex or agy config's `args` array as a process capture; their listing commands only parsed and displayed it.
+The config fixtures are sanitised test vectors: substitute `/FIXTURE_ROOT` with a temp directory before executing them. Do not treat the Codex or agy config's `args` array as a process capture; their listing commands only parsed and displayed it.
