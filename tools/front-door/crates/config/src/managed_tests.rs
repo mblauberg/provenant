@@ -15,6 +15,7 @@ impl PathResolver for Resolver {
 }
 struct Fixture {
     _tmp: tempfile::TempDir,
+    base: PathBuf,
     home: PathBuf,
     source: PathBuf,
     targets: Targets,
@@ -48,6 +49,7 @@ impl Fixture {
         let targets = Targets::new(roots, &home, &[Harness::Codex]);
         Self {
             _tmp: tmp,
+            base,
             home,
             source,
             targets,
@@ -1230,7 +1232,7 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
 
 impl Fixture {
     fn release_variant(&self, name: &str, skills: &[&str]) -> Release {
-        let source = self._tmp.path().join(format!("staged-{name}"));
+        let source = self.base.join(format!("staged-{name}"));
         for skill in skills {
             fs::create_dir_all(source.join("skills").join(skill)).unwrap();
         }

@@ -39,6 +39,37 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
+/// The Git binary: `PROVENANT_GIT` when set, otherwise the first executable in a fixed
+/// preference list. PATH is not searched: Apple's `/usr/bin/git` lacks `--attr-source`, so a
+/// newer package-manager Git must win when both exist.
+pub(crate) fn git_binary() -> Option<PathBuf> {
+    resolve_git_binary(
+        std::env::var_os("PROVENANT_GIT")
+            .map(PathBuf::from)
+            .as_deref(),
+        &GIT_CANDIDATES.map(PathBuf::from),
+    )
+}
+const GIT_CANDIDATES: [&str; 5] = [
+    "/opt/homebrew/bin/git",
+    "/usr/local/bin/git",
+    "/opt/local/bin/git",
+    "/usr/bin/git",
+    "/bin/git",
+];
+pub(crate) fn resolve_git_binary(
+    override_path: Option<&Path>,
+    candidates: &[PathBuf],
+) -> Option<PathBuf> {
+    let executable = |path: &Path| {
+        path.is_absolute() && path.is_file() && provenant_supervisor::sys::is_executable(path)
+    };
+    match override_path {
+        Some(path) => executable(path).then(|| path.to_path_buf()),
+        None => candidates.iter().find(|path| executable(path)).cloned(),
+    }
+}
+
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {
         Some(path) => path.to_path_buf(),
@@ -62,17 +93,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    let git = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|path| provenant_supervisor::sys::is_executable(path))
-    .ok_or(RootError::Checkout)?;
+    let git = git_binary().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),

@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("release/provenant")
         })
         .canonicalize()?;
-    let smoke = release_smoke::SystemSmoke::new()?;
+    let smoke = release_smoke::SystemSmoke::new(None)?;
     let cancel = CancelToken::new();
     let identity = smoke.identity(&binary, &cancel)?;
     // Never overwrite a previous stage. A failed stage has no completion marker;

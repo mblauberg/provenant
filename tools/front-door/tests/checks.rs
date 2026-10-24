@@ -110,18 +110,30 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         config_schema_version: 1,
     };
     let marker = rig.root.join("smoke-home.txt");
+    let mut version_data = serde_json::to_value(&version)?;
+    version_data["package_version"] = env!("CARGO_PKG_VERSION").into();
     let version_json = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
         "command": "version",
         "status": "ok",
-        "data": version,
+        "data": version_data,
+        "error": null,
+    }))?;
+    let help_json = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "command": "help",
+        "status": "ok",
+        "data": {"commands": []},
+        "error": null,
     }))?;
     let executable = source.join("bin/provenant");
     fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$HOME\" > '{}'\nprintf '%s\\n' smoke > \"$HOME/keep\"\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$HOME\" > '{}'\nprintf '%s\\n' smoke > \"$HOME/keep\"\ncase \"$1\" in\n  --version) printf '%s\\n' '{}' ;;\n  --help) printf '%s\\n' '{}' ;;\n  *) exit 2 ;;\nesac\n",
             marker.display(),
             version_json,
+            help_json,
         ),
     )?;
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;

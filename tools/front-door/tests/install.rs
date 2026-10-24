@@ -112,6 +112,24 @@ fn check_install_source_failures_keep_the_typed_outcome() -> Result {
 }
 
 #[test]
+fn install_resolves_source_through_symlinked_temp_ancestor() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let alias = rig.root.join("source-alias");
+    std::os::unix::fs::symlink(&rig.root, &alias)?;
+    let aliased_stage = alias.join(stage.file_name().ok_or("stage name")?);
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let result = rig.execute_os(binary, &args(&aliased_stage, true), None)?;
+    assert_eq!(
+        code(&result),
+        0,
+        "{}",
+        String::from_utf8_lossy(&result.stderr.bytes)
+    );
+    Ok(())
+}
+
+#[test]
 fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let rig = TestRig::new()?;
     let stage = staged(&rig)?;
@@ -124,14 +142,22 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
         String::from_utf8_lossy(&dry.stderr.bytes)
     );
     assert!(!rig.state.exists());
-    let preview: serde_json::Value = serde_json::from_slice(
-        dry.stderr
-            .bytes
-            .split(|b| *b == b'\n')
-            .next()
-            .ok_or("preview")?,
-    )?;
-    assert_eq!(preview["kind"], "actions");
+    assert!(dry.stderr.bytes.is_empty());
+    let preview: serde_json::Value = serde_json::from_slice(&dry.stdout.bytes)?;
+    let action_count = preview["data"]["outcome"]["actions"]
+        .as_array()
+        .ok_or("JSON action list")?
+        .len();
+    assert!(action_count > 0);
+    let mut human_args = args(&stage, true);
+    human_args.retain(|arg| arg != "--json");
+    let human = rig.execute_os(binary, &human_args, None)?;
+    assert_eq!(code(&human), 0);
+    let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(human_stdout.contains("create"));
+    assert!(human_stdout.contains("action(s)"));
+    assert!(!human_stdout.trim_start().starts_with('{'));
+    assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
@@ -237,7 +263,10 @@ fn assert_legacy_git_hook_location(custom_hooks: bool) -> Result {
     let denied: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
     assert_eq!(
         denied["error"]["message"],
-        format!("unmanaged destination conflicts: {}", source.display())
+        format!(
+            "unmanaged destination conflicts: {}",
+            source.canonicalize()?.display()
+        )
     );
     assert_eq!(
         fs::read_to_string(sensitive.join("release.json"))?,
@@ -350,7 +379,8 @@ fn recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run() -> Res
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
-    let preview = String::from_utf8(output.stderr.bytes)?;
+    assert!(output.stderr.bytes.is_empty());
+    let preview = String::from_utf8(output.stdout.bytes.clone())?;
     assert!(preview.contains("hook") && preview.contains("compact"));
     assert!(preview.contains("utility_output_hook.py"));
     assert_eq!(fs::read_to_string(&settings)?, fixture);

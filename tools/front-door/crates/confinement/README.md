@@ -8,6 +8,21 @@ directly rather than a second confinement filesystem API.
 Permission compilation consumes typed provider specifications and enforcement
 observations constructed by the providers owner. Git write grants derive from a
 held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
+`WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
+single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Its hash binds
+canonical worktree and common Git paths plus held directory identities, so
+same-named and recreated worktrees do not share a lane cache. Host builds use
+separate target directories outside this namespace.
+Before collecting `required_anchors`, call `prepare_writer_directories` under
+writer custody; pass the same independently resolved home in `Anchors.home`.
+This prepares missing nested ref/reflog parents and the exact cache without
+allowing sibling refs or caches. Existing cache and lane-parent directories
+must belong to the effective user with mode 0700; setup refuses mismatches
+without changing their metadata. Compilation rechecks the held cache.
+Common config, remote tracking and packed
+refs stay immutable: host fetch/upstream composition remains required under
+the accepted supervisor design (#1255). Child-created symlinks are denied.
+
 No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.
 
@@ -59,3 +74,12 @@ Merged pruning takes explicit branches and retains candidates whose tip is on
 the integration first-parent chain, including fast-forward merges. Linked trees
 with gitlinks require review. The unsafe library `since` path is removed; CLI
 step 4 owns translating its frozen history scope into explicit candidates.
+
+Read-only plans resolve Git reads through `PlanRequest::with_read_only_repo`
+using a host `ProjectBinding`; the common directory is never sourced from a
+lane's `.git` marker. Its subtree is readable and explicitly immutable.
+`ReadOnlyPolicy` loads the optional host-state project `read-only.json` and
+resolves `readOnlyWritable` (default empty) to existing repository-relative
+directories without following symlinks. Git and provider config components
+are refused, including config nested inside an allowed subtree. The compiler
+rechecks component traversal, held roots and hard-link safety before handoff.

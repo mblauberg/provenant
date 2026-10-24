@@ -180,7 +180,7 @@ pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
     ReleaseSmoke, SelectorChange, Snapshots, Targets, inspect_install, install, plan_install,
-    uninstall,
+    private_directory, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

@@ -1,12 +1,20 @@
-//! Validated, in-memory execution policy. Backend compilation remains prelaunch.
+pub(crate) mod read_only;
 use crate::permissions::{
     AccessMode, Anchors, ConfinedLaunch, ConfinementBackend, PathGrant, PathScope, PermissionError,
     PlanPermissions, ProviderProfile,
 };
 use provenant_core::{RelativePath, WorkScope};
 use provenant_supervisor::home::{HomeError, HomeFiles, HomeRecipe};
+pub use read_only::{ReadOnlyGrants, ReadOnlyPolicy};
 use std::path::PathBuf;
 use thiserror::Error;
+
+pub const MAX_READ_ONLY_WRITABLE: usize = 128;
+
+pub fn valid_read_only_writable(paths: &[String]) -> bool {
+    paths.len() <= MAX_READ_ONLY_WRITABLE
+        && paths.iter().all(|path| RelativePath::parse(path).is_ok())
+}
 
 /// Clean config must suppress inherited hooks, MCP and plugins. Inherited
 /// config is refused for read-only work until confined extension evidence exists.
@@ -20,6 +28,28 @@ pub enum CodexPolicy {
 pub enum ExtensionPolicy {
     Deny,
     Unconfined,
+}
+
+impl PlanRequest {
+    /// Resolve Git and write exceptions only from the trusted host repository.
+    pub fn with_read_only_repo(
+        mut self,
+        repo: &crate::ReadOnlyRepo,
+        binding: &provenant_config::ProjectBinding,
+        policy: &ReadOnlyPolicy,
+    ) -> Result<Self, PlanError> {
+        if !matches!(self.permissions.mode, AccessMode::ReadOnly)
+            || self.scope != WorkScope::Project(binding.project_id())
+        {
+            return Err(PermissionError::InvalidReadOnlyPolicy.into());
+        }
+        self.permissions.read_roots.push(PathGrant {
+            path: repo.root_path().to_owned(),
+            scope: PathScope::Subtree,
+        });
+        self.permissions.read_only = Some(policy.resolve(repo, binding)?);
+        Ok(self)
+    }
 }
 
 pub struct PlanRequest {

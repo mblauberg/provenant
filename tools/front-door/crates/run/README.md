@@ -113,3 +113,13 @@ the CLI includes those diagnostics and returns a non-success reconcile status.
 Tests use fake providers and resources at this boundary. The CLI composes the
 production provider registry and the `dispatch`, `lanes`, `output`, `cancel`,
 `resume`, `reconcile` and `telemetry stats` leaves.
+
+Start creates a private attempt-owned `tmp/` and passes it to provider
+preparation as `LaunchPaths::temporary`; a read-only lane uses it as scratch.
+Terminal commit and withdrawal remove `tmp/` best-effort through held
+directories, without following symlinks. Cleanup failure does not change the
+committed attempt. `read_only_plan` loads the bound project's `read-only.json`,
+applies the host Git binding and selects that temporary root. Start records
+the launching plan's relative write exceptions before custody handoff.
+Production `Registry::prepare` does not yet build its read-only plan through
+`read_only_plan`, so those grants are not yet applied to dispatch.

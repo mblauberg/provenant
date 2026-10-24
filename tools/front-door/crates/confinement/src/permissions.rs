@@ -43,6 +43,7 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
 const DYLD_BOOTSTRAP_RULES: &str = r#"
 (deny file-link)
+(deny file-write-create (vnode-type SYMLINK))
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/bin"))
 (allow file-read* (subpath "/usr/lib"))
@@ -146,6 +147,8 @@ pub enum Availability {
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
+    #[error("invalid read-only project write policy")]
+    InvalidReadOnlyPolicy,
     #[error("path is not an absolute, normalised path")]
     InvalidPath,
     #[error("permission root is too broad")]
@@ -268,7 +271,11 @@ pub struct ProviderProfileSpec {
     pub process_executables: Vec<PathGrant>,
     /// Forking is broad process authority and is enabled only by recorded data.
     pub allow_process_fork: bool,
+    /// Deny keychain IPC and its CLI even when a tool can execute system programs.
+    pub deny_keychain_access: bool,
     pub runtime_reads: Vec<PathGrant>,
+    /// Literal directory discovery; never the contents of provider config.
+    pub discovery_reads: Vec<PathGrant>,
     pub authentication: Vec<AuthenticationProfile>,
     pub continuation_reads: Vec<PathGrant>,
     /// Provider-owned state the CLI must write outside scratch, such as one
@@ -294,26 +301,149 @@ pub enum AccessMode {
     WorktreeWrite(Box<WorktreeWriteAuthority>),
 }
 
-/// A digest binds the plan to Git grants derived at the verified worktree edge.
+/// A digest binds the plan to Git grants and its one host-derived build cache.
 /// Neither the selected ref nor concrete Git paths enter the record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
+    cargo_cache: PathGrant,
 }
 
 impl WorktreeWriteAuthority {
     pub fn for_worktree(
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
+        home: &Path,
     ) -> Result<Self, PermissionError> {
         worktree.repo().revalidate()?;
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
         grants.validate()?;
+        let cargo_cache = worktree_cargo_cache(home, worktree)?;
         Ok(Self {
-            git_grants_digest: grants.digest(),
+            git_grants_digest: grants.digest(&cargo_cache),
+            cargo_cache,
         })
     }
+}
+
+/// The lane-only build cache belonging to this verified worktree incarnation.
+/// Host-derived canonical paths and held Git identities separate repositories,
+/// same-named worktrees and worktrees recreated at an earlier path.
+pub fn worktree_cargo_cache(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+) -> Result<PathGrant, PermissionError> {
+    validate_absolute(home)?;
+    worktree.repo().revalidate()?;
+    let mut digest = Sha256::new();
+    digest.update(b"provenant-lane-cargo-v1");
+    for path in [worktree.path(), worktree.repo().common_git_dir()] {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    for identity in [
+        worktree.identity(),
+        worktree.repo().private_identity(),
+        worktree.repo().common_identity(),
+    ] {
+        digest.update(identity.device.to_le_bytes());
+        digest.update(identity.inode.to_le_bytes());
+    }
+    let name: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let grant = PathGrant {
+        path: home.join("Library/Caches/provenant-lane-cargo").join(name),
+        scope: PathScope::Subtree,
+    };
+    validate_noncredential_grant(&grant)?;
+    Ok(grant)
+}
+
+fn verify_cache_metadata(
+    metadata: &provenant_supervisor::fs::Metadata,
+) -> Result<(), PermissionError> {
+    if metadata.kind != FileKind::Directory
+        || metadata.uid != provenant_supervisor::fs::effective_uid()
+        || metadata.mode & 0o7777 != 0o700
+    {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    Ok(())
+}
+
+/// Prepare only derived writer directories outside the child sandbox. This
+/// also creates missing nested branch/ref-log parents without granting the
+/// child authority to create sibling refs. Call while holding writer custody,
+/// before collecting `required_anchors`. Shared config and packed refs remain
+/// immutable: the host fetches before launch and sets upstream after exit.
+pub fn prepare_writer_directories(
+    safe_fs: &dyn SafeFs,
+    worktree: &VerifiedWorktree,
+    selected_ref: &GitRefName,
+    authority: &WorktreeWriteAuthority,
+    home: &Path,
+) -> Result<(), PermissionError> {
+    worktree.repo().revalidate()?;
+    let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
+    if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
+        return Err(PermissionError::GitWriteAuthorityMissing);
+    }
+    grants.validate()?;
+    validate_writer_cache(authority, worktree, home)?;
+    let paths: BTreeSet<_> = grants
+        .iter()
+        .chain([&authority.cargo_cache])
+        .filter_map(|grant| match grant.scope {
+            PathScope::Subtree => Some(grant.path.as_path()),
+            PathScope::Exact => grant.path.parent(),
+        })
+        .collect();
+    for path in paths {
+        let mut directory = safe_fs
+            .open_anchor(Path::new("/"))
+            .map_err(PermissionError::Filesystem)?;
+        let mut traversed = PathBuf::from("/");
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            directory = match directory.open_directory(name, false) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => {
+                    directory
+                        .mkdir(name, 0o700)
+                        .map_err(PermissionError::Filesystem)?;
+                    directory
+                        .open_directory(name, false)
+                        .map_err(PermissionError::Filesystem)?
+                }
+                Err(error) => return Err(PermissionError::Filesystem(error)),
+            };
+            traversed.push(name);
+            if traversed == authority.cargo_cache.path
+                || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
+            {
+                verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_writer_cache(
+    authority: &WorktreeWriteAuthority,
+    worktree: &VerifiedWorktree,
+    home: &Path,
+) -> Result<(), PermissionError> {
+    if authority.cargo_cache != worktree_cargo_cache(home, worktree)? {
+        return Err(PermissionError::GitWriteAuthorityMissing);
+    }
+    Ok(())
 }
 
 struct WorktreeWriteGrants {
@@ -367,10 +497,10 @@ impl WorktreeWriteGrants {
             .chain(self.selected_ref.iter())
     }
 
-    fn digest(&self) -> [u8; 32] {
+    fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v1\0");
-        for grant in self.iter() {
+        digest.update(b"provenant-worktree-git-grants-v2\0");
+        for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
             digest.update(bytes);
@@ -393,6 +523,7 @@ impl WorktreeWriteGrants {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    pub read_only: Option<crate::plan::ReadOnlyGrants>,
     pub mode: AccessMode,
     pub scratch: PathGrant,
     /// Attempt-private retained provider state, separate from disposable scratch.
@@ -441,6 +572,9 @@ pub enum FixtureOperation {
     UndeclaredProcessExec,
     ProcessFork,
     StateWrite,
+    ShellExec,
+    KeychainTool,
+    KeychainRead,
     LoopbackServer,
     BrowserIpc,
     PostgresIpc,
@@ -522,6 +656,8 @@ impl AnchoredDirectory {
 }
 
 pub struct Anchors<'a> {
+    /// Canonical user home resolved by the host, independent of plan records.
+    pub home: &'a Path,
     pub directories: &'a [AnchoredDirectory],
     pub safe_fs: &'a dyn SafeFs,
     /// Linked tree and selected branch derive Git paths at the authority edge.
@@ -643,6 +779,7 @@ pub fn required_anchors(
         .chain(&plan.private_state)
         .chain(&spec.process_executables)
         .chain(&spec.runtime_reads)
+        .chain(&spec.discovery_reads)
         .chain(&spec.state_writes)
         .chain(&spec.tool_exec_roots)
         .chain(
@@ -659,10 +796,16 @@ pub fn required_anchors(
             grants.push(root);
         }
     }
+    if let Some(read_only) = &plan.read_only {
+        grants.extend(read_only.git_reads.iter().chain(&read_only.writes));
+    }
     let derived = worktree
         .map(|(verified, selected_ref)| WorktreeWriteGrants::derive(verified, selected_ref));
     if let Some(derived) = &derived {
         grants.extend(derived.iter());
+    }
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        grants.push(&authority.cargo_cache);
     }
     grants
         .into_iter()
@@ -890,7 +1033,10 @@ fn successful_probe(outcome: &ExecOutcome) -> bool {
 #[cfg(target_os = "macos")]
 fn denied_probe(outcome: &ExecOutcome) -> bool {
     matches!(outcome.termination, Termination::Exit(code) if code != 0)
+        && String::from_utf8_lossy(&outcome.stderr.bytes).contains("Operation not permitted")
         && !outcome.timed_out
+        && !outcome.cancelled
+        && !outcome.overflow_stopped
         && !outcome.drain_truncated
         && !outcome.stdout.read_failed
         && !outcome.stderr.read_failed
@@ -930,11 +1076,32 @@ fn compile_sbpl(
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     let mut read_grants = plan.read_roots.clone();
+    if let Some(read_only) = &plan.read_only {
+        if !matches!(plan.mode, AccessMode::ReadOnly) {
+            return Err(PermissionError::InvalidReadOnlyPolicy);
+        }
+        read_only.revalidate(anchors.safe_fs)?;
+        read_grants.extend(read_only.git_reads.iter().cloned());
+        for grant in &read_only.writes {
+            validate_noncredential_grant(grant)?;
+            if plan
+                .protected_roots
+                .iter()
+                .chain(&plan.secret_roots)
+                .chain(&read_only.git_reads)
+                .any(|p| grant.overlaps(p))
+            {
+                return Err(PermissionError::ProtectedOverlap);
+            }
+            verify_writable_tree(&grant.path, anchors)?;
+        }
+    }
     if let Some(grants) = &worktree_grants {
         read_grants.push(grants.worktree.clone());
     }
     read_grants.extend(plan.protected_roots.iter().cloned());
     read_grants.extend(profile.spec.runtime_reads.iter().cloned());
+    read_grants.extend(profile.spec.discovery_reads.iter().cloned());
     read_grants.extend(profile.spec.process_executables.iter().cloned());
     let mut credential_writes = Vec::new();
     if let Some(mechanism) = &plan.selected_authentication {
@@ -976,6 +1143,20 @@ fn compile_sbpl(
         anchors.verify_single_link_grant(grant)?;
     }
     verify_state_writes(plan, profile, anchors)?;
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        let cache = anchors
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == authority.cargo_cache.path)
+            .ok_or(PermissionError::AnchorMismatch)?;
+        verify_cache_metadata(
+            &cache
+                .directory
+                .metadata()
+                .map_err(PermissionError::Filesystem)?,
+        )?;
+    }
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath);
     }
@@ -995,6 +1176,9 @@ fn compile_sbpl(
                 .flat_map(|authentication| &authentication.roots),
         )
         .collect();
+    if let Some(read_only) = &plan.read_only {
+        scratch_exclusions.extend(read_only.git_reads.iter().chain(&read_only.writes));
+    }
     scratch_exclusions.extend(plan.network.iter().chain(&profile.spec.network).filter_map(
         |grant| match grant {
             NetworkGrant::UnixSocket { root } => Some(root),
@@ -1104,6 +1288,26 @@ fn compile_sbpl(
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
     }
     verify_state_writes(plan, profile, anchors)?;
+    if let Some(read_only) = &plan.read_only {
+        read_only.revalidate(anchors.safe_fs)?;
+        for grant in &read_only.writes {
+            verify_writable_tree(&grant.path, anchors)?;
+        }
+    }
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        let cache = anchors
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == authority.cargo_cache.path)
+            .ok_or(PermissionError::AnchorMismatch)?;
+        verify_cache_metadata(
+            &cache
+                .directory
+                .metadata()
+                .map_err(PermissionError::Filesystem)?,
+        )?;
+    }
     anchors.verify_all()?;
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
@@ -1124,31 +1328,42 @@ fn verify_state_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in &profile.spec.state_writes {
-        if plan
-            .secret_roots
-            .iter()
-            .chain(&plan.protected_roots)
-            .chain(std::iter::once(&plan.scratch))
-            .chain(&plan.private_state)
-            .any(|root| grant.overlaps(root))
-        {
-            return Err(PermissionError::ProtectedOverlap);
-        }
-        if let Some((verified, _)) = anchors.worktree {
-            for path in [
-                verified.path(),
-                verified.repo().private_git_dir(),
-                verified.repo().common_git_dir(),
-            ] {
-                if path_overlaps(&grant.path, path) {
-                    return Err(PermissionError::ProtectedOverlap);
-                }
+        verify_state_write(plan, grant, anchors)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_state_write(
+    plan: &PlanPermissions,
+    grant: &PathGrant,
+    anchors: &Anchors<'_>,
+) -> Result<(), PermissionError> {
+    grant.validate()?;
+    if plan
+        .secret_roots
+        .iter()
+        .chain(&plan.protected_roots)
+        .chain(std::iter::once(&plan.scratch))
+        .chain(&plan.private_state)
+        .any(|root| grant.overlaps(root))
+    {
+        return Err(PermissionError::ProtectedOverlap);
+    }
+    if let Some((verified, _)) = anchors.worktree {
+        for path in [
+            verified.path(),
+            verified.repo().private_git_dir(),
+            verified.repo().common_git_dir(),
+        ] {
+            if path_overlaps(&grant.path, path) {
+                return Err(PermissionError::ProtectedOverlap);
             }
         }
-        match grant.scope {
-            PathScope::Subtree => verify_writable_tree(&grant.path, anchors)?,
-            PathScope::Exact => anchors.verify_single_link_grant(grant)?,
-        }
+    }
+    match grant.scope {
+        PathScope::Subtree => verify_writable_tree(&grant.path, anchors)?,
+        PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
 }
@@ -1300,6 +1515,12 @@ fn render_profile(
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
     }
+    if profile.spec.deny_keychain_access {
+        source.push_str(concat!(
+            "(deny process-exec (literal \"/usr/bin/security\"))\n",
+            "(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
+        ));
+    }
     for grant in &profile.spec.state_writes {
         for operation in ["file-read*", "file-write*"] {
             push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
@@ -1326,11 +1547,36 @@ fn render_profile(
         }
     }
 
-    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+    if let Some(read_only) = &plan.read_only {
+        for grant in &read_only.writes {
+            for operation in ["file-read*", "file-write*"] {
+                push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
+            }
+            // Restrict this exception, preserving separate provider auth grants.
+            source.push_str(&format!(
+                "(deny file-write* (require-all (subpath \"{}\") (regex #\"{}\")))\n",
+                sbpl_path(&grant.path)?,
+                crate::plan::read_only::exclusion_regex()
+            ));
+        }
+        for git in &read_only.git_reads {
+            push_rule(&mut source, "deny", "file-write*", &git.path, git.scope)?;
+        }
+    }
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         push_worktree_rule(
             &mut source,
             worktree_grants.ok_or(PermissionError::GitWriteAuthorityMissing)?,
         )?;
+        for operation in ["file-read*", "file-write*"] {
+            push_rule(
+                &mut source,
+                "allow",
+                operation,
+                &authority.cargo_cache.path,
+                PathScope::Subtree,
+            )?;
+        }
     }
 
     for endpoint in &profile.spec.provider_api {
@@ -1452,7 +1698,8 @@ fn verify_worktree_authority(
     }
     let grants = WorktreeWriteGrants::derive(verified, selected_ref);
     grants.validate()?;
-    if grants.digest() != authority.git_grants_digest {
+    validate_writer_cache(authority, verified, anchors.home)?;
+    if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     verify_selected_head(verified, selected_ref.short_name())?;
@@ -1533,6 +1780,13 @@ fn verify_requested_evidence(
             },
         ),
     ];
+    if profile.spec.deny_keychain_access {
+        required.extend([
+            (FixtureOperation::ShellExec, allowed),
+            (FixtureOperation::KeychainTool, denied),
+            (FixtureOperation::KeychainRead, denied),
+        ]);
+    }
     if !profile.spec.runtime_reads.is_empty() {
         required.push((FixtureOperation::RuntimeRead, allowed));
     }
@@ -1561,7 +1815,7 @@ fn verify_requested_evidence(
         };
         (operation, allowed)
     }));
-    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+    if let AccessMode::WorktreeWrite(_) = &plan.mode {
         required.extend([
             (FixtureOperation::WorktreeWrite, allowed),
             (FixtureOperation::GitIndexWrite, allowed),
@@ -1595,6 +1849,7 @@ fn require_observation(
 fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
     if spec.process_executables.len() > MAX_PATH_GRANTS
         || spec.runtime_reads.len() > MAX_PATH_GRANTS
+        || spec.discovery_reads.len() > MAX_PATH_GRANTS
         || spec.authentication.len() > 16
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
         || spec.state_writes.len() > MAX_PATH_GRANTS
@@ -1617,6 +1872,17 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
     }
     for grant in &spec.runtime_reads {
         validate_noncredential_grant(grant)?;
+    }
+    for grant in &spec.discovery_reads {
+        grant.validate()?;
+        if grant.scope != PathScope::Exact
+            || !matches!(
+                grant.path.file_name().and_then(OsStr::to_str),
+                Some(".agents" | ".claude" | ".codex")
+            )
+        {
+            return Err(PermissionError::InvalidPath);
+        }
     }
     for auth in &spec.authentication {
         if auth.mechanism.is_empty()
@@ -1966,6 +2232,7 @@ mod tests {
         std::fs::create_dir(&original).expect("replacement directory");
         let directories = [anchor];
         let anchors = Anchors {
+            home: Path::new("/fixture/home"),
             directories: &directories,
             safe_fs: &safe_fs,
             worktree: None,
@@ -2027,13 +2294,229 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::plan::{
+            CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest, ReadOnlyPolicy,
+        };
+        use crate::utility::{GitMutation, execute_git_mutation};
+        use provenant_core::WorkScope;
+        use std::os::unix::fs::PermissionsExt;
+        let f = crate::test_support::Fixture::new()?;
+        let branch = GitRefName::branch("read-only-profile")?;
+        let linked = f._temp.path().join("linked");
+        let outcome = execute_git_mutation(
+            &f.executor,
+            &f.repo,
+            &f.runtime,
+            GitMutation::WorktreeAdd {
+                branch,
+                base: Some(f.head()?),
+                path: linked.clone(),
+                create_branch: true,
+            },
+            f.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        let repo =
+            f.runtime
+                .open_read_repo(&f.executor, &linked, f.budget()?, &CancelToken::new())?;
+        let root = repo.root_path();
+        std::fs::create_dir_all(root.join(".agent-run/locks"))?;
+        let scratch = provenant_supervisor::fs::canonicalize(f._temp.path())?.join("private-tmp");
+        std::fs::create_dir(&scratch)?;
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        let policy: ReadOnlyPolicy =
+            serde_json::from_str(r#"{"readOnlyWritable":[".agent-run/locks"]}"#)?;
+        let binding = f.binding()?;
+        let plan = ConfinedPlan::new(
+            PlanRequest {
+                scope: WorkScope::Project(binding.project_id()),
+                permissions: PlanPermissions {
+                    read_only: None,
+                    mode: AccessMode::ReadOnly,
+                    scratch: PathGrant {
+                        path: scratch.clone(),
+                        scope: PathScope::Subtree,
+                    },
+                    private_state: None,
+                    read_roots: vec![],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: None,
+                    include_continuation: false,
+                    network: vec![],
+                    capabilities: vec![],
+                    nested_confinement: false,
+                },
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            }
+            .with_read_only_repo(&repo, &binding, &policy)?,
+        )?;
+        use FixtureOperation as O;
+        use FixtureOutcome::{Allowed, Denied};
+        let home = provenant_supervisor::fs::canonicalize(&f.home)?;
+        for directory in [
+            home.join(".cargo/bin"),
+            home.join(".cargo/registry"),
+            home.join(".rustup/toolchains"),
+            scratch.join("target"),
+        ] {
+            std::fs::create_dir_all(directory)?;
+        }
+        std::fs::write(
+            home.join(".rustup/settings.toml"),
+            "default_toolchain = 'fixture'",
+        )?;
+        std::fs::write(home.join(".cargo/credentials.toml"), "fixture-secret")?;
+        let subtree = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: "/usr/bin/true".into(),
+                    scope: PathScope::Exact,
+                }],
+                runtime_reads: vec![
+                    subtree(home.join(".cargo/bin")),
+                    subtree(home.join(".cargo/registry")),
+                    subtree(home.join(".rustup/toolchains")),
+                    PathGrant {
+                        path: home.join(".rustup/settings.toml"),
+                        scope: PathScope::Exact,
+                    },
+                ],
+                tool_exec_roots: vec![
+                    subtree(home.join(".cargo/bin")),
+                    subtree(home.join(".rustup/toolchains")),
+                    subtree(scratch.join("target")),
+                ],
+                ..Default::default()
+            },
+            observations: BTreeMap::from([
+                (O::DeclaredRead, Allowed),
+                (O::UndeclaredRead, Denied),
+                (O::UndeclaredWrite, Denied),
+                (O::SecretRead, Denied),
+                (O::ProtectedWrite, Denied),
+                (O::OtherNetwork, Denied),
+                (O::DeclaredProcessExec, Allowed),
+                (O::UndeclaredProcessExec, Denied),
+                (O::ProcessFork, Denied),
+                (O::RuntimeRead, Allowed),
+            ]),
+        };
+        let paths = required_anchors(plan.permissions(), &profile, None);
+        let directories = paths
+            .iter()
+            .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let anchors = Anchors {
+            home: &home,
+            directories: &directories,
+            safe_fs: &LocalFs,
+            worktree: None,
+        };
+        let compiled =
+            MacOsSandboxBackend { ready: true }.compile(plan.permissions(), &profile, &anchors)?;
+        let source = String::from_utf8(compiled.profile)?;
+        let git = binding.common_dir();
+        assert!(repo.0.private_git_dir().starts_with(git));
+        assert!(source.contains(&format!(
+            "(allow file-read* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(source.contains(&format!(
+            "(deny file-write* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(!source.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(source.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            root.join(".agent-run/locks").display()
+        )));
+        for tool in [home.join(".cargo/bin"), home.join(".rustup/toolchains")] {
+            assert!(source.contains(&format!(
+                "(allow file-read* (subpath \"{}\"))",
+                tool.display()
+            )));
+            assert!(source.contains(&format!(
+                "(allow process-exec (subpath \"{}\"))",
+                tool.display()
+            )));
+        }
+        assert!(!source.contains("credentials"));
+        assert!(!source.contains(&format!(
+            "(allow file-read* (subpath \"{}\"))",
+            home.join(".cargo").display()
+        )));
+        assert!(source.contains(&format!(
+            "(deny file-write* (require-all (subpath \"{}\") (regex #",
+            root.join(".agent-run/locks").display()
+        )));
+        assert!(!source.contains("(deny file-write* (regex #"));
+        assert!(source.contains(&crate::plan::read_only::exclusion_regex()));
+        // A component swapped for a symlink after resolution cannot be compiled.
+        std::fs::rename(root.join(".agent-run"), root.join("moved"))?;
+        std::os::unix::fs::symlink(root.join("moved"), root.join(".agent-run"))?;
+        assert!(
+            MacOsSandboxBackend { ready: true }
+                .compile(plan.permissions(), &profile, &anchors)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn denied_probe_requires_an_operating_system_refusal() {
+        let mut outcome = ExecOutcome {
+            termination: Termination::Exit(44),
+            stdout: Default::default(),
+            stderr: provenant_supervisor::exec::CapturedStream {
+                bytes: b"security: The specified item could not be found in the keychain.".to_vec(),
+                ..Default::default()
+            },
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert!(!denied_probe(&outcome));
+        outcome.stderr.bytes =
+            b"sandbox-exec: execvp() of '/usr/bin/security' failed: Operation not permitted"
+                .to_vec();
+        assert!(denied_probe(&outcome));
+        outcome.termination = Termination::Exit(0);
+        assert!(!denied_probe(&outcome));
+        outcome.termination = Termination::Exit(1);
+        outcome.cancelled = true;
+        assert!(!denied_probe(&outcome));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         let authority = WorktreeWriteAuthority {
             git_grants_digest: [0; 32],
+            cargo_cache: PathGrant {
+                path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
+                scope: PathScope::Subtree,
+            },
         };
         let safe_fs = LocalFs;
         let directories = [];
         let anchors = Anchors {
+            home: Path::new("/fixture/home"),
             directories: &directories,
             safe_fs: &safe_fs,
             worktree: None,
@@ -2042,6 +2525,106 @@ mod tests {
             verify_worktree_authority(&authority, &anchors),
             Err(PermissionError::GitWriteAuthorityMissing)
         ));
+    }
+
+    #[test]
+    fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::repo::verify_worktree;
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = crate::test_support::Fixture::new()?;
+        let other = crate::test_support::Fixture::new()?;
+        let selected_ref = GitRefName::branch("cache-test")?;
+        let add = |fixture: &crate::test_support::Fixture, path: &Path, branch: &str| {
+            fixture.run(&[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                path.to_str().ok_or("path")?,
+            ])?;
+            Ok::<_, Box<dyn std::error::Error>>(verify_worktree(&fixture.repo, path)?)
+        };
+        let path = fixture._temp.path().join("package");
+        let linked = add(&fixture, &path, "cache-test")?;
+        let home = provenant_supervisor::fs::canonicalize(&fixture.home)?;
+        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
+        let cache = &authority.cargo_cache.path;
+        assert_eq!(
+            cache.parent(),
+            Some(home.join("Library/Caches/provenant-lane-cargo").as_path())
+        );
+        assert_eq!(cache.file_name().ok_or("cache name")?.len(), 64);
+        assert_eq!(
+            authority,
+            WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?
+        );
+
+        let other_linked = add(&other, &other._temp.path().join("package"), "cache-test")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(&other_linked, &selected_ref, &home)?
+                .cargo_cache
+                .path
+        );
+        let sibling_path = fixture._temp.path().join("nested/package");
+        std::fs::create_dir(sibling_path.parent().ok_or("parent")?)?;
+        let sibling = add(&fixture, &sibling_path, "sibling")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(&sibling, &GitRefName::branch("sibling")?, &home)?
+                .cargo_cache
+                .path
+        );
+
+        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
+        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
+        let mut metadata = LocalFs.open_anchor(cache)?.metadata()?;
+        verify_cache_metadata(&metadata)?;
+        metadata.uid = metadata.uid.wrapping_add(1);
+        assert!(matches!(
+            verify_cache_metadata(&metadata),
+            Err(PermissionError::AnchorMismatch)
+        ));
+        for mode in [0o755, 0o770, 0o1700] {
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(mode))?;
+            assert!(
+                matches!(
+                    prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+                    Err(PermissionError::AnchorMismatch)
+                ),
+                "mode {mode:o}"
+            );
+        }
+        std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        let namespace = cache.parent().ok_or("namespace")?;
+        std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755))?;
+        assert!(matches!(
+            prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+            Err(PermissionError::AnchorMismatch)
+        ));
+        std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o700))?;
+
+        let moved = fixture._temp.path().join("retired");
+        fixture.run(&[
+            "worktree",
+            "move",
+            path.to_str().ok_or("path")?,
+            moved.to_str().ok_or("path")?,
+        ])?;
+        let recreated = add(&fixture, &path, "recreated")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(
+                &recreated,
+                &GitRefName::branch("recreated")?,
+                &home
+            )?
+            .cargo_cache
+            .path
+        );
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2074,9 +2657,30 @@ mod tests {
         let common = linked.repo().common_git_dir().to_owned();
         assert_ne!(private, common);
 
-        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?;
+        let authority = WorktreeWriteAuthority::for_worktree(
+            &linked,
+            &selected_ref,
+            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+        )?;
+        fixture.run(&["pack-refs", "--all"])?;
+        let missing_parent = common.join("refs/heads/s3");
+        if missing_parent.exists() {
+            std::fs::remove_dir(&missing_parent)?;
+        }
+        assert!(!missing_parent.exists());
+
+        prepare_writer_directories(
+            &LocalFs,
+            &linked,
+            &selected_ref,
+            &authority,
+            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+        )?;
         let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
-        assert_eq!(authority.git_grants_digest, grants.digest());
+        assert_eq!(
+            authority.git_grants_digest,
+            grants.digest(&authority.cargo_cache)
+        );
         assert_eq!(grants.objects.path, common.join("objects"));
         assert!(
             grants
@@ -2096,6 +2700,7 @@ mod tests {
             private.clone(),
             common.clone(),
             common.join("objects"),
+            authority.cargo_cache.path.clone(),
             private_logs.clone(),
             common_heads,
             common_logs,
@@ -2106,18 +2711,43 @@ mod tests {
             .map(|path| AnchoredDirectory::open_canonical(&safe_fs, path))
             .collect::<Result<Vec<_>, _>>()?;
         let anchors = Anchors {
+            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
             directories: &directories,
             safe_fs: &safe_fs,
             worktree: Some((&linked, &selected_ref)),
         };
+        assert!(missing_parent.is_dir());
+        let wrong_home = Anchors {
+            home: Path::new("/different/home"),
+            ..anchors
+        };
+        assert!(matches!(
+            verify_worktree_authority(&authority, &wrong_home),
+            Err(PermissionError::GitWriteAuthorityMissing)
+        ));
         let verified_grants = verify_worktree_authority(&authority, &anchors)?;
         let mut source = String::new();
         push_worktree_rule(&mut source, &verified_grants)?;
         assert!(source.contains("(require-not (subpath "));
         assert!(source.contains(&format!("{}/objects/info", common.display())));
+        for relative in [
+            "config",
+            "config.lock",
+            "packed-refs",
+            "packed-refs.lock",
+            "refs/heads/main",
+            "refs/remotes/origin",
+            "refs/remotes/upstream",
+        ] {
+            assert!(
+                !source.contains(&format!("\"{}\"", common.join(relative).display())),
+                "{relative}"
+            );
+        }
 
         let other_ref = GitRefName::branch("s3/other")?;
         let mismatched = Anchors {
+            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
             directories: &directories,
             safe_fs: &safe_fs,
             worktree: Some((&linked, &other_ref)),
@@ -2149,7 +2779,11 @@ mod tests {
         std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;
         assert!(matches!(
             verify_worktree_authority(
-                &WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?,
+                &WorktreeWriteAuthority::for_worktree(
+                    &linked,
+                    &selected_ref,
+                    &provenant_supervisor::fs::canonicalize(&fixture.home)?
+                )?,
                 &anchors
             ),
             Err(PermissionError::GitWriteAuthorityMissing)
@@ -2176,6 +2810,7 @@ mod tests {
         };
         let directories = [AnchoredDirectory::open_canonical(&fs, &scratch_path)?];
         let anchors = Anchors {
+            home: Path::new("/fixture/home"),
             directories: &directories,
             safe_fs: &fs,
             worktree: None,
@@ -2217,9 +2852,13 @@ mod tests {
         let home = root.join("home");
         let state = root.join("state");
         let xdg = root.join("xdg");
-        for path in [&home, &state, &xdg] {
+        let provider_state = root.join("provider-state");
+        for path in [&home, &state, &xdg, &provider_state] {
             std::fs::create_dir_all(path)?;
         }
+        let keychain = home.join("Library/Keychains/login.keychain-db");
+        std::fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
+        std::fs::write(&keychain, b"isolated fake credential")?;
         let head = fixture.head()?;
         let selected_ref = GitRefName::branch("s3/native")?;
         let worktree_path = root.join("linked");
@@ -2238,7 +2877,18 @@ mod tests {
         )?;
         assert_eq!(added.termination, Termination::Exit(0));
         let linked = verify_worktree(&fixture.repo, &worktree_path)?;
-        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?;
+        let authority = WorktreeWriteAuthority::for_worktree(
+            &linked,
+            &selected_ref,
+            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+        )?;
+        prepare_writer_directories(
+            &LocalFs,
+            &linked,
+            &selected_ref,
+            &authority,
+            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+        )?;
         let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
 
         let scratch = root.join("scratch");
@@ -2272,10 +2922,24 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/touch"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/mv"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
         ];
 
         let profile = ProviderProfile {
             spec: ProviderProfileSpec {
+                state_writes: vec![PathGrant {
+                    path: provider_state.clone(),
+                    scope: PathScope::Subtree,
+                }],
+                deny_keychain_access: true,
+                allow_process_fork: true,
+                tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
+                    .map(|path| PathGrant {
+                        path: path.into(),
+                        scope: PathScope::Subtree,
+                    })
+                    .to_vec(),
                 process_executables: executables
                     .iter()
                     .cloned()
@@ -2301,7 +2965,11 @@ mod tests {
                     FixtureOperation::UndeclaredProcessExec,
                     FixtureOutcome::Denied,
                 ),
-                (FixtureOperation::ProcessFork, FixtureOutcome::Denied),
+                (FixtureOperation::ProcessFork, FixtureOutcome::Allowed),
+                (FixtureOperation::StateWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::ShellExec, FixtureOutcome::Allowed),
+                (FixtureOperation::KeychainTool, FixtureOutcome::Denied),
+                (FixtureOperation::KeychainRead, FixtureOutcome::Denied),
                 (
                     FixtureOperation::ProtectedInstructionRead,
                     FixtureOutcome::Allowed,
@@ -2316,7 +2984,9 @@ mod tests {
             ]
             .into(),
         };
+        let cache = authority.cargo_cache.path.clone();
         let plan = PlanPermissions {
+            read_only: None,
             private_state: None,
             mode: AccessMode::WorktreeWrite(Box::new(authority)),
             scratch: PathGrant {
@@ -2341,6 +3011,8 @@ mod tests {
         let mut anchor_paths = vec![
             root.clone(),
             scratch.clone(),
+            cache.clone(),
+            provider_state.clone(),
             protected.clone(),
             nested_git.clone(),
             linked.path().to_owned(),
@@ -2361,6 +3033,7 @@ mod tests {
             .map(|path| AnchoredDirectory::open_canonical(&safe_fs, path))
             .collect::<Result<Vec<_>, _>>()?;
         let anchors = Anchors {
+            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
             directories: &directories,
             safe_fs: &safe_fs,
             worktree: Some((&linked, &selected_ref)),
@@ -2423,6 +3096,23 @@ mod tests {
             executor.execute(options).expect("bounded sandbox child")
         };
 
+        let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);
+        assert!(
+            successful_probe(&shell_outcome),
+            "shell: {:?}; {}",
+            shell_outcome.termination,
+            String::from_utf8_lossy(&shell_outcome.stderr.bytes)
+        );
+        assert!(successful_probe(&run(
+            &executables[0],
+            &[&provider_state.join("transcript")]
+        )));
+        let cache_outcome = run(&executables[0], &[&cache.join("artifact")]);
+        assert!(
+            successful_probe(&cache_outcome),
+            "writer cache: {:?}",
+            cache_outcome.termination
+        );
         let inside_outcome = run(&executables[0], &[&inside]);
         assert!(
             successful_probe(&inside_outcome),
@@ -2431,11 +3121,45 @@ mod tests {
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
         let mut probes = vec![
+            (
+                "new symlink in provider state",
+                run(
+                    &executables[2],
+                    &[
+                        Path::new("-s"),
+                        &protected_file,
+                        &provider_state.join("new-link"),
+                    ],
+                ),
+            ),
+            (
+                "keychain tool",
+                run(Path::new("/usr/bin/security"), &[Path::new("help")]),
+            ),
+            ("keychain read", run(&executables[4], &[&keychain])),
+            (
+                "sibling cache",
+                run(&executables[0], &[&cache.with_file_name("other-lane")]),
+            ),
+            (
+                "new symlink in cache",
+                run(
+                    &executables[2],
+                    &[Path::new("-s"), &protected_file, &cache.join("new-link")],
+                ),
+            ),
             ("protected write", run(&executables[0], &[&protected_file])),
             ("symlink write", run(&executables[0], &[&symlink_path])),
             (
                 "new hardlink",
                 run(&executables[2], &[&protected_file, &hardlink_path]),
+            ),
+            (
+                "new symlink in scratch",
+                run(
+                    &executables[2],
+                    &[Path::new("-s"), &protected_file, &scratch.join("new-link")],
+                ),
             ),
             (
                 "nested git write",
@@ -2503,6 +3227,7 @@ mod tests {
             observations: BTreeMap::new(),
         };
         let plan = PlanPermissions {
+            read_only: None,
             private_state: None,
             mode: AccessMode::ReadOnly,
             scratch: PathGrant {

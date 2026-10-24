@@ -52,12 +52,13 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then default; empty or relative explicit values fail. No XDG/old-root fallback. |
 | Environment | State owns the persistent state inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
 | Build root | An uninstalled binary requires explicit absolute `PROVENANT_ROOT`; installed binaries use their release location, never this override |
-| User config | `<state>/config.toml`; optional, user-owned, only configuration file |
+| User config | `<state>/config.toml`; optional, user-owned global configuration |
 | Host identity | `<state>/state.json` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
 | Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
+| Read-only write exceptions | `<state>/projects/<ProjectId>/read-only.json`; confinement-owned, explicit `readOnlyWritable` list (default empty), authorised in #1343. Not a project config overlay and never loaded from old `.agents/fabric-policy.json`. |
 | Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |
 | Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor/confinement own repository locks, writer leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database and companions |
