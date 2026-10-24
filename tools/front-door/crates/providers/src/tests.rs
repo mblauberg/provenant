@@ -1615,6 +1615,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 .unwrap()
                 .adapter
                 .prepare(input)?;
+
             if adapter == "claude" {
                 let mut unattributed_route = route.clone();
                 unattributed_route.account_key = None;

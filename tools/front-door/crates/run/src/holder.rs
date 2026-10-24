@@ -23,6 +23,21 @@ pub struct RootSeed {
     pub checkout: PathBuf,
     pub state_root: PathBuf,
 }
+/// Host-only launch inputs, passed on the custody pipe rather than through
+/// lane-writable state. Provider credentials are resolved afresh on the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLaunchContext {
+    pub configuration_root: PathBuf,
+    pub cwd: PathBuf,
+    pub executables: std::collections::BTreeMap<String, PathBuf>,
+    pub git: PathBuf,
+    pub codex_home: Option<PathBuf>,
+    /// Synthetic fake-provider evidence; absent from installed builds.
+    #[cfg(feature = "fixture")]
+    #[serde(default)]
+    pub fixture_state_write: bool,
+}
 /// Opaque to supervisor; travels on the handoff pipe only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +51,7 @@ pub struct HolderContext {
     /// Private handoff only, never copied to the attempt or provider environment.
     #[serde(default)]
     pub host_delivery: Option<crate::HostDeliveryContext>,
+    pub launch: Option<HostLaunchContext>,
 }
 
 enum Completion<'a> {
@@ -59,7 +75,7 @@ impl HolderContext {
     }
     /// Open the store, retrying transient failures for about 30 s so a busy
     /// host does not turn into a refused or stranded attempt.
-    fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
+    pub fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
         let mut delay = std::time::Duration::from_millis(100);
         for _ in 0..10 {
             match Self::open_once(raw) {
@@ -90,7 +106,14 @@ impl HolderContext {
             actor_id: context.actor_id,
             read_prompts: false,
         };
-        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?;
+        let registry = context
+            .launch
+            .as_ref()
+            .map_or(context.roots.state_root.as_path(), |host| {
+                host.configuration_root.as_path()
+            });
+        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
+            .with_writer_registry(registry);
         Ok((context, store))
     }
 }
@@ -170,11 +193,8 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing"))?;
         let recovery = if let Some(writer) = &task.writer {
-            let mut writer = crate::prepare_writer(
-                writer,
-                self.context.state_root.as_path(),
-                record.project_id,
-            )?;
+            let mut writer =
+                crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
             let (directory, _) = writer.custody.take().ok_or(RunError::UnsafePath)?;
             if matches!(record.state, AttemptState::Terminal { .. }) {
                 match directory.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
@@ -303,16 +323,14 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         if let Some(writer) = &task.writer {
-            let check =
-                crate::prepare_writer(writer, self.context.state_root.as_path(), record.project_id)
-                    .and_then(|writer| {
-                        writer.terminal(
-                            self.context.state_root.as_path(),
-                            attempt,
-                            recovery
-                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
-                        )
-                    });
+            let check = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
+                .and_then(|writer| {
+                    writer.terminal(
+                        self.context.state_root.as_path(),
+                        attempt,
+                        recovery.ok_or(RunError::Validation("writer terminal custody missing"))?,
+                    )
+                });
             match check {
                 Ok(false) => {}
                 Ok(true) => {

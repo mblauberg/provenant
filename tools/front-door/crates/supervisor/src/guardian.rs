@@ -171,6 +171,11 @@ pub struct GuardianHooks<'a> {
 /// guardian. An error publishes a never-spawned exit and still calls `terminal`.
 pub trait Holder {
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
+    /// Stop host-side submission services before descendant cleanup begins.
+    /// Failure is bookkeeping evidence, never a provider stop reason.
+    fn provider_exited(&self, _context: &[u8], _reason: Option<machine::StopReason>) -> Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -545,6 +550,7 @@ impl Driver<'_> {
         let mut input_offset = 0;
         let mut stop_reason = None;
         let mut exit = None;
+        let mut host_closed = false;
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
@@ -579,6 +585,20 @@ impl Driver<'_> {
                     &mut omitted_warnings,
                     "child exit observation failed",
                 ),
+            }
+            if exit.is_some() && !host_closed {
+                host_closed = true;
+                if let Some(holder) = self.holder
+                    && holder
+                        .provider_exited(&self.holder_context, stop_reason)
+                        .is_err()
+                {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "host child launcher failed",
+                    );
+                }
             }
             out.read(&mut child.stdout);
             err.read(&mut child.stderr);

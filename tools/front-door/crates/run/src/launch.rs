@@ -109,6 +109,73 @@ pub enum RefusalKind {
 }
 
 impl RunStore {
+    /// Validate lane-writable ingress against the host's recorded parent.
+    pub fn validate_child(
+        &self,
+        run: RunId,
+        parent: AttemptId,
+        parent_depth: u64,
+        maximum: u64,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let expected = next_lane_depth(parent_depth, maximum)?;
+        let request = self.request(run, call)?;
+        if request.parent_attempt != Some(parent) || request.lane_depth != Some(expected) {
+            return Err(RunError::Validation(
+                "child request does not match host parent record",
+            ));
+        }
+        Ok(())
+    }
+    /// Refuse queued proposals without touching any launched provider.
+    pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
+        let ids: Vec<String> = call.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0")?;
+            let rows = query.query_map(
+                rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        for id in ids {
+            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+            if self.record(id, call)?.state == AttemptState::Queued {
+                self.withdraw(
+                    id,
+                    AttemptState::Queued,
+                    Outcome::Rejected,
+                    reason,
+                    call.clock
+                        .wall_now()
+                        .map_err(|_| RunError::Validation("wall clock"))?,
+                    call,
+                )?;
+            }
+        }
+        Ok(())
+    }
+    /// Bounded ingress for the parent host's child launcher. No provider or
+    /// custody action occurs in the submitting lane.
+    pub fn queued_runs(&self, call: &Request<'_>) -> Result<Vec<RunId>> {
+        let records: Vec<Vec<u8>> = call.retry(|| {
+            let mut query = self.db.prepare(
+                "SELECT record FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT 256",
+            )?;
+            let rows = query.query_map([self.context.project_id.to_string()], |row| row.get(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        let mut runs = std::collections::BTreeSet::new();
+        for raw in records {
+            let record: AttemptRecord = crate::db::decode(&raw)?;
+            if record.state == AttemptState::Queued {
+                runs.insert(record.run_id);
+            }
+        }
+        Ok(runs.into_iter().collect())
+    }
+
     pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
         let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
@@ -361,9 +428,9 @@ impl RunStore {
                     .ok_or_else(|| local(&"writer custody missing"))?;
                 acquire_writer(directory, scope, binding)
             }
-            None => {
-                custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
-            }
+            // Readers take the same injected acquisition as writers, so a
+            // fixture guardian and its reservation share one boot observer.
+            None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only()),
         }
         .map_err(|e| {
             if matches!(e, custody::CustodyError::Busy) {
@@ -444,7 +511,10 @@ impl RunStore {
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
             task: task.task_id,
-            requester: self.context.actor_id,
+            requester: self
+                .run(record.run_id, call)
+                .map_err(|error| local(&error))?
+                .actor_id,
             protected_commands: vec![],
             config_environment: vec![],
             argv: plan.argv,
