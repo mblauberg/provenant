@@ -5,6 +5,7 @@ pub mod domains;
 pub mod fabric;
 pub mod quota;
 pub mod route;
+pub mod run;
 pub mod workflow;
 pub use fabric::Fabric;
 pub use quota::Quota;

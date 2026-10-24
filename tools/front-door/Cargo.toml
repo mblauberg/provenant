@@ -48,7 +48,6 @@ provenant-cli = { path = "crates/cli" }
 ignored-paths = []
 ignored = [
   "provenant-routing",
-  "provenant-telemetry",
 ]
 
 [workspace.lints.rust]
@@ -76,11 +75,11 @@ publish = false
 license.workspace = true
 
 [dependencies]
-provenant-run = { workspace = true }
 provenant-fabric-mcp = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 provenant-fabric-store = { workspace = true }
 provenant-workflow = { workspace = true }
+provenant-run = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-cli = { workspace = true }
 provenant-core = { workspace = true }

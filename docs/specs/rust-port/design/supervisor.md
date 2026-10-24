@@ -138,7 +138,7 @@ publication. Failure keeps the durable reservation fenced.
 A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
 drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
 The exit's `settlement_evidence` records
-`darwin_census_and_writer_lease`, `linux_kernel_children`, `never_spawned` or
+`darwin_census_and_custody_lease`, `linux_kernel_children`, `never_spawned` or
 `unresolved`. Linux requires two identical complete per-thread kernel children
 snapshots, including stable thread membership, before cleanup settlement.
 The Linux global census skips rows whose process group or session is 0 (host
@@ -581,6 +581,12 @@ original attempt inode and custody lock, verifies both digests and scopes,
 and syncs held files/directories before minting `SettlementCommit`. That
 receipt permits classified scratch settlement and fence clearing under writer
 exclusion; an absent or invalid attestation retains the fence.
+
+Decision (run steps 2+3): supervisor owns the attestation byte format as
+`custody::publish_release(attempt, scope)`, which the guardian holder calls
+after Run's terminal commit, so Run does not duplicate it. The holder also
+gets `Holder::admit(context, attempt)` before spawn. A refusal publishes a
+never-spawned exit and releases custody without starting the provider.
 
 ## Deletions and build order
 

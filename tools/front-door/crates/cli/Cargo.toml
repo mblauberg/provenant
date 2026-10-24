@@ -20,6 +20,7 @@ provenant-run = { workspace = true }
 provenant-workflow = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-telemetry = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

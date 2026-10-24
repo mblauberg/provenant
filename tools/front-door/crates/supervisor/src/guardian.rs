@@ -44,6 +44,7 @@ struct LaunchMessage {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
+    holder_context: Vec<u8>,
     capture: CapturePlan,
 }
 pub(crate) fn handoff(
@@ -58,6 +59,7 @@ pub(crate) fn handoff(
             .iter()
             .any(|name| name.is_empty() || name.len() > 512)
         || owned.command.config_environment.len() > 128
+        || owned.command.holder_context.len() > HOLDER_CONTEXT_LIMIT
         || !valid_resolved_route(&owned.command.resolved_route)
     {
         return Err(CustodyError::InvalidRecord);
@@ -72,12 +74,12 @@ pub(crate) fn handoff(
     )?;
     let message = LaunchMessage {
         schema_version: 1,
-        scope: owned.writer.scope(),
+        scope: owned.lease.scope(),
         resolved_route: owned.command.resolved_route,
         permission_plan_digest: owned.command.permission_plan_digest,
         task: owned.command.task,
         requester: owned.command.requester,
-        binding: owned.writer.reservation.binding.clone(),
+        binding: owned.lease.reservation.binding.clone(),
         executable_snapshot,
         protected_commands: owned.command.protected_commands,
         argv: owned
@@ -94,6 +96,7 @@ pub(crate) fn handoff(
             .collect(),
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
+        holder_context: owned.command.holder_context,
         capture,
     };
     if message.argv.is_empty()
@@ -104,9 +107,9 @@ pub(crate) fn handoff(
     }
     let payload = serde_json::to_vec(&message).map_err(|_| CustodyError::InvalidRecord)?;
     crate::sys::handoff::spawn(
-        &owned.writer.directory,
+        &owned.lease.directory,
         &publication.directory,
-        owned.writer.lease.as_ref().ok_or(CustodyError::Fenced)?,
+        owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
         &owned.command.environment,
         &owned.command.config_environment,
@@ -121,7 +124,7 @@ pub(crate) fn handoff(
     )?;
     // The guardian owns custody after ACK. Retaining this duplicate would make
     // the descendant lease-absence proof depend on requester lifetime.
-    drop(owned.writer.lease.take());
+    drop(owned.lease.lease.take());
     Ok(())
 }
 
@@ -129,6 +132,9 @@ pub(crate) fn handoff(
 #[derive(Default)]
 pub struct GuardianHooks<'a> {
     pub children: Option<&'a dyn ChildRegistry>,
+    /// Run's terminal transaction. Without one, custody stays fenced after
+    /// exit until an explicit recovery verifies Run's release attestations.
+    pub holder: Option<&'a dyn Holder>,
     #[cfg(feature = "fixture")]
     pub observer: Option<&'a dyn ProcessObserver>,
     #[cfg(feature = "fixture")]
@@ -139,6 +145,21 @@ pub struct GuardianHooks<'a> {
     pub stderr_decoder: Option<&'a dyn crate::capture::FrameDecoder>,
     pub stdout_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
     pub stderr_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
+}
+/// The holder role: the composed terminal publisher runs inside the guardian,
+/// after durable exit and completed cleanup, while the guardian still holds
+/// the writer lease and attempt custody. It must durably publish Run's
+/// `terminal-commit.json`, `quarantine/manifest.json` and `release.json` in the
+/// attempt directory before returning. Supervisor then verifies those exact
+/// scoped bytes and clears the fence; any failure leaves the fence for
+/// recovery. Supervisor never interprets the context or the terminal outcome.
+///
+/// `admit` runs first, after custody is accepted and before the provider
+/// spawns, so a queued attempt waits for host admission inside its own
+/// guardian. An error publishes a never-spawned exit and still calls `terminal`.
+pub trait Holder {
+    fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
+    fn terminal(&self, context: &[u8], attempt: &Directory, exit: &ExitObservation) -> Result<()>;
 }
 /// Final reservation and immutable exit publication share one storage seam.
 pub trait ExitPublisher {
@@ -351,6 +372,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         reactor,
         observer,
         exit_publisher,
+        holder: hooks.holder,
+        holder_context: message.holder_context,
     };
     let result = driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks);
     #[cfg(target_os = "linux")]
@@ -374,6 +397,8 @@ struct Driver<'a> {
     reactor: crate::sys::provider::GuardianReactor,
     observer: &'a dyn ProcessObserver,
     exit_publisher: Option<&'a dyn ExitPublisher>,
+    holder: Option<&'a dyn Holder>,
+    holder_context: Vec<u8>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
@@ -429,6 +454,11 @@ impl Driver<'_> {
                 *omitted = omitted.saturating_add(1);
             }
         };
+        if let Some(holder) = self.holder
+            && holder.admit(&self.holder_context, &self.attempt).is_err()
+        {
+            return self.never_spawned("admission refused");
+        }
         let started = Instant::now();
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
@@ -460,46 +490,11 @@ impl Driver<'_> {
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(error) => {
-                self.reservation.launch_state = LaunchState::NeverSpawned;
-                self.reservation.unresolved_cleanup = false;
-                self.reservation.census_incomplete = false;
-                self.reservation.descendants.clear();
-                self.reservation.omitted_descendants = 0;
-                require_durable(write_record(
-                    &self.writer_dir,
-                    "reservation.json",
-                    &self.reservation,
-                    PublishMode::Replace,
-                )?)?;
-                let record = ProcessExit {
-                    schema_version: 1,
-                    scope: self.reservation.scope,
-                    termination: None,
-                    never_spawned: true,
-                    stop_reason: None,
-                    delivered_signals: vec![],
-                    reaped: vec![],
-                    omitted_reaped: 0,
-                    spared: vec![],
-                    omitted_spared: 0,
-                    failed_deliveries: vec![],
-                    omitted_failed_deliveries: 0,
-                    terminal_observed: false,
-                    unresolved_cleanup: false,
-                    settlement_evidence: SettlementEvidence::NeverSpawned,
-                    stdout: CaptureTotals::default(),
-                    stderr: CaptureTotals::default(),
-                    warnings: vec![
-                        if error.kind() == io::ErrorKind::InvalidData {
-                            "provider executable snapshot changed"
-                        } else {
-                            "provider spawn failed"
-                        }
-                        .into(),
-                    ],
-                    omitted_warnings: 0,
-                };
-                return self.publish_until_durable(&record);
+                return self.never_spawned(if error.kind() == io::ErrorKind::InvalidData {
+                    "provider executable snapshot changed"
+                } else {
+                    "provider spawn failed"
+                });
             }
         };
         self.reservation.launch_state = LaunchState::Spawned;
@@ -956,6 +951,9 @@ impl Driver<'_> {
             omitted_warnings,
         };
         self.publish_until_durable(&record)?;
+        if cleanup_complete {
+            self.release(&record);
+        }
         if !cleanup_complete {
             // A durable unresolved fence permits recovery to reconcile after
             // the guardian exits. It does not certify descendant absence.
@@ -971,6 +969,85 @@ impl Driver<'_> {
             }
         }
         Ok(())
+    }
+    /// Hand the durable exit to the holder and clear the fence only after its
+    /// release attestations verify. Failures keep the fence for `reconcile`;
+    /// they never alter the published exit or become a stop reason.
+    fn never_spawned(&mut self, warning: &str) -> Result<()> {
+        self.reservation.launch_state = LaunchState::NeverSpawned;
+        self.reservation.unresolved_cleanup = false;
+        self.reservation.census_incomplete = false;
+        self.reservation.descendants.clear();
+        self.reservation.omitted_descendants = 0;
+        require_durable(write_record(
+            &self.writer_dir,
+            "reservation.json",
+            &self.reservation,
+            PublishMode::Replace,
+        )?)?;
+        let record = ProcessExit {
+            schema_version: 1,
+            scope: self.reservation.scope,
+            termination: None,
+            never_spawned: true,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            failed_deliveries: vec![],
+            omitted_failed_deliveries: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+            warnings: vec![warning.into()],
+            omitted_warnings: 0,
+        };
+        self.publish_until_durable(&record)?;
+        self.release(&record);
+        Ok(())
+    }
+    fn release(&mut self, record: &ProcessExit) {
+        let Some(holder) = self.holder else {
+            return;
+        };
+        if record.unresolved_cleanup || self.writer.is_none() {
+            return;
+        }
+        let exit = record.durable_observation();
+        // About 30 s in all, so a contended store does not strand custody.
+        let mut delay = Duration::from_millis(50);
+        for attempt in 0..12 {
+            if attempt > 0 {
+                let _ = self.reactor.wait(&[], delay);
+                delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+            }
+            if holder
+                .terminal(&self.holder_context, &self.attempt, &exit)
+                .is_err()
+            {
+                continue;
+            }
+            let verified = self
+                .attempt
+                .open_verified_directory(OsStr::new("quarantine"))
+                .map_err(CustodyError::from)
+                .and_then(|quarantine| {
+                    verify_release(
+                        self.reservation.scope,
+                        &self.attempt,
+                        &self.attempt,
+                        &quarantine,
+                    )
+                });
+            if verified.is_ok() {
+                let _ = clear_reservation(&self.writer_dir, self.reservation.scope);
+                return;
+            }
+        }
     }
     fn persist_tracking(&mut self) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
@@ -1198,7 +1275,7 @@ impl Driver<'_> {
         match try_writer_lease(&self.writer_dir, self.writer_identity) {
             Ok(lease) => {
                 self.writer = Some(lease);
-                self.settlement_evidence = SettlementEvidence::DarwinCensusAndWriterLease;
+                self.settlement_evidence = SettlementEvidence::DarwinCensusAndCustodyLease;
                 Ok(true)
             }
             Err(_) => Ok(false),

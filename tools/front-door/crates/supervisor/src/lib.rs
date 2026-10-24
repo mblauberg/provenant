@@ -24,4 +24,4 @@ pub mod scratch;
 
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
-pub use guardian::{ChildRegistry, GuardianHooks, RegisteredChild, supervise};
+pub use guardian::{ChildRegistry, GuardianHooks, Holder, RegisteredChild, supervise};

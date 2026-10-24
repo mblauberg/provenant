@@ -432,6 +432,10 @@ impl Directory {
     /// off the original anchor device. This cannot detect ABA replacement or
     /// prevent entry mutation after the final stat; callers own directory access
     /// policy. The returned descriptor retains its opened identity after rename.
+    /// Unprivileged free bytes on this directory's filesystem, for admission.
+    pub fn available_bytes(&self) -> std::io::Result<u64> {
+        crate::sys::resources::available_bytes(&self.file)
+    }
     pub fn open_verified_directory(&self, name: &OsStr) -> Result<Self> {
         let before = self.metadata_at(name, false)?;
         let child = self.open_directory(name)?;

@@ -167,6 +167,28 @@ pub fn scan_disclosure(
     })
 }
 
+/// Scan one exact in-memory snapshot, such as a prompt about to be sealed,
+/// with the same secret patterns. A match refuses without naming the text.
+pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), DisclosureError> {
+    let mut redactor =
+        Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
+    for chunk in bytes.chunks(BUFFER_SIZE) {
+        redactor
+            .filter(chunk)
+            .map_err(|_| DisclosureError::SecretMatch)?;
+        if redactor.has_redaction() {
+            return Err(DisclosureError::SecretMatch);
+        }
+    }
+    redactor
+        .finish()
+        .map_err(|_| DisclosureError::SecretMatch)?;
+    if redactor.has_redaction() {
+        return Err(DisclosureError::SecretMatch);
+    }
+    Ok(())
+}
+
 struct Scanner {
     redactor: Redactor,
     files: u64,

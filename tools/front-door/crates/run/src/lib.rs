@@ -1,14 +1,26 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+mod admission;
 mod artifacts;
+mod controls;
 mod db;
+mod holder;
+mod launch;
 mod reader;
 mod store;
+
+pub use admission::{
+    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
+};
+pub use controls::{CancelReceipt, Reconciled, Resume};
+pub use holder::{HolderContext, RootSeed, RunHolder};
+pub use launch::{Decoded, PreparedLaunch, Providers, Started};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
 pub use reader::{
-    ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, OutputChunk, RunWorkSnapshot,
+    ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
+    LaneTarget, OutputChunk, RunWorkSnapshot,
 };
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
@@ -33,8 +45,12 @@ pub enum RunError {
     TooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record")]
     ArtifactMismatch,
+    #[error("terminal publication is already sealed; recover its original facts and result")]
+    TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
+    #[error("host queue is full")]
+    Capacity,
     #[error("run store is contended or its call budget expired")]
     Contention,
     #[error("run-store call was cancelled")]
@@ -56,5 +72,7 @@ pub enum RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 
+#[cfg(test)]
+mod dispatch_tests;
 #[cfg(test)]
 mod tests;

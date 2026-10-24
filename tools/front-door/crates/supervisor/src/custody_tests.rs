@@ -77,7 +77,7 @@ fn scope() -> Scope {
         generation: 1,
     }
 }
-fn acquire(root: &std::path::Path) -> Result<WriterLease> {
+fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
     let clock = SystemClock::new();
     crate::fixture::acquire_writer(
         Directory::open_anchor(root)?,
@@ -294,8 +294,9 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
                 environment: crate::fixture::environment(root.path()),
                 cwd: root.path().into(),
                 stdin: vec![],
+                holder_context: Vec::new(),
             },
-            writer: &mut writer,
+            lease: &mut writer,
             handshake: WaitBudget::cli(clock.mono_now(), 1)?,
             cancel: &token,
             clock: &clock,
