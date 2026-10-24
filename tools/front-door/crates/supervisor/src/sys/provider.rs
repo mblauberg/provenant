@@ -8,7 +8,7 @@ use super::{
     child,
     reaper::{Permit, Reaper},
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::machine::{DeliveryFailure, DeliveryOutcome};
 use crate::{
     census::{
@@ -382,7 +382,7 @@ pub(crate) struct AdoptedCleanup {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) struct AdoptedDelivery {
     pub(crate) identity: ProcessIdentity,
     pub(crate) outcome: DeliveryOutcome,
@@ -909,19 +909,60 @@ impl ProviderGroup {
                 });
                 continue;
             }
-            let error = io::Error::last_os_error();
-            let failure = match error.raw_os_error() {
-                Some(libc::ESRCH) => DeliveryFailure::NoSuchProcess,
-                Some(libc::EPERM) => DeliveryFailure::PermissionDenied,
-                Some(code) => DeliveryFailure::OsError(code),
-                None => DeliveryFailure::OsError(libc::EIO),
-            };
             deliveries.push(AdoptedDelivery {
                 identity,
-                outcome: DeliveryOutcome::Failed(failure),
+                outcome: DeliveryOutcome::Failed(kill_failure(&io::Error::last_os_error())),
             });
         }
         Ok(deliveries)
+    }
+
+    /// Signal exact identities the guardian found still inside the attempt's
+    /// sandbox after they left the provider tree. Each identity is re-observed
+    /// immediately before the signal, so a recycled PID is never targeted.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stop_marked(
+        &mut self,
+        escalation: bool,
+        marked: &[ProcessIdentity],
+    ) -> Vec<AdoptedDelivery> {
+        let signal = if escalation {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        let mut deliveries = Vec::new();
+        for identity in marked {
+            if self.last_adopted_signal.get(identity) == Some(&signal) {
+                continue;
+            }
+            let Ok(pid) = native_pid(identity.pid) else {
+                continue;
+            };
+            match super::census::observe_with_boot(identity.pid, &identity.boot) {
+                ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie => {
+                }
+                _ => continue,
+            }
+            // SAFETY: the identity (boot, PID, start stamp) was re-read just
+            // above and is inside the attempt's own sandbox. This
+            // targets that one process only, never a group or caller PID.
+            let outcome = if unsafe { libc::kill(pid, signal) } == 0 {
+                self.last_adopted_signal.insert(identity.clone(), signal);
+                DeliveryOutcome::Delivered
+            } else {
+                match kill_failure(&io::Error::last_os_error()) {
+                    // Gone between the observation and the signal: the goal.
+                    DeliveryFailure::NoSuchProcess => continue,
+                    failure => DeliveryOutcome::Failed(failure),
+                }
+            };
+            deliveries.push(AdoptedDelivery {
+                identity: identity.clone(),
+                outcome,
+            });
+        }
+        deliveries
     }
 
     /// Prove the guardian has no provider descendants left after the provider
@@ -1004,6 +1045,16 @@ impl Drop for ProviderGroup {
             // direct-child reaping and deliberately performs no signal.
             permit.transfer(child);
         }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn kill_failure(error: &io::Error) -> DeliveryFailure {
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => DeliveryFailure::NoSuchProcess,
+        Some(libc::EPERM) => DeliveryFailure::PermissionDenied,
+        Some(code) => DeliveryFailure::OsError(code),
+        None => DeliveryFailure::OsError(libc::EIO),
     }
 }
 

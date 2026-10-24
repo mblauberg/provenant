@@ -54,6 +54,59 @@ impl Drop for HostHolder<'_> {
         let _ = self.stop(None);
     }
 }
+impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
+    /// The lane's MCP creates its child store at startup, so the store existing
+    /// proves nothing. No nested lane can exist while the store holds no `runs`
+    /// entry and its database has no run row. Any failed read is not "none".
+    fn has_no_nested_runs(&self, raw: &[u8]) -> bool {
+        let Ok(context) = serde_json::from_slice::<run::HolderContext>(raw) else {
+            return false;
+        };
+        let state = context
+            .roots
+            .state_root
+            .join("children")
+            .join(context.attempt_id.to_string());
+        match std::fs::read_dir(state.join("runs")) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return false;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        let mut inputs = provenant_core::RootInputs::new(
+            context.roots.home.clone(),
+            context.roots.checkout.clone(),
+        );
+        inputs.state_dir = Some(state);
+        let Ok(roots) = inputs.resolve(&provenant_supervisor::fs::LocalFs) else {
+            return false;
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let Ok(budget) = provenant_core::WaitBudget::cli(clock.mono_now(), 1) else {
+            return false;
+        };
+        let call = run::Request {
+            clock: &clock,
+            budget,
+            cancel: &cancel,
+        };
+        let execution = run::ExecutionContext {
+            state_root: roots.state,
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            read_prompts: false,
+        };
+        match run::RunStore::open_read_only(&execution, &call) {
+            Ok(None) => true,
+            Ok(Some(store)) => store.has_runs(&call).is_ok_and(|any| !any),
+            Err(_) => false,
+        }
+    }
+}
 impl Holder for HostHolder<'_> {
     fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
         self.inner.admit(raw, attempt)?;

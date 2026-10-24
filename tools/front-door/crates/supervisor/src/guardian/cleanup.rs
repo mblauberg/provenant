@@ -185,12 +185,14 @@ impl Driver<'_> {
             Ok(census) => census,
             Err(_) => {
                 self.descendant_stop_allowed = false;
+                self.escapee_stop_allowed = false;
                 self.reservation.census_incomplete = true;
                 return None;
             }
         };
         let Some(root) = self.reservation.provider.as_ref() else {
             self.descendant_stop_allowed = false;
+            self.escapee_stop_allowed = false;
             self.reservation.census_incomplete = true;
             return None;
         };
@@ -228,9 +230,11 @@ impl Driver<'_> {
         child.record_census(&census);
         self.spared.refresh(&census);
         let mut registry_unknown = self.registry.is_none();
+        let mut registry_listed = false;
         if let Some(registry) = self.registry {
             match registry.registered_children() {
                 Ok(children) if children.len() <= 4096 => {
+                    registry_listed = true;
                     for registered in children {
                         let identity = registered.registration.identity();
                         match crate::sys::census::prove_nested_custody(
@@ -295,9 +299,48 @@ impl Driver<'_> {
         self.protected
             .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
+        self.escapee_stop_allowed = registry_listed
+            || (self.registry.is_none()
+                && self
+                    .nested_children
+                    .is_some_and(|store| store.has_no_nested_runs(&self.holder_context)));
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
+    /// Live processes outside the provider and any spared owner that are still
+    /// inside this attempt's sandbox. They are added to `tracked`, so cleanup cannot
+    /// settle while one lives, and returned for signalling.
+    #[cfg(target_os = "macos")]
+    fn marked_escapees(
+        &mut self,
+        census: &crate::census::Census,
+        provider_pid: i64,
+        spared: &std::collections::BTreeSet<ProcessIdentity>,
+    ) -> Vec<ProcessIdentity> {
+        let Ok(name) = std::ffi::CString::new(self.reservation.scope.attempt.sandbox_lookup_name())
+        else {
+            return Vec::new();
+        };
+        let marked: Vec<_> = census
+            .facts()
+            .filter(|fact| {
+                !fact.zombie
+                    && fact.identity.pid != provider_pid
+                    && fact.identity != self.guardian
+                    && !spared.contains(&fact.identity)
+                    // A nested owner's own descendants are its to end.
+                    && !self.protected.iter().any(|owner| {
+                        census.ancestry(&fact.identity, owner) != crate::census::Ancestry::No
+                    })
+                    && i32::try_from(fact.identity.pid)
+                        .is_ok_and(|pid| crate::sys::census::darwin_in_attempt_sandbox(pid, &name))
+            })
+            .map(|fact| fact.identity.clone())
+            .collect();
+        self.tracked.extend(marked.iter().cloned());
+        marked
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn darwin_quiescent(
         &mut self,
@@ -385,6 +428,10 @@ impl Driver<'_> {
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
+            // A descendant that detached before the census saw it stays in the
+            // attempt's sandbox; it is tracked here and ended below.
+            #[cfg(target_os = "macos")]
+            let marked = self.marked_escapees(&census, child.id(), &spared);
             // Reaping sends no signal, so an adopted zombie is reaped even when
             // descendant stops are not allowed; otherwise a fenced guardian
             // would pin it indefinitely.
@@ -439,9 +486,13 @@ impl Driver<'_> {
                 libc::SIGTERM
             };
             let outcome = stop_delivery_outcome(child.stop(escalation));
-            self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
-            if outcome != DeliveryOutcome::Delivered {
-                push_warning(warnings, omitted, "post-terminal provider signal failed");
+            // ESRCH means the provider is already gone (or already signalled),
+            // which later ticks would only repeat; it is not a failed delivery.
+            if outcome != DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess) {
+                self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
+                if outcome != DeliveryOutcome::Delivered {
+                    push_warning(warnings, omitted, "post-terminal provider signal failed");
+                }
             }
             #[cfg(target_os = "linux")]
             if self.descendant_stop_allowed {
@@ -457,6 +508,12 @@ impl Driver<'_> {
                         }
                     }
                     Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if self.escapee_stop_allowed {
+                for delivery in child.stop_marked(escalation, &marked) {
+                    self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }
             }
             self.persist_tracking(warnings, omitted);

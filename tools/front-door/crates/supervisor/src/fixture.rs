@@ -757,6 +757,12 @@ pub fn dispatch() -> io::Result<bool> {
         "s2-setsid-descendant" => {
             crate::sys::fixture_ignore_term()?;
             let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            // Connect first: the lane profile that follows denies other lookups
+            // and sockets, as the production profile does.
+            #[cfg(target_os = "macos")]
+            if let Ok(name) = fixture_path(&args, 4) {
+                crate::sys::fixture_enter_attempt_sandbox(&name.to_string_lossy())?;
+            }
             ready.write_all(b"R")?;
             ready.write_all(std::process::id().to_string().as_bytes())?;
             ready.write_all(b"\n")?;
@@ -779,6 +785,28 @@ pub fn dispatch() -> io::Result<bool> {
             gate.write_all(b"R")?;
             wait_for_eof(&mut gate)?;
             descendant.detach();
+        }
+        "s2-detach-provider" | "s2-registered-detach-provider" => {
+            // Start a session-leading descendant in the attempt's sandbox, then
+            // exit at once so no census can follow the parent edge. The
+            // registered variant also leaves a nested owner whose custody the
+            // macOS census cannot prove, which forbids stops by descent.
+            let root = std::env::current_dir()?;
+            let extra = [
+                fixture_path(&args, 3)?.into_os_string(),
+                fixture_path(&args, 4)?.into_os_string(),
+            ];
+            ChildGuard::new(
+                command_with_args("s2-setsid-descendant", &extra, &root, true)?.spawn()?,
+            )
+            .detach();
+            if scenario == "s2-registered-detach-provider" {
+                let owner = [fixture_path(&args, 5)?.into_os_string()];
+                ChildGuard::new(
+                    command_with_args("s2-registered-owner", &owner, &root, false)?.spawn()?,
+                )
+                .detach();
+            }
         }
         "s2-registered-owner" => {
             let home = std::env::var_os("HOME")

@@ -161,11 +161,30 @@ The Linux global census skips rows whose process group or session is 0 (host
 kernel tasks and container shims; never a descendant of the guardian's
 session); a direct observation of such a PID stays unknown.
 
-A macOS daemon that escapes with `setsid` before ever being sampled and closes
-the inherited lease is the residual: libproc cannot reconstruct that missing
-history. It grants no signalling authority. Census observations never grant
-arbitrary PID or process-group signal authority; only the unreaped provider
-and kernel-confirmed adopted children may receive signals. The one exception
+Every confined provider launch's seatbelt profile also allows one Mach lookup
+name unique to the attempt, `dev.provenant.attempt.<attempt id>`, which no
+service answers. A seatbelt sandbox is inherited and cannot be dropped, so a
+descendant that detaches before any census samples its parent edge still
+carries it. On macOS, post-terminal cleanup treats a live process outside the
+provider and any spared owner as an escapee when `sandbox_check` reports it
+sandboxed, allowed to look that name up, and denied an unrelated control name
+(the control excludes system daemons whose sandboxes allow lookups broadly). It
+joins the tracked set, so cleanup cannot settle while it lives, and receives
+TERM then KILL after the descendant grace, each time after re-observing its
+full identity. This needs only a readable nested-child registry, or, where none is wired
+(production), the host reporting that the attempt's nested child store
+(`children/<attempt id>` under the state root) holds no nested run (the lane's
+MCP creates the store at startup, so its existing proves nothing: no `runs/`
+entries and no row in its read-only `runs` table); a run there, or a failed
+read, mean no signal and the escapee stays unresolved.
+macOS cannot prove a registered owner's custody, so that owner stays protected
+(as do its descendants) while other escapees are still ended. A signal to a provider that
+is already gone (ESRCH) is neither recorded nor warned about. A survivor is published in `unresolved_pids`. An unconfined
+launch is the residual: libproc cannot reconstruct that missing history. Every
+production launch is confined; Linux has no confinement backend and does not
+use the check. Census observations never grant
+arbitrary PID or process-group signal authority; only the unreaped provider,
+kernel-confirmed adopted children and attempt-sandbox escapees may receive signals. The one exception
 is the provider's own group: while the provider leader is unreaped (a live
 process or a `WNOWAIT` zombie, either of which reserves the PGID) the guardian
 sends TERM, then KILL after the descendant grace, to that group, which the

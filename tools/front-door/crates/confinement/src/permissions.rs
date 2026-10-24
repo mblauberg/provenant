@@ -992,11 +992,24 @@ pub struct ConfinedLaunch {
 impl ConfinedLaunch {
     /// The only way to turn a provider argv into a runnable command: the
     /// compiled profile wraps it, so no caller can launch the CLI unconfined.
-    pub fn command(&self, argv: &[OsString]) -> Result<Vec<OsString>, PermissionError> {
+    ///
+    /// The profile also allows looking up the attempt's own Mach name, which
+    /// grants nothing. The sandbox is inherited and cannot be dropped, so the
+    /// supervisor uses that allowance to find processes that left the
+    /// provider's process tree.
+    pub fn command(
+        &self,
+        argv: &[OsString],
+        attempt: &provenant_core::AttemptId,
+    ) -> Result<Vec<OsString>, PermissionError> {
         let profile =
             std::str::from_utf8(&self.profile).map_err(|_| PermissionError::InvalidFixture)?;
+        let profile = format!(
+            "{profile}(allow mach-lookup (global-name \"{}\"))\n",
+            attempt.sandbox_lookup_name()
+        );
         let mut command = Vec::with_capacity(argv.len() + 3);
-        command.extend(["/usr/bin/sandbox-exec", "-p", profile].map(OsString::from));
+        command.extend(["/usr/bin/sandbox-exec", "-p", &profile].map(OsString::from));
         command.extend(argv.iter().cloned());
         Ok(command)
     }
@@ -2490,6 +2503,25 @@ mod tests {
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
+
+    #[test]
+    fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), PermissionError> {
+        let launch = ConfinedLaunch {
+            enforcement: Enforcement::MacOsSandboxExec,
+            profile: b"(version 1)\n(deny default)\n".to_vec(),
+            profile_digest: [0; 32],
+            native_controls: Vec::new(),
+        };
+        let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+        let command = launch.command(&["tool".into()], &attempt)?;
+        assert_eq!(command[3], "tool");
+        let profile = command[2].to_string_lossy();
+        assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+        assert!(profile.ends_with(&format!(
+            "(allow mach-lookup (global-name \"dev.provenant.attempt.{attempt}\"))\n"
+        )));
+        Ok(())
+    }
 
     #[test]
     fn codex_standalone_package_is_read_exec_only() {

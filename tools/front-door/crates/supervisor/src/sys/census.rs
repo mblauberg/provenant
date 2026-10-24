@@ -1052,6 +1052,48 @@ fn darwin_start_stamp(pid: i32) -> Option<(u64, usize)> {
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" {
+    // Exported by libSystem (libsystem_sandbox). Variadic: the filter value
+    // follows `filter_type`, and is absent when `filter_type` is 0.
+    fn sandbox_check(
+        pid: libc::pid_t,
+        operation: *const libc::c_char,
+        filter_type: libc::c_int,
+        ...
+    ) -> libc::c_int;
+}
+
+/// Whether a process is still inside the sandbox of the attempt that owns
+/// `lookup_name`: sandboxed at all, allowed to look that name up, yet denied an
+/// unrelated name. Only the attempt's own profile grants that one name while
+/// denying others; system daemons' sandboxes allow lookups broadly and fail the
+/// control. A seatbelt sandbox is inherited and cannot be dropped, so this
+/// survives reparenting and `setsid`. Unsandboxed processes, other sandboxes
+/// and any failed check read as not a member.
+#[cfg(target_os = "macos")]
+pub(crate) fn darwin_in_attempt_sandbox(pid: i32, lookup_name: &std::ffi::CStr) -> bool {
+    const SANDBOX_FILTER_GLOBAL_NAME: libc::c_int = 2;
+    const CONTROL_NAME: &std::ffi::CStr = c"dev.provenant.attempt.control";
+    let lookup = |name: &std::ffi::CStr| {
+        // SAFETY: both strings are live NUL-terminated C strings for the call,
+        // and the variadic argument is the single char pointer that filter type
+        // 2 (global name) expects. Nothing is retained.
+        unsafe {
+            sandbox_check(
+                pid,
+                c"mach-lookup".as_ptr(),
+                SANDBOX_FILTER_GLOBAL_NAME,
+                name.as_ptr(),
+            )
+        }
+    };
+    // SAFETY: a null operation with filter type 0 asks only whether the pid is
+    // sandboxed; sandbox_check reads no pointer and retains none.
+    let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) } == 1;
+    sandboxed && lookup(lookup_name) == 0 && lookup(CONTROL_NAME) == 1
+}
+
+#[cfg(target_os = "macos")]
 fn darwin_cpu_micros(pid: i32) -> Option<u64> {
     use std::mem::{MaybeUninit, size_of};
     #[allow(deprecated)]

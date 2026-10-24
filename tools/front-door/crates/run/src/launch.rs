@@ -525,7 +525,7 @@ impl RunStore {
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
                 return Err(local(&error));
             }
-            match confinement.command(&plan.argv, call.cancel) {
+            match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
                     lease

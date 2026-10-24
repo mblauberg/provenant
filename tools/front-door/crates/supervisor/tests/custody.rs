@@ -1,6 +1,6 @@
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
-    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
+    ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     clock::SystemClock,
     custody::*,
@@ -20,6 +20,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const S2_CENSUS_GATE_ONCE: &str = "s2-census-gate-once";
 const S2_CENSUS_PAUSED: &str = "s2-census-paused";
 const S2_CENSUS_RELEASE: &str = "s2-census-release";
+const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 
@@ -871,6 +872,138 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     wait_for_identity_absence(&descendant)?;
     Ok(())
 }
+/// A lane with an MCP child registers a nested owner whose custody macOS cannot
+/// prove; that must not stop cleanup ending a different, exact escapee, and
+/// cleanup must not repeat a signal to a provider that is already gone.
+#[cfg(target_os = "macos")]
+fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
+    root: &Path,
+) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    let ready_path = root.join("esc-ready.sock");
+    let owner_path = root.join("esc-owner.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let owner_listener = UnixListener::bind(&owner_path)?;
+    let (_writer, handle) = start(
+        root,
+        "esc",
+        "s2-registered-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+            owner_path.into_os_string(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let escapee = process_identity(read_pid_line(&mut stream)?)?;
+    let mut owner = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner, b'R')?;
+    let owner_identity: ProcessIdentity =
+        serde_json::from_slice(&std::fs::read(home.join("s2-owner.json"))?)?;
+    let exit = exited(&handle)?;
+    // The owner is protected and still holds custody, so the exit is unresolved
+    // for the whole cleanup budget; the escapee is nevertheless gone.
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    wait_for_identity_absence(&escapee)?;
+    assert!(!exit.unresolved_pids.contains(&escapee.pid), "{exit:?}");
+    process_identity(owner_identity.pid)?;
+    // Every failed provider signal also warns, so none means none repeated.
+    assert!(
+        !exit
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("signal failed")),
+        "{exit:?}"
+    );
+    assert_eq!(exit.omitted_warnings, 0, "{exit:?}");
+    drop(owner);
+    wait_for_identity_absence(&owner_identity)?;
+    Ok(())
+}
+/// The production shape: no registry is wired, so the host's child store
+/// decides. A store with no nested run ends the escapee; one with a run, which
+/// could hold a nested owner, leaves it alive and reported.
+#[cfg(target_os = "macos")]
+fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
+    let case = |name: &str| -> Result<(ExitObservation, ProcessIdentity, UnixStream)> {
+        let ready_path = root.join(format!("{name}.sock"));
+        let ready_listener = UnixListener::bind(&ready_path)?;
+        let (_writer, handle) = start(
+            root,
+            name,
+            "s2-detach-provider",
+            &[
+                ready_path.into_os_string(),
+                scope().attempt.sandbox_lookup_name().into(),
+            ],
+            CapturePlan {
+                root_flush_ms: 30,
+                descendant_grace_ms: 10,
+                ..CapturePlan::default()
+            },
+        )?;
+        let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+        byte(&mut stream, b'R')?;
+        let escapee = process_identity(read_pid_line(&mut stream)?)?;
+        let exit = exited(&handle)?;
+        Ok((exit, escapee, stream))
+    };
+    // The lane's MCP creates its store at startup, with no nested run.
+    std::fs::create_dir_all(home.join("children/attempt/tmp"))?;
+    std::fs::write(home.join("children/attempt/run.sqlite3"), b"")?;
+    let (exit, escapee, _stream) = case("empty")?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    wait_for_identity_absence(&escapee)?;
+    std::fs::create_dir_all(home.join("children/attempt/runs/nested-run"))?;
+    let (exit, escapee, stream) = case("records")?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    process_identity(escapee.pid)?;
+    // Only the process this test started: it exits when its socket closes.
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
+    let ready_path = root.join("mark-ready.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let (_writer, handle) = start(
+        root,
+        "mark",
+        "s2-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut stream)?)?;
+    assert_eq!(descendant.session_id, descendant.pid);
+    // The descendant ignores TERM and left the group before any census; its
+    // inherited sandbox is the only way cleanup can reach it. It must be gone before a clean settle.
+    let exit = exited(&handle)?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.is_empty(), "{exit:?}");
+    wait_for_identity_absence(&descendant)?;
+    Ok(())
+}
 fn cancel_kills_the_whole_group_and_settles(root: &Path) -> Result<()> {
     let ready_path = root.join("group-ready.sock");
     let gate_path = root.join("group-gate.sock");
@@ -986,6 +1119,17 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
     Ok(())
 }
 
+struct FileNestedChildren {
+    home: PathBuf,
+}
+impl NestedChildStore for FileNestedChildren {
+    fn has_no_nested_runs(&self, _: &[u8]) -> bool {
+        match std::fs::read_dir(self.home.join("children/attempt/runs")) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+    }
+}
 struct FileChildRegistry {
     home: PathBuf,
 }
@@ -1581,6 +1725,21 @@ const CASES: &[Case] = &[
         "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
         setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
     ),
+    #[cfg(target_os = "macos")]
+    (
+        "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures",
+        escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
+        escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "detached_descendant_in_the_attempt_sandbox_is_found_and_ended",
+        detached_descendant_in_the_attempt_sandbox_is_found_and_ended,
+    ),
     (
         "cancel_kills_the_whole_group_and_settles",
         cancel_kills_the_whole_group_and_settles,
@@ -1678,6 +1837,9 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        // The production shape wires no registry; only the host's child store.
+        let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
+        let store = FileNestedChildren { home: home.clone() };
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
@@ -1687,7 +1849,8 @@ fn main() -> Result<()> {
         provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
-                children: Some(&registry),
+                children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
+                nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
                 exit_publisher: publisher.as_ref().map(|item| item as &dyn ExitPublisher),
                 stdout_decoder: Some(&Decoder),
