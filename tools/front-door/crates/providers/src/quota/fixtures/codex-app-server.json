@@ -1,0 +1,25 @@
+{
+  "_fixture": "synthetic_schema_example",
+  "payload": {
+    "result": {
+      "rateLimits": {
+        "planType": "plus",
+        "primary": {"usedPercent": 43.2, "windowDurationMins": 300, "resetsAt": "2026-10-25T12:00:00Z"},
+        "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": "2026-10-31T12:00:00Z"},
+        "credits": {"hasCredits": true, "balance": "9.50"}
+      },
+      "rateLimitsByLimitId": {
+        "codex": {"rateLimits": {"primary": {"usedPercent": 43.2, "windowDurationMins": 300}}},
+        "gpt-5-codex": {"rate_limit": {"primary_window": {"used_percent": 2.4, "window_minutes": 300}}}
+      },
+      "rateLimitResetCredits": {
+        "availableCount": 2,
+        "credits": [
+          {"status": "available", "expiresAt": "2026-10-25T12:00:00Z"},
+          {"status": "used", "expiresAt": "2026-10-26T12:00:00Z"}
+        ]
+      }
+    }
+  },
+  "details": {"plan": "Plus"}
+}

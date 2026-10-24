@@ -255,28 +255,28 @@
   "quota_sources": [
     {
       "adapter": "claude",
-      "enabled": false,
-      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+      "enabled": true,
+      "reason": "redacted_live_quota_recording_available"
     },
     {
       "adapter": "codex",
-      "enabled": false,
-      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+      "enabled": true,
+      "reason": "redacted_live_quota_recording_available"
     },
     {
       "adapter": "cursor",
-      "enabled": false,
-      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+      "enabled": true,
+      "reason": "redacted_live_quota_recording_available"
     },
     {
       "adapter": "agy",
-      "enabled": false,
-      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+      "enabled": true,
+      "reason": "redacted_live_quota_recording_available"
     },
     {
       "adapter": "opencode",
-      "enabled": false,
-      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+      "enabled": true,
+      "reason": "redacted_live_quota_recording_available"
     }
   ]
 }

@@ -531,6 +531,7 @@ fn quota(
             observed_unix_seconds: observed,
             source_ref: "fixture".into(),
             authority_ref: None,
+            details: None,
             windows: vec![],
         },
     })

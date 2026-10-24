@@ -239,7 +239,7 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
 
 /// Claude Code names a non-default identity's keychain item after the first
 /// eight hex digits of the SHA-256 of its config directory path.
-fn keychain_suffix(config_dir: &[u8]) -> String {
+pub(crate) fn keychain_suffix(config_dir: &[u8]) -> String {
     let digest = CanonicalV1::file_digest(config_dir).to_string();
     let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
     hex[..8].to_owned()

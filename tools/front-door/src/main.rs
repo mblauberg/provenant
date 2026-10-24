@@ -5,6 +5,7 @@ mod hooks;
 mod hosts;
 mod install;
 mod overflow;
+mod quota_live;
 mod roots;
 #[cfg(test)]
 #[path = "../tests/support/worktrees.rs"]
@@ -360,9 +361,22 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 roots::roots(globals, &assets, &project)
             })();
             match resolved {
-                Ok(roots) => {
-                    provenant_cli::quota::run(cmd, globals, &roots, provenant_providers::REGISTRY)
-                }
+                Ok(roots) => match quota_live::LiveQuota::new(roots.state.as_path()) {
+                    Ok(effects) => provenant_cli::quota::run(
+                        cmd,
+                        globals,
+                        &roots,
+                        provenant_providers::REGISTRY,
+                        &effects,
+                    ),
+                    Err(_) => fail(
+                        &inv.leaf,
+                        Outcome::Invalid,
+                        "QUOTA_CONFIG",
+                        "invalid quota accounts configuration",
+                        globals,
+                    ),
+                },
                 Err(error) => fail(
                     &inv.leaf,
                     Outcome::Error,
