@@ -94,11 +94,9 @@ final class QuotaModel {
         isRefreshing = true
         let cached = launcher
         Task {
-            let (resolved, outcome) = await withCheckedContinuation { done in
-                DispatchQueue.global(qos: .utility).async {
-                    done.resume(returning: CLI.quota(cached, ["quota", "show", "--json"]))
-                }
-            }
+            let (resolved, outcome) = await Task.detached(priority: .utility) {
+                CLI.quota(cached, ["quota", "show", "--json"])
+            }.value
             launcher = resolved
             isRefreshing = false
             switch outcome {
@@ -122,13 +120,13 @@ final class QuotaModel {
             return
         }
         isRefreshing = true
-        let arguments = ["quota", "tick", "--trigger", trigger.rawValue, "--power", power, "--json"]
-        log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power, privacy: .public)")
+        let arguments = ["quota", "tick", "--trigger", trigger.rawValue, "--power", power.rawValue, "--json"]
+        log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power.rawValue, privacy: .public)")
         let cached = launcher
         Task {
-            let (resolved, outcome) = await withCheckedContinuation { done in
-                DispatchQueue.global(qos: .utility).async { done.resume(returning: CLI.quota(cached, arguments)) }
-            }
+            let (resolved, outcome) = await Task.detached(priority: .utility) {
+                CLI.quota(cached, arguments)
+            }.value
             launcher = resolved
             isRefreshing = false
             switch outcome {
@@ -161,20 +159,22 @@ final class QuotaModel {
         clock?.invalidate()
         let dates = (report?.accounts ?? []).flatMap { account in account.windows.compactMap(\.resetAt) + [account.backAt].compactMap { $0 } }
         guard let due = dates.filter({ $0 > now }).min() else { return }
-        clock = Timer(timeInterval: due.timeIntervalSince(now) + 1, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: due.timeIntervalSince(now) + 1, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.relabel() }
         }
-        clock?.tolerance = 5
-        RunLoop.main.add(clock!, forMode: .common)
+        timer.tolerance = 5
+        clock = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     /// One timer at the earliest due time, but no sooner than 30 s, so a report that is always due cannot spin.
     private func schedule(_ due: Date?) {
         timer?.invalidate()
         let delay = max(due?.timeIntervalSinceNow ?? retryInterval, 30)
-        timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.run(.timer) } }
-        timer?.tolerance = min(delay * 0.1, 60)   // lets the system coalesce wakeups
-        RunLoop.main.add(timer!, forMode: .common)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.run(.timer) } }
+        timer.tolerance = min(delay * 0.1, 60)   // lets the system coalesce wakeups
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func watch() {
@@ -238,12 +238,16 @@ final class ReportWatcher {
 }
 
 /// The `--power` value; Low Power Mode wins over the power source.
-enum Power {
-    static var current: String {
-        if ProcessInfo.processInfo.isLowPowerModeEnabled { return "low" }
+enum Power: String {
+    case ac
+    case battery
+    case low
+
+    static var current: Power {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return .low }
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let source = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return "ac" }
-        return source as String == kIOPSBatteryPowerValue ? "battery" : "ac"
+              let source = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return .ac }
+        return source as String == kIOPSBatteryPowerValue ? .battery : .ac
     }
 }
 
