@@ -90,19 +90,27 @@ fn prepare(
         link: codex_home.join("auth.json"),
         target: credential.clone(),
     }];
-    let path = if access == Access::ReadOnly {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
+    let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
     input.provenant.environment(&mut env);
-    if access == Access::ReadOnly {
+    {
         let cargo = input.home.join(".cargo");
         let rustup = input.home.join(".rustup");
-        let cargo_home = plan.scratch.path.join("cargo-home");
-        let target = plan.scratch.path.join("target");
-        tool_exec_roots.push(subtree(&target));
+        let cache = match &plan.mode {
+            provenant_confinement::permissions::AccessMode::ReadOnly => &plan.scratch.path,
+            provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
+                &authority.cargo_cache().path
+            }
+        };
+        let cargo_home = cache.join("cargo-home");
+        let target = cache.join("target");
+        // The host prepares the writer cache itself under custody. Cargo
+        // creates target/ and cargo-home/ after launch, so anchor the cache.
+        tool_exec_roots.push(subtree(if access == Access::ReadOnly {
+            &target
+        } else {
+            cache
+        }));
         for directory in [cargo.join("bin"), rustup.join("toolchains")] {
             runtime_reads.push(subtree(&directory));
             tool_exec_roots.push(subtree(directory));
@@ -114,20 +122,25 @@ fn prepare(
         env.extend([
             ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
             ("RUSTUP_HOME".into(), rustup.into_os_string()),
-            (
-                "CARGO_TARGET_DIR".into(),
-                plan.scratch.path.join("target").into_os_string(),
-            ),
+            ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
         ]);
-        setup.extend([
-            SetupStep::CreateDir(cargo_home.clone()),
-            SetupStep::CreateDir(target),
-            SetupStep::Symlink {
-                link: cargo_home.join("registry"),
-                target: cargo.join("registry"),
-            },
-        ]);
+        if access == Access::ReadOnly {
+            setup.extend([
+                SetupStep::CreateDir(cargo_home.clone()),
+                SetupStep::CreateDir(target),
+                SetupStep::Symlink {
+                    link: cargo_home.join("registry"),
+                    target: cargo.join("registry"),
+                },
+            ]);
+        }
     }
+    // Git may inspect global config even for status. Keep host hooks,
+    // includes and credential helpers outside the lane's environment.
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
     let mut spec = LaunchSpec {

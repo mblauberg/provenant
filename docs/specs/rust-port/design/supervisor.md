@@ -283,6 +283,14 @@ verify `git status -sb` reports the upstream. The directory preparation and
 cache grants are implemented in confinement; the full fetch/push/upstream
 conformance row and runtime composition remain outstanding. A lane's
 `git push -u` may push successfully but fail to persist upstream locally.
+The host writer delivery work in #1246 must supply the remote, explicit
+refspec, credential authority and a verified push result before this handoff
+can be composed. Generic Run settlement has none of those fields and also
+runs for cancelled/recovered attempts; it cannot safely infer a completed push
+from provider text or unconditionally mutate shared config. After a bound
+push, the host must fetch the selected branch, match it to the lane's final
+head, set upstream and verify status. #1255 remains open until that host
+composition and its conformance row are present.
 
 The providers owner loads and verifies profile fixtures, then constructs the typed
 profile data consumed by confinement. Provider profiles contain fixture-proven

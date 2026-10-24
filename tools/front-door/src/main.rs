@@ -1,6 +1,9 @@
 // The process edge composes typed owners and owns ordinary result delivery.
 mod chair;
 mod checks;
+#[cfg(test)]
+#[path = "../tests/support/compose.rs"]
+mod compose_tests;
 mod fabric;
 mod hooks;
 mod hosts;
@@ -484,6 +487,20 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         _ => {}
+    }
+    // The compose fixture's lanes run in its `compose` worktree; other
+    // provider fixtures exercise lane MCP and nesting.
+    #[cfg(test)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("exec"))
+        && std::env::current_dir().is_ok_and(|cwd| cwd.ends_with(".worktrees/compose"))
+    {
+        return match compose_tests::provider() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "compose provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     #[cfg(test)]
     if std::env::args_os()

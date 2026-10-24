@@ -229,9 +229,12 @@ the committed attempt. It is not retained provider history and is not the
 supervisor's host-only classified `scratch/`.
 No new deletion/retention command is introduced. Production
 `Registry::prepare` selects this directory as read-only scratch and applies
-recipe setup below scratch or provider state, but does not yet build its plan
-through `read_only_plan`, so project write exceptions and the common Git
-directory grant are not yet applied to dispatch.
+recipe setup below scratch or provider state. It opens a read-only repository
+on the host, matches its common directory to the persisted dispatch project
+binding and calls the shared `read_only_plan` builder. Both CLI and Fabric
+therefore apply project write exceptions and the common Git directory read
+grant before provider preparation and handoff. Non-Git workspaces retain their
+existing directory read grant without repository exceptions.
 
 Modes are 0700/0600 under state's verified root. Use rusqlite WAL,
 foreign keys and `synchronous=FULL`; each connection has one owning thread,

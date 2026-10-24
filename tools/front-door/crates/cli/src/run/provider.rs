@@ -146,7 +146,8 @@ fn prepare_with(
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
     for adapter in ["codex", "claude", "opencode"] {
-        if confinement_plan(
+        // Repository-bound read-only grants are checked per candidate below.
+        if confinement_request(
             project_id,
             &cwd,
             &home,
@@ -155,6 +156,7 @@ fn prepare_with(
             writer.as_ref(),
             adapter,
         )
+        .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
         .is_ok()
         {
             access.push(provenant_routing::AccessContext {
@@ -247,6 +249,8 @@ fn prepare_with(
                 continue;
             }
         };
+        // A read-only lane's scratch is its private temporary directory, which
+        // terminal commit and withdrawal remove; writer scratch keeps settlement.
         // A failed setup never poisons the next explicit fallback candidate.
         let staging = if writer.is_some() {
             &paths.scratch
@@ -265,7 +269,7 @@ fn prepare_with(
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
-        let plan = match confinement_plan(
+        let plan = match confinement_request(
             project_id,
             &cwd,
             &home,
@@ -273,7 +277,11 @@ fn prepare_with(
             private_state,
             writer.as_ref(),
             adapter.id(),
-        ) {
+        )
+        .and_then(|request| match writer.as_ref() {
+            Some(_) => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+            None => read_only_plan(roots, project_id, &cwd, &git, request),
+        }) {
             Ok(plan) => plan,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
@@ -574,7 +582,7 @@ fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
     Ok(provider_route)
 }
 
-fn confinement_plan(
+fn confinement_request(
     project_id: ProjectId,
     cwd: &Path,
     home: &Path,
@@ -582,7 +590,7 @@ fn confinement_plan(
     private_state: &Path,
     writer: Option<&run::WriterLaunch>,
     adapter: &str,
-) -> Result<ConfinedPlan, String> {
+) -> Result<PlanRequest, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
             WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, home)
@@ -594,7 +602,7 @@ fn confinement_plan(
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
-    ConfinedPlan::new(PlanRequest {
+    Ok(PlanRequest {
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
             read_only: None,
@@ -621,7 +629,67 @@ fn confinement_plan(
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
     })
-    .map_err(|error| error.to_string())
+}
+
+/// Verify the selected repository on the host and match the persisted dispatch
+/// project before deriving any Git read authority from that binding.
+fn read_only_plan(
+    roots: &provenant_core::Roots,
+    project: ProjectId,
+    cwd: &Path,
+    git: &Path,
+    request: PlanRequest,
+) -> Result<ConfinedPlan, String> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
+    // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
+    let utility = UtilityRuntime::new(
+        std::sync::Arc::new(LocalFs),
+        git,
+        roots.state.as_path().join("tmp/git-home"),
+    )
+    .map_err(|error| error.to_string())?;
+    let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let cancel = provenant_core::CancelToken::new();
+    // Find the root without opening a protected-history repo: read-only
+    // repositories may use native object alternates. A malformed Git marker
+    // must refuse, never fall through to a non-Git workspace.
+    let mut repository = None;
+    for ancestor in cwd.ancestors() {
+        let directory = Directory::open_anchor(ancestor).map_err(|error| error.to_string())?;
+        match directory.metadata_at(std::ffi::OsStr::new(".git"), false) {
+            Ok(_) => {
+                repository = Some(
+                    utility
+                        .open_read_repo(&executor, ancestor, budget, &cancel)
+                        .map_err(|error| error.to_string())?,
+                );
+                break;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let location = provenant_config::ProjectLocation::new(
+        repository
+            .as_ref()
+            .map_or(cwd, |repo| repo.common_git_dir()),
+    )
+    .map_err(|error| error.to_string())?;
+    let binding = provenant_config::lookup_project(roots, &location, &LocalFs)
+        .map_err(|error| error.to_string())?
+        .ok_or("dispatch project binding missing")?;
+    if binding.project_id() != project {
+        return Err("repository does not match dispatch project binding".into());
+    }
+    match repository {
+        Some(repo) => run::read_only_plan(&roots.state, &repo, &binding, request)
+            .map_err(|error| error.to_string()),
+        // Non-Git workspaces have no Git metadata or repository exceptions.
+        None => ConfinedPlan::new(request).map_err(|error| error.to_string()),
+    }
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
@@ -735,7 +803,7 @@ pub fn writer_fixture_plan(
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
 ) -> Result<ConfinedPlan, String> {
-    confinement_plan(
+    let request = confinement_request(
         project,
         cwd,
         home,
@@ -743,7 +811,8 @@ pub fn writer_fixture_plan(
         &paths.provider_state,
         Some(writer),
         "codex",
-    )
+    )?;
+    ConfinedPlan::new(request).map_err(|error| error.to_string())
 }
 
 /// Exercise production preparation against a fake external provider executable.

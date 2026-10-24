@@ -38,29 +38,42 @@ impl RunStore {
         {
             return Err(RunError::Refused);
         }
-        let project = match self.root.open_verified_directory(OsStr::new("projects")) {
-            Ok(projects) => match projects
-                .open_verified_directory(OsStr::new(&self.context.project_id.to_string()))
-            {
+        request.permissions.scratch.path = self.temporary_path(id, call)?;
+        read_only_plan(&self.context.state_root, repo, binding, request)
+    }
+}
+
+/// Build a host-bound read-only plan for the production preparation edge.
+/// Run has already allocated the attempt-private scratch directory in request.
+pub fn read_only_plan(
+    state: &provenant_core::StateRoot,
+    repo: &ReadOnlyRepo,
+    binding: &provenant_config::ProjectBinding,
+    request: PlanRequest,
+) -> Result<ConfinedPlan> {
+    if request.scope != WorkScope::Project(binding.project_id()) {
+        return Err(RunError::Refused);
+    }
+    let root = provenant_supervisor::fs::Directory::open_anchor(state.as_path())?;
+    let project = match root.open_verified_directory(OsStr::new("projects")) {
+        Ok(projects) => {
+            match projects.open_verified_directory(OsStr::new(&binding.project_id().to_string())) {
                 Ok(project) => Some(project),
                 Err(e) if e.is_not_found() => None,
                 Err(e) => return Err(e.into()),
-            },
-            Err(e) if e.is_not_found() => None,
-            Err(e) => return Err(e.into()),
-        };
-        let policy = project
-            .as_ref()
-            .map(|project| ReadOnlyPolicy::read(project))
-            .transpose()
-            .map_err(RunError::Confinement)?
-            .unwrap_or_default();
-        request.permissions.scratch.path = self.temporary_path(id, call)?;
-        let request = request
-            .with_read_only_repo(repo, binding, &policy)
-            .map_err(RunError::Plan)?;
-        ConfinedPlan::new(request).map_err(RunError::Plan)
-    }
+            }
+        }
+        Err(e) if e.is_not_found() => None,
+        Err(e) => return Err(e.into()),
+    };
+    let policy = project
+        .as_ref()
+        .map(|project| ReadOnlyPolicy::read(project))
+        .transpose()
+        .map_err(RunError::Confinement)?
+        .unwrap_or_default();
+    let request = request.with_read_only_repo(repo, binding, &policy)?;
+    ConfinedPlan::new(request).map_err(RunError::Plan)
 }
 
 #[cfg(test)]
