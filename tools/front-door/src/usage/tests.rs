@@ -31,6 +31,7 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
         usage: true,
         since: None,
         until: None,
+        run_id: None,
         detail: false,
     };
     let count = |data: Report| {

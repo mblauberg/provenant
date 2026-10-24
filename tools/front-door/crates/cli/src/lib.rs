@@ -1,6 +1,7 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
 pub mod accounts;
+pub mod bench;
 pub mod check;
 pub mod domains;
 pub mod fabric;
@@ -9,6 +10,7 @@ pub mod route;
 pub mod run;
 pub mod workflow;
 pub use fabric::Fabric;
+pub use bench::Bench;
 pub use quota::Quota;
 pub use route::Route;
 pub use workflow::Workflow;

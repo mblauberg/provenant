@@ -1,0 +1,6 @@
+repo = "mblauberg/provenant"
+parent_sha = "1aba8202513d318ca91c683d4087af75926b8d68"
+merge_sha = "ffaf224ce44545af56fd5e88f8e127f6bdab30e6"
+prompt = "Make utility route resolution skip models that do not support the requested effort, as in PR #1437."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-routing --lib pool_skips_a_member_without_the_requested_effort"
+split = "acceptance"
