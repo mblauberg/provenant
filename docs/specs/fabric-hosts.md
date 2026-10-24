@@ -6,6 +6,27 @@ Status: **accepted** by the user on 2026-10-07 (issue
 delivery state; this file owns the durable requirements. It grants no
 authority.
 
+## Rust implementation boundary
+
+The requirements below record the accepted pre-rewrite design. They are not
+an operator command or wire-format reference. Current Rust commands are
+`provenant fabric host list`, `provenant hosts doctor [HOST]` and the hidden
+`provenant fabric peer` entrypoint. Dispatch is `provenant dispatch`, with
+`--host` for placement; observation and controls use top-level `lanes`,
+`output`, `cancel`, `resume` and `reconcile`. There is no `fabric dispatch`
+command. The binary edge in `tools/front-door/src/main.rs` currently returns
+`unavailable` for those run commands, so their grammar is not evidence of
+working dispatch or recovery. Configuration is in the state directory's `config.toml` under
+`domains.fabric`; the retired `hosts.json` and `id@host` conventions below
+must not be used as current instructions.
+
+The grammar owners are `tools/front-door/crates/cli/src/grammar.rs` and
+`tools/front-door/crates/cli/src/fabric.rs`; typed host configuration and peer
+messages live in `tools/front-door/crates/fabric-runtime/src/config.rs` and
+`hosts.rs`. Follow [the current runbook](../runbooks/fabric-hosts.md) when
+operating the Rust implementation. Requirements not represented there remain
+design requirements, not verified implementation claims.
+
 ## Outcome
 
 One user with two or more of their own Macs works from either machine as if
