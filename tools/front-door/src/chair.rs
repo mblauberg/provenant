@@ -111,6 +111,9 @@ fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
     if record.account.adapter != "claude" || record.account.account_key != key {
         return None;
     }
+    if record.last_error.is_some() {
+        return None;
+    }
     record.snapshot
 }
 fn quote(text: &str) -> String {
@@ -204,9 +207,7 @@ fn switch(
     automatic: bool,
 ) -> Result<Option<Value>, Error> {
     if !dry_run && let Some(previous) = context.store().prepared(&input.session_id)? {
-        return Ok(Some(
-            json!({"dry_run":false,"target_account":previous.target_account,"checkpoint":context.store().path(&input.session_id),"already_prepared":true,"launch_error":"handoff already prepared for this session; do not launch again","command":null}),
-        ));
+        return Ok(Some(prepared_response(context, &previous)));
     }
     let config = provenant_config::read_with_domains(
         &context.roots,
@@ -289,6 +290,9 @@ fn switch(
     }
     let launch_command = target.map(|a| command(context, a, &path)).transpose()?;
     let (path, fresh) = store.save(&handoff)?;
+    if !fresh && let Some(previous) = store.prepared(&input.session_id)? {
+        return Ok(Some(prepared_response(context, &previous)));
+    }
     let Some(target) = target else {
         return Ok(Some(
             json!({"refused":true,"reason":reason,"checkpoint":path,"dry_run":false}),
@@ -309,6 +313,35 @@ fn switch(
     Ok(Some(
         json!({"dry_run":false,"target_account":target.key(),"checkpoint":path,"command":command,"pane":pane,"launch_error":launch_error,"already_prepared":!fresh}),
     ))
+}
+fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
+    let path = context.store().path(&handoff.session_id);
+    let recovery = (|| -> Result<String, Error> {
+        let label = handoff
+            .target_account
+            .as_deref()
+            .ok_or("handoff target unavailable")?;
+        let config = provenant_config::read_with_domains(
+            &context.roots,
+            &LocalFs,
+            &provenant_cli::domains::SECTIONS,
+        )?;
+        if !config
+            .knobs
+            .get("chair.switch_accounts")
+            .and_then(|k| k.value.as_array())
+            .is_some_and(|labels| labels.iter().any(|v| v.as_str() == Some(label)))
+        {
+            return Err("handoff target is no longer allowed".into());
+        }
+        let accounts = crate::quota_live::registered_claude()?;
+        let target = accounts
+            .iter()
+            .find(|a| a.key() == label)
+            .ok_or("handoff target is no longer registered")?;
+        command(context, target, &path)
+    })();
+    json!({"dry_run":false,"target_account":handoff.target_account,"checkpoint":path,"already_prepared":true,"command":recovery.as_ref().ok(),"launch_error":recovery.as_ref().err().map(|e|e.to_string())})
 }
 pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let Chair::Switch {
@@ -370,8 +403,10 @@ fn message(value: &Value) -> String {
         );
     }
     if value["already_prepared"] == true {
+        let recovery = value["command"].as_str().map(|command| format!("If no successor session is running, use this exact recovery command:\n{command}"))
+            .unwrap_or_else(|| format!("Recovery command unavailable: {}", value["launch_error"].as_str().unwrap_or("check the handoff target registration")));
         return format!(
-            "Chair handoff already prepared. Stop this session; do not launch again. Checkpoint: {}",
+            "Chair handoff already prepared. Stop this session; inspect the successor before launching again. Checkpoint: {}. {recovery}",
             value["checkpoint"].as_str().unwrap_or("unavailable")
         );
     }

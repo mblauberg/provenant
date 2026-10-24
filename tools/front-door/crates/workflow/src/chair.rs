@@ -102,7 +102,7 @@ impl HandoffStore {
             Err(Error::Filesystem(error)) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(self.read(&dir, "pending.json")?.filter(|h| !h.consumed))
+        Ok(self.read(&dir, ".pending.json")?.filter(|h| !h.consumed))
     }
     pub fn prepared(&self, session: &HostSessionId) -> Result<Option<Handoff>, Error> {
         let dir = match self.directory(false) {
@@ -111,7 +111,7 @@ impl HandoffStore {
             Err(error) => return Err(error),
         };
         Ok(self
-            .read(&dir, &format!("{}.json", session.as_str()))?
+            .read(&dir, &format!(".prepared-{}.json", session.as_str()))?
             .filter(|h| h.target_account.is_some()))
     }
     /// Persist before launching. A source session with a prepared handoff is
@@ -123,16 +123,29 @@ impl HandoffStore {
         let dir = self.directory(true)?;
         let _lock = dir.try_lock(OsStr::new("handoff.lock"), LockMode::Exclusive)?;
         let name = format!("{}.json", handoff.session_id.as_str());
+        let prepared = format!(".prepared-{}.json", handoff.session_id.as_str());
         let path = self.path(&handoff.session_id);
         if self
-            .read(&dir, &name)?
+            .read(&dir, &prepared)?
             .is_some_and(|old| old.target_account.is_some())
         {
             return Ok((path, false));
         }
+        // A target may have consumed a pending record after an interrupted
+        // publication. Retain that consumption instead of reissuing the handoff.
+        if let Some(pending) = self.read(&dir, ".pending.json")?
+            && pending.session_id == handoff.session_id
+            && pending.consumed
+        {
+            Self::write(&dir, &prepared, &pending)?;
+            return Ok((path, false));
+        }
         Self::write(&dir, &name, handoff)?;
         if handoff.target_account.is_some() {
-            Self::write(&dir, "pending.json", handoff)?;
+            Self::write(&dir, ".pending.json", handoff)?;
+            // Only this final durable record commits preparation. An earlier
+            // checkpoint or pending write alone must never suppress a retry.
+            Self::write(&dir, &prepared, handoff)?;
         }
         Ok((path, true))
     }
@@ -145,7 +158,7 @@ impl HandoffStore {
             Err(error) => return Err(error),
         };
         let _lock = dir.try_lock(OsStr::new("handoff.lock"), LockMode::Exclusive)?;
-        let Some(mut handoff) = self.read(&dir, "pending.json")? else {
+        let Some(mut handoff) = self.read(&dir, ".pending.json")? else {
             return Ok(None);
         };
         if handoff.consumed
@@ -155,7 +168,7 @@ impl HandoffStore {
             return Ok(None);
         }
         handoff.consumed = true;
-        Self::write(&dir, "pending.json", &handoff)?;
+        Self::write(&dir, ".pending.json", &handoff)?;
         Ok(Some(handoff))
     }
 }
@@ -196,6 +209,19 @@ mod tests {
             reason: "quota threshold".into(),
             consumed: false,
         };
+        // Simulate failure after the source checkpoint is durable but before
+        // pending publication. No launch claim may survive this incomplete save.
+        let dir = store.directory(true).unwrap();
+        std::fs::write(
+            store.path(&handoff.session_id),
+            serde_json::to_vec(&handoff).unwrap(),
+        )
+        .unwrap();
+        dir.mkdir(OsStr::new(".pending.json"), 0o700).unwrap();
+        assert!(store.save(&handoff).is_err());
+        assert!(store.path(&handoff.session_id).is_file());
+        assert!(store.prepared(&handoff.session_id).unwrap().is_none());
+        dir.rmdir(OsStr::new(".pending.json")).unwrap();
         let (path, fresh) = store.save(&handoff).unwrap();
         assert!(fresh && path.is_file());
         assert!(!store.save(&handoff).unwrap().1);
@@ -206,6 +232,17 @@ mod tests {
         let restored = store.consume("target", &id("new")).unwrap().unwrap();
         assert_eq!(restored.session_id, id("newer"));
         assert_eq!(restored.open_lanes, handoff.open_lanes);
+        // Interruption after pending publication and target consumption, but
+        // before the prepare marker, must not overwrite consumed context.
+        dir.unlink(OsStr::new(".prepared-newer.json")).unwrap();
+        let original = std::fs::read(store.path(&handoff.session_id)).unwrap();
+        handoff.next_step = Some("a different retry prompt".into());
+        assert!(!store.save(&handoff).unwrap().1);
+        assert_eq!(
+            std::fs::read(store.path(&handoff.session_id)).unwrap(),
+            original
+        );
+
         assert!(store.consume("target", &id("another")).unwrap().is_none());
         let other = HandoffStore::new(root, base.join("other"));
         assert!(other.consume("target", &id("new")).unwrap().is_none());

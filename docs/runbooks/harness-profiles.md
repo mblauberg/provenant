@@ -42,7 +42,8 @@ The managed `UserPromptSubmit` hook checks cached quota only, never refreshes it
 Either the five-hour or weekly window at or above the threshold triggers a
 handoff. The first allowed registered account with both windows below the
 threshold wins. Missing, expired, future-dated or more than 15-minute-old quota
-cannot establish target headroom. Refresh quota separately with
+cannot establish target headroom. A failed refresh also invalidates retained
+headroom until a successful refresh. Refresh quota separately with
 `provenant quota tick --adapter claude` when needed. Install the managed hooks
 through the normal authorised install workflow.
 
@@ -57,7 +58,9 @@ Inside a Herdr-managed pane, switching splits the current pane and submits the
 launch command to the returned new pane ID. Otherwise, or on a Herdr failure,
 it prints the exact command for the user. Pane admission is not proof that the
 new session is ready. The old session stops after the checkpoint is prepared;
-a repeated prompt cannot launch the same source handoff again. The launch
+a repeated prompt cannot launch the same source handoff again. It retains an
+exact recovery command for use after checking that no successor is running.
+Incomplete checkpoint publication can be retried. The launch
 command supplies the resume hooks with `claude --settings`, so target accounts
 need no copied settings. SessionStart injects the newest unconsumed handoff for
 this cwd only in the selected account's new session and marks it consumed.

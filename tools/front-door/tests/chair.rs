@@ -157,7 +157,9 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     );
     assert!(handoff["open_lanes"].is_array());
     let repeat = hook(&rig, false, "old")?;
-    assert!(String::from_utf8_lossy(&repeat.stdout.bytes).contains("already prepared"));
+    let repeated = String::from_utf8_lossy(&repeat.stdout.bytes);
+    assert!(repeated.contains("already prepared"));
+    assert!(repeated.contains("exact recovery command") && repeated.contains("CLAUDE_CONFIG_DIR="));
     // The source account cannot consume its own handoff on compaction.
     assert!(hook(&rig, true, "old")?.stdout.bytes.is_empty());
     rig.env.retain(|(k, _)| k != "CLAUDE_CONFIG_DIR");
@@ -208,7 +210,7 @@ fn chair_disabled_and_refused_paths_never_launch() -> Result {
             .as_str()
             .is_some_and(|s| s.contains("no allowed"))
     );
-    assert!(!dir.join("pending.json").exists());
+    assert!(!dir.join(".pending.json").exists());
     Ok(())
 }
 #[test]
@@ -260,5 +262,20 @@ esac
     );
     hook(&rig, false, "herdr-session")?;
     assert_eq!(fs::read_to_string(&log)?, calls);
+    Ok(())
+}
+
+#[test]
+fn chair_failed_auth_refresh_cannot_establish_target_headroom() -> Result {
+    let rig = configured()?;
+    let file = rig.state.join("quota/spare/claude.json");
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&file)?)?;
+    record["last_error"] = "auth".into();
+    record["failures"] = 1.into();
+    fs::write(file, serde_json::to_vec(&record)?)?;
+    let refused = rig.command(&["chair", "switch", "--to", "spare", "--dry-run", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
+    assert_eq!(value["status"], "refused");
+    assert!(value["data"]["command"].is_null());
     Ok(())
 }
