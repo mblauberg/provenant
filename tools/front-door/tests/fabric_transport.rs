@@ -159,8 +159,8 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
         &replies.iter().find(|r| r["id"] == 1).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["inbox"]["agent"], "codex");
     let run = &replies.iter().find(|r| r["id"] == 2).ok_or("run")?["result"];
-    assert_eq!(run["isError"], true);
-    assert_eq!(run["structuredContent"]["code"], "owner_unavailable");
+    assert_ne!(run["isError"], true, "{run}");
+    assert_eq!(run["structuredContent"]["page"]["items"], json!([]));
     let events =
         &replies.iter().find(|r| r["id"] == 3).ok_or("events")?["result"]["structuredContent"];
     assert_eq!(events["unknown_hosts"], json!([]));
@@ -235,8 +235,8 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
 #[test]
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
+        RunId, TaskId, WaitBudget,
     };
     use provenant_records::{
         CanonicalV1,
@@ -266,44 +266,116 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let attempt = AttemptId::from_bytes([91; 16]);
-    let task = TaskId::from_bytes([92; 16]);
+    let tasks = [
+        TaskId::from_bytes([92; 16]),
+        TaskId::from_bytes([93; 16]),
+        TaskId::from_bytes([94; 16]),
+    ];
+    let attempts = [
+        AttemptId::from_bytes([91; 16]),
+        AttemptId::from_bytes([95; 16]),
+        AttemptId::from_bytes([97; 16]),
+    ];
+    let attempt = attempts[0];
     store.create(
         &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([93; 16]),
+            run_id: RunId::from_bytes([96; 16]),
             operation_id: OperationId::parse("edge-read")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
                 schema_version: 1,
-                tasks: vec![TaskRequest {
-                    profile: provenant_records::run::HarnessProfile::default(),
-                    task_id: task,
-                    prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                    route: RequestedRoute::Model {
-                        provider: "fixture".into(),
-                        model: "fixture".into(),
-                        effort: None,
-                    },
-                    account: None,
-                    fallback: vec![],
-                    authority_digest: Digest::from_bytes([94; 32]),
-                    provider_timeout_seconds: 60,
-                    delivery_id: None,
-                }],
+                tasks: tasks
+                    .iter()
+                    .map(|task_id| TaskRequest {
+                        writer: None,
+                        profile: provenant_records::run::HarnessProfile::default(),
+                        task_id: *task_id,
+                        prompt_digest: CanonicalV1::file_digest(b"prompt"),
+                        route: RequestedRoute::Model {
+                            provider: "fixture".into(),
+                            model: "fixture".into(),
+                            effort: None,
+                        },
+                        account: None,
+                        fallback: vec![],
+                        authority_digest: Digest::from_bytes([94; 32]),
+                        provider_timeout_seconds: 60,
+                        delivery_id: None,
+                    })
+                    .collect(),
                 concurrency: 1,
                 parent: None,
                 lane_depth: 1,
                 parent_attempt: None,
             },
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id: attempt,
-                task_id: task,
-                prompt: "prompt".into(),
-            }],
+            attempts: tasks
+                .iter()
+                .zip(attempts)
+                .map(|(task_id, attempt_id)| provenant_run::NewAttempt {
+                    attempt_id,
+                    task_id: *task_id,
+                    prompt: "prompt".into(),
+                })
+                .collect(),
         },
         &call,
     )?;
     drop(store);
+    let first = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":1}}}),
+        ],
+    )?;
+    let first = &first
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("first page")?["result"]["structuredContent"]["page"];
+    assert_eq!(first["items"][0]["attempt_id"], attempts[0].to_string());
+    assert_eq!(first["truncated"], true);
+    let cursor = first["next_after"].clone();
+    let local_host = HostId::parse(cursor["host"].as_str().ok_or("cursor host")?)?;
+    let mut remote_host_bytes = *local_host.as_bytes();
+    remote_host_bytes[0] ^= 1;
+    let mut remote_cursor = cursor.clone();
+    remote_cursor["host"] = json!(HostId::from_bytes(remote_host_bytes).to_string());
+    let remote = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":remote_cursor,"limit":1}}}),
+        ],
+    )?;
+    let remote = &remote
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("remote cursor")?["result"];
+    assert_eq!(remote["isError"], true);
+    assert_eq!(remote["structuredContent"]["code"], "owner_unavailable");
+    let second = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
+        ],
+    )?;
+    let second = &second
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("second page")?["result"]["structuredContent"]["page"];
+    assert_eq!(second["items"][0]["attempt_id"], attempts[1].to_string());
+    assert_eq!(second["truncated"], true);
+    let cursor = second["next_after"].clone();
+    let third = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
+        ],
+    )?;
+    let third = &third
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("third page")?["result"]["structuredContent"]["page"];
+    assert_eq!(third["items"][0]["attempt_id"], attempts[2].to_string());
+    assert_eq!(third["next_after"], Value::Null);
     let target = json!({"host":null,"attempt":attempt.to_string()});
     let replies = mcp(
         &rig,
@@ -389,8 +461,9 @@ fn submitted_policy(
     operation: &str,
     concurrency: Option<u64>,
     knobs: &[&str],
+    route: Value,
 ) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
-    let task = json!({"prompt":"fixture", "route":{"model":"codex/fixture","task_class":"mechanical"},"timeout_ms":60000});
+    let task = json!({"prompt":"fixture", "route":route,"timeout_ms":60000});
     let mut arguments = json!({"op":"submission","operation_id":operation,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
     if let Some(n) = concurrency {
         arguments["concurrency"] = n.into();
@@ -416,6 +489,61 @@ fn submitted_policy(
         rig.state.join("runs").join(run).join("request.json"),
     )?)?;
     Ok((request, attempt))
+}
+
+#[test]
+fn submission_preserves_explicit_named_route_tier() -> Result {
+    let rig = TestRig::new()?;
+    let (request, _) = submitted_policy(
+        &rig,
+        "named-tier",
+        None,
+        &[],
+        json!({"route":"senior","task_class":"mechanical"}),
+    )?;
+    assert_eq!(
+        request.tasks[0].route,
+        provenant_records::run::RequestedRoute::Named {
+            name: "senior".into(),
+            effort: None,
+        }
+    );
+    assert_eq!(
+        request.tasks[0].profile.task_class.as_deref(),
+        Some("mechanical")
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn submission_does_not_advertise_unsupported_inputs() -> Result {
+    let rig = TestRig::new()?;
+    let replies = mcp(
+        &rig,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})],
+    )?;
+    let tools = replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("tools")?;
+    let submit = tools["result"]["tools"]
+        .as_array()
+        .ok_or("tool list")?
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .ok_or("fabric_submit")?;
+    assert!(!submit["inputSchema"].to_string().contains("inputs"));
+
+    let reply = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"unsupported-inputs","tasks":[{"prompt":"fixture","inputs":[],"route":{"route":"senior"},"timeout_ms":60000}]}}}),
+        ],
+    )?;
+    let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    assert_eq!(call["result"]["structuredContent"]["code"], "invalid_input");
+    rig.assert_legacy_unchanged()
 }
 
 #[test]
@@ -445,7 +573,13 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             1,
         ),
     ] {
-        let (request, attempt) = submitted_policy(&rig, operation, explicit, &knobs)?;
+        let (request, attempt) = submitted_policy(
+            &rig,
+            operation,
+            explicit,
+            &knobs,
+            json!({"model":"codex/fixture","task_class":"mechanical"}),
+        )?;
         assert_eq!(request.concurrency, expected);
         let task = &request.tasks[0];
         assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
@@ -475,7 +609,13 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         ("config-silence", vec![], 2000),
         ("dispatch-silence", vec!["lanes.silence_seconds=1"], 1000),
     ] {
-        let (request, _) = submitted_policy(&rig, operation, None, &knobs)?;
+        let (request, _) = submitted_policy(
+            &rig,
+            operation,
+            None,
+            &knobs,
+            json!({"model":"codex/fixture","task_class":"mechanical"}),
+        )?;
         let plan = provenant_run::capture_plan(&request.tasks[0]);
         assert_eq!(plan.silence_ms, threshold);
         assert!(!plan.silent(threshold - 1, Some(0)));

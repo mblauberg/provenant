@@ -254,6 +254,11 @@ fn account_placement() -> Result {
             token: None,
             cwd: &rig.project,
             nonce: [1; 16],
+            provenant: provenant_providers::LaneRuntime {
+                executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
+                state: std::path::Path::new("/fixture/state"),
+                assets: std::path::Path::new("/fixture/provenant"),
+            },
         })?;
         let auth = account.directory().join("auth.json");
         let selected = &spec.profile.spec.authentication[0];

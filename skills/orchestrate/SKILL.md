@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: "Use for bounded fan-out, multi-agent research, cross-family reviews, audits, Herdr control and ready-issue automation. Not for tiny work; coupled defects: diagnose; run-until-STOP: autopilot."
+description: "Use to coordinate bounded work across agents, research lanes or independent reviews. Use diagnose for coupled defects and autopilot for missions that continue until STOP. Not for a small, single-owner task."
 ---
 
 # Multi-agent orchestration
@@ -10,7 +10,8 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
 2. Call `fabric_submit` with its `submission` operation; its tool schema documents the task list and typed route. Use `provenant route list --adapter <id>` to list live model ids.
 3. For a graph workflow, use `fabric_graph` with `op: run|status|cancel|resume`; pass the project-local graph document path to `run` and `resume`, and its `id` to `status` and `cancel`.
-4. For writers, pass `access: "worktree_write"` and the registered `worktree`,
+4. For writers, pass `access: "worktree_write"` and the registered `worktree`
+   as an absolute path or relative to the selected repository's primary root,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before submission, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
@@ -18,10 +19,12 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
    repeat `--path PATH` for a path set); keep its generation/token proof, renew
    it while work continues and release it when
    finished. Do not submit against a conflicting live claim; submission does not
-   enforce claims.
+   enforce claims. One supervisor writer lease excludes a second writer;
+   terminal Git sequencer state fails the lane. If custody is lost, keep the
+   worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
-7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task. Named sessions are retired.
+7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task.
 8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
 ## Rules
@@ -66,6 +69,10 @@ Preflight authority, isolation, disclosure and receipts. Dispatch independent wa
 
 ## Depth on demand
 
-Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. [lane-safety.md](references/lane-safety.md) for lane and reviewer failure modes and false greens. [trigger-boundary.md](references/trigger-boundary.md) for skill activation boundaries, [retrieval-and-tool-routing.md](references/retrieval-and-tool-routing.md) for source and tool selection, and [evaluation-and-observability.md](references/evaluation-and-observability.md) for checks and trace review. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
+Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for route choices, and [lane-safety.md](references/lane-safety.md) for lane and reviewer safeguards. For non-code work, read [domain adaptation](references/domain-adaptation.md); for scratch handling, read [memory and scratch](references/memory-scratchpad.md). Other references cover provider pairing, Herdr, verification, and evaluation.
 
 Keep the criteria, evidence and outcome in the existing project document or PR.
+
+Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml),
+[contracts](evals/contract_cases.yaml), [discipline](evals/discipline_cases.yaml),
+and [topology value](evals/topology_value_cases.yaml).

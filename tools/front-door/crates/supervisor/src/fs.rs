@@ -353,6 +353,16 @@ pub struct Directory {
     path: PathBuf,
 }
 impl Directory {
+    /// Duplicate the held descriptor without resolving its pathname again.
+    pub fn try_clone(&self) -> Result<Self> {
+        Self::from_file(
+            self.file
+                .try_clone()
+                .map_err(error("duplicate directory", &self.path))?,
+            self.path.clone(),
+            self.anchorable,
+        )
+    }
     pub(crate) fn handoff_file(&self) -> &File {
         &self.file
     }

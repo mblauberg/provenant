@@ -238,7 +238,6 @@ fn main() -> BuildResult<()> {
         ("templates", "templates"),
         ("config", "config"),
         ("scripts", "scripts"),
-        ("runtime", "runtime"),
     ] {
         let directory = repository.join(source);
         watch(&mut watched, directory.clone())?;
@@ -343,7 +342,6 @@ fn release_asset_inputs(inputs: &Inputs) -> BuildResult<Vec<(String, Vec<u8>)>> 
             "config/",
             "instructions/",
             "scripts/",
-            "runtime/",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))

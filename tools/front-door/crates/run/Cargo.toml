@@ -6,10 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+fixture = []
+
 [lints]
 workspace = true
 
 [dependencies]
+provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }
@@ -18,5 +22,6 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }

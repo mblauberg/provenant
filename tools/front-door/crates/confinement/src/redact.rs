@@ -458,6 +458,18 @@ impl Redactor {
     }
 }
 
+/// Filter one bounded in-memory message or artifact using the same known
+/// credential shapes as capture. Filter before paging to preserve token context.
+pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut safe = Vec::new();
+    for chunk in bytes.chunks(8192) {
+        safe.extend(redactor.filter(chunk)?);
+    }
+    safe.extend(redactor.finish()?);
+    Ok(safe)
+}
+
 impl CaptureFilter for Redactor {
     fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
         self.filter_bounded(bytes)

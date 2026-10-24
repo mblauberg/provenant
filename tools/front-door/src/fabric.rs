@@ -6,7 +6,7 @@ use provenant_fabric_mcp::{
     tools::{Service, ServiceError},
 };
 use provenant_fabric_runtime::runs::{
-    RunCapabilities, RunEventsPage, RunOwner, RunResult, SubmissionReceipt,
+    AttemptPage, RunCapabilities, RunEventsPage, RunOwner, RunResult, SubmissionReceipt,
 };
 use provenant_fabric_runtime::{
     coordination::{facade::*, *},
@@ -16,7 +16,7 @@ use provenant_fabric_runtime::{
 use provenant_supervisor::{clock::SystemClock, exec::SystemExecutor};
 use std::{
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc,
     time::Instant,
 };
@@ -819,6 +819,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
         RunError::NotFound => FacadeError::NotFound,
         RunError::Refused => FacadeError::ConfinementRefused,
         RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
+        RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
+        RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
         RunError::Cancelled => FacadeError::Cancelled,
@@ -1061,11 +1063,11 @@ impl RunOwner for BinaryRunOwner<'_> {
     fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
             submit: true,
-            list: false,
+            list: true,
             status: true,
             wait: true,
             cancel: true,
-            resume: provenant_cli::run::Registry { roots: None }.continues_sessions(),
+            resume: provenant_cli::run::Registry::default().continues_sessions(),
             output: true,
             events: true,
         }
@@ -1090,12 +1092,8 @@ impl RunOwner for BinaryRunOwner<'_> {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 task.worktree.as_deref().map(Path::new),
-                &self.factory.cwd,
             )
             .map_err(fail_error)?;
-            if !task.inputs.is_empty() {
-                return Err(FacadeError::InvalidInput);
-            }
             let route = &task.route;
             let model = match (&route.adapter, &route.model) {
                 (_, Some(model)) if model.contains('/') => Some(model.clone()),
@@ -1105,7 +1103,11 @@ impl RunOwner for BinaryRunOwner<'_> {
             };
             let name = match model {
                 Some(_) => None,
-                None => route.role.as_deref().or(route.task_class.as_deref()),
+                None => route
+                    .route
+                    .as_deref()
+                    .or(route.role.as_deref())
+                    .or(route.task_class.as_deref()),
             };
             submitted.push(Submitted {
                 task_class: route.task_class.clone(),
@@ -1117,6 +1119,7 @@ impl RunOwner for BinaryRunOwner<'_> {
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
                 delivery_id: task.delivery_id,
+                worktree: task.worktree.map(PathBuf::from),
             });
         }
         let session = self.session(budget, cancel)?;
@@ -1397,7 +1400,57 @@ impl RunOwner for BinaryRunOwner<'_> {
                         .map_err(run_error)?,
                 })
             }
-            RunInput::List { .. } => Err(FacadeError::OwnerUnavailable),
+            RunInput::List { after, limit } => {
+                if !(1..=100).contains(&limit) {
+                    return Err(FacadeError::InvalidInput);
+                }
+                let host = self.factory.context.identity.host;
+                if after
+                    .as_ref()
+                    .and_then(|target| target.host)
+                    .is_some_and(|cursor_host| cursor_host != host)
+                {
+                    return Err(FacadeError::OwnerUnavailable);
+                }
+                let store = self.store(budget, cancel)?;
+                let call = self.call(budget, cancel);
+                let after_sequence = after
+                    .as_ref()
+                    .map(|target| {
+                        store
+                            .attempt_sequence(target.attempt, &call)
+                            .map_err(run_error)
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                let page = store
+                    .lanes(
+                        &provenant_run::LaneQuery {
+                            targets: Vec::new(),
+                            all: true,
+                            limit: u64::from(limit),
+                            after: after_sequence,
+                        },
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                let truncated = page.next.is_some();
+                let next_after = if truncated {
+                    page.lanes.last().map(|lane| AttemptTarget {
+                        attempt: lane.attempt_id,
+                        host: Some(host),
+                    })
+                } else {
+                    None
+                };
+                Ok(RunResult::List {
+                    page: AttemptPage {
+                        items: page.lanes,
+                        next_after,
+                        truncated,
+                    },
+                })
+            }
         }
     }
     fn events(
@@ -1457,7 +1510,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 access,
                 worktree: worktree.map(str::to_owned),
                 prompt: prompt.into(),
-                inputs: vec![],
                 route: RoutePreference {
                     adapter: Some(route.adapter.clone()),
                     model: route.model.clone(),

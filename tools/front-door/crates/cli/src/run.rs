@@ -9,7 +9,7 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
-use provenant_providers::{OutcomeStatus, ProviderError, ProviderEvent, REGISTRY};
+use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
 use provenant_run as run;
@@ -21,6 +21,10 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+mod provider;
+#[cfg(feature = "fixture")]
+pub use provider::writer_fixture_plan;
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -55,6 +59,8 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use run::RunError as E;
         let (status, code) = match &error {
+            E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
+            E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
             E::Validation(_) | E::TooLarge { .. } => (Status::Invalid, "INVALID"),
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
@@ -108,10 +114,15 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
 }
 
 /// Production provider seam. Routing resolves the requested route and its
-/// fallback; the first activated candidate is prepared. Until providers
-/// expose launch specifications every adapter refuses here, task-locally.
+/// fallback; the first eligible provider launch specification is prepared.
+#[derive(Default)]
 pub struct Registry<'a> {
     pub roots: Option<&'a Roots>,
+    pub home: Option<&'a Path>,
+    pub assets: Option<&'a Path>,
+    pub cwd: Option<&'a Path>,
+    pub state_root: Option<&'a Path>,
+    pub project_id: Option<provenant_core::ProjectId>,
 }
 impl Registry<'_> {
     /// Whether providers can continue an exact prior session. None can yet,
@@ -124,43 +135,13 @@ impl run::Providers for Registry<'_> {
     fn prepare(
         &self,
         task: &run::TaskRequest,
-        _prompt: &str,
+        prompt: &str,
+        paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        if resume.is_some() {
-            return Err(
-                "continuation needs a provider session; providers do not expose sessions yet"
-                    .into(),
-            );
-        }
-        let roots = self.roots.ok_or("routing context is unavailable")?;
-        let resolved =
-            crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
-        let candidates = std::iter::once((resolved.adapter.as_str(), resolved.model.as_str()))
-            .chain(
-                resolved
-                    .alternatives
-                    .as_slice()
-                    .iter()
-                    .map(|a| (a.adapter.as_str(), a.model.as_str())),
-            );
-        let reasons: Vec<String> = candidates
-            .map(|(adapter, model)| {
-                let model = format!("{adapter}/{model}");
-                match REGISTRY.iter().find(|r| r.adapter.id() == adapter) {
-                    None => format!("{model}: unknown adapter"),
-                    Some(r) if !r.adapter.execution_enabled() => format!(
-                        "{model}: {}",
-                        ProviderError::Disabled {
-                            adapter: r.adapter.id()
-                        }
-                    ),
-                    Some(_) => format!("{model}: provider launch specification is not wired"),
-                }
-            })
-            .collect();
-        Err(reasons.join("; "))
+        provider::prepare(self, task, prompt, paths, resume)
     }
+
     fn decode(
         &self,
         route: &run::RouteRecord,
@@ -248,6 +229,24 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
+        if let Some(ProviderEvent::QuotaLimited { message, .. }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+        {
+            decoded.outcome = run::Outcome::QuotaLimited;
+            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| {
+                    "provider quota exhausted (message redaction unavailable)".into()
+                });
+            let mut end = reason.len().min(8192);
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason.truncate(end);
+            decoded.reason = Some(reason);
+        }
         decoded
     }
 }
@@ -310,6 +309,22 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
         store: run::RunStore::open(&context, call)?,
         context,
     })
+}
+fn open_read_only(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
+    let (roots, project_id, actor_id) =
+        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
+            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
+    let context = run::ExecutionContext {
+        state_root: roots.state,
+        project_id,
+        actor_id,
+        read_prompts: true,
+    };
+    let store = run::RunStore::open_read_only(&context, call)?;
+    Ok((context, store))
 }
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
@@ -440,9 +455,9 @@ fn scan(prompt: &str) -> Result<(), Fail> {
         )
     })
 }
-/// Worktree access is explicit. A missing local worktree is named first; a
-/// worktree with read-only access is refused, never run read-only.
-pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Result<(), Fail> {
+/// Worktree access is explicit. Submission resolves and verifies the path;
+/// a worktree with read-only access is refused, never run read-only.
+pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail> {
     match worktree {
         None if !writer => Ok(()),
         None => Err(Fail::new(
@@ -450,24 +465,12 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Res
             "WORKTREE_REQUIRED",
             "worktree-write access needs --worktree",
         )),
-        Some(path) if !cwd.join(path).is_dir() => Err(Fail::new(
-            Status::Invalid,
-            "WORKTREE_MISSING",
-            format!(
-                "local worktree {} does not exist; create it with `provenant worktree create <name>`",
-                path.display()
-            ),
-        )),
         Some(_) if !writer => Err(Fail::new(
             Status::Invalid,
             "WORKTREE_NOT_APPLICABLE",
             "--worktree requires --mode worktree-write",
         )),
-        Some(_) => Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "worktree-write dispatch is not available in this build",
-        )),
+        Some(_) => Ok(()),
     }
 }
 
@@ -482,6 +485,7 @@ pub struct Submitted {
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
+    pub worktree: Option<PathBuf>,
 }
 pub struct Submission {
     pub operation_id: OperationId,
@@ -489,7 +493,7 @@ pub struct Submission {
     pub concurrency: Option<u64>,
     pub knobs: Vec<String>,
 }
-/// Scan, record and launch read-only work: the one path the CLI and Fabric
+/// Scan, record and launch work: the one path the CLI and Fabric
 /// share. Replaying an operation returns its run and launches nothing new.
 pub fn submit(
     session: &Session,
@@ -498,22 +502,6 @@ pub fn submit(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
-    #[derive(Serialize)]
-    struct Authority<'a> {
-        mode: &'static str,
-        network: bool,
-        cwd: &'a Path,
-    }
-    let authority = CanonicalV1::record_digest(
-        "run-authority",
-        1,
-        &Authority {
-            mode: "read_only",
-            network: false,
-            cwd: edge.cwd,
-        },
-    )
-    .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
     let config = provenant_config::read_with_domains(
@@ -530,6 +518,37 @@ pub fn submit(
     let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
     for task in submission.tasks {
         scan(&task.prompt)?;
+        let writer = task
+            .worktree
+            .as_ref()
+            .map(|path| {
+                let writer =
+                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?;
+                run::prepare_writer(
+                    &writer,
+                    session.context.state_root.as_path(),
+                    session.context.project_id,
+                )?;
+                Ok::<_, run::RunError>(writer)
+            })
+            .transpose()?;
+        #[derive(serde::Serialize)]
+        struct RunAuthority<'a> {
+            writer: Option<&'a run::WriterRequest>,
+            cwd: &'a Path,
+            network: bool,
+        }
+        let authority = CanonicalV1::record_digest(
+            "run-authority",
+            2,
+            &RunAuthority {
+                writer: writer.as_ref(),
+                cwd: edge.cwd,
+                network: false,
+            },
+        )
+        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+
         requests.push(run::TaskRequest {
             profile: profile(task.task_class.as_deref())?,
             task_id: task.task_id,
@@ -538,6 +557,7 @@ pub fn submit(
             account: task.account,
             fallback: fallback(&task.fallback)?,
             authority_digest: authority,
+            writer,
             provider_timeout_seconds: task.provider_timeout,
             delivery_id: task.delivery_id,
         });
@@ -581,7 +601,6 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     worktree_access(
         matches!(access.mode, Mode::WorktreeWrite),
         access.worktree.as_deref(),
-        edge.cwd,
     )?;
     if matches!(access.network, Switch::On)
         || !access.capability.is_empty()
@@ -714,6 +733,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 account,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
+                worktree: access.worktree.clone(),
             },
         )
         .collect();
@@ -844,6 +864,11 @@ pub fn launch(
     };
     let registry = Registry {
         roots: Some(edge.roots),
+        home: Some(edge.home),
+        assets: Some(edge.assets),
+        cwd: Some(edge.cwd),
+        state_root: Some(session.context.state_root.as_path()),
+        project_id: Some(session.context.project_id),
     };
     Ok(session.store.start(run, &registry, &holder, call)?)
 }
@@ -1074,7 +1099,12 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let (context, store) = open_read_only(edge, &call)?;
+            let Some(store) = store else {
+                let (data, human) = render_lanes(&[], None, edge);
+                return Ok((data, human, false));
+            };
+            let session = Session { store, context };
             if let Some(seconds) = command.wait {
                 return wait_lanes(&session, &command.id, command.condition, seconds, edge);
             }
@@ -1101,7 +1131,13 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        "NOT_FOUND",
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
     let target = command.attempt.0;
     let id = target
         .attempt
@@ -1266,7 +1302,7 @@ pub fn continue_attempt(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
-    if !(Registry { roots: None }).continues_sessions() {
+    if !(Registry::default()).continues_sessions() {
         return Err(Fail::new(
             Status::Refused,
             "UNSUPPORTED",
@@ -1364,6 +1400,11 @@ fn reconcile_inner(
     };
     let registry = Registry {
         roots: Some(edge.roots),
+        home: Some(edge.home),
+        assets: Some(edge.assets),
+        cwd: Some(edge.cwd),
+        state_root: Some(session.context.state_root.as_path()),
+        project_id: Some(session.context.project_id),
     };
     let mut rows = Vec::new();
     let mut human = String::new();
@@ -1423,7 +1464,19 @@ fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    Ok((json!({ "runs": rows, "truncated": truncated }), human))
+    let reservations = session.store.writer_fence_listing()?;
+    *fenced |= !reservations.issues.is_empty();
+    for issue in &reservations.issues {
+        human.push_str(&format!(
+            "writer reservation unreadable: {}: {}\n",
+            issue.reservation.display(),
+            issue.reason
+        ));
+    }
+    Ok((
+        json!({ "runs": rows, "truncated": truncated, "writer_reservations": reservations.reservations, "writer_reservation_errors": reservations.issues }),
+        human,
+    ))
 }
 
 /// Usage and cost over this project's terminal attempts, priced from the
@@ -1455,23 +1508,27 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let session = open(edge, &call)?;
+    let (context, store) = open_read_only(edge, &call)?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
         until: instant(command.until)?,
-        project: Some(session.context.project_id),
+        project: Some(context.project_id),
         detail: command.detail,
     };
-    let facts = session
-        .store
-        .attempts(
-            run::AttemptFilter {
-                run_id: None,
-                task_id: None,
-            },
-            &call,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    let facts = store
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: None,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
     let cost = report.totals.cost.complete.as_ref().map_or_else(
@@ -1525,5 +1582,77 @@ mod lane_depth_tests {
     #[test]
     fn shared_submit_context_assigns_root_depth_without_parent() {
         assert!(matches!(lane_dispatch_values(None, None, 2), Ok((1, None))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_run::Providers;
+    use provenant_supervisor::custody::{
+        CaptureTotals, PublicationState, Scope, SettlementEvidence,
+    };
+    #[test]
+    fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: RunId::from_bytes([1; 16]),
+                attempt: AttemptId::from_bytes([2; 16]),
+                generation: 1,
+            },
+            termination: Some(provenant_supervisor::exec::Termination::Exit(1)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        };
+        let route = run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/a-free".into()),
+            ..Default::default()
+        };
+        let registry = Registry {
+            roots: None,
+            home: None,
+            assets: None,
+            cwd: None,
+            state_root: None,
+            project_id: None,
+        };
+        for (message, expected) in [
+            (
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+                "Free allowance exhausted. See https://opencode.ai/go\\quota",
+            ),
+            (
+                "Free allowance exhausted for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "Free allowance exhausted for [REDACTED]",
+            ),
+        ] {
+            let event = json!({"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":message}}}});
+            let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+            assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+            assert_eq!(decoded.reason.as_deref(), Some(expected));
+        }
+        let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
+        let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+        assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        let reason = decoded.reason.unwrap();
+        assert!(
+            reason.len() <= 8192,
+            "reason must leave room in the terminal record"
+        );
+        assert!(reason.ends_with('☀'));
     }
 }

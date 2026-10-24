@@ -54,3 +54,8 @@ Label evidence as `verified` or `judgement`, and each selected lane as `tested`,
 `failed`, `not tested`, or `not applicable`. Deterministic checks and delivery
 acceptance remain with the enclosing implementation lifecycle; design does not
 certify itself.
+
+Reference cases (not run by CI): [boundary](evals/boundary_cases.yaml),
+[craft quality](evals/craft_quality.yaml),
+[provenance ledger](evals/provenance_components.yaml), and
+[reference disposition](evals/reference_disposition.yaml).

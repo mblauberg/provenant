@@ -173,7 +173,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   custody.lock                 # supervisor-owned run custody
   children/{journal.lock,<ChildId>.json} # supervisor child-custody evidence
   attempts/<AttemptId>/         # task association/ordinal live in the run store
-    prompt.txt                 # run-owned immutable exact provider prompt
+    prompt.txt                 # run-owned immutable submitted prompt
     result.md                  # run-owned sealed result, including failure
     custody.lock               # supervisor-owned attempt custody
     launch.json                # supervisor-owned redacted launch summary
@@ -741,18 +741,53 @@ scheduler daemon. Within that, the lane decided:
   A wall-deadline stop becomes `timed_out` and an explicit cancellation becomes
   `cancelled`, unless the provider had already succeeded. Redaction is
   deferred: no secret reaches the provider environment yet.
-- **Worktree-write dispatch is refused** in this slice, because instruction
-  snapshots and quarantine are not composed yet. Confinement's
-  `writer_custody` already exists for that follow-up. Network, capability,
-  read-root and remote-host requests are refused as unsupported too.
+- **Worktree-write dispatch** accepts an absolute path or a path relative to
+  the selected repository's primary root. The edge verifies a linked worktree
+  of that project and its active Provenant registration, then records the
+  canonical writer scope in the immutable task request. Run acquires the
+  worktree's supervisor reservation and exclusive lease before compiling the
+  confinement plan, and transfers custody to the guardian. A second writer is
+  refused. The guardian releases the reservation after terminal publication
+  and settlement. Network, capability, read-root and remote-host requests
+  remain unsupported.
+- **Writer terminal checks** reverify the recorded worktree and call
+  confinement's instruction snapshot before launch. The sealed baseline lives
+  in the provider-inaccessible quarantine archive and can be reopened only for
+  matching custody, base and archive identity. After quiescence, quarantine
+  archives protected disk/index/HEAD changes before terminal publication.
+  Review-required changes produce `failed`; incomplete quarantine remains
+  retryable. A crash after evidence publication requires review rather than
+  replaying a partial restore. The release manifest names the real evidence
+  and result digests. Both the guardian and reconcile require the recorded
+  base to remain an ancestor of the branch tip and call `check_writer_terminal`.
+  An unfinished cherry-pick, revert, rebase, merge or sequencer operation
+  produces `failed` with the worktree and reason, even when the provider
+  returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
   alternatives. Runtime fallback on rate, quota or model-unavailable is
   deferred, because no decoder emits those events yet.
 - **The provider seam is minimal**: `Providers::prepare` returns argv,
   allow-listed environment, stdin, cwd and applied route, and `decode` maps a
   sealed capture to an outcome. It is shaped for the providers crate's launch
-  specification. Until providers activate, production `prepare` refuses each
-  candidate as disabled, so live dispatch is blocked on provider activation.
+  specification. The composition edge prepares activated Codex launch specs;
+  Claude still needs a credential-authority binding. Provider execution does
+  not waive the existing terminal requirement for an observed route: Codex
+  streams without an answering-model observation cannot establish success.
+  This is confirmed for installed Codex CLI 0.159.0: its
+  [exec event schema](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/exec_events.rs)
+  has no answering-model field, and its
+  [JSON event processor](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
+  emits only the thread ID from `SessionConfiguredEvent`. A resolved model
+  pinned in argv remains recorded separately; it cannot satisfy the present
+  observed-route gate. Claude requires an authority record binding actor,
+  exact credential source, purpose and expiry before the host token loader
+  can run. The task request currently carries no such record.
+- **Launch storage** is allocated once per attempt before route fallback, under
+  its canonical `scratch/` and `provider-state/` paths. No candidate creates
+  random `tmp/` trees. Settlement removes empty scratch; provider history and
+  unclassified contents remain retained. Supervisor owns reservation listing:
+  malformed entries are reported and remain fenced while valid entries can
+  reconcile. Such diagnostics make the reconcile command non-successful.
 - **The guardian re-resolves the state root** from a `RootSeed` in the holder
   context, because its environment is cleared.
 
@@ -787,13 +822,19 @@ scheduler daemon. Within that, the lane decided:
   whose reservation is provably absent and which has no exit, is withdrawn as
   `rejected`; queued work is started; everything else stays fenced and is
   reported as held or uncertain. Accepting lost custody
-  (`--abandon-uncertain`) is refused as unsupported until its evidence rules
-  are designed. Reader fences on terminal attempts stay, because attempt
-  directories are never reused. A guardian that dies after the terminal
-  commit but before publishing its release leaves that settlement
-  unpublished: reconcile scans nonterminal attempts only, and the attempt
-  directory is never reused, so nothing waits on it. A release sweep is a
-  follow-up if supervisor ever needs it. A per-attempt or per-run error is reported in
+  (`--abandon-uncertain`) remains unavailable at the CLI. Writer reservations
+  survive owner death, including death after terminal commit, and reconcile
+  includes their run IDs and exact reservation paths in `writer_reservations`.
+  A starting writer with a never-handed-off `Prepared` reservation is safely
+  withdrawn under its worktree lock. Reconcile also clears that preparation
+  fence after a terminal withdrawal that proves no provider launched and has
+  no exit evidence. Other reservations without a launch
+  summary stay uncertain; absence of an attempt-local reader reservation
+  cannot withdraw them. A retained
+  reservation after a provider's terminal commit also stays uncertain. The chair recovery
+  procedure is in [worktrees](../../../worktrees.md#writer-custody-recovery).
+  Reader fences on terminal attempts stay, because attempt directories are
+  never reused. A per-attempt or per-run error is reported in
   place and the scan continues; anything left uncertain, unlaunched or in
   error fails the command. The scan covers the 320 oldest open runs and says
   when more exist; `--id` reaches the rest.
@@ -812,20 +853,22 @@ scheduler daemon. Within that, the lane decided:
 - **Reservation race.** Reconcile withdraws a start without a launch summary
   only while holding the writer lock: either supervisor's `prove_unreserved`
   (no reservation, launch or exit) or the recovery lease. The launcher
-  re-reads the attempt after taking reader custody and stays local if it
+  re-reads the attempt after taking custody and stays local if it
   changed, so a withdrawn attempt never reaches a guardian.
 - **Input scan.** `dispatch`, `resume` and Fabric submissions scan each prompt
   against confinement's secret patterns before any record is written and
   refuse with `SECRET_INPUT`, without echoing the match.
 - **Worktrees.** A missing local worktree is `WORKTREE_MISSING` (Fabric
   `worktree_missing`, #1309); a writer without a worktree or a reader with
-  one is invalid (#1310). Worktree-write dispatch itself stays unsupported.
+  one is invalid (#1310). Writer scope is persisted and reverified at launch
+  and terminal publication; primary, foreign and unregistered trees refuse.
 - **Fabric's facade** calls the CLI's shared `submit`, `continue_attempt`,
   cancel and output paths, so Fabric submissions, graph nodes and the CLI
   admit, record and launch identically. Output fetch accepts only the
   attempt's bound result digest and returns the whole result, paging the
   64 KiB reader, or refuses with `output_too_large`. Remote runs forward to the owning host. Run
-  listing stays `owner_unavailable`. A graph route refused before launch
+  listing pages the local project through `fabric_run` with an attempt cursor;
+  remote-host list cursors stay `owner_unavailable`. A graph route refused before launch
   (`rejected`, never launched) maps to `adapter_unavailable`, so the graph
   tries the next route.
 - **Provider launch specs.** Lane P's `LaunchSpec` (#1411) is consumed behind
@@ -840,3 +883,35 @@ step 5. These are owner acceptance conditions,
 not permission to ship an unresolved custody path. The chair arranges the
 cross-family council and accepts the design; the lane opens a PR and does not
 merge or arm auto-merge.
+
+### Run follow-ups (#1321, #1216, #1288)
+
+The provider prompt starts with an attempt-specific output notice: the absolute
+`result.md`, `process-exit.json`, `stdout.log` and `stderr.log` paths are the only
+durable lane outputs. The lane returns its report and evidence in its final
+answer; the harness writes those files. `prompt.txt` and its request digest
+retain the submitted prompt, before this deterministic harness envelope.
+Scratch is disposable; this change adds no retention. The Rust settlement
+policy above wins over the historical issue's Python `tmp/` pruning rules:
+classified staging is deleted, unknown files remain outside that classification.
+
+OpenCode quota events use the provider's message as the terminal reason,
+filtering known secret shapes and bounding the reason to a UTF-8-safe 8 KiB
+excerpt before persistence,
+with the existing typed `quota_limited` outcome rather than the retired
+`usage_limited` string. `FreeUsageLimitError` identifies the `opencode-free`
+allowance pool. Admission refuses another model only when its supplied pool
+binding and account identity match; no model-name suffix implies identity.
+The holder's existing terminal transaction supplies the single finish time and
+outcome to both its record and attempt fact. Shared refusal persistence and
+pool bindings are still not composed into the production launch/admission edge,
+so this does not yet implement the end-to-end cooldown in #1216. A free-tier
+repair hint is also deferred until the terminal record carries the proven pool;
+a generic quota refusal must not assert free-tier exhaustion.
+
+Writer dispatch now carries a verified `WriterLaunch` through confinement and
+supervisor custody; terminal publication checks the selected worktree with
+`check_writer_terminal`. The process cwd alone does not establish writer
+authority. Post-launch route fallback remains deferred: it needs a new attempt
+with retry-budget and publication ordering, rather than replaying an exited
+process in place.

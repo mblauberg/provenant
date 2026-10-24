@@ -26,7 +26,7 @@ None of that exists. `AFCHAL1`, `AFREGV1`, `AFACKV1`, `supervise-v1` and
 `SCM_RIGHTS` appear in no `.rs` and no `.ts` file in the repository. The crate
 never forks and never execs: it has no `fork`, `execve` or `Command::new` call
 site. There is no daemon-side caller at all. Outside its own crate the
-supervisor is named only by documentation (`runtime/README.md`,
+supervisor is named only by documentation (the former `runtime/README.md`,
 `runtime/agent-fabric/README.md`, `MAINTAINING.md` and several
 specifications), by the repository-structure tests and by CI; none of them
 invokes it.

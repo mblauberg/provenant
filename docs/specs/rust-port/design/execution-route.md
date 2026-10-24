@@ -206,6 +206,15 @@ auth-required and unsupported. Refusals remain model/account-scoped unless wire
 evidence proves wider scope; independent allowance pools do not exhaust each
 other. A newer comparable observation or reset expires only that scoped refusal;
 unknown data preserves it. Unknown reset has a one-hour backoff. No pin bypass.
+OpenCode `provider.quota` decodes its structured response body (JSON or a JSON
+string); `FreeUsageLimitError` supplies the shared `opencode-free` pool and its
+provider message, without searching stderr. The admission rule matches this
+pool across models only for the same account identity and a supplied pool
+binding. Production launch still needs to persist these events and supply those
+bindings. The quota tick's macOS Claude refresh calls the shared provider helper
+from the binary composition edge; quota itself cannot import providers because
+providers already depends on quota. The credential-file path on other platforms
+remains separate because that helper currently reads Keychain only.
 
 Tick TTLs (timer/panel seconds): Claude 300/120, Codex 900/300, Cursor 1800/600,
 Agy 1200/900. Manual has a 30 s floor and respects backoff. Battery doubles
@@ -352,14 +361,14 @@ child above `lanes.max_depth`, default 2, before creating its records. Nested
 runs record their submitting parent separately from continuation ancestry.
 This is a lightweight recursion limit, not a new authority boundary.
 
-Composition limitation: the CLI's production `Registry::prepare` still refuses
-with “provider launch specification is not wired”. Adapter preparation and
-shared dispatch-depth tests cover this change; live lane acceptance requires
-that existing execution composition to land first. Codex also needs a new
-`state_write` confinement observation for its Fabric state: the current fixture
-has none. The recorder's `--skip-live` probe was attempted in this confined lane
-and returned `BackendNotAvailable(ProbeFailed)`; the existing observation gate
-is retained, so compilation refuses until host-side evidence is recorded. The earlier blanket
+The CLI production `Registry::prepare` now calls `provider::prepare`, and Run
+passes attempt scratch and provider-state paths into that preparation for both
+read-only and writer launches. Codex still cannot compile its profile: the
+current fixture has no `state_write` confinement observation for Fabric state.
+The recorder's `--skip-live` probe was attempted in this confined lane and
+returned `BackendNotAvailable(ProbeFailed)`; the existing observation gate is
+retained until host-side evidence is recorded. Live lane acceptance remains
+pending that observation and the exact-head checks. The earlier blanket
 no-customisation launch policy is superseded by this explicit user decision.
 
 ### Live activation

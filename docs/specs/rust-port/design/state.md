@@ -55,7 +55,7 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | User config | `<state>/config.toml`; optional, user-owned, only configuration file |
 | Host identity | `<state>/state.json` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
-| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/,runtime/}` |
+| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |

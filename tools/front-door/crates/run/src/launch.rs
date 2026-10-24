@@ -35,6 +35,7 @@ pub struct PreparedLaunch {
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
+    pub confinement: Option<crate::LaunchConfinement>,
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
@@ -45,6 +46,11 @@ pub struct Decoded {
     pub usage: UsageRecord,
     pub reason: Option<String>,
 }
+/// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
+pub struct LaunchPaths {
+    pub scratch: PathBuf,
+    pub provider_state: PathBuf,
+}
 pub trait Providers {
     /// Prepare one task, trying its fallback routes in order. An error is a
     /// task-local refusal reason; siblings still launch. `resume` is the prior
@@ -54,6 +60,7 @@ pub trait Providers {
         &self,
         task: &TaskRequest,
         prompt: &str,
+        paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
@@ -62,6 +69,7 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
+    Busy,
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -71,12 +79,18 @@ pub enum Started {
     Refused {
         attempt: AttemptId,
         reason: String,
+        kind: RefusalKind,
     },
     /// Handoff did not confirm; the attempt stays fenced for `reconcile`.
     Unknown {
         attempt: AttemptId,
         error: String,
     },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalKind {
+    Preparation,
+    WorktreeBusy,
 }
 
 impl RunStore {
@@ -97,6 +111,52 @@ impl RunStore {
         run: RunId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(
+            run,
+            providers,
+            context,
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            call,
+        )
+    }
+    /// Native observation seam for integration fixtures. The ordinary start
+    /// path always uses supervisor's system observer and nonblocking lease.
+    #[cfg(feature = "fixture")]
+    pub fn start_with_writer_lease(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(run, providers, context, acquire_writer, call)
+    }
+    fn start_inner(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         let request = self.request(run, call)?;
@@ -129,14 +189,42 @@ impl RunStore {
             let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
             let prompt = String::from_utf8(prompt)
                 .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
+            let directory = self
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{run}/attempts/{id}"));
+            let prompt = format!(
+                "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Empty attempt scratch is deleted at settlement; unknown contents and provider history remain retained. Files left in scratch are not deliverables.\n\n{prompt}",
+                result = directory.join("result.md").display(),
+                exit = directory.join("process-exit.json").display(),
+                stdout = directory.join("stdout.log").display(),
+                stderr = directory.join("stderr.log").display(),
+            );
             let now = || {
                 call.clock
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let mut plan = match providers.prepare(task, &prompt, resume.as_ref()) {
+            let attempt = self.attempt_dir(record.run_id, id, false)?;
+            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
+            let base = self
+                .context
+                .state_root
+                .as_path()
+                .join("runs")
+                .join(record.run_id.to_string())
+                .join("attempts")
+                .join(id.to_string());
+            let paths = LaunchPaths {
+                scratch: base.join("scratch"),
+                provider_state: base.join("provider-state"),
+            };
+            let mut plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
+                    crate::writer::settle_launch_staging(&attempt)?;
                     self.withdraw(
                         id,
                         AttemptState::Queued,
@@ -148,6 +236,7 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
+                        kind: RefusalKind::Preparation,
                     });
                     continue;
                 }
@@ -159,37 +248,52 @@ impl RunStore {
                 Err(RunError::Conflict) => continue,
                 Err(error) => return Err(error),
             };
-            started.push(match self.hand_off(task, plan, context, &record, call) {
-                Ok(()) => Started::Launched(id),
-                // Nothing reached a guardian: the attempt ends here.
-                Err(HandOff::Local(error)) => {
-                    let reason = format!("launch preparation failed: {error}");
-                    self.withdraw(
-                        id,
-                        AttemptState::Starting,
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
-                        call,
-                    )?;
-                    Started::Refused {
-                        attempt: id,
-                        reason,
+            started.push(
+                match self.hand_off(task, plan, context, acquire_writer, &record, call) {
+                    Ok(()) => Started::Launched(id),
+                    // Nothing reached a guardian: the attempt ends here.
+                    Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
+                        let (reason, kind) = match error {
+                            HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
+                            HandOff::Local(error) => (
+                                format!("launch preparation failed: {error}"),
+                                RefusalKind::Preparation,
+                            ),
+                            _ => unreachable!(),
+                        };
+                        self.withdraw(
+                            id,
+                            AttemptState::Starting,
+                            Outcome::Rejected,
+                            &reason,
+                            now()?,
+                            call,
+                        )?;
+                        Started::Refused {
+                            attempt: id,
+                            reason,
+                            kind,
+                        }
                     }
-                }
-                Err(HandOff::Uncertain(error)) => {
-                    self.launch_unknown(run, call)?;
-                    Started::Unknown { attempt: id, error }
-                }
-            });
+                    Err(HandOff::Uncertain(error)) => {
+                        self.launch_unknown(run, call)?;
+                        Started::Unknown { attempt: id, error }
+                    }
+                },
+            );
         }
         Ok(started)
     }
     fn hand_off(
         &self,
         task: &TaskRequest,
-        plan: PreparedLaunch,
+        mut plan: PreparedLaunch,
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
@@ -204,18 +308,71 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        let mut lease =
-            custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
-                .map_err(|e| local(&e))?;
-        // Reconcile may have withdrawn this attempt before the lease existed.
-        match self.record(id, call) {
-            Ok(now) if now.revision == record.revision => {}
-            Ok(_) => return Err(local(&"attempt changed before handoff")),
-            Err(error) => return Err(local(&error)),
-        }
+        let holder_context = context(record).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
+        let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
+        if task.writer.as_ref().map(|w| w.worktree.as_path())
+            != writer.as_ref().map(|w| w.worktree.path())
+        {
+            return Err(local(&"writer confinement does not match the task"));
+        }
+        let mut lease = match writer {
+            Some(writer) => {
+                let (directory, binding) = writer
+                    .custody
+                    .take()
+                    .ok_or_else(|| local(&"writer custody missing"))?;
+                acquire_writer(directory, scope, binding)
+            }
+            None => {
+                custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
+            }
+        }
+        .map_err(|e| {
+            if matches!(e, custody::CustodyError::Busy) {
+                HandOff::Busy
+            } else {
+                local(&e)
+            }
+        })?;
+        // Reconcile may have withdrawn this attempt before the lease existed.
+        match self.record(id, call) {
+            Ok(now) if now.revision == record.revision => {}
+            Ok(_) => {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&"attempt changed before handoff"));
+            }
+            Err(error) => {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
+        }
+        if let Some(confinement) = &plan.confinement {
+            if let Some(writer) = &confinement.writer
+                && let Err(error) =
+                    writer.snapshot(self.context.state_root.as_path(), &directory()?, scope)
+            {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
+            match confinement.command(&plan.argv, call.cancel) {
+                Ok(argv) => plan.argv = argv,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(local(&error));
+                }
+            }
+        }
         let route = format!(
             "{}/{}",
             plan.route.provider.as_deref().unwrap_or_default(),
@@ -232,7 +389,7 @@ impl RunStore {
             environment: plan.environment,
             cwd: plan.cwd,
             stdin: plan.stdin,
-            holder_context: context(record).map_err(|e| local(&e))?,
+            holder_context,
         };
         let capture = capture_plan(task);
         custody::launch(

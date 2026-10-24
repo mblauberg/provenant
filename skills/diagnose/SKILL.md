@@ -46,3 +46,5 @@ requires an explicit user request or an authorised `implement` scope.
 After three failed fix attempts, stop and question the architecture with the
 user. An enclosing lifecycle's stricter repair-cycle cap always wins.
 Detailed loop choices and cleanup checks: [references/method.md](references/method.md).
+For a guided user reproduction, adapt the
+[human-in-the-loop script template](scripts/hitl-loop.template.sh).
