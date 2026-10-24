@@ -118,6 +118,7 @@ To also record the issue-to-branch link on GitHub, create the branch with
 ```sh
 gh issue develop 148 --name fix/repo-runbook-mechanics --base main
 git fetch origin
+git branch --track fix/repo-runbook-mechanics origin/fix/repo-runbook-mechanics
 provenant worktree create fix/repo-runbook-mechanics
 ```
 

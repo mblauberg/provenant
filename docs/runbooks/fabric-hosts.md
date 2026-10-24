@@ -19,9 +19,11 @@ provenant dispatch --host workshop --help
 
 `fabric host list` reads local and configured peer health. `hosts doctor`
 probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
-general provider sign-in check. Remote dispatch requires `~/.local/bin/provenant`
-on the peer host. The hidden `fabric peer` command is the fixed SSH protocol
-entrypoint. Remote dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
+general provider sign-in check. Remote doctor uses
+`~/.local/bin/provenant` on the peer. Remote dispatch runs `provenant fabric
+peer` through the peer's non-interactive `PATH`. The hidden `fabric peer`
+command is the fixed SSH protocol entrypoint. Remote dispatch uses top-level
+`dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 

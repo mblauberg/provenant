@@ -90,18 +90,6 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** consult `provenant route list`; only models exposed by the active
   Claude routes can be dispatched.
 
-### Claude Fable 5.1 (Anthropic override)
-
-- **Good at:** a deliberately different Anthropic mind for synthesis or
-  adjudication when Opus has already had its say.
-- **Watch out for:** the owner prefers Opus 5.5 for critical work most of the
-  time, and in September said "no fable at the moment". Reach for Fable only
-  when asked, or when a second Anthropic perspective is the point. Effort is
-  capped at `medium` by the catalogue override.
-- **Cost:** not recorded.
-- **Reach:** `claude-fable-5-1` through the crucial and terminal
-  `--model-override-tier`, synthesis and adjudication roles only.
-
 ### GPT-6 Astra (OpenAI principal)
 
 - **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
