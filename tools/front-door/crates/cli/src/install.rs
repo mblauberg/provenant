@@ -8,7 +8,6 @@ use provenant_config::{
 };
 use provenant_core::Roots;
 use provenant_supervisor::fs::SafeFs;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, clap::Args)]
@@ -40,14 +39,6 @@ pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = H
         .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct InstallDomains {
-    fabric: provenant_fabric_runtime::config::FabricConfig,
-}
-static SECTIONS: config::DomainSections<InstallDomains> =
-    config::DomainSections::new(&[provenant_fabric_runtime::config::SECTION]);
-
 /// Config values are applied before explicit harness environment overrides;
 /// leaf flags are applied by `execute_install` after this function returns.
 pub fn configured_targets(
@@ -60,7 +51,9 @@ pub fn configured_targets(
     git_hooks_dir: Option<PathBuf>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
-    config::apply_install_config_with_domains(&mut targets, fs, &SECTIONS)?;
+    // Validate against every registered domain, so sections other commands
+    // write (accounts, routing, quota) never block installation.
+    config::apply_install_config_with_domains(&mut targets, fs, &crate::domains::SECTIONS)?;
     targets.apply_environment(claude_config_dir, codex_home)?;
     targets.git_hooks_dir = git_hooks_dir;
     Ok(targets)

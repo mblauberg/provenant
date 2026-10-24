@@ -163,7 +163,8 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n",
+        // Sections other commands write must not block installation.
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n",
     )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
