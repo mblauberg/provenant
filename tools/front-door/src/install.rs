@@ -1,18 +1,19 @@
 //! Process-edge wiring for installation. State operations stay in config;
 //! every child is supervised with a bounded wait and isolated environment.
+use crate::release_smoke::SystemSmoke;
 use provenant_cli as cli;
 use provenant_config::{
-    self as config, Action, InstallContext, InstallError, InstallFinding, InstallOutcome,
-    InstallReporter, ManualInclude, Release, ReleaseSmoke, Targets,
+    Action, InstallContext, InstallError, InstallFinding, InstallOutcome, InstallReporter,
+    ManualInclude, Targets,
 };
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
-use provenant_records::{CommandError, CommandResult, Harness, Outcome, VersionInfo};
+use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use provenant_supervisor::{
     clock::SystemClock,
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::{LocalFs, SafeFs},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
@@ -183,120 +184,6 @@ fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
         return Err(EdgeError::Git);
     }
     Ok(path)
-}
-
-#[derive(Deserialize)]
-struct SmokeVersion {
-    package_version: String,
-    source_digest: String,
-    asset_digest: String,
-    target: String,
-    toolchain: String,
-    record_schema_version: u64,
-    config_schema_version: u64,
-}
-#[derive(Deserialize)]
-struct SmokeEnvelope<T> {
-    schema_version: u64,
-    command: String,
-    status: String,
-    data: T,
-    error: Option<serde_json::Value>,
-}
-
-struct SystemSmoke {
-    executor: SystemExecutor,
-}
-impl SystemSmoke {
-    fn new() -> io::Result<Self> {
-        let executor = SystemExecutor::new(1)
-            .map_err(|_| io::Error::other("cannot start bounded release smoke executor"))?;
-        Ok(Self { executor })
-    }
-    fn invoke<T: DeserializeOwned>(
-        &self,
-        release: &Release,
-        args: &[&str],
-        cancel: &CancelToken,
-    ) -> io::Result<SmokeEnvelope<T>> {
-        let executable = release.source().join("bin/provenant");
-        let mut argv = vec![executable.into_os_string()];
-        argv.extend(args.iter().map(OsString::from));
-        let env: [(OsString, OsString); 0] = [];
-        let mut options = ExecOptions::new(&argv, release.source(), Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 1_048_576 };
-        options.stderr = StreamPolicy::Discard;
-        options.cancel = Some(cancel);
-        options.stop_on_output_limit = true;
-        let result = self
-            .executor
-            .execute(options)
-            .map_err(|_| io::Error::other("bounded release smoke command failed"))?;
-        if result.termination != Termination::Exit(0)
-            || result.timed_out
-            || result.drain_truncated
-            || result.stdout.truncated
-            || result.stdout.read_failed
-            || result.cancelled
-        {
-            return Err(io::Error::other(
-                "release smoke command returned an invalid result",
-            ));
-        }
-        provenant_records::decode(
-            result.stdout.bytes.as_slice(),
-            provenant_records::Limits::CONFIG,
-        )
-        .map_err(|_| io::Error::other("release smoke output is not a valid result envelope"))
-    }
-}
-impl ReleaseSmoke for SystemSmoke {
-    fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
-        let version = self.invoke::<SmokeVersion>(release, &["--version", "--json"], cancel)?;
-        if version.schema_version != 1
-            || version.command != "version"
-            || version.status != "ok"
-            || version.error.is_some()
-            || version.data.package_version != env!("CARGO_PKG_VERSION")
-        {
-            return Err(io::Error::other(
-                "release version identity envelope differs",
-            ));
-        }
-        let manifest = release.manifest();
-        let data = version.data;
-        if data.source_digest != manifest.source_digest.to_string()
-            || data.asset_digest != manifest.asset_digest.to_string()
-            || data.target != manifest.target
-            || data.toolchain != manifest.toolchain
-            || data.record_schema_version != 1
-            || data.config_schema_version != config::CONFIG_SCHEMA_VERSION
-        {
-            return Err(io::Error::other(
-                "release version identity differs from manifest",
-            ));
-        }
-        let help = self.invoke::<serde_json::Value>(release, &["--help", "--json"], cancel)?;
-        if help.schema_version != 1
-            || help.command != "help"
-            || help.status != "ok"
-            || help.error.is_some()
-            || !help.data.is_object()
-        {
-            return Err(io::Error::other("release help identity envelope differs"));
-        }
-        Ok(VersionInfo {
-            source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
-                .map_err(|_| io::Error::other("release source digest is invalid"))?,
-            asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
-                .map_err(|_| io::Error::other("release asset digest is invalid"))?,
-            target: data.target,
-            toolchain: data.toolchain,
-            record_schema_version: data.record_schema_version,
-            config_schema_version: data.config_schema_version,
-        })
-    }
 }
 
 #[derive(Default)]

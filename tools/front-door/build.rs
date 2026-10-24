@@ -17,6 +17,7 @@ const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
 struct InputFile {
+    source: PathBuf,
     name: String,
     bytes: Vec<u8>,
     executable: bool,
@@ -68,6 +69,7 @@ impl Inputs {
             .checked_add(byte_count)
             .ok_or_else(|| invalid("source inventory total-byte count overflowed"))?;
         self.files.push(InputFile {
+            source: path.to_path_buf(),
             name,
             bytes,
             executable,
@@ -276,6 +278,7 @@ fn main() -> BuildResult<()> {
     validate_metadata_value(&toolchain)?;
 
     let encoded_assets = release_asset_inputs(&inputs)?;
+    write_release_asset_map(&inputs, &encoded_assets)?;
     let borrowed_assets: Vec<SourceInput<'_>> = encoded_assets
         .iter()
         .map(|(name, bytes)| SourceInput { name, bytes })
@@ -305,6 +308,28 @@ fn main() -> BuildResult<()> {
     )?;
     emit_instruction("rustc-env", &format!("PROVENANT_TARGET_TRIPLE={target}"))?;
     emit_instruction("rustc-env", &format!("PROVENANT_TOOLCHAIN={toolchain}"))?;
+    Ok(())
+}
+
+// The build-only packager consumes this generated module, so its copy inventory
+// is exactly the inventory used below, including tracked-file filtering.
+fn write_release_asset_map(inputs: &Inputs, assets: &[(String, Vec<u8>)]) -> BuildResult<()> {
+    let mut module = String::from("const RELEASE_ASSETS: &[(&str, &str)] = &[\n");
+    for (name, _) in assets {
+        let input = inputs
+            .files
+            .iter()
+            .find(|input| input.name == *name)
+            .ok_or_else(|| invalid("release asset was not inventoried"))?;
+        let source = input
+            .source
+            .to_str()
+            .ok_or_else(|| invalid("release asset source is not UTF-8"))?;
+        module.push_str(&format!("    ({source:?}, {name:?}),\n"));
+    }
+    module.push_str("];\n");
+    let out = env::var_os("OUT_DIR").ok_or_else(|| invalid("Cargo did not provide OUT_DIR"))?;
+    fs::write(PathBuf::from(out).join("release_assets.rs"), module)?;
     Ok(())
 }
 
