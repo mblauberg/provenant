@@ -71,32 +71,8 @@ pub enum Command {
 pub enum Config {
     Show,
 }
-#[derive(Debug, Args)]
-pub struct Install {
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
-    pub source: PathBuf,
-    #[arg(long, required = true, value_parser = harness_parser())]
-    pub harness: Vec<Harness>,
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
-    pub bin_dir: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "off")]
-    pub hooks: Switch,
-    #[arg(long)]
-    pub adopt_existing: bool,
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
-    pub legacy_checkout: Option<PathBuf>,
-    #[arg(long)]
-    pub dry_run: bool,
-}
-#[derive(Debug, Args)]
-pub struct Uninstall {
-    #[arg(long, required = true, value_parser = harness_parser())]
-    pub harness: Vec<Harness>,
-}
-fn harness_parser() -> impl TypedValueParser<Value = Harness> {
-    clap::builder::PossibleValuesParser::new(["claude", "codex", "cursor", "agy", "opencode"])
-        .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
-}
+
+pub use crate::install::{Install, Uninstall};
 pub use crate::route::{Model, RouteRequest};
 #[derive(Debug, Args)]
 pub struct Adapter {

@@ -265,7 +265,7 @@ old ledger, transcript and collector data.
 
 1. Before replacing the old install, quiesce old clients without signalling
    healthy providers. From that Mac's retained legacy checkout, plan
-   `scripts/install-harness --uninstall-otel-collector`. This uninstalls the
+   `scripts/install-otel-collector uninstall`. This uninstalls the
    LaunchAgent, plist and collector binary; it leaves stored data in place.
    Keep the legacy helper available through cut-over even though rewrite
    source retires it.
@@ -349,7 +349,7 @@ modules. Count each deletion once, including workflow's reducer hand-off.
 |---|---|
 | Telemetry | `scripts/telemetry{,_ingest,_costs,_report,_changes,_delivery,_hosts}.py`, `scripts/provenant-telemetry`, `tests/test_telemetry.py`; all inert Rust under `tools/front-door/crates/telemetry/src/`, including `pending`, Unicode generator/tables and differential harness. |
 | Telemetry data | Four `schemas/telemetry-{usage,event,quota-series,quota-event}-row.schema.json` files and JSON price asset with its TOML replacement. Repair `schemas/README.md`; shared record-schema tests retire with their subjects. |
-| State slice 4 (harness cut-over) | `scripts/install-otel-collector`, Swift collector and plist template under `tools/otlp-collector/`, `tests/test_otlp_collector.py`; state removes OTel flags/wiring from `scripts/install-harness` and counts the OTel slices of `tests/test_install_harness.py`. Retained legacy install supplies the cut-over uninstall helper. |
+| State slice 4 (harness cut-over) | `scripts/install-otel-collector`, Swift collector and plist template under `tools/otlp-collector/`, `tests/test_otlp_collector.py` and `tests/test_install_otel_collector.py`; both test subjects retire here. The preserved pre-rewrite checkout supplies its old uninstall helper at the separately authorised host cut-over. |
 | Providers/execution-route | Replace `scripts/provider_identity.py`; update `scripts/quota_display.py:9`'s window-label configuration and telemetry renderer import, remove account help/`--account` from `skills/orchestrate/scripts/dispatch_run.py` and `cf_dispatch.py`, and identity/account tests including `runtime/fabric/tests/surface.test.ts:253`. Routing owns eligibility; run records the resolved label. |
 | Quota | Remove `_telemetry`, `state_root`, `ledger_windows`, `record_series` and telemetry writes in `scripts/provider_quota.py`; remove ledger fallback from `scripts/quota_providers/codex.py` and removed-subject quota tests/oracles. |
 | Run/utility/Fabric | Remove dispatch telemetry assertions and callbacks; telemetry import/`record_call` in `scripts/utility.py`; `telemetry_summary` and registration in `scripts/fabric_hosts.py`. Do not remove unrelated identity/quota/peer behaviour. |

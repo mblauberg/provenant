@@ -1,6 +1,7 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
 mod checks;
+mod install;
 mod overflow;
 mod roots;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
@@ -162,7 +163,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             unavailable("config show", "config", globals)
         }
-        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", globals),
+        Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
+            unavailable("fabric mcp", "fabric", globals)
+        }
         Command::Fabric(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;
@@ -183,8 +186,8 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 }
             }
         }
-        Command::Install(_) => unavailable("install", "config", globals),
-        Command::Uninstall(_) => unavailable("uninstall", "config", globals),
+        Command::Install(args) => install::run_install(args, globals),
+        Command::Uninstall(args) => install::run_uninstall(args, globals),
         Command::Route(command) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;

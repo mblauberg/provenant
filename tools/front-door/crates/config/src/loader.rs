@@ -194,6 +194,31 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .transpose()?
         .unwrap_or_default();
     let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
+    let install_item = user.remove("install");
+    let install = if let Some(item) = &install_item {
+        let mut table = Table::new();
+        table.insert("install", item.clone());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            install: crate::InstallSettings,
+        }
+        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
+            location: site(&user_sites, "install", &user_origin, false),
+            rule: "type",
+        })?;
+        settings
+            .install
+            .validate()
+            .map_err(|_| ConfigError::Schema {
+                location: site(&user_sites, "install", &user_origin, false),
+                rule: "absolute_path",
+            })?;
+        settings.install
+    } else {
+        crate::InstallSettings::default()
+    };
+
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -264,6 +289,12 @@ fn inspect<T: DeserializeOwned + Serialize>(
     walk_table(&defaults, "", &mut |key, _, _| {
         origins.insert(key.into(), compiled.clone());
     });
+    origins.insert("install.targets".into(), compiled.clone());
+    if let Some(item) = &install_item {
+        walk_item(item, "install", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
     let mut effective = defaults.clone();
     let mut issues = Vec::new();
     let mut semantic_sites = compiled_sites.clone();
@@ -320,6 +351,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             schema_version: header.schema_version,
             profile: header.profile,
             domains,
+            install,
             origins,
         },
         issues,

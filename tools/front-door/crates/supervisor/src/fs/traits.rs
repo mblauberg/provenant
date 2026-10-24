@@ -18,6 +18,15 @@ pub trait SafeFile: Read + Write + Seek + Send + Sync {
 /// this trait object-safe; concrete Directory also supports publication between
 /// held directories.
 pub trait SafeDir: Send + Sync {
+    /// Establish a validated, held no-follow directory as a device boundary.
+    /// Adapters without this capability refuse; no path is resolved again.
+    fn into_anchor(self: Box<Self>) -> Result<Box<dyn SafeDir>> {
+        Err(FsError::Io {
+            operation: "held anchor unsupported",
+            path: PathBuf::new(),
+            source: io::Error::from(io::ErrorKind::Unsupported),
+        })
+    }
     fn metadata(&self) -> Result<Metadata>;
     fn metadata_at(&self, name: &OsStr, follow: bool) -> Result<Metadata>;
     fn open_directory(&self, name: &OsStr, follow: bool) -> Result<Box<dyn SafeDir>>;
@@ -154,6 +163,9 @@ impl SafeFile for FileHandle {
     }
 }
 impl SafeDir for Directory {
+    fn into_anchor(self: Box<Self>) -> Result<Box<dyn SafeDir>> {
+        Ok(Box::new(Directory::into_anchor(*self)?))
+    }
     fn metadata(&self) -> Result<Metadata> {
         Directory::metadata(self)
     }

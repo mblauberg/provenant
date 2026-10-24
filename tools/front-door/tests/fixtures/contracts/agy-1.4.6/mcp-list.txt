@@ -1,0 +1,2 @@
+NAME    TYPE   STATUS   COMMAND/URL
+fabric  stdio  enabled  /FIXTURE_ROOT/bin/mcp-probe --state-dir /FIXTURE_ROOT/state fabric mcp --client agy

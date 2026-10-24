@@ -87,6 +87,7 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
                 globals,
             ),
         },
+        Err(Error::Install(error)) => crate::install::install_error(name, &error, globals),
         Err(error) => fail(
             name,
             error.outcome(),

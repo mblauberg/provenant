@@ -51,10 +51,16 @@ pub enum InstallError {
     Drift(PathBuf),
     #[error("select at least one harness explicitly, without duplicates")]
     HarnessSelection,
-    #[error("hook registration belongs to harness cut-over")]
+    #[error("hook registration refused: no fixture-backed HookSpec is available")]
     HooksUnavailable,
-    #[error("legacy matching belongs to harness cut-over")]
-    LegacyUnavailable,
+    #[error("legacy cut-over unresolved: {0}")]
+    LegacyUnresolved(&'static str),
+    #[error(transparent)]
+    Config(#[from] crate::ConfigError),
+    #[error("invalid harness configuration: {0}")]
+    InvalidConfig(&'static str),
+    #[error("symlinked or non-regular harness config refused: {0}")]
+    ConfigFile(PathBuf),
     #[error("preview output failed")]
     Preview(#[source] std::io::Error),
     #[error("release smoke check failed")]
@@ -93,6 +99,13 @@ pub struct Action {
     pub before: Option<OwnedValue>,
     pub after: Option<OwnedValue>,
     pub identity: Option<EntryIdentity>,
+    pub edits: Vec<SelectorChange>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SelectorChange {
+    pub selector: String,
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntryIdentity {
@@ -109,16 +122,23 @@ fn identity(snapshot: &Option<Snapshot>) -> Option<EntryIdentity> {
 pub struct HarnessTarget {
     pub harness: Harness,
     pub skills_dir: PathBuf,
+    pub mcp_file: PathBuf,
+    pub hook_file: Option<PathBuf>,
     pub instruction: Option<PathBuf>,
 }
 #[derive(Debug, Clone)]
 pub struct Targets {
     pub roots: Roots,
+    pub home: PathBuf,
     pub bin_dir: PathBuf,
     pub harnesses: Vec<HarnessTarget>,
     pub adopt_existing: bool,
     pub hooks: bool,
     pub legacy_checkout: Option<PathBuf>,
+    pub git_hooks_dir: Option<PathBuf>,
+    pub protected_roots: Vec<PathBuf>,
+    pub(crate) configured_homes: BTreeSet<Harness>,
+    pub(crate) configured_configs: BTreeSet<Harness>,
 }
 impl Targets {
     /// Defaults from captured HOME. Composition applies explicit config/flag
@@ -137,6 +157,8 @@ impl Targets {
                 let base = home.join(base);
                 HarnessTarget {
                     harness: *h,
+                    mcp_file: crate::harness::default_mcp(*h, home, &base),
+                    hook_file: crate::harness::default_hooks(*h, &base),
                     skills_dir: base.join("skills"),
                     instruction: instruction.map(|n| base.join(n)),
                 }
@@ -144,14 +166,63 @@ impl Targets {
             .collect();
         Self {
             roots,
+            home: home.to_path_buf(),
             bin_dir: home.join(".local/bin"),
             harnesses: targets,
             adopt_existing: false,
             hooks: false,
             legacy_checkout: None,
+            git_hooks_dir: None,
+            protected_roots: Vec::new(),
+            configured_homes: BTreeSet::new(),
+            configured_configs: BTreeSet::new(),
         }
     }
-    fn validate(&self) -> Result<(), InstallError> {
+    /// Composition calls this after config, environment and flags. Resolve
+    /// parents only: final config symlinks and whole skills links stay visible.
+    pub fn resolve_destinations(
+        &mut self,
+        resolver: &impl provenant_core::PathResolver,
+    ) -> Result<(), InstallError> {
+        let resolve = |path: &Path| -> Result<PathBuf, InstallError> {
+            resolver.resolve_existing_ancestor(path).map_err(|source| {
+                InstallError::Fs(FsError::Io {
+                    operation: "resolve install destination",
+                    path: path.into(),
+                    source,
+                })
+            })
+        };
+        let destination = |path: &Path| -> Result<PathBuf, InstallError> {
+            let parent = path
+                .parent()
+                .ok_or_else(|| InstallError::Conflict(path.into()))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| InstallError::Conflict(path.into()))?;
+            Ok(resolve(parent)?.join(name))
+        };
+        self.bin_dir = resolve(&self.bin_dir)?;
+        for target in &mut self.harnesses {
+            target.skills_dir = destination(&target.skills_dir)?;
+            target.mcp_file = destination(&target.mcp_file)?;
+            target.hook_file = target.hook_file.as_deref().map(destination).transpose()?;
+            target.instruction = target.instruction.as_deref().map(destination).transpose()?;
+        }
+        let global = destination(&self.home.join(".agents/AGENTS.md"))?;
+        if self
+            .protected_roots
+            .iter()
+            .chain(self.legacy_checkout.iter())
+            .any(|root| global.starts_with(root))
+        {
+            return Err(InstallError::Conflict(global));
+        }
+        self.validate()
+    }
+
+    /// Validate all destinations before any source or harness file is read.
+    pub fn validate(&self) -> Result<(), InstallError> {
         if self.harnesses.is_empty()
             || self
                 .harnesses
@@ -166,22 +237,84 @@ impl Targets {
         if self.hooks {
             return Err(InstallError::HooksUnavailable);
         }
-        if self.legacy_checkout.is_some() {
-            return Err(InstallError::LegacyUnavailable);
+        normal_absolute(&self.home)?;
+        for root in &self.protected_roots {
+            normal_absolute(root)?;
+            if self.roots.state.as_path().starts_with(root) {
+                return Err(InstallError::Conflict(self.roots.state.as_path().into()));
+            }
+        }
+        if let Some(path) = &self.legacy_checkout {
+            normal_absolute(path)?;
+            if self.roots.state.as_path().starts_with(path) {
+                return Err(InstallError::Conflict(self.roots.state.as_path().into()));
+            }
+        }
+        if let Some(path) = &self.git_hooks_dir {
+            normal_absolute(path)?;
         }
         normal_absolute(&self.bin_dir)?;
+        let mut file_paths = BTreeSet::new();
+        let mut skills_paths = BTreeSet::new();
         for h in &self.harnesses {
+            if !skills_paths.insert(h.skills_dir.clone()) {
+                return Err(InstallError::Conflict(h.skills_dir.clone()));
+            }
+            for path in std::iter::once(&h.mcp_file)
+                .chain(h.hook_file.iter())
+                .chain(h.instruction.iter())
+                .chain(
+                    h.instruction
+                        .iter()
+                        .map(|p| p.with_file_name("HARNESS.md"))
+                        .collect::<Vec<_>>()
+                        .iter(),
+                )
+            {
+                if !file_paths.insert(path.clone()) {
+                    return Err(InstallError::Conflict(path.clone()));
+                }
+            }
             normal_absolute(&h.skills_dir)?;
+            normal_absolute(&h.mcp_file)?;
+            if let Some(path) = &h.hook_file {
+                normal_absolute(path)?;
+            }
             if let Some(p) = &h.instruction {
                 normal_absolute(p)?;
+            }
+        }
+        for path in file_paths.iter().chain(skills_paths.iter()).chain([
+            &self.bin_dir.join("provenant"),
+            &self.home.join(".agents/AGENTS.md"),
+        ]) {
+            if path.starts_with(self.roots.state.as_path())
+                || self
+                    .protected_roots
+                    .iter()
+                    .chain(self.legacy_checkout.iter())
+                    .any(|root| path.starts_with(root))
+            {
+                return Err(InstallError::Conflict(path.clone()));
+            }
+        }
+        for path in &file_paths {
+            if skills_paths
+                .iter()
+                .any(|directory| path.starts_with(directory))
+                || file_paths
+                    .iter()
+                    .any(|other| path != other && path.starts_with(other))
+            {
+                return Err(InstallError::Conflict(path.clone()));
             }
         }
         Ok(())
     }
 }
 #[derive(Debug, Clone)]
-struct Desired {
-    value: Value,
+pub(crate) struct Desired {
+    pub(crate) value: Value,
     harness: Option<Harness>,
     selector: String,
 }
@@ -189,6 +322,7 @@ struct Desired {
 pub struct Snapshots {
     entries: BTreeMap<PathBuf, Option<Snapshot>>,
     receipt: Option<InstallReceipt>,
+    harness: crate::harness::HarnessPlan,
 }
 #[derive(Debug)]
 pub struct InstallPlan {
@@ -201,12 +335,16 @@ pub struct InstallPlan {
     manual_includes: Vec<ManualInclude>,
 }
 impl InstallPlan {
+    pub fn findings(&self) -> &[InstallFinding] {
+        &self.before.harness.findings
+    }
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }
 }
 #[derive(Debug, Serialize)]
 pub struct InstallOutcome {
+    pub findings: Vec<InstallFinding>,
     pub actions: Vec<Action>,
     pub manual_includes: Vec<ManualInclude>,
     pub dry_run: bool,
@@ -219,6 +357,9 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
+    fn findings(&mut self, _findings: &[InstallFinding]) -> std::io::Result<()> {
+        Ok(())
+    }
     fn preview(&mut self, actions: &[Action]) -> std::io::Result<()>;
     fn manual_includes(&mut self, _includes: &[ManualInclude]) -> std::io::Result<()> {
         Ok(())
@@ -238,12 +379,12 @@ impl Snapshots {
     ) -> Result<Self, InstallError> {
         targets.validate()?;
         let desired = desired(release, targets)?;
-        let installed = targets
-            .roots
-            .state
-            .as_path()
-            .join("releases")
-            .join(release.manifest.source_digest.to_string());
+        let snapshot =
+            |path: &Path, fs: &dyn SafeFs| snapshot_scoped(path, targets.roots.state.as_path(), fs);
+        let installed = release_root(
+            targets.roots.state.as_path(),
+            release.manifest.source_digest,
+        );
         let manifest_path = installed.join("release.json");
         let manifest_snapshot = snapshot(&manifest_path, fs)?;
         let completed = match &manifest_snapshot {
@@ -264,7 +405,13 @@ impl Snapshots {
             }
             Some(_) => return Err(InstallError::Tampered(manifest_path)),
         };
-        validate_release_inventory(release, &installed, fs, false)?;
+        validate_release_inventory(
+            release,
+            &installed,
+            targets.roots.state.as_path(),
+            fs,
+            false,
+        )?;
 
         let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
         let receipt_snapshot = snapshot(&receipt_path, fs)?;
@@ -295,7 +442,7 @@ impl Snapshots {
             let current = if path == manifest_path {
                 manifest_snapshot.clone()
             } else {
-                snapshot(&path, fs)?
+                crate::harness::snapshot_target(&path, targets, fs)?
             };
             if completed && path.starts_with(&installed) && current.is_none() {
                 return Err(InstallError::Tampered(path));
@@ -303,17 +450,26 @@ impl Snapshots {
             entries.insert(path, current);
         }
         entries.insert(receipt_path, receipt_snapshot);
-        Ok(Self { entries, receipt })
+        let harness =
+            crate::harness::capture(release, targets, &mut entries, receipt.as_ref(), fs)?;
+        Ok(Self {
+            entries,
+            receipt,
+            harness,
+        })
     }
 }
 
 fn validate_release_inventory(
     release: &Release,
     installed: &Path,
+    state_root: &Path,
     fs: &dyn SafeFs,
     remove_staging: bool,
 ) -> Result<(), InstallError> {
-    match crate::release::inventory_with_cleanup(installed, fs, remove_staging) {
+    let inventory = directory_scoped(installed, state_root, false, fs)
+        .and_then(|dir| crate::release::inventory_held(installed, dir.as_ref(), remove_staging));
+    match inventory {
         Ok(paths) => {
             for path in paths {
                 if !release.files.contains_key(&path) {
@@ -332,16 +488,28 @@ fn desired(
     targets: &Targets,
 ) -> Result<BTreeMap<PathBuf, Desired>, InstallError> {
     targets.validate()?;
-    let root = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(release.manifest.source_digest.to_string());
+    let root = release_root(
+        targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
     let mut result = BTreeMap::new();
     let mut insert =
         |p: PathBuf, value: Value, harness, selector: String| -> Result<(), InstallError> {
             normal_absolute(&p)?;
+            if targets
+                .protected_roots
+                .iter()
+                .any(|root| p.starts_with(root))
+            {
+                return Err(InstallError::Conflict(p));
+            }
+            if targets
+                .legacy_checkout
+                .as_ref()
+                .is_some_and(|legacy| p.starts_with(legacy))
+            {
+                return Err(InstallError::Conflict(p));
+            }
             if selector != "release"
                 && (p.starts_with(targets.roots.state.as_path())
                     || p.starts_with(&release.source)
@@ -394,23 +562,32 @@ fn desired(
         "binary".into(),
     )?;
     for target in &targets.harnesses {
-        let mut skills = BTreeSet::new();
+        let mut skills = BTreeMap::new();
         for path in release.files.keys() {
-            let Ok(tail) = path.strip_prefix("skills") else {
-                continue;
-            };
-            let mut components = tail.components();
-            if let (Some(Component::Normal(name)), Some(Component::Normal(file)), None) =
-                (components.next(), components.next(), components.next())
+            let mut components = path.components();
+            if let (
+                Some(Component::Normal(area)),
+                Some(Component::Normal(name)),
+                Some(Component::Normal(file)),
+                None,
+            ) = (
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+            ) && (area == "skills" || area == "library")
                 && file == "SKILL.md"
+                && skills
+                    .insert(name.to_os_string(), Path::new(area).join(name))
+                    .is_some()
             {
-                skills.insert(name.to_os_string());
+                return Err(InstallError::Manifest("duplicate retained skill name"));
             }
         }
-        for name in skills {
+        for (name, relative) in skills {
             insert(
                 target.skills_dir.join(&name),
-                Value::Link(root.join("skills").join(&name)),
+                Value::Link(root.join(relative)),
                 Some(target.harness),
                 "skill".into(),
             )?;
@@ -441,7 +618,47 @@ fn desired(
     }
     Ok(result)
 }
-fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
+pub(crate) fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> PathBuf {
+    state.join("releases").join(digest.to_string())
+}
+
+fn validate_removal(
+    path: &Path,
+    targets: &Targets,
+    source: Option<&Path>,
+    before: &Option<Snapshot>,
+) -> Result<(), InstallError> {
+    normal_absolute(path)?;
+    // The composition edge resolves this directory from the explicit checkout.
+    // Only a manifest-listed link to that checkout receives the exception.
+    let git_hook = match (&targets.legacy_checkout, &targets.git_hooks_dir, before) {
+        (
+            Some(checkout),
+            Some(directory),
+            Some(Snapshot {
+                value: Value::Link(actual),
+                ..
+            }),
+        ) => crate::legacy::git_hook_links(checkout)?
+            .iter()
+            .any(|link| path == directory.join(&link.name) && actual == &link.target),
+        _ => false,
+    };
+    if path.starts_with(targets.roots.state.as_path())
+        || source.is_some_and(|root| path.starts_with(root) || root.starts_with(path))
+        || (!git_hook
+            && targets
+                .protected_roots
+                .iter()
+                .chain(targets.legacy_checkout.iter())
+                .any(|root| path.starts_with(root)))
+    {
+        return Err(InstallError::Conflict(path.into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
     match value {
         Value::File { bytes, mode } => Ok(OwnedValue::File {
             digest: CanonicalV1::file_digest(bytes),
@@ -453,7 +670,7 @@ fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
         Value::Other => Err(InstallError::Manifest("unsupported ownership value")),
     }
 }
-fn matches_owned(value: &Value, expected: &OwnedValue) -> bool {
+pub(crate) fn matches_owned(value: &Value, expected: &OwnedValue) -> bool {
     owned(value).is_ok_and(|v| &v == expected)
 }
 
@@ -462,10 +679,36 @@ pub fn plan_install(
     targets: Targets,
     snapshots: Snapshots,
 ) -> Result<InstallPlan, InstallError> {
-    let desired = desired(&release, &targets)?;
+    let mut desired = desired(&release, &targets)?;
+    for (path, value) in &snapshots.harness.files {
+        normal_absolute(path)?;
+        if desired.contains_key(path)
+            || path.starts_with(targets.roots.state.as_path())
+            || path.starts_with(&release.source)
+            || release.source.starts_with(path)
+            || targets
+                .protected_roots
+                .iter()
+                .any(|root| path.starts_with(root))
+            || targets
+                .legacy_checkout
+                .as_ref()
+                .is_some_and(|checkout| path.starts_with(checkout))
+        {
+            return Err(InstallError::Conflict(path.clone()));
+        }
+        desired.insert(
+            path.clone(),
+            Desired {
+                value: value.clone(),
+                harness: None,
+                selector: "config".into(),
+            },
+        );
+    }
     let selected: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
     let mut actions = Vec::new();
-    let mut entries = Vec::new();
+    let mut entries = snapshots.harness.owned.clone();
     let mut manual_includes = Vec::new();
     for (path, want) in &desired {
         let previous = snapshots
@@ -502,12 +745,10 @@ pub fn plan_install(
                     }
                     continue;
                 }
-                let release_root = targets
-                    .roots
-                    .state
-                    .as_path()
-                    .join("releases")
-                    .join(release.manifest.source_digest.to_string());
+                let release_root = release_root(
+                    targets.roots.state.as_path(),
+                    release.manifest.source_digest,
+                );
                 let complete = snapshots
                     .entries
                     .get(&release_root.join("release.json"))
@@ -515,7 +756,14 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                if !immutable && !was_owned && !adopt_binary {
+                let legacy = snapshots.harness.authorised.contains(path)
+                    || (want.selector == "binary"
+                        && targets.legacy_checkout.is_some()
+                        && crate::legacy::legacy_shim(&targets.home)?
+                            .is_some_and(|shim| shim.retained && &shim.path == path)
+                        && matches!(&current.value, Value::File { bytes, .. } if crate::legacy::legacy_shim_matches(bytes)));
+                if !immutable && !was_owned && !adopt_binary && !legacy && want.selector != "config"
+                {
                     return Err(InstallError::Conflict(path.clone()));
                 }
             }
@@ -532,9 +780,10 @@ pub fn plan_install(
                     .and_then(|snapshot| owned(&snapshot.value).ok()),
                 after: Some(owned(&want.value)?),
                 identity: identity(previous),
+                edits: Vec::new(),
             });
         }
-        if want.selector != "release" {
+        if want.selector != "release" && want.selector != "config" {
             entries.push(OwnedEntry {
                 path: AbsolutePath::new(path)?,
                 harness: want.harness,
@@ -549,6 +798,12 @@ pub fn plan_install(
     // are relinquished as unmanaged state. Missing links are already settled.
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
+            if matches!(entry.expected, OwnedValue::Selector { .. }) {
+                if !entry.harness.is_some_and(|h| selected.contains(&h)) {
+                    entries.push(entry.clone());
+                }
+                continue;
+            }
             if entries.iter().any(|current| current.path == entry.path)
                 || manual_includes
                     .iter()
@@ -580,11 +835,55 @@ pub fn plan_install(
                     before: Some(entry.expected.clone()),
                     after: None,
                     identity: identity(current),
+                    edits: Vec::new(),
                 });
             }
         }
     }
 
+    for path in &snapshots.harness.removals {
+        if actions
+            .iter()
+            .any(|a| a.path.to_path_buf().is_ok_and(|p| &p == path))
+        {
+            continue;
+        }
+        let before = snapshots
+            .entries
+            .get(path)
+            .ok_or_else(|| InstallError::Drift(path.clone()))?;
+        if before.is_some() {
+            actions.push(Action {
+                path: AbsolutePath::new(path)?,
+                disposition: Disposition::Remove,
+                selector: "legacy".into(),
+                before: before.as_ref().and_then(|s| owned(&s.value).ok()),
+                after: None,
+                identity: identity(before),
+                edits: Vec::new(),
+            });
+        }
+    }
+    for action in &actions {
+        if action.disposition == Disposition::Remove {
+            let path = action.path.to_path_buf()?;
+            let before = snapshots
+                .entries
+                .get(&path)
+                .ok_or_else(|| InstallError::Drift(path.clone()))?;
+            validate_removal(&path, &targets, Some(&release.source), before)?;
+        }
+    }
+    for action in &mut actions {
+        if let Ok(path) = action.path.to_path_buf() {
+            action.edits = snapshots
+                .harness
+                .changes
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
     let mut resolved_targets = BTreeMap::new();
     if let Some(previous) = &snapshots.receipt {
         for target in &previous.harness_targets {
@@ -599,6 +898,12 @@ pub fn plan_install(
             ResolvedHarnessTarget {
                 harness: target.harness,
                 skills_dir: AbsolutePath::new(&target.skills_dir)?,
+                mcp_file: AbsolutePath::new(&target.mcp_file)?,
+                hook_file: target
+                    .hook_file
+                    .as_deref()
+                    .map(AbsolutePath::new)
+                    .transpose()?,
                 instruction: target
                     .instruction
                     .as_deref()
@@ -619,6 +924,19 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
+        legacy: match &targets.legacy_checkout {
+            Some(checkout) => Some(provenant_records::LegacyInstall {
+                checkout: AbsolutePath::new(checkout)?,
+                home: AbsolutePath::new(&targets.home)?,
+                manifest_digest: crate::legacy::manifest_digest(),
+                git_hooks_dir: targets
+                    .git_hooks_dir
+                    .as_deref()
+                    .map(AbsolutePath::new)
+                    .transpose()?,
+            }),
+            None => snapshots.receipt.as_ref().and_then(|r| r.legacy.clone()),
+        },
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;
@@ -652,6 +970,7 @@ pub fn plan_install(
                 mode: 0o600,
             }),
             identity: identity(current),
+            edits: Vec::new(),
         });
     }
 
@@ -669,8 +988,9 @@ pub fn plan_install(
             }
             "release" => 0,
             "binary" => 2,
-            "receipt" => 4,
-            _ => 3,
+            "receipt" => 5,
+            "legacy" => 3,
+            _ => 4,
         }
     });
     Ok(InstallPlan {
@@ -700,8 +1020,15 @@ pub fn install(
     reporter
         .preview(&plan.actions)
         .map_err(InstallError::Preview)?;
+    reporter
+        .manual_includes(&plan.manual_includes)
+        .map_err(InstallError::Preview)?;
+    reporter
+        .findings(plan.findings())
+        .map_err(InstallError::Preview)?;
     if dry_run {
         return Ok(InstallOutcome {
+            findings: plan.findings().to_vec(),
             actions: plan.actions.clone(),
             manual_includes: plan.manual_includes.clone(),
             dry_run: true,
@@ -709,8 +1036,9 @@ pub fn install(
     }
     crate::release::verify_binary_identity(&plan.release, smoke, context.cancel)?;
     let fs = context.fs;
+    let state_root = plan.targets.roots.state.as_path();
     let install_root = plan.targets.roots.state.as_path().join("install");
-    let dir = directory(&install_root, true, fs)?;
+    let dir = directory_scoped(&install_root, state_root, true, fs)?;
     let _lock = dir.lock(
         OsStr::new("install.lock"),
         LockMode::Exclusive,
@@ -720,15 +1048,14 @@ pub fn install(
     )?;
     // Validate the complete preview before the first authoritative file write.
     for (path, before) in &plan.before.entries {
-        recheck(path, before, fs)?;
+        if &crate::harness::snapshot_target(path, &plan.targets, fs)? != before {
+            return Err(InstallError::Drift(path.clone()));
+        }
     }
-    let release_root = plan
-        .targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(plan.release.manifest.source_digest.to_string());
+    let release_root = release_root(
+        plan.targets.roots.state.as_path(),
+        plan.release.manifest.source_digest,
+    );
     let unfinished = plan
         .before
         .entries
@@ -736,7 +1063,7 @@ pub fn install(
         .is_some_and(Option::is_none);
     // Only the lock holder may collect abandoned staging files. A concurrent
     // preview ignores those names so it cannot interrupt a live publication.
-    validate_release_inventory(&plan.release, &release_root, fs, unfinished)?;
+    validate_release_inventory(&plan.release, &release_root, state_root, fs, unfinished)?;
     let mut completed = Vec::new();
     for (index, action) in plan.actions.iter().enumerate() {
         let result = (|| {
@@ -749,9 +1076,9 @@ pub fn install(
                 .entries
                 .get(&path)
                 .ok_or_else(|| InstallError::Drift(path.clone()))?;
-            recheck(&path, before, fs)?;
+            recheck(&path, before, fs, state_root)?;
             if action.disposition == Disposition::Remove {
-                remove_entry(&path, fs)
+                remove_entry(&path, fs, state_root)
             } else {
                 let value = if action.selector == "receipt" {
                     Value::File {
@@ -765,7 +1092,7 @@ pub fn install(
                         .value
                         .clone()
                 };
-                publish(&path, &value, before.is_some(), fs)
+                publish(&path, &value, before.is_some(), fs, state_root)
             }
         })();
         if let Err(source) = result {
@@ -780,23 +1107,35 @@ pub fn install(
     Ok(InstallOutcome {
         actions: completed,
         manual_includes: plan.manual_includes.clone(),
+        findings: plan.findings().to_vec(),
         dry_run: false,
     })
 }
-fn recheck(path: &Path, before: &Option<Snapshot>, fs: &dyn SafeFs) -> Result<(), InstallError> {
-    if &snapshot(path, fs)? != before {
+pub(crate) fn recheck(
+    path: &Path,
+    before: &Option<Snapshot>,
+    fs: &dyn SafeFs,
+    root: &Path,
+) -> Result<(), InstallError> {
+    if &snapshot_scoped(path, root, fs)? != before {
         return Err(InstallError::Drift(path.into()));
     }
     Ok(())
 }
-fn publish(path: &Path, value: &Value, replace: bool, fs: &dyn SafeFs) -> Result<(), InstallError> {
+pub(crate) fn publish(
+    path: &Path,
+    value: &Value,
+    replace: bool,
+    fs: &dyn SafeFs,
+    root: &Path,
+) -> Result<(), InstallError> {
     let parent = path
         .parent()
         .ok_or_else(|| InstallError::Path(path.into()))?;
     let name = path
         .file_name()
         .ok_or_else(|| InstallError::Path(path.into()))?;
-    let dir = directory(parent, true, fs)?;
+    let dir = directory_scoped(parent, root, true, fs)?;
     let mode = if replace {
         PublishMode::Replace
     } else {
@@ -831,14 +1170,14 @@ fn publish(path: &Path, value: &Value, replace: bool, fs: &dyn SafeFs) -> Result
         Value::Other => Err(InstallError::Conflict(path.into())),
     }
 }
-fn remove_entry(path: &Path, fs: &dyn SafeFs) -> Result<(), InstallError> {
+pub(crate) fn remove_entry(path: &Path, fs: &dyn SafeFs, root: &Path) -> Result<(), InstallError> {
     let parent = path
         .parent()
         .ok_or_else(|| InstallError::Path(path.into()))?;
     let name = path
         .file_name()
         .ok_or_else(|| InstallError::Path(path.into()))?;
-    let dir = directory(parent, false, fs)?;
+    let dir = directory_scoped(parent, root, false, fs)?;
     dir.unlink(name)?;
     dir.sync()?;
     Ok(())
@@ -871,67 +1210,185 @@ pub(crate) fn directory(
     create: bool,
     fs: &dyn SafeFs,
 ) -> Result<Box<dyn SafeDir>, InstallError> {
-    let mut dir = fs.root(path.is_absolute())?;
+    normal_absolute(path)?;
+    // Bootstrap absolute destinations without following any path component.
+    // A selected path may have mount ancestors (e.g. a separately mounted
+    // HOME or temporary release root). Re-anchor only a held, identity-checked
+    // no-follow mount handle; never reopen an absolute path through aliases.
+    let mut dir = fs.root(true)?;
     for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                dir = match dir.open_verified_directory(name) {
-                    Ok(next) => next,
-                    Err(error) if create && error.is_not_found() => {
-                        match dir.mkdir(name, 0o700) {
-                            Ok(()) => dir.sync()?,
-                            Err(e) if e.is_exists() => {}
-                            Err(e) => return Err(e.into()),
-                        }
-                        dir.open_verified_directory(name)?
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        dir = match dir.open_verified_directory(name) {
+            Ok(next) => next,
+            Err(error) if error.is_cross_device() => {
+                let before = dir.metadata_at(name, false)?;
+                let child = dir.open_directory(name, false)?;
+                let opened = child.metadata()?;
+                let after = dir.metadata_at(name, false)?;
+                if before.kind != FileKind::Directory
+                    || opened.kind != FileKind::Directory
+                    || after.kind != FileKind::Directory
+                    || !before.same_identity(&opened)
+                    || !opened.same_identity(&after)
+                {
+                    return Err(FsError::RaceRefused { name: name.into() }.into());
+                }
+                child.into_anchor()?
             }
-            _ => return Err(InstallError::Path(path.into())),
-        }
+            Err(error) if create && error.is_not_found() => {
+                match dir.mkdir(name, 0o700) {
+                    Ok(()) => dir.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                dir.open_verified_directory(name)?
+            }
+            Err(error) => return Err(error.into()),
+        };
     }
     Ok(dir)
 }
+
+pub(crate) fn directory_scoped(
+    path: &Path,
+    root: &Path,
+    create: bool,
+    fs: &dyn SafeFs,
+) -> Result<Box<dyn SafeDir>, InstallError> {
+    let Ok(tail) = path.strip_prefix(root) else {
+        return directory(path, create, fs);
+    };
+    let mut dir = directory(root, create, fs)?;
+    for part in tail.components() {
+        let Component::Normal(name) = part else {
+            return Err(InstallError::Path(path.into()));
+        };
+        dir = match dir.open_verified_directory(name) {
+            Ok(next) => next,
+            Err(error) if create && error.is_not_found() => {
+                match dir.mkdir(name, 0o700) {
+                    Ok(()) => dir.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                dir.open_verified_directory(name)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+    }
+    Ok(dir)
+}
+
+pub(crate) fn snapshot_scoped(
+    path: &Path,
+    root: &Path,
+    fs: &dyn SafeFs,
+) -> Result<Option<Snapshot>, InstallError> {
+    snapshot_scoped_inspected(path, root, fs, None)
+}
+pub(crate) fn snapshot_scoped_inspected(
+    path: &Path,
+    root: &Path,
+    fs: &dyn SafeFs,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| InstallError::Path(path.into()))?;
+    let dir = match directory_scoped(parent, root, false, fs) {
+        Ok(dir) => dir,
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            if let Some(evidence) = evidence {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    snapshot_at_inspected(path, dir.as_ref(), evidence)
+}
+
+pub(crate) fn snapshot_below_inspected(
+    path: &Path,
+    root: &Path,
+    anchor: &dyn SafeDir,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
+    let tail = path
+        .strip_prefix(root)
+        .map_err(|_| InstallError::Path(path.into()))?;
+    let parent = tail
+        .parent()
+        .ok_or_else(|| InstallError::Path(path.into()))?;
+    let mut held: Option<Box<dyn SafeDir>> = None;
+    for part in parent.components() {
+        let Component::Normal(name) = part else {
+            return Err(InstallError::Path(path.into()));
+        };
+        let next = held
+            .as_deref()
+            .unwrap_or(anchor)
+            .open_verified_directory(name)?;
+        held = Some(next);
+    }
+    snapshot_at_inspected(path, held.as_deref().unwrap_or(anchor), evidence)
+}
+
 pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>, InstallError> {
     snapshot_inspected(path, fs, None)
 }
 pub(crate) fn snapshot_inspected(
     path: &Path,
     fs: &dyn SafeFs,
-    mut evidence: Option<&mut InspectionEvidence>,
+    evidence: Option<&mut InspectionEvidence>,
 ) -> Result<Option<Snapshot>, InstallError> {
     let Some(parent) = path.parent() else {
         return Err(InstallError::Path(path.into()));
     };
+    let dir = match directory(parent, false, fs) {
+        Ok(dir) => dir,
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            if let Some(evidence) = evidence {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    snapshot_at_inspected(path, dir.as_ref(), evidence)
+}
+fn snapshot_at_inspected(
+    path: &Path,
+    dir: &dyn SafeDir,
+    mut evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| InstallError::Path(path.into()))?;
     let name = path
         .file_name()
         .ok_or_else(|| InstallError::Path(path.into()))?;
-    let dir = match directory(parent, false, fs) {
-        Ok(dir) => dir,
-        Err(InstallError::Fs(e)) if e.is_not_found() => {
-            if let Some(evidence) = evidence.as_deref_mut() {
-                evidence.observe(b"snapshot", path, None);
-            }
-            return Ok(None);
-        }
-        Err(e) => return Err(e),
-    };
     let metadata = match dir.metadata_at(name, false) {
         Ok(m) => m,
-        Err(e) if e.is_not_found() => {
+        Err(error) if error.is_not_found() => {
             if let Some(evidence) = evidence.as_deref_mut() {
                 evidence.observe(b"snapshot", path, None);
             }
             return Ok(None);
         }
-        Err(e) => return Err(e.into()),
+        Err(error) => return Err(error.into()),
     };
     if let Some(evidence) = evidence.as_deref_mut() {
         evidence.metadata(path, metadata);
     }
-    let limit = if name == "release.json" || name == "receipt.json" {
+    let limit = if name == OsStr::new(".claude.json") {
+        16 * 1024 * 1024
+    } else if Path::new(name)
+        .extension()
+        .is_some_and(|ext| matches!(ext.to_str(), Some("json" | "jsonc" | "toml" | "md")))
+    {
         Limits::CONFIG.max_bytes
     } else {
         FILE_LIMIT
@@ -1003,19 +1460,19 @@ pub struct InstallFinding {
     pub rule: String,
     pub path: AbsolutePath,
 }
-fn read_receipt(
+pub(crate) fn read_receipt(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<InstallReceipt>, InstallError> {
     read_receipt_inspected(targets, fs, None)
 }
-fn read_receipt_inspected(
+pub(crate) fn read_receipt_inspected(
     targets: &Targets,
     fs: &dyn SafeFs,
     evidence: Option<&mut InspectionEvidence>,
 ) -> Result<Option<InstallReceipt>, InstallError> {
     let path = targets.roots.state.as_path().join("install/receipt.json");
-    match snapshot_inspected(&path, fs, evidence)? {
+    match snapshot_scoped_inspected(&path, targets.roots.state.as_path(), fs, evidence)? {
         None => Ok(None),
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
@@ -1027,6 +1484,13 @@ fn read_receipt_inspected(
 fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, InstallError> {
     let receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
+    if let Some(legacy) = &receipt.legacy {
+        normal_absolute(&legacy.checkout.to_path_buf()?)?;
+        normal_absolute(&legacy.home.to_path_buf()?)?;
+        if legacy.manifest_digest != crate::legacy::manifest_digest() {
+            return Err(InstallError::Manifest("legacy manifest digest differs"));
+        }
+    }
     let mut harnesses = BTreeSet::new();
     for harness in &receipt.harnesses {
         if !harnesses.insert(*harness) {
@@ -1039,6 +1503,10 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
             return Err(InstallError::Manifest("duplicate receipt target"));
         }
         normal_absolute(&target.skills_dir.to_path_buf()?)?;
+        normal_absolute(&target.mcp_file.to_path_buf()?)?;
+        if let Some(path) = &target.hook_file {
+            normal_absolute(&path.to_path_buf()?)?;
+        }
         if let Some(path) = &target.instruction {
             normal_absolute(&path.to_path_buf()?)?;
         }
@@ -1050,7 +1518,7 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
     }
     let mut paths = BTreeSet::new();
     for entry in &receipt.entries {
-        if !paths.insert(entry.path.to_path_buf()?) {
+        if !paths.insert((entry.path.to_path_buf()?, entry.selector.clone())) {
             return Err(InstallError::Manifest("duplicate receipt path"));
         }
         if !permitted_entry(entry, &receipt, state_root)? {
@@ -1100,10 +1568,7 @@ fn permitted_entry(
     normal_absolute(&path)?;
     if entry.harness.is_none() {
         let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
-        let expected_target = state_root
-            .join("releases")
-            .join(receipt.source_digest.to_string())
-            .join("bin/provenant");
+        let expected_target = release_root(state_root, receipt.source_digest).join("bin/provenant");
         return Ok(entry.selector == "binary"
             && path == binary
             && matches!(
@@ -1119,6 +1584,9 @@ fn permitted_entry(
     else {
         return Ok(false);
     };
+    if matches!(entry.expected, OwnedValue::Selector { .. }) {
+        return crate::harness::permitted_selector(entry, target);
+    }
     let skills_dir = target.skills_dir.to_path_buf()?;
     if entry.selector == "skill"
         && path.parent() == Some(skills_dir.as_path())
@@ -1131,7 +1599,7 @@ fn permitted_entry(
                             &link,
                             state_root,
                             &Path::new("skills").join(name),
-                        )
+                        ) || asset_target(&link, state_root, &Path::new("library").join(name))
                     })
             )
         })
@@ -1184,7 +1652,6 @@ pub fn inspect_install(
     cancel: &CancelToken,
 ) -> Result<InstallInspection, InstallError> {
     let mut evidence = InspectionEvidence::default();
-    // Requested releases are immutable verified snapshots, supplied by caller.
     if let Some(source) = source {
         evidence.observe(
             b"source-manifest",
@@ -1206,7 +1673,11 @@ pub fn inspect_install(
                 | InstallError::Tampered(_)
                 | InstallError::Conflict(_)
                 | InstallError::Platform
-                | InstallError::Path(_)),
+                | InstallError::Path(_)
+                | InstallError::InvalidConfig(_)
+                | InstallError::ConfigFile(_)
+                | InstallError::LegacyUnresolved(_)
+                | InstallError::Config(_)),
             ) => (Vec::new(), Some(error)),
             Err(error) => return Err(error),
         };
@@ -1226,7 +1697,8 @@ fn check_install_inspected(
     cancel: &CancelToken,
     evidence: &mut InspectionEvidence,
 ) -> Result<Vec<InstallFinding>, InstallError> {
-    let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
+    let state_root = targets.roots.state.as_path();
+    let receipt_path = state_root.join("install/receipt.json");
     let Some(receipt) = read_receipt_inspected(targets, fs, Some(evidence))? else {
         return Ok(vec![InstallFinding {
             rule: "missing_receipt".into(),
@@ -1234,13 +1706,8 @@ fn check_install_inspected(
         }]);
     };
     let mut findings = Vec::new();
-    let release_path = targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(receipt.source_digest.to_string());
-    match Release::read_inspected(&release_path, target, fs, Some(evidence)) {
+    let release_path = release_root(state_root, receipt.source_digest);
+    match Release::read_scoped_inspected(&release_path, target, fs, state_root, Some(evidence)) {
         Ok(release) => {
             crate::release::verify_binary_identity(&release, smoke, cancel)?;
             if release.manifest.source_digest == receipt.source_digest
@@ -1272,12 +1739,14 @@ fn check_install_inspected(
             findings.push(InstallFinding {
                 rule: "release_drift".into(),
                 path: AbsolutePath::new(&release_path)?,
-            })
+            });
         }
-        Err(InstallError::Fs(error)) if error.is_not_found() => findings.push(InstallFinding {
-            rule: "missing_release".into(),
-            path: AbsolutePath::new(&release_path)?,
-        }),
+        Err(InstallError::Fs(error)) if error.is_not_found() => {
+            findings.push(InstallFinding {
+                rule: "missing_release".into(),
+                path: AbsolutePath::new(&release_path)?,
+            });
+        }
         Err(error) => return Err(error),
     }
     if let Some(source) = source {
@@ -1295,18 +1764,24 @@ fn check_install_inspected(
         }
     }
     for entry in &receipt.entries {
-        if !permitted_entry(entry, &receipt, targets.roots.state.as_path())? {
+        if !permitted_entry(entry, &receipt, state_root)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        if snapshot_inspected(&path, fs, Some(evidence))?
-            .is_none_or(|current| !matches_owned(&current.value, &entry.expected))
-        {
+        let current = snapshot_scoped_inspected(&path, state_root, fs, Some(evidence))?;
+        let matches = match &current {
+            Some(current) => crate::harness::entry_matches(&current.value, entry)?,
+            None => false,
+        };
+        if !matches {
             findings.push(InstallFinding {
                 rule: "owned_entry_drift".into(),
                 path: entry.path.clone(),
             });
         }
+    }
+    if let Some(legacy) = &receipt.legacy {
+        crate::harness::check_legacy(&receipt, legacy, &mut findings, evidence, fs)?;
     }
     Ok(findings)
 }
@@ -1322,11 +1797,21 @@ pub fn uninstall(
     targets.validate()?;
     let fs = context.fs;
     let state_root = targets.roots.state.as_path();
+    let snapshot =
+        |path: &Path, fs: &dyn SafeFs| snapshot_scoped(path, targets.roots.state.as_path(), fs);
     let receipt_path = state_root.join("install/receipt.json");
     let before_receipt = snapshot(&receipt_path, fs)?;
     let Some(mut receipt) = read_receipt(targets, fs)? else {
         reporter.preview(&[]).map_err(InstallError::Preview)?;
+        let findings = vec![InstallFinding {
+            rule: "not_installed".into(),
+            path: AbsolutePath::new(&receipt_path)?,
+        }];
+        reporter
+            .findings(&findings)
+            .map_err(InstallError::Preview)?;
         return Ok(InstallOutcome {
+            findings,
             actions: Vec::new(),
             manual_includes: Vec::new(),
             dry_run: false,
@@ -1341,7 +1826,15 @@ pub fn uninstall(
     let selected: BTreeSet<_> = requested.intersection(&registered).copied().collect();
     if selected.is_empty() {
         reporter.preview(&[]).map_err(InstallError::Preview)?;
+        let findings = vec![InstallFinding {
+            rule: "not_installed".into(),
+            path: AbsolutePath::new(&receipt_path)?,
+        }];
+        reporter
+            .findings(&findings)
+            .map_err(InstallError::Preview)?;
         return Ok(InstallOutcome {
+            findings,
             actions: Vec::new(),
             manual_includes: Vec::new(),
             dry_run: false,
@@ -1349,7 +1842,9 @@ pub fn uninstall(
     }
 
     let mut removals = Vec::new();
+    let mut findings = Vec::new();
     let mut actions = Vec::new();
+    let mut selector_files = BTreeMap::new();
     for entry in &receipt.entries {
         if !entry
             .harness
@@ -1361,18 +1856,58 @@ pub fn uninstall(
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        if let Some(before) = snapshot(&path, fs)?
-            && matches_owned(&before.value, &entry.expected)
-        {
-            actions.push(Action {
-                path: entry.path.clone(),
-                disposition: Disposition::Remove,
-                selector: entry.selector.clone(),
-                before: Some(entry.expected.clone()),
-                after: None,
-                identity: identity(&Some(before.clone())),
-            });
-            removals.push((path, Some(before)));
+        if matches!(entry.expected, OwnedValue::Selector { .. }) {
+            let before = snapshot(&path, fs)?;
+            if let Some(before) = before {
+                let current = selector_files.get(&path).unwrap_or(&before.value);
+                if let Some((value, edits)) = crate::harness::remove_selector(current, entry)? {
+                    if let Some(action) = actions
+                        .iter_mut()
+                        .find(|a: &&mut Action| a.path == entry.path)
+                    {
+                        action.after = Some(owned(&value)?);
+                        action.edits.extend(edits);
+                    } else {
+                        actions.push(Action {
+                            path: entry.path.clone(),
+                            disposition: Disposition::Replace,
+                            selector: "config".into(),
+                            before: Some(owned(&before.value)?),
+                            after: Some(owned(&value)?),
+                            identity: identity(&Some(before.clone())),
+                            edits,
+                        });
+                        removals.push((path.clone(), Some(before)));
+                    }
+                    selector_files.insert(path, value);
+                } else {
+                    findings.push(InstallFinding {
+                        rule: "relinquished_modified_entry".into(),
+                        path: entry.path.clone(),
+                    });
+                }
+            }
+            continue;
+        }
+        let before = snapshot(&path, fs)?;
+        if let Some(current) = &before {
+            if matches_owned(&current.value, &entry.expected) {
+                actions.push(Action {
+                    path: entry.path.clone(),
+                    disposition: Disposition::Remove,
+                    selector: entry.selector.clone(),
+                    before: Some(entry.expected.clone()),
+                    after: None,
+                    identity: identity(&before),
+                    edits: Vec::new(),
+                });
+                removals.push((path, before));
+            } else {
+                findings.push(InstallFinding {
+                    rule: "relinquished_modified_entry".into(),
+                    path: entry.path.clone(),
+                });
+            }
         }
     }
 
@@ -1400,10 +1935,17 @@ pub fn uninstall(
             mode: 0o600,
         }),
         identity: identity(&before_receipt),
+        edits: Vec::new(),
     });
 
+    for (path, before) in &removals {
+        validate_removal(path, targets, None, before)?;
+    }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
-    let install_dir = directory(&state_root.join("install"), false, fs)?;
+    reporter
+        .findings(&findings)
+        .map_err(InstallError::Preview)?;
+    let install_dir = directory_scoped(&state_root.join("install"), state_root, false, fs)?;
     let _lock = install_dir.lock(
         OsStr::new("install.lock"),
         LockMode::Exclusive,
@@ -1411,9 +1953,9 @@ pub fn uninstall(
         context.cancel,
         context.clock,
     )?;
-    recheck(&receipt_path, &before_receipt, fs)?;
+    recheck(&receipt_path, &before_receipt, fs, state_root)?;
     for (path, before) in &removals {
-        recheck(path, before, fs)?;
+        recheck(path, before, fs, state_root)?;
     }
 
     let mut completed = Vec::new();
@@ -1422,8 +1964,12 @@ pub fn uninstall(
             if context.cancel.is_cancelled() {
                 return Err(InstallError::Fs(FsError::Cancelled { path: path.clone() }));
             }
-            recheck(path, before, fs)?;
-            remove_entry(path, fs)
+            recheck(path, before, fs, state_root)?;
+            if let Some(value) = selector_files.get(path) {
+                publish(path, value, true, fs, state_root)
+            } else {
+                remove_entry(path, fs, state_root)
+            }
         })();
         if let Err(source) = result {
             return Err(InstallError::Partial {
@@ -1434,7 +1980,7 @@ pub fn uninstall(
         }
         completed.push(actions[index].clone());
     }
-    let result = recheck(&receipt_path, &before_receipt, fs).and_then(|()| {
+    let result = recheck(&receipt_path, &before_receipt, fs, state_root).and_then(|()| {
         publish(
             &receipt_path,
             &Value::File {
@@ -1443,6 +1989,7 @@ pub fn uninstall(
             },
             true,
             fs,
+            state_root,
         )
     });
     if let Err(source) = result {
@@ -1457,6 +2004,7 @@ pub fn uninstall(
     }
     Ok(InstallOutcome {
         actions: completed,
+        findings,
         manual_includes: Vec::new(),
         dry_run: false,
     })

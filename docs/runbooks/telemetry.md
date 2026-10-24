@@ -4,31 +4,21 @@ Telemetry reduces supervised terminal attempt records into usage and
 API-equivalent cost estimates. Its accepted contract is the
 [Rust telemetry design](../specs/rust-port/design/telemetry.md).
 
-## Rewrite status
+## Stats command
 
-Step 1 supplies the pure `provenant-telemetry` reducer and its typed
-[TOML price asset](../../config/telemetry-prices.toml). It removes the Python
-ledger, transcript and OTel ingestion, sources, delivery-cost joins, changes,
-comparison and retro reports. Collector source and installer support remain
-until state slice 4 (harness cut-over) removes them with the installer flags. Old ledger and collector data
-stay untouched. There is no history import or transition adapter.
-
-The command is pending CLI integration:
-
-```text
-provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
-```
-
-Until run integration lands, this command parses fully and returns
-`OWNER_UNAVAILABLE` with exit 4. The old telemetry, stats and retro forwarding
-routes are removed. Legacy quota, utility and Fabric peer paths still import
-the removed telemetry owner; their owners remove those calls in later steps.
+`provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]`
+reduces supervised terminal-attempt records using the bundled typed
+[TOML price asset](../../config/telemetry-prices.toml). It is local and
+read-only. Reports include usage, API-equivalent cost estimates, route
+outcomes and measurement coverage. Unsupervised activity, other hosts and old
+ledger history are outside the report; stats does not import transcripts,
+collect usage or create telemetry state.
 
 ## Measurements and estimates
 
 Run supplies validated `AttemptFact` values. The reducer selects `finished_at`
-in `[since, until)`, with an optional project scope. CLI will parse dates as
-midnight UTC and require an offset on timestamps. Every selected retry
+in `[since, until)`, with an optional project scope. CLI parses dates as
+midnight UTC and requires an offset on timestamps. Every selected retry
 contributes usage once; task outcomes use the highest selected attempt number.
 Active attempts come separately from run's `snapshot`.
 
@@ -56,25 +46,24 @@ Coverage is `supervised_terminal_attempts` on the selected host/project/window.
 Unsupervised activity, old-ledger history and other hosts are outside it.
 Missing data never implies zero use. A failed read or reduction produces no
 partial totals. Reduction refuses more than 100,000 selected attempts, 10,000
-combined groups or 1 MiB of retained group keys. CLI will enforce its separate
+combined groups or 1 MiB of retained group keys. CLI enforces its separate
 1 MiB envelope limit and bounded human output.
 
-## Collector retirement
+## Collector and harness configuration
 
-Source deletion does not uninstall an existing collector or edit harness
-configuration. State and telemetry own the user-authorised two-Mac cut-over in
-[the collector retirement checklist](../specs/rust-port/design/telemetry.md#collector-retirement-at-cut-over).
-The retained legacy install supplies the uninstall helper at that cut-over.
-Preserve all old ledger, transcript and collector data and unrelated user
-configuration.
+Telemetry does not install or manage an OTel collector, or edit harness
+configuration. Use the `provenant install` procedure in the
+[front-door runbook](front-door.md) to preview and apply selected harness
+changes. Stop selected clients and config editors before installation, and
+keep them stopped through `check install`. Pass `--legacy-checkout` only for
+exact entries from that checkout. The installer does not discover launchd
+services or delete paths absent from its printed plan.
 
 ## Provider quota
 
-The following is the legacy quota owner's reference during the rewrite. Its
-telemetry imports, state paths and renderer are unavailable after step 1 removes
-the ledger. Quota and execution-route own their replacements; this telemetry
-step does not change account eligibility, probes or cooldown policy. Ledger
-window history and plan-change events are retired.
+Provider quota is owned by execution-route. Telemetry stats reads the
+resolved provider and account labels recorded on attempts; it does not fetch
+quota, infer account identity or reconstruct window history from ledger events.
 
 ```sh
 scripts/provenant-quota                 # fetches only the accounts that are due
@@ -304,8 +293,8 @@ The legacy quota classifier distinguishes `natural`, `granted_date_kept`,
 `granted_window_restarted`, `window_moved`, `not_started` and `window_started`
 changes. Natural rollover compares the new provider window start against the
 previous provider reset. Restarted windows must start within five minutes of
-the observation. These classification rules remain with quota; their retired
-ledger events provide no history in the Rust rewrite.
+the observation. These classification rules remain with quota. Telemetry
+stats does not reconstruct provider windows from ledger events.
 
 ### Display
 
@@ -505,15 +494,3 @@ unconfigured to keep its accounts apart. The inspected Cursor reference uses
 its SQLite store for authentication, then obtains allowance from the endpoint;
 it does not supply a local token-usage ledger. Cursor usage tokens therefore
 remain receipt-only. Neither missing coverage is represented as zero use.
-
-## Retained OTLP collector
-
-The legacy [Swift collector](../../tools/otlp-collector/otlp-collector.swift),
-plist template and `scripts/install-otel-collector` remain live through state
-slice 4 (harness cut-over). The collector
-accepts OTLP/HTTP JSON on loopback, stores NDJSON under the state root's `otel/`
-directory and supports launchd socket activation. Install with
-`scripts/install-otel-collector install`; uninstall with
-`scripts/install-otel-collector uninstall`. Uninstall preserves data.
-The Python ingest consumer is retired; collector retention supplies the legacy
-installer and the authorised cut-over checklist, not new report ingestion.

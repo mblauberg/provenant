@@ -22,7 +22,7 @@ changing memory policy.
   execution tools delegate to the orchestration owners and keep full output
   in run files. An agent's identity comes from its working directory: a
   registered worktree shares its repository's project but keeps its own
-  working directory. `AGENT_FABRIC_LABEL` gives several agents of one
+  working directory. `PROVENANT_AGENT_LABEL` gives several agents of one
   provider separate inboxes.
 - **Checks.** Heavy checks, such as release scans and full test
   suites, run in GitHub Actions rather than on a contributor's or agent's

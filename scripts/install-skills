@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# The checkout installer is retired with its mutable installation owners.
-printf '%s\n' 'Checkout installation is retired during the Rust rewrite. Use an accepted packaged release at cut-over.' >&2
-exit 3

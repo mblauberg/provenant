@@ -91,9 +91,10 @@ How to work:
    (PORTING.md R9). Never read credentials.
 
 Write scope: the crate, the binary's wiring for this step's verbs, the files
-you delete with their tests, callers you update, and `Cargo.lock`. Not CI
-workflows or other crates, except a small API the design assigns to this
-step.
+you delete with their tests, callers you update (including CI workflow steps
+and path filters for this step's subjects), and `Cargo.lock`. Not other
+crates, except a small API the design assigns to this step. Never mute or
+weaken `ci-status`.
 
 Checks in `tools/front-door`: `cargo fmt --all`,
 `cargo clippy -p provenant-CRATE --all-targets -- -D warnings` and

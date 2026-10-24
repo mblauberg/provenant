@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Retained provider-registration query for Fabric hosts; no install state reads.
-
-The checkout installation checker retired with mutable installation ownership.
-The shared read-only query waits for its Fabric host consumer's replacement.
-"""
+"""Read-only provider-registration diagnostics used by the Fabric host query."""
 from __future__ import annotations
 import os
 import json
 from pathlib import Path
 import shutil
-import sys
 import tomllib
 from lib.jsonc import parse_jsonc
 
@@ -47,8 +42,3 @@ def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
             mcp = False
         result[provider] = {"present": present, "skills": skills, "registered": mcp}
     return result
-
-
-if __name__ == "__main__":
-    print("Checkout installation checks are retired during the Rust rewrite.", file=sys.stderr)
-    raise SystemExit(3)
