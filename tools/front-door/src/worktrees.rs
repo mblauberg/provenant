@@ -3,9 +3,7 @@ use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Worktree};
 use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
-    worktrees::{
-        self, SystemWorkerObserver, WorktreeContext, WorktreeCreate, WorktreeError, WorktreeRemove,
-    },
+    worktrees::{self, WorktreeContext, WorktreeCreate, WorktreeError, WorktreeRemove},
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
@@ -176,7 +174,10 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
         project_state: project_state.as_ref(),
         executor: &executor,
         utility: &runtime,
-        workers: &SystemWorkerObserver,
+        #[cfg(not(test))]
+        workers: &worktrees::SystemWorkerObserver,
+        #[cfg(test)]
+        workers: &crate::worktree_tests::FreeWorkers,
         clock: &clock,
         utility_budget: budget,
         lock_budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?,

@@ -1549,6 +1549,18 @@ mod lifecycle_tests {
         }
     }
 
+    struct UnknownWorkers;
+
+    impl WorkerObserver for UnknownWorkers {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect()
+        }
+    }
+
     struct TestContext<'a> {
         fixture: &'a Fixture,
         binding: ProjectBinding,
@@ -1736,6 +1748,20 @@ mod lifecycle_tests {
             ),
             Err(WorktreeError::Primary)
         ));
+
+        let unknown_context = WorktreeContext {
+            workers: &UnknownWorkers,
+            ..test_context.context()
+        };
+        assert!(matches!(
+            remove(
+                &unknown_context,
+                WorktreeRemove::Name("feature/lifecycle".to_owned()),
+                &cancellation,
+            ),
+            Err(WorktreeError::UnknownWriter)
+        ));
+        assert!(created.path.is_dir());
 
         let removed = remove(
             &context,

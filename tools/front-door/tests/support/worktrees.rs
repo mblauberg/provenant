@@ -1,8 +1,58 @@
+#[path = "mod.rs"]
 mod support;
 use provenant_supervisor::exec::ExecOutcome;
 use serde_json::Value;
 use std::{fs, path::Path};
 use support::{Result, TestRig, code};
+
+// Only the harness=false target compiles these observations. The installed
+// binary has no fixture flag, feature or environment override.
+pub(crate) struct FreeWorkers;
+impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
+    fn observe_roots(
+        &self,
+        roots: &[std::path::PathBuf],
+    ) -> std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::worktrees::WorkerState>
+    {
+        roots
+            .iter()
+            .cloned()
+            .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+            .collect()
+    }
+}
+
+pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
+    provenant_supervisor::fixture::run_libtest(
+        args,
+        &[
+            "create_list_and_remove_a_managed_worktree",
+            "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
+            "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
+        ],
+        |name| {
+            let result = match name {
+                "create_list_and_remove_a_managed_worktree" => {
+                    create_list_and_remove_a_managed_worktree()
+                }
+                "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
+                    merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
+                }
+                _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
+            };
+            result.map_err(|error| std::io::Error::other(error.to_string()))
+        },
+    )
+}
+
+fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
+    let mut argv = vec![
+        std::ffi::OsString::from("--state-dir"),
+        rig.state.clone().into_os_string(),
+    ];
+    argv.extend(args.iter().map(std::ffi::OsString::from));
+    rig.execute_os(&std::env::current_exe()?, &argv, None)
+}
 
 fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
     let output = rig.execute(Path::new("/usr/bin/git"), args, None)?;
@@ -31,7 +81,7 @@ fn json(output: &ExecOutcome) -> Result<Value> {
 }
 
 fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
-    let output = rig.command(args)?;
+    let output = command(rig, args)?;
     assert_eq!(
         code(&output),
         0,
@@ -43,7 +93,6 @@ fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
     Ok(value)
 }
 
-#[test]
 fn create_list_and_remove_a_managed_worktree() -> Result {
     let rig = repository()?;
     let base = git(&rig, &["rev-parse", "HEAD"])?;
@@ -100,7 +149,6 @@ fn branch_commit(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-#[test]
 fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
     for since_scope in [false, true] {
         let rig = repository()?;
@@ -140,7 +188,7 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
         assert_eq!(git(&rig, &["rev-parse", "old"])?.len(), 40);
         assert_eq!(git(&rig, &["rev-parse", "dirty"])?.len(), 40);
         assert_eq!(git(&rig, &["rev-parse", "unmerged"])?.len(), 40);
-        let refused = rig.command(&["worktree", "remove", "dirty", "--json"])?;
+        let refused = command(&rig, &["worktree", "remove", "dirty", "--json"])?;
         assert_eq!(code(&refused), 1);
         assert_eq!(json(&refused)?["status"], "refused");
         assert!(dirty.join("precious").is_file());
@@ -149,7 +197,6 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
     Ok(())
 }
 
-#[test]
 fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> Result {
     let rig = repository()?;
     let output = rig.command(&["worktree", "create", "../escape", "--json"])?;

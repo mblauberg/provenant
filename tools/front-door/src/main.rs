@@ -1,9 +1,11 @@
-//! The process edge composes typed owners and owns ordinary result delivery.
-#![forbid(unsafe_code)]
+// The process edge composes typed owners and owns ordinary result delivery.
 mod checks;
 mod install;
 mod overflow;
 mod roots;
+#[cfg(test)]
+#[path = "../tests/support/worktrees.rs"]
+mod worktree_tests;
 mod worktrees;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
 use provenant_records::{CommandError, CommandResult, Outcome, VersionInfo};
@@ -255,6 +257,18 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
 }
 fn main() -> ExitCode {
+    // The integration target compiles this command edge unchanged apart from
+    // native worker observations. Its children re-enter the normal parser.
+    #[cfg(test)]
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--state-dir")) {
+        return match worktree_tests::suite(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "worktree integration: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let status = match provenant_cli::parse(std::env::args_os().skip(1)) {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
