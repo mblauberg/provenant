@@ -1,0 +1,100 @@
+use crate::*;
+use provenant_core::{RelativePath, RunId};
+use provenant_records::{CanonicalV1, PathWire};
+use provenant_supervisor::fs::{Directory, FileKind, Publication, PublishMode};
+use std::{ffi::OsStr, path::Component};
+
+pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
+    if create {
+        match parent.mkdir(name, 0o700) {
+            Ok(()) => parent.sync()?,
+            Err(e) if e.is_exists() => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let dir = parent.open_verified_directory(name)?;
+    db::private(&dir)?;
+    Ok(dir)
+}
+impl RunStore {
+    pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
+        let runs = subdir(&self.root, OsStr::new("runs"), create)?;
+        subdir(&runs, OsStr::new(&run.to_string()), create)
+    }
+    pub(crate) fn attempt_dir(
+        &self,
+        run: RunId,
+        attempt: provenant_core::AttemptId,
+        create: bool,
+    ) -> Result<Directory> {
+        let run = self.run_dir(run, create)?;
+        let attempts = subdir(&run, OsStr::new("attempts"), create)?;
+        subdir(&attempts, OsStr::new(&attempt.to_string()), create)
+    }
+    pub(crate) fn artifact_bytes(
+        &self,
+        run: RunId,
+        artifact: &ArtifactRecord,
+        limit: u64,
+    ) -> Result<Vec<u8>> {
+        if artifact.bytes > limit {
+            return Err(RunError::TooLarge { limit });
+        }
+        let mut dir = self.run_dir(run, false)?;
+        let path = artifact.path.to_relative_path()?;
+        let mut parts = path.as_path().components().peekable();
+        while let Some(Component::Normal(name)) = parts.next() {
+            if parts.peek().is_some() {
+                dir = subdir(&dir, name, false)?;
+            } else {
+                let m = dir.metadata_at(name, false)?;
+                if m.kind != FileKind::Regular
+                    || m.links != 1
+                    || m.mode & 0o077 != 0
+                    || m.uid != provenant_supervisor::fs::effective_uid()
+                {
+                    return Err(RunError::UnsafePath);
+                }
+                let bytes = dir.read_bounded(name, limit)?;
+                if bytes.len() as u64 != artifact.bytes
+                    || CanonicalV1::file_digest(&bytes) != artifact.digest
+                {
+                    return Err(RunError::ArtifactMismatch);
+                }
+                return Ok(bytes);
+            }
+        }
+        Err(RunError::UnsafePath)
+    }
+}
+pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> Result<PathWire> {
+    let path = RelativePath::parse(format!("attempts/{attempt}/{name}"))
+        .map_err(|_| RunError::UnsafePath)?;
+    Ok(PathWire::from_relative(&path)?)
+}
+pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> Result<()> {
+    if content.len() as u64 > limit {
+        return Err(RunError::TooLarge { limit });
+    }
+    let name = OsStr::new(name);
+    match dir.atomic_write(name, ".run-", content, PublishMode::NoReplace) {
+        Ok(Publication::Durable) => Ok(()),
+        Ok(Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
+            Err(RunError::Publication(sync_error))
+        }
+        Err(e) if e.is_exists() => {
+            let mut file = dir.open_read(name)?;
+            let meta = file.metadata()?;
+            if meta.links != 1 || meta.mode & 0o077 != 0 {
+                return Err(RunError::UnsafePath);
+            }
+            if file.read_bounded(limit)? != content {
+                return Err(RunError::ArtifactMismatch);
+            }
+            file.sync()?;
+            dir.sync()?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
