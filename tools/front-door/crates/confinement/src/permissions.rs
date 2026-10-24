@@ -3,10 +3,8 @@
 //! Provider-owned profile data and observations are checked against every
 //! requested permission. Linux deliberately exposes an unavailable backend.
 use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-#[cfg(target_os = "macos")]
 use std::ffi::OsString;
 #[cfg(target_os = "macos")]
 use std::io::Read;
@@ -91,6 +89,29 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
   (fcntl-command F_ADDFILESIGS_RETURN F_CHECK_LV F_GETPATH))
 (with-filter (mac-policy-name "Sandbox")
   (allow system-mac-syscall (mac-syscall-number 2)))
+"#;
+/// Fixed operating-system runtime every provider CLI needs under deny-default:
+/// kernel and preference reads, TLS trust, DNS and time zone data. It names no
+/// user path; explicit secret-root denials still override the metadata grant.
+#[cfg(target_os = "macos")]
+const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
+(allow file-read-metadata)
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow mach-lookup
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.ocspd")
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.networkd"))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow file-read* file-write-data (literal "/dev/null"))
+(allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 "#;
 #[cfg(target_os = "macos")]
 const PROBE_PROCESS_RULES: &str = "(allow process-exec (literal \"/usr/bin/true\"))\n(allow process-exec (literal \"/bin/cat\"))\n";
@@ -233,6 +254,10 @@ pub struct CapabilityGrant {
 pub struct AuthenticationProfile {
     pub mechanism: String,
     pub roots: Vec<PathGrant>,
+    /// Exact credential files the CLI rewrites in place on token refresh.
+    /// Each must also be a read root; no create, rename or unlink is granted.
+    #[serde(default)]
+    pub in_place_writes: Vec<PathGrant>,
 }
 
 /// Provider policy is declarative data. There are no provider-name branches in
@@ -246,6 +271,12 @@ pub struct ProviderProfileSpec {
     pub runtime_reads: Vec<PathGrant>,
     pub authentication: Vec<AuthenticationProfile>,
     pub continuation_reads: Vec<PathGrant>,
+    /// Provider-owned state the CLI must write outside scratch, such as one
+    /// session transcript. It never overlaps an authentication root.
+    pub state_writes: Vec<PathGrant>,
+    /// Directories whose executables the provider's own tools may run, for
+    /// providers whose file reading goes through a shell.
+    pub tool_exec_roots: Vec<PathGrant>,
     pub provider_api: Vec<NetworkEndpoint>,
     pub network: Vec<NetworkGrant>,
     pub capabilities: Vec<CapabilityGrant>,
@@ -405,6 +436,7 @@ pub enum FixtureOperation {
     DeclaredProcessExec,
     UndeclaredProcessExec,
     ProcessFork,
+    StateWrite,
     BrowserIpc,
     PostgresIpc,
 }
@@ -568,6 +600,72 @@ pub struct ConfinedLaunch {
     pub profile: Vec<u8>,
     pub profile_digest: [u8; 32],
     pub native_controls: Vec<String>,
+}
+
+impl ConfinedLaunch {
+    /// The only way to turn a provider argv into a runnable command: the
+    /// compiled profile wraps it, so no caller can launch the CLI unconfined.
+    pub fn command(&self, argv: &[OsString]) -> Result<Vec<OsString>, PermissionError> {
+        let profile =
+            std::str::from_utf8(&self.profile).map_err(|_| PermissionError::InvalidFixture)?;
+        let mut command = Vec::with_capacity(argv.len() + 3);
+        command.extend(["/usr/bin/sandbox-exec", "-p", profile].map(OsString::from));
+        command.extend(argv.iter().cloned());
+        Ok(command)
+    }
+}
+
+/// Directories a launcher must hold as anchors before `compile`: each subtree
+/// grant itself and the parent of each exact grant. Writer Git paths are
+/// derived from the verified worktree, exactly as the compiler derives them.
+pub fn required_anchors(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    worktree: Option<(&VerifiedWorktree, &GitRefName)>,
+) -> BTreeSet<PathBuf> {
+    let spec = &profile.spec;
+    let selected = plan.selected_authentication.as_ref().and_then(|mechanism| {
+        spec.authentication
+            .iter()
+            .find(|auth| &auth.mechanism == mechanism)
+    });
+    let mut grants: Vec<&PathGrant> = plan
+        .read_roots
+        .iter()
+        .chain(&plan.protected_roots)
+        .chain(&plan.secret_roots)
+        .chain(std::iter::once(&plan.scratch))
+        .chain(&plan.private_state)
+        .chain(&spec.process_executables)
+        .chain(&spec.runtime_reads)
+        .chain(&spec.state_writes)
+        .chain(&spec.tool_exec_roots)
+        .chain(
+            selected
+                .into_iter()
+                .flat_map(|auth| auth.roots.iter().chain(&auth.in_place_writes)),
+        )
+        .collect();
+    if plan.include_continuation {
+        grants.extend(&spec.continuation_reads);
+    }
+    for grant in plan.network.iter().chain(&spec.network) {
+        if let NetworkGrant::UnixSocket { root } = grant {
+            grants.push(root);
+        }
+    }
+    let derived = worktree
+        .map(|(verified, selected_ref)| WorktreeWriteGrants::derive(verified, selected_ref));
+    if let Some(derived) = &derived {
+        grants.extend(derived.iter());
+    }
+    grants
+        .into_iter()
+        .filter_map(|grant| match grant.scope {
+            PathScope::Subtree => Some(grant.path.clone()),
+            PathScope::Exact => grant.path.parent().map(Path::to_owned),
+        })
+        .collect()
 }
 
 pub struct BackendContext<'a> {
@@ -833,6 +931,8 @@ fn compile_sbpl(
     read_grants.extend(plan.protected_roots.iter().cloned());
     read_grants.extend(profile.spec.runtime_reads.iter().cloned());
     read_grants.extend(profile.spec.process_executables.iter().cloned());
+    read_grants.extend(profile.spec.tool_exec_roots.iter().cloned());
+    let mut credential_writes = Vec::new();
     if let Some(mechanism) = &plan.selected_authentication {
         let selected = profile
             .spec
@@ -843,6 +943,7 @@ fn compile_sbpl(
         for grant in &selected.roots {
             read_grants.push(grant.clone());
         }
+        credential_writes.extend(selected.in_place_writes.iter().cloned());
     }
     if plan.include_continuation {
         read_grants.extend(profile.spec.continuation_reads.iter().cloned());
@@ -867,6 +968,10 @@ fn compile_sbpl(
     for executable in &profile.spec.process_executables {
         anchors.verify_executable(executable)?;
     }
+    for grant in &credential_writes {
+        anchors.verify_single_link_grant(grant)?;
+    }
+    verify_state_writes(plan, profile, anchors)?;
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath);
     }
@@ -877,6 +982,7 @@ fn compile_sbpl(
         .chain(&plan.protected_roots)
         .chain(&plan.secret_roots)
         .chain(&profile.spec.continuation_reads)
+        .chain(&profile.spec.state_writes)
         .chain(
             profile
                 .spec
@@ -969,7 +1075,13 @@ fn compile_sbpl(
         return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render_profile(plan, profile, &read_grants, worktree_grants.as_ref())?;
+    let mut profile_bytes = render_profile(
+        plan,
+        profile,
+        &read_grants,
+        &credential_writes,
+        worktree_grants.as_ref(),
+    )?;
     if profile_bytes.len() > PROFILE_LIMIT {
         return Err(PermissionError::ProfileTooLarge);
     }
@@ -987,6 +1099,7 @@ fn compile_sbpl(
     if let Some(state) = &plan.private_state {
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
     }
+    verify_state_writes(plan, profile, anchors)?;
     anchors.verify_all()?;
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
@@ -996,6 +1109,44 @@ fn compile_sbpl(
         profile_digest,
         native_controls: profile.spec.native_controls.clone(),
     })
+}
+
+/// Provider state writes stay outside every secret, protected and Git root, and
+/// carry the same hard-link census as other writable trees.
+#[cfg(target_os = "macos")]
+fn verify_state_writes(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    anchors: &Anchors<'_>,
+) -> Result<(), PermissionError> {
+    for grant in &profile.spec.state_writes {
+        if plan
+            .secret_roots
+            .iter()
+            .chain(&plan.protected_roots)
+            .chain(std::iter::once(&plan.scratch))
+            .chain(&plan.private_state)
+            .any(|root| grant.overlaps(root))
+        {
+            return Err(PermissionError::ProtectedOverlap);
+        }
+        if let Some((verified, _)) = anchors.worktree {
+            for path in [
+                verified.path(),
+                verified.repo().private_git_dir(),
+                verified.repo().common_git_dir(),
+            ] {
+                if path_overlaps(&grant.path, path) {
+                    return Err(PermissionError::ProtectedOverlap);
+                }
+            }
+        }
+        match grant.scope {
+            PathScope::Subtree => verify_writable_tree(&grant.path, anchors)?,
+            PathScope::Exact => anchors.verify_single_link_grant(grant)?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1113,12 +1264,14 @@ fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     reads: &[PathGrant],
+    credential_writes: &[PathGrant],
     worktree_grants: Option<&WorktreeWriteGrants>,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(deny default)\n");
     // Apple dyld bootstrap rules are shared with the backend probe to keep
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
+    source.push_str(RUNTIME_BASELINE_RULES);
     for grant in reads {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
@@ -1131,8 +1284,31 @@ fn render_profile(
             PathScope::Exact,
         )?;
     }
+    for root in &profile.spec.tool_exec_roots {
+        push_rule(
+            &mut source,
+            "allow",
+            "process-exec",
+            &root.path,
+            PathScope::Subtree,
+        )?;
+    }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
+    }
+    for grant in &profile.spec.state_writes {
+        for operation in ["file-read*", "file-write*"] {
+            push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
+        }
+    }
+    for grant in credential_writes {
+        push_rule(
+            &mut source,
+            "allow",
+            "file-write-data",
+            &grant.path,
+            PathScope::Exact,
+        )?;
     }
     for private in std::iter::once(&plan.scratch).chain(&plan.private_state) {
         for operation in ["file-read*", "file-write*"] {
@@ -1349,6 +1525,9 @@ fn verify_requested_evidence(
     if !profile.spec.runtime_reads.is_empty() {
         required.push((FixtureOperation::RuntimeRead, allowed));
     }
+    if !profile.spec.state_writes.is_empty() {
+        required.push((FixtureOperation::StateWrite, allowed));
+    }
     if plan.selected_authentication.is_some() {
         required.push((FixtureOperation::AuthenticationRead, allowed));
     }
@@ -1404,6 +1583,8 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         || spec.runtime_reads.len() > MAX_PATH_GRANTS
         || spec.authentication.len() > 16
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
+        || spec.state_writes.len() > MAX_PATH_GRANTS
+        || spec.tool_exec_roots.len() > MAX_PATH_GRANTS
         || spec.provider_api.len() > MAX_NETWORK_GRANTS
         || spec.network.len() > MAX_NETWORK_GRANTS
         || spec.capabilities.len() > 16
@@ -1440,12 +1621,43 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
                 return Err(PermissionError::BroadRoot);
             }
         }
-        if auth.roots.len() > MAX_PATH_GRANTS {
+        if auth.roots.len() > MAX_PATH_GRANTS || auth.in_place_writes.len() > MAX_PATH_GRANTS {
             return Err(PermissionError::InvalidFixture);
+        }
+        for write in &auth.in_place_writes {
+            write.validate()?;
+            if write.scope != PathScope::Exact
+                || !auth.roots.iter().any(|root| match root.scope {
+                    PathScope::Exact => root.path == write.path,
+                    PathScope::Subtree => write.path.starts_with(&root.path),
+                })
+            {
+                return Err(PermissionError::InvalidFixture);
+            }
         }
     }
     for grant in &spec.continuation_reads {
         validate_noncredential_grant(grant)?;
+    }
+    for root in &spec.tool_exec_roots {
+        validate_noncredential_grant(root)?;
+        if root.scope != PathScope::Subtree {
+            return Err(PermissionError::InvalidPath);
+        }
+    }
+    // State may sit under a provider's home (Claude keeps transcripts beside
+    // its configuration), so only the authentication roots themselves are off
+    // limits, together with the ordinary path and breadth checks.
+    for grant in &spec.state_writes {
+        grant.validate()?;
+        if spec
+            .authentication
+            .iter()
+            .flat_map(|auth| auth.roots.iter().chain(&auth.in_place_writes))
+            .any(|root| grant.overlaps(root))
+        {
+            return Err(PermissionError::CredentialRoot);
+        }
     }
     for endpoint in &spec.provider_api {
         validate_endpoint(endpoint)?;
@@ -1756,6 +1968,46 @@ mod tests {
         assert!(matches!(
             validate_profile_spec(&spec),
             Err(PermissionError::ProcessPolicyMissing)
+        ));
+    }
+
+    #[test]
+    fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
+        let grant = |path: &str, scope| PathGrant {
+            path: path.into(),
+            scope,
+        };
+        let spec = |in_place: PathGrant, state: PathGrant| ProviderProfileSpec {
+            process_executables: vec![grant("/opt/provider/bin/cli", PathScope::Exact)],
+            authentication: vec![AuthenticationProfile {
+                mechanism: "login".into(),
+                roots: vec![grant(
+                    "/Users/fixture/.provider/auth.json",
+                    PathScope::Exact,
+                )],
+                in_place_writes: vec![in_place],
+            }],
+            state_writes: vec![state],
+            ..ProviderProfileSpec::default()
+        };
+        let auth = grant("/Users/fixture/.provider/auth.json", PathScope::Exact);
+        let transcript = grant("/Users/fixture/.provider/projects/p", PathScope::Subtree);
+        assert!(validate_profile_spec(&spec(auth.clone(), transcript.clone())).is_ok());
+        for in_place in [
+            grant("/Users/fixture/.provider/other.json", PathScope::Exact),
+            grant("/Users/fixture/.provider", PathScope::Subtree),
+        ] {
+            assert!(matches!(
+                validate_profile_spec(&spec(in_place, transcript.clone())),
+                Err(PermissionError::InvalidFixture)
+            ));
+        }
+        assert!(matches!(
+            validate_profile_spec(&spec(
+                auth,
+                grant("/Users/fixture/.provider", PathScope::Subtree)
+            )),
+            Err(PermissionError::CredentialRoot)
         ));
     }
 
@@ -2252,8 +2504,9 @@ mod tests {
             capabilities: Vec::new(),
             nested_confinement: false,
         };
-        let rendered = String::from_utf8(render_profile(&plan, &profile, &[], None).expect("SBPL"))
-            .expect("UTF-8 SBPL");
+        let rendered =
+            String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
+                .expect("UTF-8 SBPL");
         assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
         assert!(rendered.contains("(allow process-fork)"));
 
@@ -2262,8 +2515,9 @@ mod tests {
             spec,
             observations: BTreeMap::new(),
         };
-        let rendered = String::from_utf8(render_profile(&plan, &profile, &[], None).expect("SBPL"))
-            .expect("UTF-8 SBPL");
+        let rendered =
+            String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
+                .expect("UTF-8 SBPL");
         assert!(!rendered.contains("(allow process-fork)"));
     }
 
