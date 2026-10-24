@@ -33,7 +33,6 @@ pub(crate) struct LiveQuota {
     accounts: Vec<Account>,
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
-    agy_claims: RefCell<BTreeMap<String, String>>,
 }
 fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
     let mut bytes = Vec::new();
@@ -170,7 +169,6 @@ impl LiveQuota {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             claude_default: RefCell::new(None),
-            agy_claims: RefCell::new(BTreeMap::new()),
         })
     }
     fn command(
@@ -484,48 +482,6 @@ impl LiveQuota {
             return Err(ProbeFailure::Auth);
         }
         let actual = actual.ok_or(ProbeFailure::Auth)?;
-        // One shared login cannot become several configured aliases on a first
-        // tick. Existing explicit or recorded bindings take precedence.
-        for other in self.accounts.iter().filter(|a| {
-            a.scope.adapter == "agy" && a.scope.account_key != account.scope.account_key
-        }) {
-            let recorded = value(
-                &self
-                    .state
-                    .join("quota")
-                    .join(&other.scope.account_key)
-                    .join("agy.json"),
-            )
-            .ok();
-            let bound = other
-                .options
-                .get("fingerprint")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    other
-                        .scope
-                        .label
-                        .starts_with("google-")
-                        .then_some(other.scope.label.as_str())
-                })
-                .or_else(|| {
-                    recorded
-                        .as_ref()
-                        .and_then(|v| v.pointer("/snapshot/details/fingerprint"))
-                        .and_then(Value::as_str)
-                });
-            if bound == Some(actual.as_str()) {
-                return Err(ProbeFailure::Auth);
-            }
-        }
-        let mut claims = self.agy_claims.borrow_mut();
-        if claims
-            .get(&actual)
-            .is_some_and(|owner| owner != &account.scope.account_key)
-        {
-            return Err(ProbeFailure::Auth);
-        }
-        claims.insert(actual.clone(), account.scope.account_key.clone());
         details.fingerprint = Some(actual);
         Ok(payload)
     }

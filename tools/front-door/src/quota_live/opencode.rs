@@ -258,7 +258,6 @@ fn monthly_cap(options: &Value) -> Option<f64> {
     let cap = match configured {
         Some(Value::Number(value)) => value.as_f64(),
         Some(Value::String(value)) => value.parse::<f64>().ok(),
-        Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
     .or_else(|| {
@@ -276,17 +275,6 @@ fn table_names(db: &Connection) -> rusqlite::Result<HashSet<String>> {
     let mut statement = db.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
     let rows = statement.query_map([], |row| row.get(0))?;
     rows.collect()
-}
-
-fn has_column(db: &Connection, table: &str, column: &str) -> bool {
-    let mut statement = match db.prepare(&format!("PRAGMA table_info({table})")) {
-        Ok(statement) => statement,
-        Err(_) => return false,
-    };
-    statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .ok()
-        .is_some_and(|rows| rows.filter_map(Result::ok).any(|name| name == column))
 }
 
 fn spend(
@@ -318,9 +306,6 @@ fn spend(
         if assistant_only {
             sql.push_str(" AND type='assistant'");
         } else {
-            if has_column(db, table, "session_id") {
-                sql.push_str(" AND session_id IN (SELECT DISTINCT session_id FROM message)");
-            }
             if tables.contains("session_message") {
                 sql.push_str(
                     " AND NOT EXISTS (SELECT 1 FROM session_message AS v2 WHERE v2.id=message.id)",

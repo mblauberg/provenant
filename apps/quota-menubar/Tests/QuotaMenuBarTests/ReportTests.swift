@@ -13,8 +13,8 @@ final class ReportTests: XCTestCase {
               "snapshot": {
                 "schema_version": 1,
                 "windows": [
-                  {"pool": "session:1", "used_basis_points": 300, "resets_unix_seconds": 1899698400, "window_seconds": 18000},
-                  {"pool": "weekly_all:2", "used_basis_points": 10000, "resets_unix_seconds": 1900285200, "window_seconds": 604800},
+                  {"pool": "five_hour", "used_basis_points": 300, "resets_unix_seconds": 1899698400, "window_seconds": 18000},
+                  {"pool": "seven_day", "used_basis_points": 10000, "resets_unix_seconds": 1900285200, "window_seconds": 604800},
                   {"pool": "weekly_scoped:Fable", "used_basis_points": 10000, "resets_unix_seconds": 1900285200, "window_seconds": 604800},
                   {"pool": "secondary", "used_basis_points": 10000, "resets_unix_seconds": 1899676800, "window_seconds": 18000}
                 ],
@@ -66,11 +66,11 @@ final class ReportTests: XCTestCase {
         XCTAssertEqual(account.banked?.available, 2)
         XCTAssertEqual(account.banked?.expiresAt.map(\.timeIntervalSince1970), [1900100000, 1900200000])
         XCTAssertEqual(account.note, "fixed profile")
-        let session = try XCTUnwrap(account.windows.first { $0.name == "session:1" })
-        XCTAssertEqual(session.title, "Session · 5-hour")
+        let session = try XCTUnwrap(account.windows.first { $0.name == "five_hour" })
+        XCTAssertEqual(session.title, "5-hour")
         XCTAssertEqual(session.windowMinutes, 300)
         XCTAssertEqual(session.pace.state, "on_pace")
-        let weekly = try XCTUnwrap(account.windows.first { $0.name == "weekly_all:2" })
+        let weekly = try XCTUnwrap(account.windows.first { $0.name == "seven_day" })
         XCTAssertEqual(weekly.title, "Weekly")
         XCTAssertEqual(weekly.windowMinutes, 10_080)
         XCTAssertEqual(weekly.pace.state, "exhausted")

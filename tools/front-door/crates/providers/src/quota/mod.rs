@@ -248,19 +248,7 @@ fn decode_codex(
                 .or_else(|| value.get("available_count"))
         })
         .and_then(Value::as_u64);
-    let fallback_credits = [
-        "resetCredits",
-        "reset_credits",
-        "availableResets",
-        "available_resets",
-    ]
-    .iter()
-    .find_map(|key| {
-        main.get(key)
-            .or_else(|| root.get(key))
-            .and_then(Value::as_u64)
-    });
-    if let Some(count) = reset_credits.or(fallback_credits) {
+    if let Some(count) = reset_credits {
         details_mut(details).reset_credits = Some(count);
     }
     if let Some(credits) = reset_source
@@ -270,12 +258,7 @@ fn decode_codex(
         let mut expiries = credits
             .iter()
             .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
-            .filter_map(|credit| {
-                credit
-                    .get("expiresAt")
-                    .or_else(|| credit.get("expires_at"))
-                    .and_then(unix_seconds)
-            })
+            .filter_map(|credit| credit.get("expiresAt").and_then(unix_seconds))
             .collect::<Vec<_>>();
         expiries.sort_unstable();
         expiries.dedup();
@@ -330,7 +313,6 @@ fn decode_codex_group(group: &Value, prefix: &str, windows: &mut Vec<QuotaWindow
         let Some(used) = used else { continue };
         let resets = window
             .get("resetsAt")
-            .or_else(|| window.get("resets_at"))
             .or_else(|| window.get("reset_at"))
             .and_then(unix_seconds);
         let pool = unique_pool(windows, format!("{prefix}{name}"));
@@ -562,7 +544,6 @@ fn codex_credit_blocked(payload: &Value) -> bool {
     root.get("spend_control")
         .and_then(|value| value.get("reached"))
         == Some(&Value::Bool(true))
-        || main.get("spendControlReached") == Some(&Value::Bool(true))
         || root
             .get("credits")
             .or_else(|| main.get("credits"))
@@ -614,14 +595,10 @@ fn basis_points(value: &Value) -> Option<u64> {
 }
 
 fn window_duration_seconds(window: &Value) -> Option<u64> {
-    [
-        "windowDurationMins",
-        "window_duration_mins",
-        "window_minutes",
-    ]
-    .iter()
-    .find_map(|key| window.get(key).and_then(minutes_to_seconds))
-    .or_else(|| window.get("limit_window_seconds").and_then(Value::as_u64))
+    ["windowDurationMins", "window_minutes"]
+        .iter()
+        .find_map(|key| window.get(key).and_then(minutes_to_seconds))
+        .or_else(|| window.get("limit_window_seconds").and_then(Value::as_u64))
 }
 
 fn minutes_to_seconds(value: &Value) -> Option<u64> {

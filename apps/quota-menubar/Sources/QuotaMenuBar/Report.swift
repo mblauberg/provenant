@@ -149,10 +149,6 @@ struct QuotaReport {
         -> (title: String, pool: String?, poolLabel: String?, advisory: Bool) {
         let duration = durationTitle(seconds)
         if adapter == "claude" {
-            if name.hasPrefix("session:") {
-                return (duration.map { "Session · \($0)" } ?? "Session", nil, nil, false)
-            }
-            if name.hasPrefix("weekly_all:") { return ("Weekly", nil, nil, false) }
             if name.hasPrefix("weekly_scoped:") {
                 let model = String(name.dropFirst("weekly_scoped:".count))
                 return ("Weekly · \(Fmt.human(model))", nil, nil, true)
@@ -211,8 +207,8 @@ struct QuotaReport {
         case "seven_day", "weekly", "weekly_all", "gemini.weekly", "claude.weekly": return 10_080
         case "thirty_day": return 43_200
         default:
-            if adapter == "claude" && (name.hasPrefix("session:") || name.hasPrefix("weekly_scoped:") || name.hasPrefix("weekly_all:")) {
-                return name.hasPrefix("session:") ? 300 : 10_080
+            if adapter == "claude" && name.hasPrefix("weekly_scoped:") {
+                return 10_080
             }
             return nil
         }

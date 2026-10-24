@@ -259,14 +259,19 @@ fn detections(
                         .filter(|a| a.adapter == r.adapter.id())
                         .cloned()
                         .collect();
-                    (!accounts.is_empty()).then_some(accounts)
+                    (!accounts.is_empty()
+                        && !matches!(
+                            status,
+                            Ok(provenant_providers::AccountDetection::AuthRequired)
+                        ))
+                    .then_some(accounts)
                 },
                 status: match status {
-                    _ if configured.iter().any(|a| a.adapter == r.adapter.id()) => {
-                        QuotaStatus::Available
-                    }
                     Ok(provenant_providers::AccountDetection::AuthRequired) => {
                         QuotaStatus::AuthRequired
+                    }
+                    _ if configured.iter().any(|a| a.adapter == r.adapter.id()) => {
+                        QuotaStatus::Available
                     }
                     _ if r.quota_source.is_none() => QuotaStatus::Unsupported,
                     _ => QuotaStatus::Unknown,

@@ -23,6 +23,37 @@ fn freshest<'a>(
         })
         .max_by_key(|i| i.expires)
 }
+fn expected_fingerprint<'a>(
+    configured: Option<&'a str>,
+    previous: Option<&'a str>,
+    live: Option<&'a str>,
+) -> Result<&'a str, ProbeFailure> {
+    let expected = configured.or(previous).or(live).ok_or(ProbeFailure::Auth)?;
+    if live != Some(expected) {
+        return Err(ProbeFailure::Auth);
+    }
+    Ok(expected)
+}
+fn may_refresh(
+    fixed: &Path,
+    default: &Path,
+    mut store: impl FnMut(&Path) -> Result<Value, ProbeFailure>,
+) -> Result<bool, ProbeFailure> {
+    if fixed == default {
+        return Ok(true);
+    }
+    // Refresh tokens are single-use. Compare only in memory: refreshing a
+    // cloned fixed login would invalidate the default session's shared token.
+    let fixed = store(fixed)?;
+    let default = store(default)?;
+    let fixed = fixed
+        .pointer("/claudeAiOauth/refreshToken")
+        .and_then(Value::as_str);
+    let default = default
+        .pointer("/claudeAiOauth/refreshToken")
+        .and_then(Value::as_str);
+    Ok(!fixed.is_some_and(|fixed| Some(fixed) == default))
+}
 impl LiveQuota {
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
@@ -68,7 +99,7 @@ impl LiveQuota {
             expires,
         }
     }
-    fn claude_token(&self, dir: &Path, deadline: i64) -> Result<(String, i64), ProbeFailure> {
+    fn claude_credentials(&self, dir: &Path, deadline: i64) -> Result<Value, ProbeFailure> {
         let raw = if cfg!(target_os = "macos") {
             let mut service = "Claude Code-credentials".to_owned();
             if dir != self.home.join(".claude") {
@@ -90,7 +121,10 @@ impl LiveQuota {
         } else {
             read(&dir.join(".credentials.json"))?
         };
-        let value: Value = serde_json::from_slice(&raw).map_err(|_| ProbeFailure::Auth)?;
+        serde_json::from_slice(&raw).map_err(|_| ProbeFailure::Auth)
+    }
+    fn claude_token(&self, dir: &Path, deadline: i64) -> Result<(String, i64), ProbeFailure> {
+        let value = self.claude_credentials(dir, deadline)?;
         let oauth = value.get("claudeAiOauth").ok_or(ProbeFailure::Auth)?;
         let token = oauth
             .get("accessToken")
@@ -161,23 +195,15 @@ impl LiveQuota {
             *self.claude_default.borrow_mut() = Some(default);
         }
         let mut fixed = self.claude_identity(&account.identity_dir, deadline);
-        let expected = fixed
-            .fingerprint
-            .clone()
-            .or_else(|| {
-                account
-                    .options
-                    .get("fingerprint")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| {
-                previous
-                    .and_then(|r| r.snapshot.as_ref())
-                    .and_then(|s| s.details.as_ref())
-                    .and_then(|d| d.fingerprint.clone())
-            })
-            .ok_or(ProbeFailure::Auth)?;
+        let expected = expected_fingerprint(
+            account.options.get("fingerprint").and_then(Value::as_str),
+            previous
+                .and_then(|r| r.snapshot.as_ref())
+                .and_then(|s| s.details.as_ref())
+                .and_then(|d| d.fingerprint.as_deref()),
+            fixed.fingerprint.as_deref(),
+        )?
+        .to_owned();
         // Refresh only through Claude Code. The deliberately unknown model is
         // rejected before inference; credentials are never written by Provenant.
         let has_fresh = self
@@ -188,6 +214,9 @@ impl LiveQuota {
         if !has_fresh
             && self.refresh_expired
             && fixed.expires.is_some_and(|e| e <= now() + 60)
+            && may_refresh(&account.identity_dir, &self.home.join(".claude"), |dir| {
+                self.claude_credentials(dir, deadline)
+            })?
             && self.mark_refresh(account, fixed.expires.ok_or(ProbeFailure::Auth)?)?
         {
             let _ = self.command(
@@ -199,6 +228,9 @@ impl LiveQuota {
                     "provenant-refresh-probe",
                     "--max-turns",
                     "1",
+                    "--strict-mcp-config",
+                    "--settings",
+                    r#"{"disableAllHooks":true}"#,
                 ],
                 self.claude_selector(&account.identity_dir),
                 None,
@@ -229,6 +261,52 @@ impl LiveQuota {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_refresh_skips_byte_identical_default_refresh_token() {
+        use super::{ProbeFailure, may_refresh};
+        use serde_json::json;
+        use std::{collections::BTreeMap, path::Path};
+        let fixed = Path::new("/fake/fixed");
+        let default = Path::new("/fake/.claude");
+        let mut stores = BTreeMap::from([
+            (
+                fixed,
+                json!({"claudeAiOauth": {"refreshToken": "fake-shared"}}),
+            ),
+            (
+                default,
+                json!({"claudeAiOauth": {"refreshToken": "fake-shared"}}),
+            ),
+        ]);
+        let read = |path: &Path| stores.get(path).cloned().ok_or(ProbeFailure::Auth);
+        assert!(!may_refresh(fixed, default, read).unwrap());
+        assert!(may_refresh(default, default, read).unwrap());
+        stores.insert(
+            default,
+            json!({"claudeAiOauth": {"refreshToken": "fake-other"}}),
+        );
+        assert!(
+            may_refresh(fixed, default, |path| stores
+                .get(path)
+                .cloned()
+                .ok_or(ProbeFailure::Auth))
+            .unwrap()
+        );
+    }
+    #[test]
+    fn fixed_directory_rejects_changed_account_fingerprint() {
+        use super::{ProbeFailure, expected_fingerprint};
+        for (configured, previous) in [(Some("pinned"), None), (None, Some("recorded"))] {
+            assert!(matches!(
+                expected_fingerprint(configured, previous, Some("other")),
+                Err(ProbeFailure::Auth)
+            ));
+        }
+        assert_eq!(
+            expected_fingerprint(None, None, Some("first-login")).unwrap(),
+            "first-login"
+        );
+    }
     #[test]
     fn rotating_default_is_attributed_only_to_matching_fingerprint_and_expiry() {
         use super::{Identity, freshest};

@@ -56,8 +56,7 @@ impl Admission<'_> {
         }
         let snapshot = record.and_then(|r| r.snapshot.as_ref());
         let fresh = snapshot.is_some_and(|s| {
-            record.is_some_and(|r| r.last_error.is_none())
-                && s.observed_unix_seconds <= self.now_unix_seconds
+            s.observed_unix_seconds <= self.now_unix_seconds
                 && self
                     .now_unix_seconds
                     .saturating_sub(s.observed_unix_seconds)
@@ -103,6 +102,7 @@ impl Admission<'_> {
                     .ok_or(QuotaError::TimeRange)?,
             );
             let comparable_newer = fresh
+                && record.is_some_and(|r| r.last_error.is_none())
                 && snapshot.is_some_and(|s| {
                     s.observed_unix_seconds > refusal.observed_unix_seconds
                         && matches!(
@@ -235,6 +235,21 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn failed_probe_preserves_recent_exhaustion() {
+        let mut record = record(QuotaStatus::Exhausted);
+        record.last_error = Some(ProbeFailure::Auth);
+        assert!(matches!(
+            Admission {
+                now_unix_seconds: 1000,
+                records: &[record],
+                refusals: &[],
+                pools: &["pool-a".into()],
+            }
+            .admit(&route(), &"operation".parse().unwrap()),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
     }
     #[test]
     fn stale_exhausted_snapshot_does_not_clear_newer_refusal() {
