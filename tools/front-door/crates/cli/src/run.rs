@@ -59,6 +59,7 @@ impl From<run::RunError> for Fail {
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
             E::Nonterminal => (Status::Refused, "NONTERMINAL"),
+            E::Conflict => (Status::Refused, "CONFLICT"),
             E::Refused => (Status::Refused, "REFUSED"),
             E::Capacity => (Status::Refused, "QUEUE_FULL"),
             E::Contention => (Status::Error, "CONTENTION"),

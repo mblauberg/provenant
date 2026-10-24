@@ -812,7 +812,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     match error {
         RunError::NotFound => FacadeError::NotFound,
         RunError::Refused => FacadeError::ConfinementRefused,
-        RunError::Contention => FacadeError::Busy,
+        RunError::Contention | RunError::Capacity => FacadeError::Busy,
+        RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
         RunError::Cancelled => FacadeError::Cancelled,
         RunError::Validation(_) | RunError::Decode(_) | RunError::ArtifactMismatch => {
             FacadeError::StateCorrupt
@@ -827,7 +828,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
-        "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
+        "CONFLICT" | "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
         "UNSUPPORTED" => FacadeError::OwnerUnavailable,
         _ => FacadeError::Io,
@@ -1031,6 +1032,8 @@ impl BinaryRunOwner<'_> {
                 "continuation_unsupported" => FacadeError::ContinuationUnsupported,
                 "owner_unavailable" => FacadeError::OwnerUnavailable,
                 "cancelled" => FacadeError::Cancelled,
+                "conflict" => FacadeError::Conflict,
+                "busy" => FacadeError::Busy,
                 _ => FacadeError::HomeUnavailable,
             }),
             value => Ok(value),
