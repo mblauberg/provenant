@@ -105,7 +105,7 @@ pub enum RunError {
     Decode(#[from] provenant_records::DecodeError),
     #[error(transparent)]
     Canonical(#[from] provenant_records::CanonicalError),
-    #[error("run filesystem I/O failed")]
+    #[error("run filesystem I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
