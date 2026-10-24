@@ -468,6 +468,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Res
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    /// Fabric's route.task_class, retained separately from the resolved route.
     pub task_class: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
@@ -693,7 +694,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
         .into_iter()
         .map(
             |(task_id, prompt, route, fallback, delivery_id)| Submitted {
-                task_class: command.task_class.clone(),
+                task_class: None,
                 task_id,
                 prompt,
                 route,

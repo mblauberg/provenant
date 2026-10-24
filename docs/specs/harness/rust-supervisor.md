@@ -121,7 +121,6 @@ daemon or second lifecycle engine" still holds.
  "stdin": {"path": "/abs/run/tasks/t/attempt-001/prompt.md"},
  "attempt_dir": "/abs/run/tasks/t/attempt-001", "run_token": "...",
  "capture": {"events": "events.jsonl", "stderr": "stderr.log", "max_bytes": 8388608},
- "silence_observation_ms": 300000,
  "timeouts_ms": {"startup": 300000, "wall": 3600000,
                  "settle": 1500, "child_grace": 500, "root_flush": 2000},
  "progress": {"writer_tree": {"root": "/abs/worktree", "exclude": [".git", "node_modules"]}},
@@ -130,12 +129,12 @@ daemon or second lifecycle engine" still holds.
  "spare": {"code_mode_host": true}}
 ```
 
-**Silence.** `silence_observation_ms` comes from `lanes.silence_seconds`.
-After that interval without stdout or stderr, Rust samples liveness, output
-timestamps and writer-tree progress and writes `watchdog.json` beside the
-capture files. Silence never reaches `ProviderGroup::stop`; it cannot become
-a forced reason, even when the writer tree is unchanged. Startup and wall
-deadlines remain separate stop reasons. The retired `stalled` forced reason
+**Silence.** Run resolves `lanes.silence_seconds` into `CapturePlan.silence_ms`
+(default 300,000 ms). After that interval with no output or CPU progress, the
+Rust guardian marks the `silent` observation field in `process.json`. Output
+or CPU progress clears silence. It does not write `watchdog.json`.
+Silence never authorises a stop; startup and wall deadlines remain separate
+stop reasons. The retired `stalled` forced reason
 is rejected, including in observer requests. After proven process death, Python
 builds `wip-checkpoint.json` from retained events and a bounded Git summary;
 Rust commits those bytes for the owner from S3 and the reaper from S4.
@@ -271,7 +270,7 @@ synthesis from absence (`provider_lost`, `reap_attempts`).
 | File | Writer today | Writer after | Change |
 |---|---|---|---|
 | `events.jsonl`, `stderr.log`, `pgid` | Python | Rust (S2) | None |
-| `watchdog.json` | Python supervisor or reaper | Rust supervisor (S2); Python reaper until S4 | Silence observation only; never a stop request |
+| `process.json` | Rust guardian | Rust guardian | `silent` records no output or CPU progress for the configured interval; replaces the legacy `watchdog.json` observation |
 | `wip-checkpoint.json` | Python owner or reaper after proven death | Python content; Rust commit for owner (S3), reaper (S4) | Best effort before terminal publication |
 | `supervisor.lock`, `supervisor.json`, `supervisor.exit.json`, `launch.json`, `observer.json` | none | Rust and the observer (S2) | New, versioned |
 | Both `attempt.json` records, sidecars, adapter receipt, `result.md`, manifest, `RUN_RECEIPT.json` | Python | Python bytes, Rust commit (S3) | None |

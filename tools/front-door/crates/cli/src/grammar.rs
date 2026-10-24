@@ -172,8 +172,6 @@ pub struct Dispatch {
     #[arg(long = "knob")]
     pub knobs: Vec<String>,
     #[arg(long)]
-    pub task_class: Option<String>,
-    #[arg(long)]
     pub host: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,

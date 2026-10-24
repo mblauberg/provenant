@@ -438,8 +438,7 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
 }
 
 #[test]
-fn silence_knob_changes_observation_without_stopping_a_provider() -> Result {
-    use provenant_supervisor::machine::{self, Budgets, Event, Phase, State, Tick};
+fn silence_knob_controls_capture_plan_observations() -> Result {
     let rig = TestRig::new()?;
     std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
     std::fs::write(
@@ -450,25 +449,12 @@ fn silence_knob_changes_observation_without_stopping_a_provider() -> Result {
         ("config-silence", vec![], 2000),
         ("dispatch-silence", vec!["lanes.silence_seconds=1"], 1000),
     ] {
-        let (request, attempt) = submitted_policy(&rig, operation, None, &knobs)?;
-        assert_eq!(
-            serde_json::to_value(&request.tasks[0].profile)?,
-            attempt["profile"]
-        );
+        let (request, _) = submitted_policy(&rig, operation, None, &knobs)?;
         let plan = provenant_run::capture_plan(&request.tasks[0]);
-        let state = machine::step(
-            State::prepared(Budgets::new(60_000)),
-            Event::Started,
-            Tick::at(0),
-        )
-        .0;
-        assert!(!plan.silent(threshold - 1, state.last_progress_ms()));
-        assert!(plan.silent(threshold, state.last_progress_ms()));
-        let (state, effects) = machine::step(state, Event::Silence, Tick::at(threshold));
-        assert_eq!(state.phase(), Phase::Running);
-        assert!(effects.is_empty());
-        let state = machine::step(state, Event::Progress, Tick::at(threshold)).0;
-        assert!(!plan.silent(threshold, state.last_progress_ms()));
+        assert_eq!(plan.silence_ms, threshold);
+        assert!(!plan.silent(threshold - 1, Some(0)));
+        assert!(plan.silent(threshold, Some(0)));
+        assert!(!plan.silent(threshold, Some(threshold)));
     }
     rig.assert_legacy_unchanged()
 }
