@@ -12,7 +12,7 @@ use provenant_records::{CommandResult, Outcome};
 use provenant_supervisor::{
     clock::SystemClock,
     exec::SystemExecutor,
-    fs::{Directory, LocalFs, SafeDir, canonicalize},
+    fs::{Directory, FileKind, FsError, LocalFs, SafeDir, canonicalize},
 };
 use serde::Serialize;
 use std::{
@@ -120,7 +120,25 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 Err(error) if error.is_exists() => {}
                 Err(error) => return Err(error.into()),
             }
-            state = state.open_verified_directory(name)?;
+            state = match state.open_verified_directory(name) {
+                Ok(child) => child,
+                // Only the configured absolute state path may cross mounts.
+                // Re-anchor the held no-follow child after checking identity.
+                Err(error) if error.is_cross_device() => {
+                    let before = state.metadata_at(name, false)?;
+                    let child = state.open_directory(name)?;
+                    let opened = child.metadata()?;
+                    let after = state.metadata_at(name, false)?;
+                    if before.kind != FileKind::Directory
+                        || !before.same_identity(&opened)
+                        || !opened.same_identity(&after)
+                    {
+                        return Err(FsError::RaceRefused { name: name.into() }.into());
+                    }
+                    child.into_anchor()?
+                }
+                Err(error) => return Err(error.into()),
+            };
         }
     }
     let utility_home = child(&state, "utility-home")?;
