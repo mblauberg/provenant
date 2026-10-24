@@ -293,8 +293,8 @@ The legacy quota classifier distinguishes `natural`, `granted_date_kept`,
 `granted_window_restarted`, `window_moved`, `not_started` and `window_started`
 changes. Natural rollover compares the new provider window start against the
 previous provider reset. Restarted windows must start within five minutes of
-the observation. These classification rules remain with quota; their retired
-Telemetry stats does not reconstruct provider windows from ledger events.
+the observation. These classification rules remain with quota. Telemetry
+stats does not reconstruct provider windows from ledger events.
 
 ### Display
 
