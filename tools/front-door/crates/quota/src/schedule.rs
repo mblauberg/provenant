@@ -220,9 +220,12 @@ pub fn plan_tick_with_settings(
         if selected(&record.account.adapter)
             && detections.iter().any(|d| {
                 d.adapter == record.account.adapter
-                    && d.accounts
-                        .as_ref()
-                        .is_some_and(|a| !a.contains(&record.account))
+                    && d.accounts.as_ref().is_some_and(|accounts| {
+                        !accounts.iter().any(|a| {
+                            a.adapter == record.account.adapter
+                                && a.account_key == record.account.account_key
+                        })
+                    })
             })
         {
             drops.push(UpdateIntent {
@@ -243,7 +246,9 @@ pub fn plan_tick_with_settings(
         let empty = AccountRecord::empty(account.clone());
         let current = records
             .iter()
-            .find(|r| r.account == *account)
+            .find(|r| {
+                r.account.adapter == account.adapter && r.account.account_key == account.account_key
+            })
             .unwrap_or(&empty);
         if next_due(current, tick.trigger, tick.power)?.is_some_and(|due| due <= now) {
             if account.adapter == "agy" {
@@ -472,6 +477,30 @@ mod transition_tests {
             account_key: key.into(),
             label: "work".into(),
         }
+    }
+    #[test]
+    fn label_change_keeps_account_and_refresh_schedule() {
+        let mut record = AccountRecord::empty(account("claude", "work"));
+        record.last_attempt_unix_seconds = Some(90);
+        let mut renamed = record.account.clone();
+        renamed.label = "renamed".into();
+        let plan = plan_tick(
+            &[record],
+            &[Detection {
+                adapter: "claude".into(),
+                accounts: Some(vec![renamed]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaTick {
+                adapter: None,
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            100,
+        )
+        .unwrap();
+        assert!(plan.drops.is_empty());
+        assert!(plan.batches.is_empty());
     }
     #[test]
     fn detection_removes_only_authoritatively_absent_accounts_and_batches_probes() {

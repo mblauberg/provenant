@@ -2,6 +2,40 @@ mod support;
 use support::{Result, TestRig, code};
 
 #[test]
+fn tick_does_not_create_missing_state_ancestors() -> Result {
+    let mut rig = quota_rig()?;
+    let missing = rig.root.join("missing");
+    rig.state = missing.join("state");
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 3);
+    assert!(!missing.exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn fabric_and_quota_load_one_domain_config() -> Result {
+    let rig = quota_rig()?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.fabric]\nclient_label = 'combined'\n[domains.quota]\nmax_parallel = 1\n",
+    )?;
+    for args in [
+        &["quota", "show", "--json"][..],
+        &["quota", "tick", "--json"],
+        &["fabric", "identity", "--json"],
+    ] {
+        let out = rig.command(args)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let rig = quota_rig()?;
     let shown = rig.command(&["quota", "show", "--json"])?;

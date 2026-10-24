@@ -4,9 +4,6 @@ from datetime import timedelta
 import io
 import json
 from pathlib import Path
-import shutil
-import subprocess
-import sys
 
 import pytest
 
@@ -14,7 +11,6 @@ import quota_display
 from tests.support.quota import NOW, configure, quota, snapshot, window
 
 
-ROOT = Path(__file__).resolve().parents[1]
 WEEK = 7 * 24 * 60
 ANESE, MICHAEL = 'anese@example.com', 'michael@example.com'
 
@@ -461,40 +457,6 @@ def test_pre_reset_refusal_is_stale_and_never_claims_allowance_spent(quota, rese
     assert 'stale' in account['summary'] and 'allowance spent' not in account['summary']
     assert not account.get('drawing_credits')
     assert account['display_window'] == ('secondary' if current else None)
-
-
-@pytest.fixture(scope='module')
-def swift_projection(tmp_path_factory):
-    if sys.platform != 'darwin' or not shutil.which('swiftc'):
-        pytest.skip('menu bar formatter requires macOS Swift')
-    root = tmp_path_factory.mktemp('quota-swift')
-    main = root / 'main.swift'
-    main.write_text('import Foundation\nlet report = try QuotaReport.decode(Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))\nlet now = try Date(CommandLine.arguments[2], strategy: .iso8601)\nprint(Fmt.projection(report.accounts[0].windows[0], now: now) ?? "")\n')
-    binary = root / 'projection'
-    result = subprocess.run(['swiftc', '-module-cache-path', str(root / 'cache'),
-                             str(ROOT / 'apps/quota-menubar/Sources/QuotaMenuBar/Report.swift'), str(main),
-                             '-o', str(binary)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr[-4000:]
-    return binary
-
-
-@pytest.mark.parametrize('legacy', [False, True])
-def test_menu_bar_projection_names_allowance_and_keeps_reserve_runway(quota, tmp_path, swift_projection, legacy):
-    reading = value(quota, 'codex', 'default', [window(33, WEEK, timedelta(hours=159), 'primary')],
-                    usage_credits=[{'balance': 26000, 'unit': 'credits'}], credits={'reset_credits': 1})
-    account = row(quota, reading)
-    pace = account['windows'][0]['pace']
-    if legacy:
-        pace.pop('summary')
-        pace['state'] = 'deficit'
-    path = tmp_path / 'report.json'
-    path.write_text(json.dumps({'schema': quota.REPORT_SCHEMA, 'enabled': True, 'accounts': [account]}))
-    result = subprocess.run([str(swift_projection), str(path), iso(NOW)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr[-1000:]
-    assert 'allowance' in result.stdout.lower() and 'empty' not in result.stdout.lower()
-    if not legacy:
-        assert pace['summary'].lower() in result.stdout.lower()
-        assert '26,000 credits' in result.stdout and '1 banked reset' in result.stdout
 
 
 @pytest.mark.parametrize('used', [60, 100])

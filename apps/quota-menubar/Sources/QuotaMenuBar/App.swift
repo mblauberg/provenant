@@ -173,13 +173,13 @@ struct Summary: View {
             ?? report?.top(now: now).map { ($0.account, $0.account.display(now: now, alert: alert) ?? $0.window) }
         let firstBack = report?.exhausted(now: now).compactMap { $0.back(now: now) }.min()
         let drawing = report?.drawing(now: now) ?? []
+        let sources = report?.sources.map { source in
+            "\(source.title): \(source.statusTitle)" + (source.error.map { " (\($0))" } ?? "")
+        } ?? []
+        let coverage = report.map { "\($0.coverage.known) of \($0.coverage.total) quota report rows have current account data." } ?? ""
         let (title, detail): (String, String) = switch (report, featured) {
         case (nil, _): error.map { ("Quota unavailable", $0) } ?? ("Loading…", "")
         case (let report?, _) where report.accounts.isEmpty:
-            let sources = report.sources.map { source in
-                "\(source.title): \(source.statusTitle)" + (source.error.map { " (\($0))" } ?? "")
-            }
-            let coverage = "\(report.coverage.known) of \(report.coverage.total) quota report rows have current account data."
             ("No account snapshots", ([coverage] + sources).joined(separator: "\n"))
         case (_, let featured?): (featured.account.title, [featured.window.fullTitle, Fmt.resets(featured.window.resetAt, now: now)]
                                     .compactMap { $0 }.joined(separator: " · "))

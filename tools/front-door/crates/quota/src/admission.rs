@@ -106,10 +106,14 @@ impl Admission<'_> {
                         s.status,
                         QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
                     )
-                    && refusal
-                        .pool
-                        .as_ref()
-                        .is_some_and(|pool| s.windows.iter().any(|w| w.pool == *pool))
+                    && refusal.pool.as_ref().is_some_and(|pool| {
+                        s.windows.iter().any(|w| {
+                            w.pool == *pool
+                                && (w.used_basis_points < 10000
+                                    || w.resets_unix_seconds
+                                        .is_some_and(|r| r <= self.now_unix_seconds))
+                        })
+                    })
             });
             if expires > self.now_unix_seconds
                 && !comparable_newer
@@ -211,6 +215,28 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn stale_exhausted_snapshot_does_not_clear_newer_refusal() {
+        let mut record = record(QuotaStatus::Exhausted);
+        record.snapshot.as_mut().unwrap().observed_unix_seconds = 960;
+        let refusal = Refusal {
+            account: record.account.clone(),
+            model: "exact/model".into(),
+            pool: Some("pool-a".into()),
+            observed_unix_seconds: 950,
+            resets_unix_seconds: None,
+        };
+        assert!(matches!(
+            Admission {
+                now_unix_seconds: 1300,
+                records: &[record],
+                refusals: &[refusal],
+                pools: &["pool-a".into()],
+            }
+            .admit(&route(), &"operation".parse().unwrap()),
+            Err(QuotaError::Refused("scoped provider refusal"))
+        ));
     }
     #[test]
     fn unknown_and_stale_do_not_manufacture_exhaustion() {

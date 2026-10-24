@@ -105,7 +105,7 @@ fn create_path(path: &Path) -> Result<Directory, EdgeError> {
     let dir = match Directory::open_anchor(path) {
         Ok(dir) => dir,
         Err(error) if error.is_not_found() => {
-            let parent = create_path(path.parent().ok_or(EdgeError::Permissions)?)?;
+            let parent = Directory::open_anchor(path.parent().ok_or(EdgeError::Permissions)?)?;
             let name = path.file_name().ok_or(EdgeError::Permissions)?;
             match parent.mkdir(name, 0o700) {
                 Ok(()) => parent.sync()?,
@@ -262,15 +262,6 @@ fn detections(registry: &[provenant_providers::Registration]) -> Vec<Detection> 
         })
         .collect()
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Domains {
-    quota: Settings,
-}
-static ENTRIES: [provenant_config::DomainSection; 1] = [SECTION];
-static SECTIONS: provenant_config::DomainSections<Domains> =
-    provenant_config::DomainSections::new(&ENTRIES);
-
 fn execute(
     command: &Quota,
     roots: &Roots,
@@ -298,10 +289,13 @@ fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let settings =
-        provenant_config::read_with_domains(roots, &provenant_supervisor::fs::LocalFs, &SECTIONS)?
-            .domains
-            .quota;
+    let settings = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )?
+    .domains
+    .quota;
     let clock = SystemClock::new();
     let now = clock
         .wall_now()
