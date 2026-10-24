@@ -11,7 +11,14 @@ false report. Paste the first section into every lane and reviewer brief.
   cancel and redispatch a lane that started one.
 - Direct process control is refused. Use `provenant cancel TARGET` for owned
   work. The optional Bash hook is `provenant hook claude pre-tool-use`;
-  confinement and owned process handles enforce the underlying policy.
+  confinement and owned process handles enforce the underlying policy. The
+  same hook denies bare `git stash`, `git reset --hard`, `git clean -f`,
+  force pushes (not `--force-with-lease`), `--no-verify`, branch changes in a
+  primary checkout and foreground `sleep N` of 5 s or more, each with a
+  one-line remedy. `[domains.guard] deny = [...]` in `config.toml` lists the
+  rules that are on; omit an id to turn it off. Only Claude has a
+  registrable pre-tool surface; Codex and OpenCode lanes rely on the sandbox
+  and the pre-push hook.
 - `provenant hook git pre-push` refuses default-branch deletion,
   non-fast-forward pushes, default-branch pushes from linked worktrees and
   conflict markers in pushed commits. `install --hooks on` registers only
