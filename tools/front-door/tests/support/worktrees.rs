@@ -165,6 +165,7 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let first_record = store.create(&first, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -234,6 +235,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     let _ = fs::remove_file(&ready);
     let first_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
     };
@@ -250,6 +252,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     let second_record = store.create(&second, &call)?;
     let second_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -314,6 +317,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "control",
     };
@@ -374,6 +378,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
     };
@@ -425,6 +430,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "negative",
     };
@@ -514,6 +520,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
     };
@@ -704,6 +711,7 @@ fn writer_run(
 
 struct WriterProvider {
     state: PathBuf,
+    home: PathBuf,
     project: provenant_core::ProjectId,
     mode: &'static str,
 }
@@ -733,6 +741,7 @@ impl provenant_run::Providers for WriterProvider {
         let plan = provenant_cli::run::writer_fixture_plan(
             self.project,
             writer.worktree.path(),
+            &self.home,
             paths,
             &writer,
         )?;
@@ -767,6 +776,7 @@ impl provenant_run::Providers for WriterProvider {
                 plan,
                 profile,
                 writer: Some(writer),
+                home: self.home.clone(),
             }),
         })
     }
@@ -1129,9 +1139,14 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
-    let home = rig.state.join("fixture-home");
+    let home = rig.root.join("fixture-home");
+    fs::create_dir_all(home.join(".claude"))?;
     fs::create_dir_all(home.join(".codex"))?;
     fs::write(home.join(".codex/auth.json"), b"fixture credential")?;
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(home.join(path))?;
+    }
+    fs::write(home.join(".rustup/settings.toml"), b"fixture settings")?;
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     fs::copy(std::env::current_exe()?, &executable)?;
@@ -1172,8 +1187,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
             lane_depth: 2,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
         };
-        for path in [&paths.scratch, &paths.provider_state] {
+        for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
             fs::create_dir_all(path)?;
         }
         let registry = provenant_cli::run::Registry {
@@ -1191,10 +1207,15 @@ fn lane_prepare_isolates_nested_state() -> Result {
             model: Some(format!("{adapter}/fixture-fallback")),
             ..Default::default()
         });
+        let staging = if writer {
+            &paths.scratch
+        } else {
+            &paths.temporary
+        };
         let poison = if adapter == "codex" {
             paths.provider_state.join("candidate-0/auth.json")
         } else {
-            paths.scratch.join("candidate-0/provenant-settings.json")
+            staging.join("candidate-0/provenant-settings.json")
         };
         fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
         fs::write(&poison, b"partial setup")?;
@@ -1226,7 +1247,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
         let permissions = confinement.plan.permissions();
-        assert_eq!(permissions.scratch.path, paths.scratch.join("candidate-1"));
+        assert_eq!(permissions.scratch.path, staging.join("candidate-1"));
         if adapter == "codex" {
             assert!(
                 fs::symlink_metadata(
@@ -1272,7 +1293,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 roots
                     .state
                     .as_path()
-                    .join("runs/other/attempts/other/custody.json"),
+                    .join("runs/other/attempts/other/custody.lock"),
             ] {
                 assert!(
                     !(grant.path == denied
@@ -1506,6 +1527,7 @@ fn verify_lane_profile(
         .map(|path| AnchoredDirectory::open_canonical(&LocalFs, path))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let anchors = Anchors {
+        home: &confinement.home,
         directories: &directories,
         safe_fs: &LocalFs,
         worktree: writer,
@@ -1540,6 +1562,44 @@ fn verify_lane_profile(
             .ok_or("confined MCP reply")?["result"]["structuredContent"]["code"],
         "lane_depth"
     );
+    // Admission below the limit must also open the isolated child store under
+    // the profile, rather than only exercising the early depth refusal.
+    let child = launch
+        .environment
+        .iter()
+        .find(|(key, _)| key == provenant_core::RUN_STATE_DIRECTORY_ENV)
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or("child store environment")?;
+    let run_count = || -> Result<usize> {
+        match fs::read_dir(child.join("runs")) {
+            Ok(entries) => Ok(entries.collect::<std::io::Result<Vec<_>>>()?.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let before = run_count()?;
+    fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.max_depth'=3\n",
+    )?;
+    let nested_frames =
+        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
+    let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
+    options.env = Some(&launch.environment);
+    options.stdin = Some(nested_frames.as_bytes());
+    let nested = executor.execute(options)?;
+    fs::remove_file(state.join("config.toml"))?;
+    assert_eq!(
+        code(&nested),
+        0,
+        "{}",
+        String::from_utf8_lossy(&nested.stderr.bytes)
+    );
+    assert!(
+        run_count()? > before,
+        "confined child admission created no run"
+    );
+    assert!(!state.join("run.sqlite3").exists());
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),

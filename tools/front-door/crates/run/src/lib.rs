@@ -6,6 +6,7 @@ mod controls;
 mod db;
 mod holder;
 mod launch;
+mod plan;
 mod reader;
 mod store;
 mod writer;
@@ -50,6 +51,8 @@ pub enum RunError {
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
+    #[error(transparent)]
+    Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error("run-store schema version {0} is unsupported")]
@@ -98,7 +101,6 @@ pub enum RunError {
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
-
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]

@@ -8,9 +8,8 @@ pure review coverage check; for PR work the PR carries the evidence. Cut workflo
 engines, generated reference runs, duplicated queues and the entire bespoke UI
 runtime. Skills conduct the work using `git`, `gh`, Fabric and browser tools.
 
-This is a design for both implementation chairs, not an implementation or
-cut-over approval. The binding [cross-area decisions](https://github.com/mblauberg/provenant/blob/d61c4335a5c3e9ef3c5761b21fc710354226723e/docs/specs/rust-port/design/README.md#cross-area-decisions)
-and [PORTING v7](https://github.com/mblauberg/provenant/blob/d61c4335a5c3e9ef3c5761b21fc710354226723e/docs/specs/rust-port/PORTING.md)
+This design records the accepted workflow contract. The binding [cross-area decisions](README.md#cross-area-decisions)
+and [PORTING v7](../PORTING.md)
 govern this design; the table wins any conflict, including older R1 import
 wording. V7 supersedes the transition, compatibility and parity sections of
 [ADR 0028](../../../adr/0028-rust-port-dependencies.md) and the [port plan](../README.md).
@@ -311,9 +310,8 @@ no threads or subprocesses and never cancels another owner's attempt/lease.
 
 ## CLI, writing and hook surface
 
-The [CLI design in PR #1359](https://github.com/mblauberg/provenant/pull/1359)
-owns the command envelope and verb tree. Its `workflow` subtree is reserved;
-the following leaves are proposed. Writing checks use the shared `check` verb
+The [CLI design](cli.md) owns the command envelope and verb tree. Its
+`workflow` subtree and the following leaves are the shipped contract. Writing checks use the shared `check` verb
 (decisions table, Checks and hooks): `check writing PATHS` runs workflow's
 writing rules as data and exits 1 on findings.
 
@@ -332,16 +330,18 @@ provenant check writing <paths...> [--rules general|academic|legal] [--json]
 host, never by JSON claiming authority. `show` reports stored claims, without
 claiming current verification. CLI renders one UTF-8 JSON object plus LF:
 `{ "schema_version": 1, "command": "workflow.review", "status": "ok", "data": {}, "error": null }`.
-Status is `ok`, `failed`, `refused`, `cancelled`, `timeout` or `error`; errors
+Status is `ok`, `failed`, `refused`, `unavailable`, `cancelled`, `timeout` or `error`; errors
 carry a stable code, redacted message, cause and optional repair. Useful partial
-coverage and input-required state go in `data`, never an exit 4. The whole
+coverage and input-required state go in `data`; exit 4 means a required
+capability is unavailable. The whole
 result is capped at **1 MiB**; paginated lists carry `next_cursor`, and tails
 are at most 500 lines/64 KiB. Never silently discard rows. Text reports short
 status and remedies.
 
 The binding exits are 0 successful operation/query, 1 failed/refused/findings,
 2 invalid input/version, 3 cannot proceed (setup, I/O, conflict/contention or
-unavailable required evidence), 124 wait deadline and 130 cancelled. A wait
+unavailable required evidence), 4 unavailable capability, 124 wait deadline
+and 130 cancelled. A wait
 whose condition is met, including `InputRequired`, exits 0. Waits require an
 explicit budget; CLI permits up to 14,400 seconds. The binary edge renders
 these outcomes; libraries never choose exits or return an envelope.
@@ -877,7 +877,7 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 | providers | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; keep adapter, endpoint and model family separate. ChairAttested never fills cross-family coverage. Workflow consumes edge-built facts, without a providers dependency. |
 | routing | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`: tiers, all author families, expiry and quota/config/capability/family-slot blockers. No probes under the receipt lock. Quota feeds routing, with no workflow call. |
 | telemetry | No workflow write/report API or ledger; CLI reads `acceptance` for the accepted-delivery join. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |
-| cli/binary | Parse proposed workflow leaves and `hook claude pre-compact\|compact`; route `check writing` to workflow's matcher; register workflow's pre-compact and session-start handlers in cli's `HookSpec` table, which the installer also reads. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/124/130; partial/input-required in data. Run verbs stay top level under run. |
+| cli/binary | Parse workflow leaves and `hook claude pre-compact\|compact`; route `check writing` to workflow's matcher; register workflow's pre-compact and session-start handlers in cli's `HookSpec` table, which the installer also reads. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/4/124/130; partial/input-required in data. Run verbs stay top level under run. |
 | fabric-store / fabric-runtime | Own the only read-only one-shot cut-over import: open/blocked tasks plus unacknowledged requests from the last 14 days. Map project/identity without importing authority; workflow points agents to it. Product identity env is `PROVENANT_AGENT_LABEL`, replacing `AGENT_FABRIC_LABEL`. |
 | fabric-mcp | No workflow asks, tools or dependency edge. CLI JSON, top-level run `lanes` and Fabric tasks suffice. |
 | Native host | Supply session ID in hook events; SessionStart injects actual key/save command. Retain observed launch identity when available, otherwise explicit ChairAttested native provenance under the limits above. |
@@ -896,7 +896,8 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
   pending. Accepting runs coverage and is refused with `REVIEW_INCOMPLETE`
   unless it passes. Reviews supplied on a pending save are still bound.
 - Coverage uses compiled `ReviewPolicy` and `RiskPolicy` defaults, with no
-  config wiring. `config/risk-policy.json` stays for `harness_profile.py`.
+  config wiring. `config/risk-policy.json` has no Rust reader and is not an
+  input to these defaults.
 - `run_gates.rs` and the Python-oracle harness were dropped with the validator
   cone. All of `skills/_shared` was deleted, including `harness_profile.py` and
   `roots.py`; scripts that still import them belong to lanes D and F.

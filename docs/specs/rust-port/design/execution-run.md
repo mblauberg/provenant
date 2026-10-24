@@ -186,6 +186,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     provider-state/            # retained provider state/history; no credentials
     quarantine/                # retained patches/blobs and manifest
     scratch/                   # disposable launch staging only
+    tmp/                       # attempt-private provider/test temporary data
 ```
 
 For nested submission, the Run root is the submitting attempt's dedicated
@@ -206,6 +207,32 @@ uses the live stream, not a second on-disk copy. Structured run events live
 in SQLite. Retention policy is out of scope. Guardian settlement deletes only
 disposable `scratch/` data; history, unclassified data and transcripts remain
 retained, never staged there.
+Read-only plans take Git read authority from the host's persisted project
+binding, not the lane's `.git` marker. The common-directory subtree includes
+linked worktree private directories and is explicitly denied writes. Confinement
+checks the held repository against that binding before resolving grants.
+
+The user-approved #1343 exception policy is a bounded, strict JSON file at
+`projects/<ProjectId>/read-only.json`, with `{"readOnlyWritable": []}` by default.
+Absence means no exceptions; malformed or linked policy files refuse. Entries
+name existing directories relative to the verified repository root. Absolute
+paths, dot/parent traversal, symlinked components and Git/provider configuration
+components are refused. Writes cover only the named subtrees; protected config
+components remain immutable even when nested below a granted directory.
+The attempt records every granted relative path before guardian handoff.
+
+Run creates each attempt's `tmp/` with mode 0700 and passes it to preparation;
+read-only plan construction selects it as scratch, and provider recipes set
+`TMPDIR` there. Terminal commit and withdrawal remove it best-effort using
+held directories without following symlinks. Cleanup failure does not change
+the committed attempt. It is not retained provider history and is not the
+supervisor's host-only classified `scratch/`.
+No new deletion/retention command is introduced. Production
+`Registry::prepare` selects this directory as read-only scratch and applies
+recipe setup below scratch or provider state, but does not yet build its plan
+through `read_only_plan`, so project write exceptions and the common Git
+directory grant are not yet applied to dispatch.
+
 Modes are 0700/0600 under state's verified root. Use rusqlite WAL,
 foreign keys and `synchronous=FULL`; each connection has one owning thread,
 bounded BUSY retries and no transaction spanning a wait, resource probe or
@@ -794,8 +821,8 @@ scheduler daemon. Within that, the lane decided:
   exact credential source, purpose and expiry before the host token loader
   can run. The task request currently carries no such record.
 - **Launch storage** is allocated once per attempt before route fallback, under
-  its canonical `scratch/` and `provider-state/` paths. Each fallback uses
-  `candidate-N/` beneath those roots so partial setup cannot poison a later
+  its canonical `scratch/` (writer), `tmp/` (read-only), and `provider-state/`
+  paths. Each fallback uses `candidate-N/` beneath the relevant roots so partial setup cannot poison a later
   candidate. No candidate creates random `tmp/` trees. Settlement removes empty scratch; provider history and
   unclassified contents remain retained. Supervisor owns reservation listing:
   malformed entries are reported and remain fenced while valid entries can

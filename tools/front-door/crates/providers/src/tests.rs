@@ -336,7 +336,7 @@ fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), Pro
     Ok(())
 }
 
-fn route(adapter: &str, model: &str) -> ResolvedRoute {
+pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
     ResolvedRoute {
         adapter: adapter.into(),
         model: model.into(),
@@ -589,7 +589,10 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     ));
 }
 
-fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confinement::ConfinedPlan {
+pub(super) fn read_only_plan(
+    root: &str,
+    authentication: Option<&str>,
+) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
@@ -603,6 +606,7 @@ fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confine
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant("scratch"),
             private_state: Some(grant("state")),
@@ -619,6 +623,33 @@ fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confine
     .expect("fixture plan")
 }
 
+fn fixture_access_plan(
+    access: Access,
+    authentication: Option<&str>,
+    include_continuation: bool,
+) -> provenant_confinement::ConfinedPlan {
+    use provenant_confinement::permissions::{AccessMode, WorktreeWriteAuthority};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let reader = read_only_plan("/fixture", authentication);
+    let mut permissions = reader.permissions().clone();
+    permissions.include_continuation = include_continuation;
+    if access == Access::WorktreeWrite {
+        let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
+            "git_grants_digest": vec![0; 32],
+            "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-lane-cargo/fixture", "scope": "subtree"}
+        })).expect("fixture authority; no compilation is attempted");
+        permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
+    }
+    ConfinedPlan::new(PlanRequest {
+        scope: reader.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture access plan")
+}
+
 const FIXTURE_TOKEN: &str = "fixture-access-token";
 
 fn fixture_token() -> crate::claude::OauthToken {
@@ -628,7 +659,7 @@ fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
-fn fixture_input<'a>(
+pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
     prompt: &'a Prompt,
@@ -692,7 +723,13 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             .map(|(key, _)| key.to_string_lossy())
             .collect();
         let extra: &[&str] = match id {
-            "codex" => &["CODEX_HOME", "SHELL"],
+            "codex" => &[
+                "CARGO_HOME",
+                "RUSTUP_HOME",
+                "CARGO_TARGET_DIR",
+                "CODEX_HOME",
+                "SHELL",
+            ],
             "claude" => &[
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
@@ -792,6 +829,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
         assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
             grant.path == package
+                || (id == "codex" && grant.path.starts_with("/fixture/home"))
                 || [
                     "/fixture/provenant/bin/provenant",
                     "/fixture/provenant/release.json",
@@ -837,6 +875,10 @@ struct LiveCapture {
     answering_model: Option<String>,
     activation_eligible: bool,
     argv: Vec<String>,
+    #[serde(default)]
+    writer_shell_proof: bool,
+    #[serde(default)]
+    keychain_ipc_proof: bool,
 }
 
 fn recordings(adapter: &str) -> Vec<LiveCapture> {
@@ -946,6 +988,8 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
         session_mode: Session,
         enabled: bool,
         capture_refs: Vec<String>,
+        #[serde(default)]
+        shell_enabled: bool,
     }
     let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
     for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
@@ -960,6 +1004,21 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
             assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
             assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
             assert!(capture.activation_eligible, "{reference}");
+            if mode.shell_enabled {
+                assert_eq!(mode.access_mode, Access::WorktreeWrite);
+                assert!(capture.writer_shell_proof, "{reference}");
+                assert!(
+                    capture.keychain_ipc_proof,
+                    "{reference}: keychain IPC not probed"
+                );
+                assert!(
+                    capture
+                        .argv
+                        .iter()
+                        .any(|arg| arg.split(',').any(|tool| tool == "Bash")),
+                    "{reference}"
+                );
+            }
             assert_eq!(capture.outcome, "Success", "{reference}");
             assert!(
                 capture
@@ -1224,6 +1283,192 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
 }
 
 #[test]
+fn codex_read_only_toolchain_uses_private_build_and_existing_registry() {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = read_only_plan("/fixture", Some("login"));
+    let prompt = Prompt::new("fixture".into());
+    let spec = crate::codex::Codex
+        .prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        ))
+        .unwrap();
+    let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
+    assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
+    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
+    assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
+    for dir in [
+        "/fixture/home/.cargo/bin",
+        "/fixture/home/.rustup/toolchains",
+    ] {
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|g| g.path == std::path::Path::new(dir))
+        );
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .any(|g| g.path == std::path::Path::new(dir))
+        );
+    }
+    assert!(spec.setup.contains(&crate::launch::SetupStep::Symlink {
+        link: "/fixture/scratch/cargo-home/registry".into(),
+        target: "/fixture/home/.cargo/registry".into(),
+    }));
+    assert!(!spec.profile.spec.runtime_reads.iter().any(|g| g.path.ends_with(".cargo") || g.path.to_string_lossy().contains("credentials")));
+}
+
+#[test]
+fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "claude",
+            &[
+                ".claude/settings.json",
+                ".claude/hooks/run",
+                ".claude/CLAUDE.md",
+                ".claude/skills/test/SKILL.md",
+                ".claude/ide/state",
+                ".claude/jobs/job",
+                ".claude/state/file",
+                ".claude/teams/team",
+            ],
+        ),
+        (
+            "codex",
+            &[
+                ".codex/config.toml",
+                ".codex/rules/default.rules",
+                ".codex/skills/test/SKILL.md",
+                ".codex/hooks/run",
+                ".codex/extensions/test",
+            ],
+        ),
+        (
+            "opencode",
+            &[
+                ".config/opencode/opencode.json",
+                ".config/opencode/plugins/run.js",
+                ".config/opencode/skills/test/SKILL.md",
+            ],
+        ),
+        (
+            "agy",
+            &[
+                ".gemini/settings.json",
+                ".gemini/config/mcp_config.json",
+                ".gemini/config/plugins/run",
+                ".gemini/antigravity-cli/sidecars/run",
+                ".gemini/antigravity-cli/plugin_data/file",
+                ".gemini/antigravity-cli/knowledge/file",
+            ],
+        ),
+        (
+            "cursor",
+            &[
+                ".cursor/hooks.json",
+                ".cursor/extensions/run",
+                ".cursor/skills/test/SKILL.md",
+                ".cursor/plans/plan",
+                ".cursor/ai-tracking/file",
+            ],
+        ),
+    ];
+    let covers = |grant: &PathGrant, path: &std::path::Path| match grant.scope {
+        PathScope::Exact => grant.path == path,
+        PathScope::Subtree => path.starts_with(&grant.path),
+    };
+    let prompt = Prompt::new("fixture prompt".into());
+    for &(id, forbidden) in cases {
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .expect("provider")
+            .adapter;
+        let recording = match id {
+            "claude" => fixture!("claude/direct-model.jsonl"),
+            "codex" => fixture!("codex/success.jsonl"),
+            "cursor" => fixture!("cursor/fresh.jsonl"),
+            "agy" => fixture!("agy/success.jsonl"),
+            "opencode" => fixture!("opencode/unversioned-success.jsonl"),
+            _ => return Err(ProviderError::UnknownIdentity),
+        };
+        let outcome = replay(adapter, recording, EXIT)?.1;
+        let route = route(id, outcome.model().unwrap_or("fixture-model"));
+        let account_dir = std::path::Path::new("/fixture/identities/opaque");
+        let account = matches!(id, "claude" | "codex")
+            .then(|| identity::RegisteredAccount::new(id, "opaque-account", account_dir.into()))
+            .transpose()?;
+        let account_token =
+            (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
+        // Synthetic continuation for path-policy coverage, including disabled
+        // adapters without answering-model evidence. This enables no mode.
+        let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            for session in [Session::Fresh, Session::Resume] {
+                let plan = fixture_access_plan(
+                    access,
+                    (id == "codex").then_some("login"),
+                    session == Session::Resume,
+                );
+                let mut input = fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    account_token.as_ref(),
+                );
+                input.account = account.as_ref();
+                input.continuation = (session == Session::Resume).then_some(&continuation);
+                let launch = match adapter.prepare(input) {
+                    Ok(launch) => launch,
+                    Err(ProviderError::Disabled { .. }) => {
+                        assert!(!mode_enabled(id, access, session));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                for relative in forbidden
+                    .iter()
+                    .copied()
+                    .chain([".npm/_cacache/content", ".npm/_logs/log"])
+                {
+                    let path = std::path::Path::new("/fixture/home").join(relative);
+                    let writable = launch
+                        .profile
+                        .spec
+                        .state_writes
+                        .iter()
+                        .chain(
+                            launch
+                                .profile
+                                .spec
+                                .authentication
+                                .iter()
+                                .flat_map(|auth| &auth.in_place_writes),
+                        )
+                        .chain(std::iter::once(&plan.permissions().scratch))
+                        .chain(&plan.permissions().private_state)
+                        .any(|grant| covers(grant, &path));
+                    assert!(!writable, "{id} {access:?} {session:?}: {}", path.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
     // Synthetic protocol regression from #1216, not an activation recording.
     let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
@@ -1408,5 +1653,72 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "recording")]
+#[test]
+fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
+-> Result<(), ProviderError> {
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        std::path::Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    assert!(
+        launch
+            .argv
+            .iter()
+            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash")
+    );
+    assert!(launch.profile.spec.deny_keychain_access);
+    assert!(launch.profile.spec.authentication.is_empty());
+    assert!(launch.profile.spec.state_writes.is_empty());
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value == "/fixture/state/claude-config")
+    );
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == FIXTURE_TOKEN)
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "recording"))]
+#[test]
+fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), ProviderError> {
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    let tools = launch
+        .argv
+        .iter()
+        .position(|arg| arg == "--tools")
+        .expect("tools");
+    assert_eq!(launch.argv[tools + 1], "Read,Grep,Glob,Edit,Write");
+    assert!(!launch.profile.spec.deny_keychain_access);
+    assert!(launch.profile.spec.tool_exec_roots.is_empty());
     Ok(())
 }

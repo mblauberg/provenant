@@ -78,6 +78,19 @@ impl Fixture {
         run_fixture_git(&self.executor, &self.git, self.repo.root_path(), &env, args)
     }
 
+    pub(crate) fn binding(&self) -> Result<provenant_config::ProjectBinding, Box<dyn Error>> {
+        let state = self._temp.path().join("state");
+        fs::create_dir_all(&state)?;
+        let mut input = provenant_core::RootInputs::new(self.home.clone(), self.root.clone());
+        input.state_dir = Some(state);
+        let roots = input.resolve(&LocalFs)?;
+        Ok(provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(self.repo.common_git_dir())?,
+            &LocalFs,
+        )?)
+    }
+
     pub(crate) fn budget(&self) -> Result<UtilityBudget, UtilityError> {
         UtilityBudget::bounded(Duration::from_secs(10))
     }

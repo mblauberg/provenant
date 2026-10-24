@@ -434,6 +434,9 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 #[test]
 fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
     let mut rig = TestRig::new()?;
+    // The host binds the project before a read-only lane looks it up.
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
     rig.env.extend([
         (provenant_run::LANE_DEPTH_ENV.into(), "2".into()),
         (
@@ -449,7 +452,10 @@ fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
     )?;
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(result["structuredContent"]["code"], "lane_depth");
+    assert_eq!(
+        result["structuredContent"]["code"], "lane_depth",
+        "{result}"
+    );
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }

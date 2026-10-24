@@ -79,14 +79,55 @@ fn prepare(
     // are readable through the runtime baseline; exec roots add exec, not
     // reads. No shared install prefix: its etc/ and var/ stay unreadable.
     let package = package_root(input.executable)?;
-    let tool_exec_roots = vec![
+    let mut tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
         subtree(package),
     ];
-    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    let mut runtime_reads = vec![subtree(package)];
+    let mut setup = vec![SetupStep::Symlink {
+        link: codex_home.join("auth.json"),
+        target: credential.clone(),
+    }];
+    let path = if access == Access::ReadOnly {
+        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
+    } else {
+        "/usr/bin:/bin".into()
+    };
+    let mut env = base_env(input, &plan.scratch.path, &path);
     input.provenant.environment(&mut env);
+    if access == Access::ReadOnly {
+        let cargo = input.home.join(".cargo");
+        let rustup = input.home.join(".rustup");
+        let cargo_home = plan.scratch.path.join("cargo-home");
+        let target = plan.scratch.path.join("target");
+        tool_exec_roots.push(subtree(&target));
+        for directory in [cargo.join("bin"), rustup.join("toolchains")] {
+            runtime_reads.push(subtree(&directory));
+            tool_exec_roots.push(subtree(directory));
+        }
+        runtime_reads.extend([
+            subtree(cargo.join("registry")),
+            exact(rustup.join("settings.toml")),
+        ]);
+        env.extend([
+            ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
+            ("RUSTUP_HOME".into(), rustup.into_os_string()),
+            (
+                "CARGO_TARGET_DIR".into(),
+                plan.scratch.path.join("target").into_os_string(),
+            ),
+        ]);
+        setup.extend([
+            SetupStep::CreateDir(cargo_home.clone()),
+            SetupStep::CreateDir(target),
+            SetupStep::Symlink {
+                link: cargo_home.join("registry"),
+                target: cargo.join("registry"),
+            },
+        ]);
+    }
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
     let mut spec = LaunchSpec {
@@ -94,15 +135,12 @@ fn prepare(
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
         cwd: input.cwd.to_owned(),
-        setup: vec![SetupStep::Symlink {
-            link: codex_home.join("auth.json"),
-            target: credential.clone(),
-        }],
+        setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                runtime_reads: vec![subtree(package)],
+                runtime_reads,
                 authentication: vec![AuthenticationProfile {
                     mechanism: "login".into(),
                     roots: vec![exact(&credential)],

@@ -13,17 +13,17 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, clap::Args)]
 pub struct Install {
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
+    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub source: PathBuf,
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
+    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub bin_dir: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "off")]
     pub hooks: Switch,
     #[arg(long)]
     pub adopt_existing: bool,
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
+    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub legacy_checkout: Option<PathBuf>,
     #[arg(long)]
     pub dry_run: bool,
@@ -35,13 +35,6 @@ pub struct Uninstall {
     pub harness: Vec<Harness>,
 }
 
-fn absolute(path: PathBuf) -> Result<PathBuf, &'static str> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Err("expected an absolute path")
-    }
-}
 pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = Harness> {
     clap::builder::PossibleValuesParser::new(["claude", "codex", "cursor", "agy", "opencode"])
         .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))

@@ -120,10 +120,11 @@ impl Store {
             if let Component::Normal(name) = part {
                 match directory.metadata_at(name, false) {
                     Ok(_) => {}
-                    Err(error) if error.is_not_found() => {
-                        directory.mkdir(name, 0o700)?;
-                        directory.sync()?;
-                    }
+                    Err(error) if error.is_not_found() => match directory.mkdir(name, 0o700) {
+                        Ok(()) => directory.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    },
                     Err(error) => return Err(error.into()),
                 }
                 directory = checked_directory(&directory, name, None)?;
@@ -137,8 +138,11 @@ impl Store {
         match directory.metadata_at(OsStr::new("fabric"), false) {
             Ok(_) => {}
             Err(error) if error.is_not_found() => {
-                directory.mkdir(OsStr::new("fabric"), 0o700)?;
-                directory.sync()?;
+                match directory.mkdir(OsStr::new("fabric"), 0o700) {
+                    Ok(()) => directory.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             Err(error) => return Err(error.into()),
         }

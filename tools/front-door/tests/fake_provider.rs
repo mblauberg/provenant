@@ -208,6 +208,7 @@ fn account_placement() -> Result {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                read_only: None,
                 mode: AccessMode::ReadOnly,
                 scratch: grant(scratch),
                 private_state: Some(grant(state.clone())),
@@ -255,13 +256,13 @@ fn account_placement() -> Result {
             cwd: &rig.project,
             nonce: [1; 16],
             provenant: provenant_providers::LaneRuntime {
-                executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
-                state: std::path::Path::new("/fixture/state"),
-                child_state: std::path::Path::new("/fixture/state/children/attempt"),
+                executable: &executable,
+                state: &rig.state,
+                child_state: &rig.state.join(format!("children/{key}")),
                 home: &rig.home,
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes([1; 16]),
-                assets: std::path::Path::new("/fixture/provenant"),
+                assets: &rig.project,
             },
         })?;
         let auth = account.directory().join("auth.json");
@@ -272,8 +273,9 @@ fn account_placement() -> Result {
         assert_eq!(selected.in_place_writes[0].path, auth);
         for step in &spec.setup {
             match step {
+                SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
+                SetupStep::WriteFile { path, bytes } => std::fs::write(path, bytes)?,
                 SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
-                _ => return Err("unexpected setup".into()),
             }
         }
         specs.push((key, state, spec));

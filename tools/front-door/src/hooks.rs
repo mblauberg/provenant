@@ -237,21 +237,11 @@ fn with_git<T>(
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;
     let result = (|| {
-        // Lanes grant this exact system binary; interactive hooks keep their
-        // usual installed-Git discovery.
-        let lane = std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/opt/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .filter(|p| !lane || *p == Path::new("/usr/bin/git"))
-        .find(|p| provenant_supervisor::sys::is_executable(p))
-        .ok_or("Git unavailable")?;
+        let git = if std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some() {
+            Path::new("/usr/bin/git").to_owned()
+        } else {
+            super::roots::git_binary().ok_or("Git unavailable")?
+        };
         let git = std::fs::canonicalize(git)?;
         let runtime = UtilityRuntime::new(Arc::new(LocalFs), git, temp.join(&name))?;
         let executor = SystemExecutor::new(1)?;

@@ -446,13 +446,18 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn tempdir() -> tempfile::TempDir {
-        tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap()
+        tempfile::tempdir().unwrap()
+    }
+
+    fn canonical_base(temp: &tempfile::TempDir) -> PathBuf {
+        temp.path().canonicalize().unwrap()
     }
 
     fn roots(temp: &tempfile::TempDir) -> Roots {
-        let home = temp.path().join("home");
-        let state = temp.path().join("state");
-        let checkout = temp.path().join("checkout");
+        let base = canonical_base(temp);
+        let home = base.join("home");
+        let state = base.join("state");
+        let checkout = base.join("checkout");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&state).unwrap();
         fs::create_dir_all(&checkout).unwrap();
@@ -465,25 +470,24 @@ mod tests {
     fn bind_project_reuses_random_identity_for_the_same_canonical_common_dir() {
         let temp = tempdir();
         let roots = roots(&temp);
-        let location = ProjectLocation::new(temp.path().join("repository/.git")).unwrap();
+        let base = canonical_base(&temp);
+        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
         fs::create_dir_all(location.common_dir()).unwrap();
 
         let first = bind_project(&roots, location.clone(), &LocalFs).unwrap();
         let second = bind_project(&roots, location, &LocalFs).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(
-            first.canonical_common_dir,
-            temp.path().join("repository/.git")
-        );
+        assert_eq!(first.canonical_common_dir, base.join("repository/.git"));
     }
 
     #[test]
     fn bind_project_assigns_distinct_ids_to_distinct_common_directories() {
         let temp = tempdir();
         let roots = roots(&temp);
-        let first_location = temp.path().join("one/.git");
-        let second_location = temp.path().join("two/.git");
+        let base = canonical_base(&temp);
+        let first_location = base.join("one/.git");
+        let second_location = base.join("two/.git");
         fs::create_dir_all(&first_location).unwrap();
         fs::create_dir_all(&second_location).unwrap();
 
@@ -518,6 +522,7 @@ mod tests {
     fn bind_project_removes_only_owned_stale_stage_contents() {
         let temp = tempdir();
         let roots = roots(&temp);
+        let base = canonical_base(&temp);
         let projects = roots.state.as_path().join(PROJECTS_DIR);
         fs::create_dir(&projects).unwrap();
         fs::set_permissions(&projects, fs::Permissions::from_mode(0o700)).unwrap();
@@ -539,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        let location = ProjectLocation::new(temp.path().join("repository/.git")).unwrap();
+        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
         fs::create_dir_all(location.common_dir()).unwrap();
         bind_project(&roots, location, &LocalFs).unwrap();
 
@@ -550,18 +555,19 @@ mod tests {
     fn bind_project_refuses_a_stale_stage_symlink_without_touching_its_target() {
         let temp = tempdir();
         let roots = roots(&temp);
+        let base = canonical_base(&temp);
         let projects = roots.state.as_path().join(PROJECTS_DIR);
         fs::create_dir(&projects).unwrap();
         fs::set_permissions(&projects, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let outside = temp.path().join("outside");
+        let outside = base.join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("keep"), b"outside contents").unwrap();
         let project = ProjectId::from_bytes([9; 16]);
         let stage = projects.join(format!(".project-stage-{project}"));
         std::os::unix::fs::symlink(&outside, &stage).unwrap();
 
-        let location = ProjectLocation::new(temp.path().join("repository/.git")).unwrap();
+        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
         fs::create_dir_all(location.common_dir()).unwrap();
 
         assert!(bind_project(&roots, location, &LocalFs).is_err());

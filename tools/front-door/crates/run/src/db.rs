@@ -118,10 +118,11 @@ impl RunStore {
             if let Component::Normal(name) = component {
                 match root.metadata_at(name, false) {
                     Ok(_) => {}
-                    Err(error) if error.is_not_found() => {
-                        root.mkdir(name, 0o700)?;
-                        root.sync()?;
-                    }
+                    Err(error) if error.is_not_found() => match root.mkdir(name, 0o700) {
+                        Ok(()) => root.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    },
                     Err(error) => return Err(error.into()),
                 }
                 let before = root.metadata_at(name, false)?;

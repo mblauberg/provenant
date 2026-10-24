@@ -58,8 +58,11 @@ fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
             dir = match dir.open_verified_directory(name) {
                 Ok(child) => child,
                 Err(error) if error.is_not_found() => {
-                    dir.mkdir(name, 0o700)?;
-                    dir.sync()?;
+                    match dir.mkdir(name, 0o700) {
+                        Ok(()) => dir.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    }
                     dir.open_verified_directory(name)?
                 }
                 Err(error) => return Err(error.into()),

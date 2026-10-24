@@ -1,6 +1,6 @@
 use crate::launch::{
     Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
-    subtree, uuid_v4,
+    shell_enabled, subtree, uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
@@ -45,6 +45,12 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    #[cfg(test)]
+    pub(crate) fn for_account(mut self, key: &str, dir: &Path) -> Self {
+        self.account = Some((key.into(), dir.to_owned()));
+        self
+    }
+
     /// Parses the keychain item's JSON, keeping only the access token and its
     /// expiry. An empty or expired token is refused.
     pub(crate) fn parse(item: &[u8], now_ms: u64) -> Result<Self, ProviderError> {
@@ -272,10 +278,10 @@ pub fn refresh_for_account(
 
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
-/// unreadable. Provenant and its hook helpers are the only added executables.
-/// The model still gets no shell: file tools only, and edit tools only for
-/// writers. Writable state covers this session's transcript and Provenant's
-/// bounded coordination state.
+/// unreadable. Recorded writer-shell activation additionally denies keychain
+/// services and the security executable, and uses a private config directory.
+/// Until that proof is accepted, writers retain file tools only.
+/// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -322,8 +328,10 @@ fn prepare(
         Session::Resume => "--resume".into(),
     });
     argv.push(session_id.clone().into());
+    let shell = shell_enabled("claude", access, session);
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
+        Access::WorktreeWrite if shell => ("bypassPermissions", "Read,Grep,Glob,Edit,Write,Bash"),
         Access::WorktreeWrite => ("acceptEdits", "Read,Grep,Glob,Edit,Write"),
     };
     argv.extend(
@@ -350,7 +358,7 @@ fn prepare(
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
     let mut setup = input.provenant.claude(scratch, &mut argv)?;
-    setup.push(SetupStep::CreateDir(transcript_dir.clone()));
+
     let mut env = base_env(input, scratch, "/usr/bin:/bin");
     input.provenant.environment(&mut env);
     env.extend(
@@ -362,7 +370,19 @@ fn prepare(
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
-    if input.account.is_some() {
+    if !shell {
+        setup.push(SetupStep::CreateDir(transcript_dir.clone()));
+    }
+    if shell {
+        let config = plan
+            .private_state
+            .as_ref()
+            .ok_or(ProviderError::UnsupportedPolicy)?
+            .path
+            .join("claude-config");
+        env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
+        setup.push(SetupStep::CreateDir(config));
+    } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
     let mut spec = LaunchSpec {
@@ -375,13 +395,27 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
+                deny_keychain_access: shell,
+                tool_exec_roots: if shell {
+                    vec![
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
+                        subtree("/usr/libexec"),
+                    ]
+                } else {
+                    Vec::new()
+                },
                 // Not `~/.claude.json`: it can hold MCP server secrets and the
                 // launch never needs it.
                 runtime_reads: vec![subtree(package)],
-                state_writes: vec![
-                    exact(project.join(format!("{session_id}.jsonl"))),
-                    subtree(transcript_dir),
-                ],
+                state_writes: if shell {
+                    Vec::new()
+                } else {
+                    vec![
+                        exact(project.join(format!("{session_id}.jsonl"))),
+                        subtree(transcript_dir),
+                    ]
+                },
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
