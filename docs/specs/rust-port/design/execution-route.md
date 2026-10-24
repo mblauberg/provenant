@@ -44,7 +44,9 @@ commands and OpenCode's speculative spend estimator. Preserve current quota
 windows/reset advice and refusal backoff, without cooldown mutation commands.
 Provider quota pools are measured allowance scopes, not routing pools.
 No old transcript quota/identity reads, general home mirroring or Python shim
-survives. Confinement retains only a bounded safe Agy home recipe.
+survives. COMPOSE-B permits only the bounded post-exit identity projection
+from the current attempt's private Codex rollout, as execution-run specifies.
+Confinement retains only a bounded safe Agy home recipe.
 
 ## Resolution and command contract
 

@@ -323,7 +323,7 @@ retains a transaction between calls.
 | run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &Acceptance, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
-| providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control or transcript reads. |
+| providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control; the only rollout read is the current-attempt host identity projection below. |
 | supervisor / run | `launch(OwnedLaunch, CapturePlan, PublicationReservation) -> CustodyHandle`; `observe(handle, WaitBudget, &CancelToken) -> Observation`; `stop(handle, StopReason) -> StopReceipt`; `recover(CustodyRef) -> Reattached\|Exited\|Unknown`; same-binary detached worker handoff. Safe filesystem publication/locks have explicit budgets; fixed Git evidence reads use `run_utility`. |
 | confinement, config / run | Validated prompt snapshots, canonical writer scopes, confined plans and lifetime-bound writer reservation; reject primary-checkout writers, secrets and unsupported enforcement. Config supplies immutable policy snapshots. Resource/liveness probes use supervisor's safe OS API. |
 
@@ -448,8 +448,9 @@ Retain sanitised real stream examples from `tests/fixtures/fabric-context/`
 for supported adapters (Claude, Codex, Cursor, OpenCode, agy, Kiro and Copilot
 only if execution-route keeps them). In particular `claude-direct-haiku.jsonl`
 contains repeated assistant frames, `codex.jsonl` turn totals and
-`codex-rollout.jsonl` a recorded session example. The latter may document a
-wire shape but must never cause a runtime transcript reader to return.
+`codex-rollout.jsonl` a recorded session example. COMPOSE-B's chair decision
+permits only the current-attempt host identity projection below; that example
+does not authorise historical transcript or message reads.
 Provider owners record CLI/version, argv, redacted environment keys, exit and
 stream provenance in new provider fixture manifests. Missing external samples
 must be recorded before enabling the affected adapter, without unauthorised
@@ -754,8 +755,8 @@ scheduler daemon. Within that, the lane decided:
   produces `failed` with the worktree and reason, even when the provider
   returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
-  alternatives. Runtime fallback on rate, quota or model-unavailable is
-  deferred, because no decoder emits those events yet.
+  alternatives, with admission checked for every candidate. Runtime fallback
+  on rate, quota or model-unavailable needs a new attempt and remains deferred.
 - **Provider preparation and observed identity (COMPOSE-B).**
   `Providers::prepare` composes validated registrations, task access and quota
   before building the confined argv/environment/stdin/cwd. Claude records its
