@@ -389,6 +389,29 @@ impl DeliveryReceipt {
             updated_at: self.updated_at,
         })
     }
+    /// Candidate for the next save with the review attempts the chair binds.
+    pub fn with_review_attempts(mut self, attempts: Vec<AttemptId>) -> Result<Self, RecordError> {
+        self.review_attempts = attempts;
+        self.validate_shape()?;
+        Ok(self)
+    }
+    /// Candidate decision stamped at `at`; the store recomputes `updated_at`
+    /// from the clock, which never precedes `at`.
+    pub fn with_decision(
+        mut self,
+        at: UtcMicros,
+        decide: impl FnOnce(DecisionContext) -> Result<Decision, RecordError>,
+    ) -> Result<Self, RecordError> {
+        self.updated_at = self.updated_at.max(at);
+        self.decision = decide(DecisionContext {
+            tier: self.risk.tier(),
+            scope_requires_approval: false,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })?;
+        self.validate_shape()?;
+        Ok(self)
+    }
     /// Derives commit metadata and subject reset from stored claims and the clock.
     /// Workflow owns the lock and supplies the receipt read under that lock.
     pub fn with_commit_metadata(
