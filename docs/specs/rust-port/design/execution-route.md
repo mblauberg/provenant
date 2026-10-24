@@ -652,8 +652,10 @@ The required macOS `lane_prepare_isolates_nested_state` case runs `git
 These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude writer Bash is default-off for fresh and resume modes through the
-activation matrix's `shell_enabled` knob. The earlier default-on decision is
+Claude writer Bash is enabled per mode through the activation matrix's
+`shell_enabled` knob, on by live pro-account captures (CLI 2.1.310, #1455) that
+prove Bash, scrub and the CLI version. The recorder binds the token to the
+`~/.claude-pro` registration by its fingerprint. The earlier default-on decision is
 superseded by REVIEW-FIX-2: each enabled shell mode must cite its own live
 capture proving successful Bash execution, `subprocess_env_scrub: true` and
 an identified CLI version. Historical file-tool captures prove none of these.

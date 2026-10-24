@@ -26,7 +26,7 @@ use provenant_confinement::{
     verify_worktree,
 };
 use provenant_core::{CancelToken, ProjectId, WorkScope};
-use provenant_providers::claude::{Login, refresh_if_expiring};
+use provenant_providers::claude::{Login, refresh_for_account};
 use provenant_providers::{
     Adapter, ExitObservation, LaunchSpec, OutcomeStatus, PrepareInput, Prompt, REGISTRY, SetupStep,
     Stdin,
@@ -354,14 +354,13 @@ struct Run {
     argv: Vec<OsString>,
 }
 
-fn route(args: &Args) -> ResolvedRoute {
+fn route(args: &Args, account_key: &str) -> ResolvedRoute {
     ResolvedRoute {
         adapter: args.adapter.clone(),
         model: args.model.clone(),
         effort: args.effort.clone(),
         catalogue_revision: "recording".into(),
-        // This recorder measures provider activation, not signed-in identity.
-        account_key: Some("recording".into()),
+        account_key: Some(account_key.into()),
         host: "recording".into(),
         alternatives: Default::default(),
         exclusions: Vec::new(),
@@ -374,6 +373,49 @@ fn route(args: &Args) -> ResolvedRoute {
         },
         pool_selection: None,
     }
+}
+
+/// Fingerprint of the signed-in Claude identity, from `auth status --json`.
+fn claude_account_key(
+    executor: &dyn Executor,
+    executable: &Path,
+    home: &Path,
+    user: &std::ffi::OsStr,
+    directory: &Path,
+    root: &Path,
+) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        #[serde(rename = "loggedIn")]
+        logged_in: bool,
+        email: String,
+    }
+    let argv: Vec<OsString> = vec![
+        executable.into(),
+        "auth".into(),
+        "status".into(),
+        "--json".into(),
+    ];
+    let env = [
+        ("HOME".into(), home.into()),
+        ("USER".into(), user.into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("CLAUDE_CONFIG_DIR".into(), directory.into()),
+    ];
+    let mut options = ExecOptions::new(&argv, root, Duration::from_secs(10));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    options.stderr = StreamPolicy::Discard;
+    let out = executor.execute(options)?;
+    if out.termination != Termination::Exit(0) || out.stdout.truncated {
+        return Err("claude auth status failed".into());
+    }
+    let status: Status = serde_json::from_slice(&out.stdout.bytes)?;
+    if !status.logged_in {
+        return Err("claude is not logged in".into());
+    }
+    provenant_providers::identity::fingerprint(&status.email)
+        .ok_or_else(|| "unusable claude identity".into())
 }
 
 struct Context<'a> {
@@ -946,21 +988,49 @@ fn main() -> Result<()> {
             agy_state: None,
         })?)
     };
-    let token = match args.adapter.as_str() {
-        "claude" => {
+    // Claude registrations live at the fixed ~/.claude-<label> directory (the
+    // recorder accepts only the pro account); rotating ~/.claude is never one.
+    let directory = home.join(if args.adapter == "codex" {
+        ".codex"
+    } else {
+        ".claude-pro"
+    });
+    // Claude binds the token to the signed-in identity, so the key is that
+    // identity's fingerprint; Codex recording uses a fixed label.
+    let account_key = if args.adapter == "claude" {
+        claude_account_key(
+            &executor,
+            &args.executable,
+            &home,
+            &user,
+            &directory,
+            &args.root,
+        )?
+    } else {
+        "recording".into()
+    };
+    let account = provenant_providers::accounts::Registration {
+        adapter: args.adapter.clone(),
+        label: "recording".into(),
+        key: account_key.clone(),
+        directory,
+    }
+    .registered()?;
+    let token = match (args.adapter.as_str(), &account) {
+        ("claude", account) => {
             let scratch = args.root.join("refresh");
             private_dir(&scratch)?;
             let login = Login {
                 executable: &args.executable,
                 home: &home,
                 user: &user,
-                config_dir: &home.join(".claude"),
+                config_dir: account.directory(),
                 scratch: &scratch,
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);
-            Some(refresh_if_expiring(
-                &executor, &login, &now, deadline, None,
+            Some(refresh_for_account(
+                &executor, &login, account, &now, deadline,
             )?)
         }
         _ => None,
@@ -970,20 +1040,7 @@ fn main() -> Result<()> {
     for child in ["fabric", "projects", "runs", "workflow"] {
         private_dir(&state.join(child))?;
     }
-    let route = route(&args);
-    // Continuations bind an account key; register the login source the recording uses.
-    let account = provenant_providers::accounts::Registration {
-        adapter: args.adapter.clone(),
-        label: "recording".into(),
-        key: "recording".into(),
-        directory: home.join(if args.adapter == "codex" {
-            ".codex"
-        } else {
-            ".claude"
-        }),
-    }
-    .registered()
-    .ok();
+    let route = route(&args, &account_key);
     let mut records = Vec::new();
     let mut continuation = None;
     let mut last_profile = None;
@@ -1014,7 +1071,7 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
-            account: account.as_ref(),
+            account: Some(&account),
             token: token.as_ref(),
             cwd,
             nonce,
@@ -1193,7 +1250,9 @@ fn main() -> Result<()> {
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
             "keychain_ipc_proof": false,
-            "activation_eligible": outcome.status() == OutcomeStatus::Success && !profile.spec.deny_keychain_access,
+            // Claude's token arrives through a pipe, so a successful run with the
+            // keychain denied is the evidence, not a disqualifier.
+            "activation_eligible": outcome.status() == OutcomeStatus::Success,
         });
         println!("{}", serde_json::to_string_pretty(&entry)?);
         if args.write {
