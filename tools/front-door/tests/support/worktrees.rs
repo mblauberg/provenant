@@ -1352,10 +1352,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
         };
+        // The active release root is its own directory, never the project.
+        let release = rig.state.with_file_name("release");
+        fs::create_dir_all(&release)?;
         let registry = provenant_cli::run::Registry {
             roots: Some(&roots),
             home: Some(&home),
-            assets: Some(&rig.project),
+            assets: Some(&release),
             cwd: Some(&rig.project),
             state_root: Some(roots.state.as_path()),
             project_id: Some(context.project_id),
