@@ -135,7 +135,7 @@ deterministic gates and user one-way-door decisions still win.
 
 The council above is one shape of a general mechanism. A panel is a chair-run
 reduction over review records the chair already dispatched — it spawns nothing
-of its own. `skills/_shared/review_panel.py` is its machine-readable owner.
+of its own.
 
 | preset | distribution | reduction | minimum completed |
 |---|---|---|---|

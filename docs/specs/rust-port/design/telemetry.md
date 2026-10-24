@@ -373,3 +373,22 @@ lines including tests** for the reducer and its command tests: forecast
 Python/TS/Rust net at most **−10,541 lines** (1,500 − 6,231 − 5,810), excluding
 shared-owner cleanup and data/shell/Swift deletions. This is a budget, not
 measured savings; each build PR reports actual `Net lines:` and justifies growth.
+
+## Lane D integration dependency (2026-10-24)
+
+The reducer is landed, but the CLI binding remains blocked on the excluded run
+owner. `RunStore::open` creates the state directory and database, changes journal
+mode and installs schema. It cannot implement the required read-only stats
+boundary. `AttemptReader` only has a `RunStore` implementation and its concrete
+`Attempts` iterator cannot be constructed by composition.
+
+The needed owner API is a read-only opener returning absence for a missing or
+uninitialised store, with the same verified filesystem/schema/record checks and
+`AttemptReader`/`work_snapshot` access as the writer. It must refuse corruption,
+links and incompatible schema without creating or migrating anything. Config's
+landed `lookup_project` supplies the existing project binding without mutation.
+The CLI can then compose bounded terminal facts, the bundled validated prices
+and `Window`, and render the reducer result. Lane D does not bypass the run
+owner with a second SQL reader or substitute an empty successful report when
+an existing store cannot be read. Step 3 is not complete until that binding
+and its empty/corrupt/populated-store CLI checks land.

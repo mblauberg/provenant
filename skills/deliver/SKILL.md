@@ -13,57 +13,36 @@ Require an approved intent, acceptance criteria, minimum risk tier and bounded
 authority. Scope/design, disclosure, one-way doors and risk downgrades need
 explicit user approval. If intent is unsettled, use `scope`.
 
-Select base profile from `config/delivery-profiles.json`: `software`,
-`research`, `analysis`, `document` or `agent-product`. Add high-stakes
-overlay when source authority, privacy or qualified review matters. Projects
-may strengthen a profile, never weaken kernel gates silently. Use explicit
-independent `not_applicable` form for fabric_relationships rather than
-inventing.
+Classify the work as `software`, `research`, `analysis`, `document` or
+`agent-product`; add a high-stakes overlay when source authority, privacy or
+qualified review matters. Projects may strengthen the gates, never weaken them
+silently.
 
 ## Lifecycle
 
-1. From the authorised workspace root, create `.agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json`.
-   For a Git linked worktree, resolve the primary checkout with
-   `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`
-   and run the producer there. Keep intent, authority and evidence paths under
-   that primary checkout; source edits may remain in the linked worktree:
-   ```sh
-   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init \
-     --run-dir ".agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>" --run-id "<id>" --profile "<profile>" \
-     --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
-     --intent "<approved-intent-file>" --authority "<authority.json>"
-   ```
-   The intent file must be non-empty; `--risk-assessment` and `--authority`
-   accept a JSON file path or inline JSON. Add `--fabric-relationships` only
-   for coordinated work, then bind other required artifacts through the same
-   producer and follow
-   [the receipt contract](references/contract.md).
-   Pass that `RUN.json` run_id as `delivery_run_id` on every new lane
-   dispatch for the delivery, reviewers included; retries, resumes and handoffs
-   inherit the id.
-2. Record each state transition. No state may jump an approval, evidence,
-   review, acceptance or release gate.
+1. Mint a typed `DeliveryId` and carry it in every lane dispatch for the
+   delivery, reviewers included; retries, resumes and handoffs inherit it.
+   Record the receipt with `provenant workflow receipt save <id>
+   --expected-revision N --request <file>`; read it with `provenant workflow
+   receipt show <id>`. See [the receipt contract](references/contract.md).
+2. Keep the receipt truthful at each gate. No state may jump an approval,
+   evidence, review, acceptance or release gate.
 3. Execute through relevant skills. Software routes through `implement`;
    stochastic behaviour through `evaluate`; failures use `diagnose`;
    substantial parallel work uses `orchestrate`.
-4. Produce profile-required deterministic evidence before judgement evidence.
-   Every gate links to a typed artifact or receipt. At acceptance, a stochastic
-   gate must bind and hash-verify a passing canonical `evaluation-run` receipt;
-   copied scores or sampling metadata are not evidence. Retain failed or
-   incomplete evaluation receipts as non-gating history.
+4. Produce deterministic evidence before judgement evidence. Every gate links
+   to a typed artifact or receipt. A stochastic gate binds a passing
+   `evaluate` receipt; copied scores are not evidence.
 5. Review independently with lenses from the dependency cone under the
-   `HARNESS.md` risk ladder. Record `adapter/model@effort` from each Fabric
-   attempt receipt; derive family. Native Claude subagents record
-   `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model
-   parameter. Record skipped legs.
+   `HARNESS.md` risk ladder. Bind each reviewer attempt with `provenant
+   workflow review --request <file>`, which reads the attempt from run custody
+   and checks coverage. Record skipped legs.
 6. Repair under the risk-tier scaled budget in [the receipt
    contract](references/contract.md). Scope/design drift returns to the user
    gate.
-7. Validate from the project root with
-   `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
-   .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
-   digest-bound `--project-policy` when used).
-   Acceptance is met by objective checks and the review required by the tier.
+7. Accepting a substantial delivery is refused (`REVIEW_INCOMPLETE`) until
+   `workflow review` coverage passes. Acceptance is met by objective checks
+   and the review the tier requires.
 8. The chair reports the outcome; the user may still reject it. Explicit user
    acceptance is required only for `terminal` work or when the approved scope
    asks for it. A project may name its landing gate as acceptance. External
@@ -79,8 +58,7 @@ surface. Artifact manifests classify `canonical`, `evidence`, `handoff`,
 explicit authority. Filesystem receipts remain truth when Herdr or another
 transport is unavailable.
 
-`implement` uses this same receipt with profile `software`; no parallel
-implementation receipt format exists. Live task or membership projections may
+`implement` uses the same receipt; no parallel format exists. Live task or membership projections may
 link to it but never replace its canonical acceptance evidence.
 
 For audience-ready HTML, apply the

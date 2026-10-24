@@ -10,14 +10,11 @@ that policy's review and CI gates pass. This is a thin mode of `orchestrate`: it
 and sequences work; it does not scope, review, or accept it, and it does not
 fork a new receipt format.
 
-This mode never assumes a delivery-run receipt already exists for a queued
-issue. `implement`'s own entry gate only requires `RUN.json` for
-substantial+ work and lets routine minor work proceed without one (see
-`implement/SKILL.md`); an unattended queue has no user in the loop to
-notice a missing receipt, so this mode cannot rely on that per-issue
-discretion. It always directs `implement` to create the canonical
-`delivery-run` (`deliver/templates/RUN.template.json`) for **every** queued
-issue, including routine minor ones, and only ever reads/reports the one
+This mode never assumes a delivery receipt already exists for a queued
+issue. `implement` only requires one for substantial+ work (see
+`implement/SKILL.md`); an unattended queue has no user to notice a missing
+receipt. It always directs `implement` to record the delivery receipt
+(`provenant workflow receipt save`) for **every** queued issue, including routine minor ones, and only ever reads/reports the one
 receipt `implement` produces — it never creates, assumes, or forks a second
 one.
 
@@ -30,7 +27,7 @@ one.
 - Requires the same build ceiling / write / external-action authority
   `implement`'s entry gate requires. Missing authority stops the mode before
   dispatch, not mid-run.
-- Requires `implement` to create a `RUN.json` delivery-run receipt for every
+- Requires `implement` to record a delivery receipt for every
   issue this mode dispatches — treat unattended queue processing as the
   "project policy requests one" condition in `implement`'s own entry gate, so
   the routine-minor-work exemption never applies here. This mode has no
@@ -46,8 +43,8 @@ one.
    more than one at once.
 2. **RUN** `implement` for that issue verbatim: its entry gate, adaptive
    plan, `tdd`/`refactor`/`diagnose` legs, `code-review`, and `evaluate`
-   where required — and its loop step 1, directed to create the canonical
-   `delivery-run` `RUN.json` for this issue regardless of size. This mode
+   where required — and its loop step 1, directed to record the delivery
+   receipt for this issue regardless of size. This mode
    adds no parallel review path of its own — it delegates the entire
    verified-implementation loop, including receipt creation; it never
    pre-supposes a receipt is already sitting there.
@@ -58,9 +55,9 @@ one.
    the nearest repository merge policy authorises agent merges, merge once
    its review and CI gates pass on the exact head. Where no such policy exists,
    do not merge. Never promote, and do not carry
-   that issue's `RUN.json` past the state `implement` leaves it in. **Never
-   fork a new receipt** — the canonical `delivery-run` from
-   `deliver/templates/RUN.template.json`, created by `implement` at this
+   that issue's receipt past the state `implement` leaves it in. **Never
+   fork a new receipt** — the delivery receipt
+   created by `implement` at this
    mode's direction for this specific issue, is the only receipt; this mode
    reads and reports it, it never replaces it and never keeps a shadow
    receipt of its own.

@@ -203,6 +203,15 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let fact = store.attempt(id, &call)?;
     assert_eq!(fact.output_refs[0].digest, all.digest);
     assert_eq!(fact.provider_ms, Some(1));
+    let reviewer = fact
+        .reviewer
+        .as_ref()
+        .expect("reviewer from observed route");
+    assert_eq!(
+        reviewer.provenance,
+        provenant_records::ReviewerProvenance::Observed
+    );
+    assert_eq!(reviewer.family.as_deref(), Some("fixture"));
     assert_eq!(
         store
             .attempts(AttemptFilter::default(), &call)?

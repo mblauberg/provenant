@@ -388,10 +388,49 @@ pub fn run(
     let result = execute(&command, roots, registry);
     let (envelope, human) = match result {
         Ok(report) => {
-            let human = format!(
-                "Quota: {}/{} current readings\nReport: {}\n",
-                report.coverage.known, report.coverage.total, report.report_path
+            let mut human = format!(
+                "Quota: {}/{} current readings\n",
+                report.coverage.known, report.coverage.total
             );
+            for row in &report.accounts {
+                let status = serde_json::to_value(row.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into())
+                    .to_uppercase();
+                let age = row
+                    .age_seconds
+                    .map_or_else(|| "unknown".into(), |age| format!("{age}s"));
+                human.push_str(&format!(
+                    "{} [{}]: {status}, age {age}",
+                    row.account.label, row.account.adapter
+                ));
+                if let Some(snapshot) = &row.snapshot {
+                    if row.status == QuotaStatus::Stale {
+                        human.push_str(" (last known)");
+                    }
+                    for window in &snapshot.windows {
+                        human.push_str(&format!(
+                            "; {} {}.{:02}% used",
+                            window.pool.escape_debug(),
+                            window.used_basis_points / 100,
+                            window.used_basis_points % 100
+                        ));
+                    }
+                }
+                if let Some(error) = row.error {
+                    let reason = serde_json::to_value(error)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "unknown".into());
+                    human.push_str(&format!("; refresh failed: {reason}"));
+                    if error == ProbeFailure::Auth {
+                        human.push_str(" (needs login in this identity)");
+                    }
+                }
+                human.push('\n');
+            }
+            human.push_str(&format!("Report: {}\n", report.report_path));
             (CommandResult::new(name, Outcome::Ok, Some(report)), human)
         }
         Err(error) => {

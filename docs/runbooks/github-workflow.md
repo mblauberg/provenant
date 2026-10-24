@@ -103,16 +103,25 @@ Name the branch `<type>/<area>-<slug>` per
 [`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
 for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
-branch with `/` replaced by `-`, as `provenant worktree` already defaults. The
+branch with `/` replaced by `-`, as `scripts/worktree` already defaults. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. Removing a clean worktree also needs no extra authority;
 dirty worktrees are refused and unmerged branches are kept.
 
 ```sh
-provenant worktree create fix/repo-runbook-mechanics --base origin/main
+scripts/worktree create \
+  --new-branch fix/repo-runbook-mechanics --start-point main
 ```
 
-Record the issue-to-branch link in the pull request.
+To also record the issue-to-branch link on GitHub, create the branch with
+`gh issue develop` first, then point the helper at it:
+
+```sh
+gh issue develop 148 --name fix/repo-runbook-mechanics --base main
+git fetch origin
+scripts/worktree create \
+  --existing-branch fix/repo-runbook-mechanics
+```
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -189,15 +198,8 @@ gh project field-list 2 --owner mblauberg --format json \
 
 ### Merge
 
-Before queueing merge for a substantial software change, validate its one
-canonical `delivery-run` receipt and retain the entire ignored run directory.
-Do not remove the worktree or discard that directory after GitHub merges it.
-The flat receipt records gates; it has no authoritative acceptance state
-transition. This is a receipt-continuity gate, not user acceptance or promotion
-authority. When post-merge GitHub binding is in scope, its already approved
-Authority V2 envelope must allowlist `api.github.com` tool egress and grant
-use-without-disclosure of the `github-cli-auth` secret reference; the binder
-never infers those grants from the operator's login.
+Before queueing merge for a substantial software change, confirm its delivery receipt (`provenant workflow receipt show <id>`) is current. The pull request is the evidence: exact-head CI, required review and the repository merge.
+
 
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
@@ -297,11 +299,9 @@ reports green; that gate is the whole review pressure for these PRs.
 
 Afterwards:
 
-1. Record the merged PR, exact merge commit, CI result and independent review
-   evidence in the delivery record through the Rust workflow owner. The old
-   Python binder and RUN.json scaffold are retired. Promotion remains a
-   separate authorised action against the accepted artifact.
-
+1. For a software delivery, sync the primary checkout. After the merge
+   commit's main-branch `ci-status` succeeds, record the accepted receipt
+   with `provenant workflow receipt save`. Do not fabricate user approval.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not
@@ -309,10 +309,6 @@ Afterwards:
    the standing authority, the method-specific proof gates and the deletion
    commands; run the complete repository, branch and merge gate first, and do
    not run the merge-commit and squash-merge paths as one sequence.
-
-   One repository-specific retention rule overrides this: a substantial software
-   change's canonical `delivery-run` receipt directory must survive the merge
-   (see [Merge](#merge)). Satisfy that first.
 
 4. The user-authorised repository setting `delete_branch_on_merge=true`
    (enabled 2026-07-19) automatically deletes a merged pull request's remote

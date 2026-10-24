@@ -570,6 +570,28 @@ Tests set HOME, state and harness paths to temporary roots and use repo-relative
 `include_str!` fixtures; canonicalise macOS temporary aliases. Local checks are
 fast and targeted; full workspace/harness and platform checks run in CI.
 
+## Shared-leaf cut-over (Lane D, 2026-10-24)
+
+`config show` now binds `config_show` with the complete registered domain
+aggregate. Compiled `Profile` and the single typed `config.toml` replace the
+profile CLI's layered JSON knob registry and mutation commands. There is no
+replacement for profile mutation; edit the user-owned TOML explicitly.
+
+`config::bind_host` owns the random host ID in the selected state's `host-id`.
+The old hostname slug, `hosts.json` alias migration and telemetry host aliases
+are retired. `core::RootInputs` and the binary's `roots` module own selected
+state, installed asset and project resolution; the `AGENT_FABRIC_PRODUCT_ROOT`
+environment variable is retired. `PROVENANT_ROOT` still selects assets for an
+uninstalled binary; installed builds resolve their release directory.
+
+Lane D deletes `scripts/harness_profile.py` (212 lines),
+`scripts/host_identity.py` (102), `scripts/lib/roots.py` (31),
+`tests/test_harness_profile.py` (437) and `tests/test_host_identity.py` (127).
+The chair explicitly assigned these deletions to Lane D; the parallel Python
+cut lane removes the remaining importers and shared Python implementations.
+These are cut-over deletions, not Python-to-Rust adapters. Existing Rust
+config, host binding and root boundary tests cover their retained behaviour.
+
 ## Deletion ledger and build order
 
 Counts are physical lines at the source baseline above (`wc -l`), including

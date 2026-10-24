@@ -451,6 +451,7 @@ dependencies = [
  "provenant-run",
  "provenant-supervisor",
  "provenant-telemetry",
+ "provenant-workflow",
  "regex",
  "serde",
  "serde_json",

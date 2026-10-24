@@ -1,5 +1,16 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
-pub(crate) mod context;
+mod context;
+
+/// Trusted project and actor identity for sibling leaves such as workflow.
+pub(crate) fn identity(
+    roots: provenant_core::Roots,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<(provenant_core::Roots, provenant_core::ProjectId, ActorId), EdgeError> {
+    let ctx = context::Context::open(roots, home, cwd)?;
+    Ok((ctx.roots, ctx.identity.project, ctx.identity.inbox.actor))
+}
+
 use crate::{Globals, RenderMode};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{
@@ -343,7 +354,7 @@ pub enum Landing {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum EdgeError {
+pub(crate) enum EdgeError {
     #[error(transparent)]
     Exec(#[from] provenant_supervisor::exec::ExecError),
     #[error(transparent)]
