@@ -391,9 +391,13 @@ scrubbing is claimed, and other credentials must remain inaccessible.
 
 Claude recording requires `--account pro` and always selects the host's
 default `.claude` identity; it has no alternate-account fallback.
-The activation matrix's `shell_enabled` stays **false** until a chair-approved
-pro-account throwaway-worktree recording succeeds. Existing file-tool writer
-activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
+Before enabling the activation matrix's `shell_enabled`, narrow Claude's
+current any-host TCP 443 rule (`claude.rs`, `provider_api`) to the required
+provider endpoints, or remove `CLAUDE_CODE_OAUTH_TOKEN` from the shell's
+environment. The current combination lets shell commands send that token to
+any HTTPS host. This is an activation prerequisite alongside a chair-approved
+pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
+both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
 any shell activation; no old file-edit capture enables Bash. The pro quota
 and account gate applies before running this recorder, including retries;
 never use the anese identity. The Rust writer launcher must also consume

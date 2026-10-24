@@ -315,7 +315,7 @@ impl WorktreeWriteAuthority {
         worktree.repo().revalidate()?;
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
         grants.validate()?;
-        let cargo_cache = worktree_cargo_cache(home, worktree.path())?;
+        let cargo_cache = worktree_cargo_cache(home, worktree)?;
         Ok(Self {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
@@ -323,19 +323,53 @@ impl WorktreeWriteAuthority {
     }
 }
 
-/// The one build cache belonging to this worktree. Both arguments come from
-/// host launch facts, never from the prompt or inherited environment.
-pub fn worktree_cargo_cache(home: &Path, worktree: &Path) -> Result<PathGrant, PermissionError> {
+/// The lane-only build cache belonging to this verified worktree incarnation.
+/// Host-derived canonical paths and held Git identities separate repositories,
+/// same-named worktrees and worktrees recreated at an earlier path.
+pub fn worktree_cargo_cache(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+) -> Result<PathGrant, PermissionError> {
     validate_absolute(home)?;
-    validate_absolute(worktree)?;
-    let mut name = OsString::from("provenant-cargo-target-");
-    name.push(worktree.file_name().ok_or(PermissionError::InvalidPath)?);
+    worktree.repo().revalidate()?;
+    let mut digest = Sha256::new();
+    digest.update(b"provenant-lane-cargo-v1");
+    for path in [worktree.path(), worktree.repo().common_git_dir()] {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    for identity in [
+        worktree.identity(),
+        worktree.repo().private_identity(),
+        worktree.repo().common_identity(),
+    ] {
+        digest.update(identity.device.to_le_bytes());
+        digest.update(identity.inode.to_le_bytes());
+    }
+    let name: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let grant = PathGrant {
-        path: home.join("Library/Caches").join(name),
+        path: home.join("Library/Caches/provenant-lane-cargo").join(name),
         scope: PathScope::Subtree,
     };
     validate_noncredential_grant(&grant)?;
     Ok(grant)
+}
+
+fn verify_cache_metadata(
+    metadata: &provenant_supervisor::fs::Metadata,
+) -> Result<(), PermissionError> {
+    if metadata.kind != FileKind::Directory
+        || metadata.uid != provenant_supervisor::fs::effective_uid()
+        || metadata.mode & 0o7777 != 0o700
+    {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    Ok(())
 }
 
 /// Prepare only derived writer directories outside the child sandbox. This
@@ -369,6 +403,7 @@ pub fn prepare_writer_directories(
         let mut directory = safe_fs
             .open_anchor(Path::new("/"))
             .map_err(PermissionError::Filesystem)?;
+        let mut traversed = PathBuf::from("/");
         for component in path.components() {
             let Component::Normal(name) = component else {
                 continue;
@@ -385,6 +420,12 @@ pub fn prepare_writer_directories(
                 }
                 Err(error) => return Err(PermissionError::Filesystem(error)),
             };
+            traversed.push(name);
+            if traversed == authority.cargo_cache.path
+                || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
+            {
+                verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+            }
         }
     }
     Ok(())
@@ -395,7 +436,7 @@ fn validate_writer_cache(
     worktree: &VerifiedWorktree,
     home: &Path,
 ) -> Result<(), PermissionError> {
-    if authority.cargo_cache != worktree_cargo_cache(home, worktree.path())? {
+    if authority.cargo_cache != worktree_cargo_cache(home, worktree)? {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     Ok(())
@@ -983,7 +1024,10 @@ fn successful_probe(outcome: &ExecOutcome) -> bool {
 #[cfg(target_os = "macos")]
 fn denied_probe(outcome: &ExecOutcome) -> bool {
     matches!(outcome.termination, Termination::Exit(code) if code != 0)
+        && String::from_utf8_lossy(&outcome.stderr.bytes).contains("Operation not permitted")
         && !outcome.timed_out
+        && !outcome.cancelled
+        && !outcome.overflow_stopped
         && !outcome.drain_truncated
         && !outcome.stdout.read_failed
         && !outcome.stderr.read_failed
@@ -1071,6 +1115,17 @@ fn compile_sbpl(
     verify_state_writes(plan, profile, anchors)?;
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        let cache = anchors
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == authority.cargo_cache.path)
+            .ok_or(PermissionError::AnchorMismatch)?;
+        verify_cache_metadata(
+            &cache
+                .directory
+                .metadata()
+                .map_err(PermissionError::Filesystem)?,
+        )?;
     }
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath);
@@ -1202,6 +1257,17 @@ fn compile_sbpl(
     verify_state_writes(plan, profile, anchors)?;
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        let cache = anchors
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == authority.cargo_cache.path)
+            .ok_or(PermissionError::AnchorMismatch)?;
+        verify_cache_metadata(
+            &cache
+                .directory
+                .metadata()
+                .map_err(PermissionError::Filesystem)?,
+        )?;
     }
     anchors.verify_all()?;
     // Avoid retaining a second mutable representation of the profile.
@@ -1442,21 +1508,19 @@ fn render_profile(
         }
     }
 
-    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         push_worktree_rule(
             &mut source,
             worktree_grants.ok_or(PermissionError::GitWriteAuthorityMissing)?,
         )?;
-        if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-            for operation in ["file-read*", "file-write*"] {
-                push_rule(
-                    &mut source,
-                    "allow",
-                    operation,
-                    &authority.cargo_cache.path,
-                    PathScope::Subtree,
-                )?;
-            }
+        for operation in ["file-read*", "file-write*"] {
+            push_rule(
+                &mut source,
+                "allow",
+                operation,
+                &authority.cargo_cache.path,
+                PathScope::Subtree,
+            )?;
         }
     }
 
@@ -1696,7 +1760,7 @@ fn verify_requested_evidence(
         };
         (operation, allowed)
     }));
-    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+    if let AccessMode::WorktreeWrite(_) = &plan.mode {
         required.extend([
             (FixtureOperation::WorktreeWrite, allowed),
             (FixtureOperation::GitIndexWrite, allowed),
@@ -2163,14 +2227,41 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn denied_probe_requires_an_operating_system_refusal() {
+        let mut outcome = ExecOutcome {
+            termination: Termination::Exit(44),
+            stdout: Default::default(),
+            stderr: provenant_supervisor::exec::CapturedStream {
+                bytes: b"security: The specified item could not be found in the keychain.".to_vec(),
+                ..Default::default()
+            },
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert!(!denied_probe(&outcome));
+        outcome.stderr.bytes =
+            b"sandbox-exec: execvp() of '/usr/bin/security' failed: Operation not permitted"
+                .to_vec();
+        assert!(denied_probe(&outcome));
+        outcome.termination = Termination::Exit(0);
+        assert!(!denied_probe(&outcome));
+        outcome.termination = Termination::Exit(1);
+        outcome.cancelled = true;
+        assert!(!denied_probe(&outcome));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         let authority = WorktreeWriteAuthority {
             git_grants_digest: [0; 32],
-            cargo_cache: worktree_cargo_cache(
-                Path::new("/fixture/home"),
-                Path::new("/fixture/worktree"),
-            )
-            .expect("cache"),
+            cargo_cache: PathGrant {
+                path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
+                scope: PathScope::Subtree,
+            },
         };
         let safe_fs = LocalFs;
         let directories = [];
@@ -2184,6 +2275,106 @@ mod tests {
             verify_worktree_authority(&authority, &anchors),
             Err(PermissionError::GitWriteAuthorityMissing)
         ));
+    }
+
+    #[test]
+    fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::repo::verify_worktree;
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = crate::test_support::Fixture::new()?;
+        let other = crate::test_support::Fixture::new()?;
+        let selected_ref = GitRefName::branch("cache-test")?;
+        let add = |fixture: &crate::test_support::Fixture, path: &Path, branch: &str| {
+            fixture.run(&[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                path.to_str().ok_or("path")?,
+            ])?;
+            Ok::<_, Box<dyn std::error::Error>>(verify_worktree(&fixture.repo, path)?)
+        };
+        let path = fixture._temp.path().join("package");
+        let linked = add(&fixture, &path, "cache-test")?;
+        let home = provenant_supervisor::fs::canonicalize(&fixture.home)?;
+        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
+        let cache = &authority.cargo_cache.path;
+        assert_eq!(
+            cache.parent(),
+            Some(home.join("Library/Caches/provenant-lane-cargo").as_path())
+        );
+        assert_eq!(cache.file_name().ok_or("cache name")?.len(), 64);
+        assert_eq!(
+            authority,
+            WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?
+        );
+
+        let other_linked = add(&other, &other._temp.path().join("package"), "cache-test")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(&other_linked, &selected_ref, &home)?
+                .cargo_cache
+                .path
+        );
+        let sibling_path = fixture._temp.path().join("nested/package");
+        std::fs::create_dir(sibling_path.parent().ok_or("parent")?)?;
+        let sibling = add(&fixture, &sibling_path, "sibling")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(&sibling, &GitRefName::branch("sibling")?, &home)?
+                .cargo_cache
+                .path
+        );
+
+        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
+        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
+        let mut metadata = LocalFs.open_anchor(cache)?.metadata()?;
+        verify_cache_metadata(&metadata)?;
+        metadata.uid = metadata.uid.wrapping_add(1);
+        assert!(matches!(
+            verify_cache_metadata(&metadata),
+            Err(PermissionError::AnchorMismatch)
+        ));
+        for mode in [0o755, 0o770, 0o1700] {
+            std::fs::set_permissions(cache, std::fs::Permissions::from_mode(mode))?;
+            assert!(
+                matches!(
+                    prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+                    Err(PermissionError::AnchorMismatch)
+                ),
+                "mode {mode:o}"
+            );
+        }
+        std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
+        let namespace = cache.parent().ok_or("namespace")?;
+        std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755))?;
+        assert!(matches!(
+            prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+            Err(PermissionError::AnchorMismatch)
+        ));
+        std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o700))?;
+
+        let moved = fixture._temp.path().join("retired");
+        fixture.run(&[
+            "worktree",
+            "move",
+            path.to_str().ok_or("path")?,
+            moved.to_str().ok_or("path")?,
+        ])?;
+        let recreated = add(&fixture, &path, "recreated")?;
+        assert_ne!(
+            *cache,
+            WorktreeWriteAuthority::for_worktree(
+                &recreated,
+                &GitRefName::branch("recreated")?,
+                &home
+            )?
+            .cargo_cache
+            .path
+        );
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2692,18 +2883,12 @@ mod tests {
             ),
             (
                 "keychain tool",
-                run(
-                    Path::new("/usr/bin/security"),
-                    &[Path::new("find-generic-password")],
-                ),
+                run(Path::new("/usr/bin/security"), &[Path::new("help")]),
             ),
             ("keychain read", run(&executables[4], &[&keychain])),
             (
                 "sibling cache",
-                run(
-                    &executables[0],
-                    &[&cache.with_file_name("provenant-cargo-target-other")],
-                ),
+                run(&executables[0], &[&cache.with_file_name("other-lane")]),
             ),
             (
                 "new symlink in cache",

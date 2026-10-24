@@ -619,6 +619,33 @@ fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confine
     .expect("fixture plan")
 }
 
+fn fixture_access_plan(
+    access: Access,
+    authentication: Option<&str>,
+    include_continuation: bool,
+) -> provenant_confinement::ConfinedPlan {
+    use provenant_confinement::permissions::{AccessMode, WorktreeWriteAuthority};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let reader = read_only_plan("/fixture", authentication);
+    let mut permissions = reader.permissions().clone();
+    permissions.include_continuation = include_continuation;
+    if access == Access::WorktreeWrite {
+        let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
+            "git_grants_digest": vec![0; 32],
+            "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-lane-cargo/fixture", "scope": "subtree"}
+        })).expect("fixture authority; no compilation is attempted");
+        permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
+    }
+    ConfinedPlan::new(PlanRequest {
+        scope: reader.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture access plan")
+}
+
 const FIXTURE_TOKEN: &str = "fixture-access-token";
 
 fn fixture_token() -> crate::claude::OauthToken {
@@ -1266,45 +1293,67 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             .find(|entry| entry.adapter.id() == id)
             .expect("provider")
             .adapter;
-        let route = route(id, "fixture-model");
-        let plan = read_only_plan("/fixture", (id == "codex").then_some("login"));
-        let launch = match adapter.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            std::path::Path::new("/fixture/repo"),
-            (id == "claude").then_some(&token),
-        )) {
-            Ok(launch) => launch,
-            Err(ProviderError::Disabled { .. }) => {
-                assert!(!mode_enabled(id, Access::ReadOnly, Session::Fresh));
-                continue;
-            }
-            Err(error) => return Err(error),
+        let recording = match id {
+            "claude" => fixture!("claude/direct-model.jsonl"),
+            "codex" => fixture!("codex/success.jsonl"),
+            "cursor" => fixture!("cursor/fresh.jsonl"),
+            "agy" => fixture!("agy/success.jsonl"),
+            "opencode" => fixture!("opencode/unversioned-success.jsonl"),
+            _ => return Err(ProviderError::UnknownIdentity),
         };
-        for relative in forbidden
-            .iter()
-            .copied()
-            .chain([".npm/_cacache/content", ".npm/_logs/log"])
-        {
-            let path = std::path::Path::new("/fixture/home").join(relative);
-            let writable = launch
-                .profile
-                .spec
-                .state_writes
-                .iter()
-                .chain(
-                    launch
+        let outcome = replay(adapter, recording, EXIT)?.1;
+        let route = route(id, outcome.model().unwrap_or("fixture-model"));
+        // Synthetic continuation for path-policy coverage, including disabled
+        // adapters without answering-model evidence. This enables no mode.
+        let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            for session in [Session::Fresh, Session::Resume] {
+                let plan = fixture_access_plan(
+                    access,
+                    (id == "codex").then_some("login"),
+                    session == Session::Resume,
+                );
+                let mut input = fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    (id == "claude").then_some(&token),
+                );
+                input.continuation = (session == Session::Resume).then_some(&continuation);
+                let launch = match adapter.prepare(input) {
+                    Ok(launch) => launch,
+                    Err(ProviderError::Disabled { .. }) => {
+                        assert!(!mode_enabled(id, access, session));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                for relative in forbidden
+                    .iter()
+                    .copied()
+                    .chain([".npm/_cacache/content", ".npm/_logs/log"])
+                {
+                    let path = std::path::Path::new("/fixture/home").join(relative);
+                    let writable = launch
                         .profile
                         .spec
-                        .authentication
+                        .state_writes
                         .iter()
-                        .flat_map(|auth| &auth.in_place_writes),
-                )
-                .chain(std::iter::once(&plan.permissions().scratch))
-                .chain(&plan.permissions().private_state)
-                .any(|grant| covers(grant, &path));
-            assert!(!writable, "{id}: {}", path.display());
+                        .chain(
+                            launch
+                                .profile
+                                .spec
+                                .authentication
+                                .iter()
+                                .flat_map(|auth| &auth.in_place_writes),
+                        )
+                        .chain(std::iter::once(&plan.permissions().scratch))
+                        .chain(&plan.permissions().private_state)
+                        .any(|grant| covers(grant, &path));
+                    assert!(!writable, "{id} {access:?} {session:?}: {}", path.display());
+                }
+            }
         }
     }
     Ok(())
@@ -1314,23 +1363,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
 #[test]
 fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
 -> Result<(), ProviderError> {
-    use provenant_confinement::permissions::{AccessMode, WorktreeWriteAuthority};
-    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    let reader = read_only_plan("/fixture", None);
-    let mut permissions = reader.permissions().clone();
-    let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
-        "git_grants_digest": vec![0; 32],
-        "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-cargo-target-repo", "scope": "subtree"}
-    })).expect("fixture authority; no compilation is attempted");
-    permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
-    let plan = ConfinedPlan::new(PlanRequest {
-        scope: reader.scope(),
-        permissions,
-        codex: CodexPolicy::Clean,
-        extensions: ExtensionPolicy::Deny,
-        agy_state: None,
-    })
-    .expect("writer plan");
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let route = route("claude", "fixture-model");
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
@@ -1363,5 +1396,30 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
             .iter()
             .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == FIXTURE_TOKEN)
     );
+    Ok(())
+}
+
+#[cfg(not(feature = "recording"))]
+#[test]
+fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), ProviderError> {
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let route = route("claude", "fixture-model");
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    let tools = launch
+        .argv
+        .iter()
+        .position(|arg| arg == "--tools")
+        .expect("tools");
+    assert_eq!(launch.argv[tools + 1], "Read,Grep,Glob,Edit,Write");
+    assert!(!launch.profile.spec.deny_keychain_access);
+    assert!(launch.profile.spec.tool_exec_roots.is_empty());
     Ok(())
 }

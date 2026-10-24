@@ -239,13 +239,19 @@ selected provider's own API endpoints, which its profile permits. Read-only exec
 and private scratch. Browser/Postgres IPC is explicitly granted.
 
 Writer setup also derives exactly
-`$HOME/Library/Caches/provenant-cargo-target-<worktree-dir-name>` from host
-launch facts. `WorktreeWriteAuthority::for_worktree` takes the host home;
+`$HOME/Library/Caches/provenant-lane-cargo/<sha256>` from the canonical
+worktree and common Git paths plus the held worktree, private Git and common Git
+device/inode identities. This separates same-named and recreated worktrees and
+reserves the namespace for confined lanes, never host builds.
+`WorktreeWriteAuthority::for_worktree` takes the host home;
 `Anchors.home` independently binds that home at compilation. The authority's
 digest covers the cache as well as Git grants. Before collecting anchors, the
 host calls `prepare_writer_directories` under writer custody. It creates only
 missing derived directories, including nested branch/reflog parents and the
-single cache, by no-follow traversal. The cache gets read/write authority,
+single cache, by no-follow traversal. The cache and its lane-only parent must
+belong to the effective user and have mode 0700, including existing directories;
+setup refuses mismatches without changing their owner or mode. Compilation
+rechecks the held cache's owner and mode. The cache gets read/write authority,
 with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.

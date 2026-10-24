@@ -546,15 +546,7 @@ fn probes(
                 "/bin/sh",
                 &[Path::new("-c"), Path::new("printf ok")],
             ),
-            probe(
-                O::KeychainTool,
-                "/usr/bin/security",
-                &[
-                    Path::new("find-generic-password"),
-                    Path::new("-s"),
-                    Path::new("provenant-denied-probe"),
-                ],
-            ),
+            probe(O::KeychainTool, "/usr/bin/security", &[Path::new("help")]),
             read(
                 O::KeychainRead,
                 &PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?)
@@ -961,7 +953,9 @@ fn main() -> Result<()> {
         if let Some(id) = outcome.session() {
             session_ids.push(id.to_owned());
         }
-        if args.writer && args.adapter == "claude" && !successful_bash(&run.outcome.stdout.bytes) {
+        let writer_shell_proof =
+            args.writer && args.adapter == "claude" && successful_bash(&run.outcome.stdout.bytes);
+        if args.writer && args.adapter == "claude" && !writer_shell_proof {
             return Err("Claude writer did not invoke Bash".into());
         }
         if session == "fresh" && args.writer {
@@ -974,7 +968,7 @@ fn main() -> Result<()> {
         if session == "fresh" {
             continuation = Some(adapter.continuation(&outcome, &route, "recording")?);
         }
-        records.push((session, run, outcome));
+        records.push((session, run, outcome, writer_shell_proof));
         last_profile = Some((plan, spec.profile));
     }
 
@@ -1049,7 +1043,7 @@ fn main() -> Result<()> {
         .trim()
         .to_owned();
     let platform = platform()?;
-    for (session, run, outcome) in &records {
+    for (session, run, outcome, writer_shell_proof) in &records {
         let redacted = redactor.stream(&run.outcome.stdout.bytes)?;
         let argv: Vec<String> = run
             .argv
@@ -1073,7 +1067,7 @@ fn main() -> Result<()> {
             "outcome": format!("{:?}", outcome.status()),
             "answering_model": outcome.model(),
             "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
-            "writer_shell_proof": args.writer && args.adapter == "claude" && successful_bash(&run.outcome.stdout.bytes),
+            "writer_shell_proof": writer_shell_proof,
             "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
             "keychain_ipc_proof": false,

@@ -9,11 +9,17 @@ Permission compilation consumes typed provider specifications and enforcement
 observations constructed by the providers owner. Git write grants derive from a
 held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
 `WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
-single `Library/Caches/provenant-cargo-target-<worktree-dir-name>` cache.
+single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Its hash binds
+canonical worktree and common Git paths plus held directory identities, so
+same-named and recreated worktrees do not share a lane cache. Host builds use
+separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under
 writer custody; pass the same independently resolved home in `Anchors.home`.
 This prepares missing nested ref/reflog parents and the exact cache without
-allowing sibling refs or caches. Common config, remote tracking and packed
+allowing sibling refs or caches. Existing cache and lane-parent directories
+must belong to the effective user with mode 0700; setup refuses mismatches
+without changing their metadata. Compilation rechecks the held cache.
+Common config, remote tracking and packed
 refs stay immutable: host fetch/upstream composition remains required under
 the accepted supervisor design (#1255). Child-created symlinks are denied.
 
