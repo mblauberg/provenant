@@ -1,7 +1,7 @@
 [
   {
     "access_mode": "read_only",
-    "activation_eligible": false,
+    "activation_eligible": true,
     "answering_model": null,
     "argv": [
       "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
@@ -148,7 +148,6 @@
     "argv": [
       "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
       "-p",
-      "--safe-mode",
       "--strict-mcp-config",
       "--disable-slash-commands",
       "--permission-prompts",
@@ -159,34 +158,45 @@
       "--session-id",
       "FIXTURE_SESSION_IDENTIFIER",
       "--permission-mode",
-      "acceptEdits",
+      "default",
       "--tools",
-      "Read,Grep,Glob,Edit,Write",
+      "Read,Grep,Glob,Edit,Write,Bash",
       "--model",
-      "claude-haiku-5-5"
+      "claude-haiku-5-5",
+      "--mcp-config",
+      "FIXTURE_ROOT/scratch-fresh/provenant-mcp.json",
+      "--settings",
+      "FIXTURE_ROOT/scratch-fresh/provenant-settings.json",
+      "--setting-sources",
+      "",
+      "--allowedTools",
+      "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
     ],
     "cli_version": "2.1.310 (Claude Code)",
     "confinement": "sandbox-exec deny-default profile, observations in claude/confinement.json",
     "fixture": "claude/live-worktree_write-fresh.jsonl",
     "id": "claude-live-worktree_write-fresh",
+    "keychain_ipc_proof": false,
     "kind": "live_recording",
     "outcome": "Success",
     "platform": "macOS 27.0.1 arm64",
     "process_exit": 0,
-    "prompt": "Create the file note.txt in the current directory containing the word ok, then reply with the word ok",
+    "prompt": "Use Bash to run printf ok > note.txt in the current directory and git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok",
     "session_mode": "fresh",
-    "sha256": "8eceb0a1c871fe1378d583155418b0d22a21cc90422d23dbffdf05c53d2f101f",
+    "sha256": "7444fbe8a683061949891c7c04ceb45370fccf654b1329cb8d2d6196e404e421",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"
     },
+    "subprocess_env_scrub": true,
     "substitution_classes": [
       "session_identifier",
       "local_path",
       "email",
       "identifier",
       "token"
-    ]
+    ],
+    "writer_shell_proof": true
   },
   {
     "access_mode": "worktree_write",
@@ -195,7 +205,6 @@
     "argv": [
       "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
       "-p",
-      "--safe-mode",
       "--strict-mcp-config",
       "--disable-slash-commands",
       "--permission-prompts",
@@ -206,33 +215,44 @@
       "--resume",
       "FIXTURE_SESSION_IDENTIFIER",
       "--permission-mode",
-      "acceptEdits",
+      "default",
       "--tools",
-      "Read,Grep,Glob,Edit,Write",
+      "Read,Grep,Glob,Edit,Write,Bash",
       "--model",
-      "claude-haiku-5-5"
+      "claude-haiku-5-5",
+      "--mcp-config",
+      "FIXTURE_ROOT/scratch-resume/provenant-mcp.json",
+      "--settings",
+      "FIXTURE_ROOT/scratch-resume/provenant-settings.json",
+      "--setting-sources",
+      "",
+      "--allowedTools",
+      "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
     ],
     "cli_version": "2.1.310 (Claude Code)",
     "confinement": "sandbox-exec deny-default profile, observations in claude/confinement.json",
     "fixture": "claude/live-worktree_write-resume.jsonl",
     "id": "claude-live-worktree_write-resume",
+    "keychain_ipc_proof": false,
     "kind": "live_recording",
     "outcome": "Success",
     "platform": "macOS 27.0.1 arm64",
     "process_exit": 0,
-    "prompt": "Reply with the word ok again",
+    "prompt": "Use Bash to run git status --short. Then make a separate Bash call running test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && test -z \"${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}\" && printf provenant-shell-proof. Reply with the word ok again",
     "session_mode": "resume",
-    "sha256": "75fc814bff0d570fed2b2fabb1760386f2eca42dd3f2c6051cb473c0900282e9",
+    "sha256": "8df9e76d1f474e02cb375f457b1c5b744411aee30a312c9dd3e2885beb1cb412",
     "source": {
       "kind": "live_confined_run",
       "recorder": "crates/providers/examples/record.rs"
     },
+    "subprocess_env_scrub": true,
     "substitution_classes": [
       "session_identifier",
       "local_path",
       "email",
       "identifier",
       "token"
-    ]
+    ],
+    "writer_shell_proof": true
   }
 ]

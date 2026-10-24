@@ -40,8 +40,8 @@
       "capture_refs": [
         "claude-live-worktree_write-fresh"
       ],
-      "shell_enabled": false,
-      "shell_reason": "disabled_pending_live_bash_subprocess_scrub_and_cli_version_capture"
+      "shell_enabled": true,
+      "shell_reason": "live_bash_subprocess_scrub_and_cli_version_capture"
     },
     {
       "adapter": "claude",
@@ -52,8 +52,8 @@
       "capture_refs": [
         "claude-live-worktree_write-resume"
       ],
-      "shell_enabled": false,
-      "shell_reason": "disabled_pending_live_bash_subprocess_scrub_and_cli_version_capture"
+      "shell_enabled": true,
+      "shell_reason": "live_bash_subprocess_scrub_and_cli_version_capture"
     },
     {
       "adapter": "codex",
