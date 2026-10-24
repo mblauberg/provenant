@@ -132,7 +132,7 @@ pub enum CredentialPresence {
 pub enum SigninState {
     SignedIn,
     SignedOut,
-    TokenPresentUnrefreshable,
+    CredentialStorePresent,
     KeychainUnavailable,
     Unknown,
 }
@@ -157,7 +157,7 @@ pub fn signin_status(
     let state = match wire::<Status>(stdout) {
         Ok(status) if status.logged_in && exit_code == Some(0) => SigninState::SignedIn,
         Ok(status) if !status.logged_in => match presence {
-            CredentialPresence::Present => SigninState::TokenPresentUnrefreshable,
+            CredentialPresence::Present => SigninState::CredentialStorePresent,
             CredentialPresence::Absent => SigninState::SignedOut,
             CredentialPresence::Unavailable => SigninState::KeychainUnavailable,
             CredentialPresence::Unknown => SigninState::Unknown,

@@ -550,3 +550,23 @@ This classification permits an explicitly authorised cross-adapter retry without
 weakening confinement. Utility execution and hosts-doctor composition still need
 their run/Fabric owners; a credential's existence alone never proves it can be
 refreshed in an SSH session with a locked or unavailable keychain.
+
+The cut-over request also restores model-backed `digest`, `classify` and
+`extract`, superseding their earlier removal decision. Restoration is still
+blocked on execution composition: current Run exposes persistence/read APIs
+only, every provider's `prepare`/`preflight` returns `Disabled`, and both launch
+plan types are uninhabited. Confinement's `utility` module is a closed Git
+boundary, not an inference runner. Bypassing Run through a CLI-owned process
+would lose custody/confinement guarantees. No placeholder command or unused
+retry seam is added.
+
+The utility execution owner must consume an ordered, explicit cross-adapter
+candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:
+Claude utility model, Codex `gpt-6-luna` at low effort, an eligible recorded
+OpenCode free model for non-confidential input, then a recorded Agy Gemini Flash
+model. Do not retry the same Claude route as a junior fallback. Each candidate
+needs its own disclosure, availability and confinement checks; confidential
+input must never reach a free model without an explicit non-training guarantee.
+A sandboxed 401 takes this route-around path rather than receiving wider auth
+write/keychain access. Exact selectors and controls still require activation
+evidence; a requested model name cannot fabricate that evidence.

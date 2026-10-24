@@ -688,15 +688,17 @@ for Claude sign-in diagnosis. This supersedes the earlier removal of that
 spelling for this diagnostic only. Without an alias, inspect the default
 Claude identity and each `.claude-<label>` directory; each CLI status probe gets
 that exact `CLAUDE_CONFIG_DIR`. With an alias, use bounded, noninteractive SSH
-to the installed remote Rust front door. Do not silently fall back to local
+to `~/.local/bin/provenant`, the default stable remote Rust front door.
+A custom remote bin directory is not resolved by this diagnostic. Do not silently fall back to local
 results when a remote host cannot answer.
 
 Doctor runs `claude auth status --json`, never a prompt. It emits only identity
 labels and typed states: `signed_in`, `signed_out`,
-`token_present_unrefreshable`, `keychain_unavailable`, or `unknown`. A negative
+`credential_store_present`, `keychain_unavailable`, or `unknown`. A negative
 login bit alone cannot establish sign-out: credential-file metadata or a
 password-free keychain item-existence probe distinguishes a present identity
-from an absent one. Keychain failure stays indeterminate. No token or raw
+from an absent one. Store presence does not prove a token exists or can be
+renewed. Keychain failure stays indeterminate. No token or raw
 account/status output is persisted or printed. Every state carries
 `token_validity = "unverified"`; local status cannot prove a token is accepted
 by the provider or that quota and subscription information were refreshed.

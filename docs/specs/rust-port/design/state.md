@@ -580,8 +580,9 @@ replacement for profile mutation; edit the user-owned TOML explicitly.
 `config::bind_host` owns the random host ID in the selected state's `host-id`.
 The old hostname slug, `hosts.json` alias migration and telemetry host aliases
 are retired. `core::RootInputs` and the binary's `roots` module own selected
-state, installed asset and project resolution; the legacy product-root
-environment variable is not a second selector.
+state, installed asset and project resolution; the `AGENT_FABRIC_PRODUCT_ROOT`
+environment variable is retired. `PROVENANT_ROOT` still selects assets for an
+uninstalled binary; installed builds resolve their release directory.
 
 Lane D deletes `scripts/harness_profile.py` (212 lines),
 `scripts/host_identity.py` (102), `scripts/lib/roots.py` (31),

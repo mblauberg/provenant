@@ -221,6 +221,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         }
         let out = rig.command(&leaf)?;
         let expected = match leaf.first().copied() {
+            Some("config") => 0,
             Some("install") => 1,
             Some("uninstall") => 0,
             Some("check") if leaf.get(1) == Some(&"install") => 1,
@@ -286,10 +287,14 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     let claude = bin.join("claude");
     fs::write(&claude, b"#!/bin/sh\n[ \"$1 $2 $3\" = 'auth status --json' ] || exit 90\ncase \"$CLAUDE_CONFIG_DIR\" in\n  */.claude-pro) printf '{\"loggedIn\":false}'; exit 1;;\n  *) printf '{\"loggedIn\":true,\"email\":\"private-marker\"}';;\nesac\n")?;
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
+    fs::create_dir(rig.home.join(".claude-default"))?;
     let identity = rig.home.join(".claude-pro");
     fs::create_dir(&identity)?;
-    // A directory at this path proves only presence. Doctor must not open it.
-    fs::create_dir(identity.join(".credentials.json"))?;
+    // Only file metadata is needed. Doctor must not decode or return this value.
+    fs::write(
+        identity.join(".credentials.json"),
+        b"private-credential-marker",
+    )?;
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push(("PATH".into(), bin.into_os_string()));
     let out = rig.command(&["hosts", "doctor", "--json"])?;
@@ -303,11 +308,14 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     let rows = value["data"]["claude"]
         .as_array()
         .ok_or("missing identities")?;
+    assert!(rows.iter().any(|r| r["label"] == "default (~/.claude)"));
+    assert!(rows.iter().any(|r| r["label"] == "default"));
     assert!(
         rows.iter()
-            .any(|r| r["label"] == "pro" && r["signin"]["state"] == "token_present_unrefreshable")
+            .any(|r| r["label"] == "pro" && r["signin"]["state"] == "credential_store_present")
     );
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-marker"));
+    assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-credential-marker"));
     assert!(!rig.state.exists());
     assert_eq!(
         code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
@@ -323,8 +331,10 @@ fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> 
     let bin = rig.root.join("ssh-bin");
     fs::create_dir(&bin)?;
     let ssh = bin.join("ssh");
-    fs::write(&ssh, b"#!/bin/sh\n[ \"$6\" = -- ] && [ \"$7\" = workshop ] && [ \"$8\" = 'exec ~/.local/bin/provenant hosts doctor --json' ] || exit 91\nprintf '{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[{\"label\":\"pro\",\"signin\":{\"state\":\"keychain_unavailable\",\"token_validity\":\"unverified\"}}]}}'\n")?;
+    fs::write(&ssh, b"#!/bin/sh\n[ \"$6\" = -- ] && [ \"$7\" = workshop ] && [ \"$8\" = 'exec ~/.local/bin/provenant hosts doctor --json' ] || exit 91\n[ \"$SSH_AUTH_SOCK\" = /fixture/agent.sock ] || exit 92\nprintf '{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[{\"label\":\"pro\",\"signin\":{\"state\":\"keychain_unavailable\",\"token_validity\":\"unverified\"}}]}}'\n")?;
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700))?;
+    rig.env
+        .push(("SSH_AUTH_SOCK".into(), "/fixture/agent.sock".into()));
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push(("PATH".into(), bin.into_os_string()));
     let out = rig.command(&["hosts", "doctor", "workshop", "--json"])?;

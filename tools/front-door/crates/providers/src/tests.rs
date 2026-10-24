@@ -687,7 +687,7 @@ fn claude_signin_does_not_call_a_locked_or_present_identity_signed_out() {
     let negative = br#"{"loggedIn":false,"email":"never-publish@example.invalid"}"#;
     assert_eq!(
         signin_status(negative, Some(1), C::Present).state,
-        S::TokenPresentUnrefreshable
+        S::CredentialStorePresent
     );
     assert_eq!(
         signin_status(negative, Some(1), C::Unavailable).state,

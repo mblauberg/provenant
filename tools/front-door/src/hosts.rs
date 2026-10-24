@@ -40,6 +40,11 @@ fn probe(
         ("HOME".into(), home.as_os_str().to_owned()),
         ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
     ];
+    if config.is_none()
+        && let Some(socket) = std::env::var_os("SSH_AUTH_SOCK")
+    {
+        env.push(("SSH_AUTH_SOCK".into(), socket));
+    }
     if let Some(config) = config {
         env.push(("CLAUDE_CONFIG_DIR".into(), config.as_os_str().to_owned()));
     }
@@ -57,7 +62,11 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
     // Existence is enough; never open the credential file or ask security for
     // its password (-w/-g). Locked/inaccessible stores remain indeterminate.
     match fs::symlink_metadata(config.join(".credentials.json")) {
-        Ok(_) => return CredentialPresence::Present,
+        Ok(meta) if meta.file_type().is_file() && meta.len() > 0 => {
+            return CredentialPresence::Present;
+        }
+        Ok(meta) if !meta.file_type().is_file() => return CredentialPresence::Unknown,
+        Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return CredentialPresence::Unavailable,
     }
@@ -94,7 +103,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
     }
 }
 fn local(home: &Path) -> Result<Report, Box<dyn std::error::Error>> {
-    let mut identities = vec![("default".to_owned(), home.join(".claude"))];
+    let mut identities = vec![("default (~/.claude)".to_owned(), home.join(".claude"))];
     for entry in fs::read_dir(home)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -180,7 +189,16 @@ fn inspect(host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
     }
     let remote: Remote =
         provenant_records::decode(&out.stdout.bytes[..], provenant_records::Limits::CONFIG)?;
-    if remote.command != "hosts doctor" || remote.status != "ok" || remote.data.claude.len() > 128 {
+    if remote.command != "hosts doctor"
+        || remote.status != "ok"
+        || remote.data.claude.len() > 128
+        || remote.data.claude.iter().any(|row| {
+            row.label.is_empty()
+                || row.label.len() > 128
+                || row.label.chars().any(char::is_control)
+                || row.signin.token_validity != "unverified"
+        })
+    {
         return Err("invalid remote doctor report".into());
     }
     Ok(remote.data)
@@ -195,10 +213,13 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "unknown".into());
-                text.push_str(&format!(
-                    "claude [{}]: {state}; token validity unverified\n",
-                    row.label
-                ));
+                text.push_str(&format!("claude [{}]: {state}", row.label));
+                if row.signin.state
+                    == provenant_providers::claude::SigninState::CredentialStorePresent
+                {
+                    text.push_str(" (status probe could not confirm sign-in)");
+                }
+                text.push_str("; token validity unverified\n");
             }
             emit(
                 &CommandResult::new("hosts doctor", Outcome::Ok, report),

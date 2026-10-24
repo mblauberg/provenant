@@ -278,7 +278,7 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
         "schema_version":1,"account":account,"revision":2,
         "snapshot":{"schema_version":1,"account":account,"revision":1,"status":"available",
           "observed_unix_seconds":now-10,"source_ref":"fixture","authority_ref":null,
-          "windows":[{"pool":"weekly","used_basis_points":5300,"resets_unix_seconds":null}]},
+          "windows":[{"pool":"weekly\n\u{1b}[2J","used_basis_points":5300,"resets_unix_seconds":null}]},
         "claim":null,"last_attempt_unix_seconds":now-5,"backoff_until_unix_seconds":null,
         "failures":1,"last_error":"auth","refusals":[]
     });
@@ -297,6 +297,8 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
     for expected in ["pro", "STALE", "last known", "53.00%", "age", "auth"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
+    assert!(!text.contains('\u{1b}'));
+    assert!(text.contains("\\n"));
     rig.assert_legacy_unchanged()
 }
 

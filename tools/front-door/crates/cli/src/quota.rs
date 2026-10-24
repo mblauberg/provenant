@@ -412,7 +412,7 @@ pub fn run(
                     for window in &snapshot.windows {
                         human.push_str(&format!(
                             "; {} {}.{:02}% used",
-                            window.pool,
+                            window.pool.escape_debug(),
                             window.used_basis_points / 100,
                             window.used_basis_points % 100
                         ));
@@ -424,6 +424,9 @@ pub fn run(
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_else(|| "unknown".into());
                     human.push_str(&format!("; refresh failed: {reason}"));
+                    if error == ProbeFailure::Auth {
+                        human.push_str(" (needs login in this identity)");
+                    }
                 }
                 human.push('\n');
             }
