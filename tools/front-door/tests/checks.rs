@@ -19,7 +19,12 @@ fn config_defects_are_findings_and_install_absence_is_not_success() -> Result {
     let value: serde_json::Value = serde_json::from_slice(&config.stdout.bytes)?;
     assert_eq!(value["data"]["count"], 1);
     let install = rig.command(&["check", "install", "--json"])?;
-    assert_eq!(code(&install), 1);
+    assert_eq!(
+        code(&install),
+        1,
+        "{}",
+        String::from_utf8_lossy(&install.stdout.bytes)
+    );
     rig.assert_legacy_unchanged()
 }
 
@@ -102,9 +107,12 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
         5
     );
     assert!(next["data"]["next_cursor"].is_null());
+    let mismatched = rig.command(&["check", "install", "--cursor", cursor, "--json"])?;
     assert_eq!(
-        code(&rig.command(&["check", "install", "--cursor", cursor, "--json"])?),
-        2
+        code(&mismatched),
+        2,
+        "{}",
+        String::from_utf8_lossy(&mismatched.stdout.bytes)
     );
     std::fs::write(
         rig.state.join("config.toml"),
