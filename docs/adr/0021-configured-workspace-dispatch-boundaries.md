@@ -121,8 +121,9 @@ first-class path to the same owners.
 
 ## Consequences
 
-- Luna, Gemini Flash and other configured workers can be used freely for cheap
-  swarms and mixed-provider batches.
+- Luna, Gemini Flash and other configured workers can be used in authorised
+  swarms and mixed-provider batches, subject to their account and quota
+  controls.
 - Cross-family evidence remains available when a user or assurance profile needs
   it, without imposing that cost on every run.
 - A single dispatch owner prevents drift between `provenant`, Fabric and

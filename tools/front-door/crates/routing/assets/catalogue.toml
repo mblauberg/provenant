@@ -1,8 +1,8 @@
 # Listing/answering evidence only. No row enables execution or proves lineage.
-# Utility Haiku low effort follows the user-approved routing policy;
-# other effort controls remain empty without retained evidence.
+# Exact effort support requires a retained invocation recording. Codex Luna at
+# low is recorded; all other entries remain effort-less until captured.
 schema_version = 1
-revision = "recordings-20261024-utility-v1"
+revision = "route-pools-20261025-v1"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -13,7 +13,7 @@ trains_on_prompts = false
 
 [[models]]
 model = "claude/claude-sonnet-5"
-efforts = ["low"]
+efforts = []
 family = "anthropic"
 evidence_ref = "providers/claude/model-mismatch.jsonl"
 trains_on_prompts = false
@@ -49,34 +49,85 @@ trains_on_prompts = false
 
 [[models]]
 model = "claude/claude-haiku-5-5"
-efforts = ["low"]
+efforts = []
 family = "anthropic"
-evidence_ref = "migrated from the former instance routing catalogue"
+evidence_ref = "providers/claude/recordings.json"
 trains_on_prompts = false
 
 [[models]]
 model = "codex/gpt-6-luna"
 efforts = ["low"]
 family = "openai"
-evidence_ref = "migrated from the former instance routing catalogue"
+evidence_ref = "providers/codex/recordings.json"
 trains_on_prompts = false
+
+[[models]]
+model = "codex/gpt-6.1-sol"
+efforts = []
+evidence_ref = "routing/legacy-route-ids.txt"
+
+[[models]]
+model = "codex/gpt-6-astra"
+efforts = []
+evidence_ref = "routing/legacy-route-ids.txt"
+
+[[models]]
+model = "claude/claude-sonnet-5-5"
+efforts = []
+evidence_ref = "routing/legacy-route-ids.txt"
+
+[[models]]
+model = "claude/claude-opus-5-5"
+efforts = []
+evidence_ref = "routing/legacy-route-ids.txt"
+
+[[models]]
+model = "agy/gemini-3.8-flash"
+efforts = []
+evidence_ref = "providers/agy/success.jsonl"
 
 [[models]]
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 efforts = []
-evidence_ref = "migrated from the former instance routing catalogue"
+evidence_ref = "routing/legacy-route-ids.txt"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
 efforts = []
-evidence_ref = "migrated from the former instance routing catalogue"
+evidence_ref = "routing/legacy-route-ids.txt"
 trains_on_prompts = false
 
 [pools]
 utility = [
-    { model = "claude/claude-haiku-5-5", effort = "low" },
-    { model = "codex/gpt-6-luna" },
+    { model = "claude/claude-haiku-5-5" },
+    { model = "codex/gpt-6-luna", effort = "low" },
     { model = "opencode/opencode/deepseek-v4.1-flash-free", free = true },
     { model = "opencode/opencode/glm-5.3-flash-free", free = true },
+]
+junior = [
+    { model = "codex/gpt-6-luna" },
+    { model = "agy/gemini-3.8-flash" },
+    { model = "claude/claude-haiku-5-5" },
+    { model = "opencode/opencode/deepseek-v4.1-flash-free", free = true },
+    { model = "opencode/opencode/glm-5.3-flash-free", free = true },
+]
+senior = [
+    { model = "codex/gpt-6.1-sol" },
+    { model = "claude/claude-sonnet-5-5" },
+    { model = "agy/gemini-3.8-flash" },
+]
+principal = [
+    { model = "claude/claude-opus-5-5" },
+    { model = "codex/gpt-6-astra" },
+]
+writing = [
+    { model = "codex/gpt-6-luna" },
+    { model = "agy/gemini-3.8-flash" },
+    { model = "claude/claude-sonnet-5-5" },
+]
+design = [
+    { model = "claude/claude-sonnet-5-5" },
+    { model = "agy/gemini-3.8-flash" },
+    { model = "claude/claude-opus-5-5" },
 ]

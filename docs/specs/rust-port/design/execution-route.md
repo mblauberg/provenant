@@ -11,7 +11,8 @@ current product does. A qualifying activation recording must establish that
 stderr/exit/answer combination and the finalisation input before Agy activation;
 no timeout inference is implemented from exit status alone.
 
-`routing` resolves explicit model choices and named routes; `providers` prepares
+`routing` resolves exact model choices, named routes and ordered catalogue
+pools; `providers` prepares
 CLI invocations and interprets provider evidence; `quota` schedules current
 allowance reads and supplies admission advice. Run owns the registry, atomic
 admission/operation insertion, attempts, retries and publication. Supervisor owns
@@ -30,9 +31,9 @@ Transcripts and run recordings are research inputs only, never runtime state.
 
 | Evidence | Decision |
 | --- | --- |
-| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council is a caller-supplied list of distinct exact models, expanded into ordinary tasks by run/Fabric; no council selector or filling algorithm. |
-| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`); no tier aliases. Named routes are one small TOML table. |
-| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Drop pools, weights, rotation, the selection store, `--commit-selection`, preferences and inferred class/size policy. Keep pure `route list\|resolve`. |
+| 1,116 `fabric_submit` calls, 1,170 tasks; councils 0, rotate 0, model lists 2, fallback 2, legacy pools 0 | Keep explicit models, efforts and bounded explicit fallback. A council remains caller-side: submit distinct exact model tasks through run/Fabric and synthesise in the chair; no council selector or filling algorithm. |
+| `strong` 73, `bulk` 24, `junior` 1 | Historical tier names, including pre-rename names on 14–15 October (`model_route_pools.py:83`). Add named catalogue pools `junior`, `senior`, `principal`, `writing` and `design`; they are exact route names, not adapter aliases or synonyms. Personal named routes still select one exact model. |
+| CLI `--council` 3 and `--pool` 2 in two sessions; `route resolve` 8 in one session; `select` once as a bug reproduction | Keep bounded ordered catalogue pools as fixed candidate lists. Drop weighted or rotating pools, the selection store, `--commit-selection`, preferences and inferred class/size routing. Keep pure `route list\|resolve`; pool choices use `--route NAME`, with no separate `--pool` or `--council` flag. |
 | Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
 | Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
 | Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
@@ -52,11 +53,13 @@ Confinement retains only a bounded safe Agy home recipe.
 
 `RouteRequest` has exactly one `Model(ADAPTER/ID)` or `NamedRoute(NAME)`,
 optional effort and `Fallback::None | Models(BoundedModels<2>)`, default none.
-IDs retain the full provider/model path after the first adapter separator.
-A route name expands to one exact model and optional effort from TOML; it does
-not choose a tier, pool, account or native seat. No inferred adapter, model
-upgrade or hidden downgrade. An explicit unknown ID remains unverified and can
-run only if activation, disclosure and confinement are independently established.
+IDs retain the full provider/model path after the first adapter separator. A
+named route in the user config expands to one exact model and optional effort;
+a bundled pool route tries its ordered members and selects the first ready
+candidate, or reports the first eligible candidate with its readiness blocker
+when none is ready. No inferred adapter, model upgrade or hidden downgrade. An
+explicit unknown ID remains unverified and can run only if activation,
+disclosure and confinement are independently established.
 
 Resolve once against immutable catalogue, provider availability and quota
 snapshots. Validate activation/executable and access, filter confidentiality and
@@ -183,8 +186,13 @@ quota cache to resolution. Catalogue-backed exact model controls need no
 invented model-bearing preflight event; unlisted models still need a current
 provider observation. Applied argv and observed answering identity remain
 separate. Preview remains read-only and does not manufacture a task grant.
-Luna and Sonnet low effort are the explicit chair-authorised smoke controls.
-No fast or priority service is enabled.
+Codex Luna `low` is the only effort control in the bundled route catalogue with
+an exact accepted invocation recording (`tools/front-door/tests/fixtures/providers/codex/recordings.json`).
+Claude recordings establish Haiku model identity but not an effort control;
+the previous Sonnet `low` smoke note has no matching invocation recording.
+Other requested efforts stay unset until their exact controls are recorded.
+Only OpenCode `*-free` models are marked free; Agy Gemini Flash is a paid
+subscription model. No fast or priority service is enabled.
 
 Claude's validated registration is durable credential authority. Each attempt
 records actor (dispatch run ID), exact `.credentials.json` or Keychain service
@@ -855,7 +863,8 @@ confinement or custody acceptance.
    alternatives, family/availability facts and route CLI. Delete routing Rust
    emulation, old golden judges and only leaves/config/schemas/help/docs whose
    importers/callers are all retired in this area. Shared routing Python waits
-   for the matrix gate. No preferences, rotation or pool engine.
+   for the matrix gate. No preferences or selection transaction. Routing
+   resolves fixed ordered catalogue pools without weighting or rotation.
    Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
    in step 3, which removes `task_classifier`'s utility calls, gated on their last
    importer. This includes CLI removing utility verbs and the output-digest hook.
@@ -936,7 +945,8 @@ The utility execution owner must consume an ordered, explicit cross-adapter
 candidate list and retry only `auth_required`, `usage_limited` or `unavailable`:
 Claude utility model, Codex `gpt-6-luna` at low effort, an eligible recorded
 OpenCode free model for non-confidential input, then a recorded Agy Gemini Flash
-model. Do not retry the same Claude route as a junior fallback. Each candidate
+model (a paid subscription model). Do not retry the same Claude route as a
+junior fallback. Each candidate
 needs its own disclosure, availability and confinement checks; confidential
 input must never reach a free model without an explicit non-training guarantee.
 A sandboxed 401 takes this route-around path rather than receiving wider auth

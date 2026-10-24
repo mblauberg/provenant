@@ -58,8 +58,8 @@ fn exact_unknown_is_retained_but_never_upgraded_or_activated()
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    let route = resolve(&request("codex/gpt-6.1-sol")?, &context)?;
-    assert_eq!(route.model, "gpt-6.1-sol");
+    let route = resolve(&request("codex/unlisted-exact-id")?, &context)?;
+    assert_eq!(route.model, "unlisted-exact-id");
     assert_eq!(route.effort, None);
     assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
     assert!(matches!(
@@ -176,7 +176,7 @@ fn utility_pool_resolves_and_confidential_skips_training_members()
 }
 
 #[test]
-fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
+fn utility_requires_free_opt_in_and_leaves_unrecorded_haiku_effort_unset()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -186,7 +186,7 @@ fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
         resolve(&request, &context(&catalogue, &config, now()?))?
             .effort
             .as_deref(),
-        Some("low")
+        None
     );
     // Confidential callers cannot use the paid members in this fixture.
     for row in &mut catalogue.models {
@@ -332,7 +332,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "recordings-20261024-utility-v1".into(),
+        catalogue_revision: "route-pools-20261025-v1".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         last_preflight_error: None,

@@ -105,17 +105,18 @@ workflow.
 | External effects | none |  | reversible | irreversible |
 | Critical surface | none | public-contract | auth-security, privacy, financial, legal, build-release-gate | life-safety |
 
-The routing catalogue currently provides the `utility` pool; `principal`,
-`senior` and `junior` are skill guidance, not router tiers. Route each dispatch
-using a named route or explicit model as the catalogue allows. Task-class
-presets affect knobs only. When several families are available, work as a
-tiered council whose depth follows the risk tier. Bind the applied route to the
-receipt. An adapter route given only as an alias records the alias and its
-capability limit; never invent task-class, role or effort fields. The runtime
-governs routing, catalogues only cache it, and the mechanics live in
-`orchestrate`. Prefer per-dispatch controls: editing a global provider
-configuration, such as `~/.codex/config.toml`, needs explicit
-authority for that path and action. Run attempts live under
+The bundled routing catalogue provides ordered `utility`, `junior`, `senior`,
+`principal`, `writing` and `design` pools. Each task selects one named route or
+one exact model; a pool tries its members in order and does not rotate or
+weight them. `task_class` presets affect knobs only and do not alias routes.
+When several families are available, use the tiered-council method by
+submitting separate tasks for distinct exact models, then synthesise in the
+chair. Bind the applied route and effort from each attempt to the receipt.
+Unsupported effort is refused; never invent task-class, role or effort values.
+The runtime governs routing, the bundled catalogue supplies pool membership
+and order, and the mechanics live in `orchestrate`. Prefer per-dispatch
+controls: editing a global provider configuration, such as
+`~/.codex/config.toml`, needs explicit authority for that path and action. Run attempts live under
 `<state>/runs/<run>/attempts/<attempt>/`; the default state root is
 `~/.local/share/provenant/v1`. `.agent-run/` is a protected legacy root, not
 the current run store.

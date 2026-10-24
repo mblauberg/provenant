@@ -1,20 +1,34 @@
 # Model routing
 
-Run `provenant route list` to inspect the catalogue and cached availability.
-Use `provenant --json route list` for records, or `--adapter NAME` to narrow it.
-Resolve a named route with `provenant route resolve --route NAME`, or select
-an exact model with `--model ADAPTER/ID` and optional `--effort LEVEL`.
-The `utility` pool tries Claude Haiku at low effort, then Codex Luna, then free
-OpenCode DeepSeek and GLM entries. OpenCode is currently disabled, so those
-members are skipped and the pool falls through to Claude or Codex.
-Select it with
-`--route utility`; `--confidential` excludes training or unclassified members
-and fallbacks. Free pool members require `--allow-free` (default false), even
-when they do not train. It uses exact routing, with no classifier or synonyms.
+Run `provenant route list` to inspect the catalogue, ordered pool members and
+cached availability. Use `provenant --json route list` for records, or
+`--adapter NAME` to narrow it. Resolve a pool with
+`provenant route resolve --route NAME`, or select an exact model with
+`--model ADAPTER/ID` and optional `--effort LEVEL`.
+
+The bundled pools are ordered readiness fallbacks:
+
+| Pool | Members, in preference order |
+|---|---|
+| `utility` | Claude Haiku, Codex Luna at recorded `low`, OpenCode DeepSeek Flash Free, OpenCode GLM Flash Free |
+| `junior` | Codex Luna, Agy Gemini 3.8 Flash, Claude Haiku, the two OpenCode free models |
+| `senior` | Codex GPT-6.1 Sol, Claude Sonnet 5.5, Agy Gemini 3.8 Flash |
+| `principal` | Claude Opus 5.5, Codex GPT-6 Astra |
+| `writing` | Codex Luna, Agy Gemini 3.8 Flash, Claude Sonnet 5.5 |
+| `design` | Claude Sonnet 5.5, Agy Gemini 3.8 Flash, Claude Opus 5.5 |
+
+The resolver selects the first ready member; if none is ready, it reports the
+first eligible member with its readiness blocker. It does not rotate or weight
+members. Only the OpenCode `*-free` entries are marked free and they require
+`--allow-free` (default false). Agy Gemini Flash is a paid subscription model.
+`--confidential` excludes training or unclassified members and fallbacks.
+There is no classifier or route-synonym inference. Effort is set only when the
+catalogue contains an exact recorded control; unsupported effort is refused.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
-is authoritative for this pool. Fabric submission is wired; use the resolved
-route recorded for the attempt when checking what ran.
+is authoritative for pool membership, order and effort controls. Catalogue
+presence does not establish adapter availability; check cached readiness and
+the resolved route recorded for the attempt.
 
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 
