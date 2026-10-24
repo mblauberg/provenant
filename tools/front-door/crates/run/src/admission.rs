@@ -6,6 +6,7 @@ use crate::{
     store::insert_event,
     *,
 };
+use provenant_confinement::valid_read_only_writable;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, WaitBudget, WallTime};
 use provenant_supervisor::{
     fs::Directory,
@@ -127,11 +128,7 @@ impl RunStore {
         writable: &[String],
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        if writable.len() > 128
-            || writable
-                .iter()
-                .any(|p| provenant_core::RelativePath::parse(p).is_err())
-        {
+        if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
         }
         self.write(call, |tx| {

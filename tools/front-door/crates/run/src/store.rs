@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, read_sealed, seal},
+    artifacts::{artifact_path, read_sealed, remove_temporary_best_effort, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -507,6 +507,9 @@ impl RunStore {
         next.exit_evidence = durable_exit;
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
+                if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
+                    remove_temporary_best_effort(&attempt_dir);
+                }
                 return Ok(old);
             }
             return Err(RunError::Conflict);
@@ -557,6 +560,7 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
+        remove_temporary_best_effort(&attempt_dir);
         #[cfg(test)]
         crate::tests::crash_at("committed");
         Ok(next)

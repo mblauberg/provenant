@@ -3,6 +3,7 @@ use crate::{
     db::{decode, sql_int},
     *,
 };
+use provenant_confinement::valid_read_only_writable;
 use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
 use provenant_records::{AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
@@ -436,11 +437,7 @@ impl RunStore {
     }
 }
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
-    if r.read_only_writable.len() > 128
-        || r.read_only_writable
-            .iter()
-            .any(|p| provenant_core::RelativePath::parse(p).is_err())
-    {
+    if !valid_read_only_writable(&r.read_only_writable) {
         return Err(RunError::Validation("invalid read-only writable paths"));
     }
     if r.schema_version != 1 || r.attempt_number == 0 || r.revision == 0 {

@@ -104,8 +104,11 @@ production provider registry and the `dispatch`, `lanes`, `output`, `cancel`,
 `resume`, `reconcile` and `telemetry stats` leaves.
 
 `temporary_paths` creates private attempt-owned `tmp/` directories and passes
-them to provider preparation. `read_only_plan` loads the bound project's
-`read-only.json`, applies the host Git binding and selects that temporary root.
+them to provider preparation. Terminal commit and withdrawal remove `tmp/`
+best-effort through held directories, without following symlinks. Cleanup
+failure does not change the committed attempt. `read_only_plan` loads the
+bound project's `read-only.json`, applies the host Git binding and selects
+that temporary root.
 `PreparedLaunch` carries the resolved read-only grant object; start records its
 relative write exceptions before custody handoff. Production Registry launch
 composition is still pending, so this does not yet enable dispatch.

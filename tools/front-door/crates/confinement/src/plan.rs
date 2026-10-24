@@ -9,6 +9,13 @@ pub use read_only::{ReadOnlyGrants, ReadOnlyPolicy};
 use std::path::PathBuf;
 use thiserror::Error;
 
+pub const MAX_READ_ONLY_WRITABLE: usize = 128;
+
+pub fn valid_read_only_writable(paths: &[String]) -> bool {
+    paths.len() <= MAX_READ_ONLY_WRITABLE
+        && paths.iter().all(|path| RelativePath::parse(path).is_ok())
+}
+
 /// Clean config must suppress inherited hooks, MCP and plugins. Inherited
 /// config is refused for read-only work until confined extension evidence exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

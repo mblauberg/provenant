@@ -209,8 +209,10 @@ The attempt records every granted relative path before guardian handoff.
 
 Run creates each attempt's `tmp/` with mode 0700 and passes it to preparation;
 read-only plan construction selects it as scratch, and provider recipes set
-`TMPDIR` there. It is disposable with its owning attempt; it is not retained
-provider history and is not the supervisor's host-only classified `scratch/`.
+`TMPDIR` there. Terminal commit and withdrawal remove it best-effort using
+held directories without following symlinks. Cleanup failure does not change
+the committed attempt. It is not retained provider history and is not the
+supervisor's host-only classified `scratch/`.
 No new deletion/retention command is introduced. The run plan builder and
 provider recipes are implemented; production `Registry::prepare` still needs
 to compose their setup, anchors, compilation and custody handoff. Until that

@@ -2,6 +2,7 @@
 use crate::{
     ReadOnlyRepo,
     permissions::{PathGrant, PathScope, PermissionError},
+    plan::valid_read_only_writable,
 };
 use provenant_core::RelativePath;
 use provenant_supervisor::fs::SafeDir;
@@ -45,7 +46,7 @@ impl ReadOnlyPolicy {
         if repo.0.common_git_dir() != binding.common_dir() {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
-        if self.writable.len() > 128 {
+        if !valid_read_only_writable(&self.writable) {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
         let mut writes = Vec::new();
@@ -59,18 +60,7 @@ impl ReadOnlyPolicy {
             {
                 return Err(PermissionError::InvalidReadOnlyPolicy);
             }
-            // Every component must already be a real directory below the held
-            // repository root. No creation and no symlink traversal here.
-            let mut directory: Option<Box<dyn SafeDir>> = None;
-            for component in path.as_path().components() {
-                if let Component::Normal(name) = component {
-                    let parent = directory.as_deref().unwrap_or(repo.0.root_dir());
-                    let opened = parent
-                        .open_verified_directory(name)
-                        .map_err(PermissionError::Filesystem)?;
-                    directory = Some(opened);
-                }
-            }
+            verify_directory_path(repo.0.root_dir(), &path)?;
             writes.push(PathGrant {
                 path: repo.0.root_path().join(path.as_path()),
                 scope: PathScope::Subtree,
@@ -116,20 +106,25 @@ impl ReadOnlyGrants {
         for path in &self.relative {
             let relative =
                 RelativePath::parse(path).map_err(|_| PermissionError::InvalidReadOnlyPolicy)?;
-            let mut directory: Option<Box<dyn SafeDir>> = None;
-            for part in relative.as_path().components() {
-                if let Component::Normal(name) = part {
-                    let parent = directory.as_deref().unwrap_or(root.as_ref());
-                    directory = Some(
-                        parent
-                            .open_verified_directory(name)
-                            .map_err(PermissionError::Filesystem)?,
-                    );
-                }
-            }
+            verify_directory_path(root.as_ref(), &relative)?;
         }
         Ok(())
     }
+}
+
+fn verify_directory_path(root: &dyn SafeDir, path: &RelativePath) -> Result<(), PermissionError> {
+    let mut directory: Option<Box<dyn SafeDir>> = None;
+    for component in path.as_path().components() {
+        if let Component::Normal(name) = component {
+            let parent = directory.as_deref().unwrap_or(root);
+            directory = Some(
+                parent
+                    .open_verified_directory(name)
+                    .map_err(PermissionError::Filesystem)?,
+            );
+        }
+    }
+    Ok(())
 }
 
 // .config covers XDG provider configuration; .github includes Copilot.

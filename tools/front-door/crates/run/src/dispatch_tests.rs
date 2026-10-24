@@ -270,6 +270,61 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = two_tasks(2);
+    store.create(&run, &call)?;
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "keep")?;
+
+    let withdrawn = run.attempts[0].attempt_id;
+    let withdrawn_tmp = store.temporary_paths(withdrawn, &call)?.temporary;
+    std::fs::write(withdrawn_tmp.join("provider.tmp"), "discard")?;
+    symlink(&outside, withdrawn_tmp.join("outside-link"))?;
+    store.withdraw(
+        withdrawn,
+        AttemptState::Queued,
+        Outcome::Cancelled,
+        "cancelled before start",
+        WallTime::from_micros(150)?,
+        &call,
+    )?;
+    assert!(!withdrawn_tmp.exists());
+
+    let terminal = run.attempts[1].attempt_id;
+    let terminal_tmp = store.temporary_paths(terminal, &call)?.temporary;
+    std::fs::write(terminal_tmp.join("provider.tmp"), "discard")?;
+    symlink(&outside, terminal_tmp.join("outside-link"))?;
+    let mut observed = exit();
+    observed.scope.attempt = terminal;
+    observed.termination = Some(Termination::Exit(1));
+    seal_exit(&store, &observed)?;
+    let publication = TerminalPublication {
+        outcome: Outcome::Failed,
+        finished_at: WallTime::from_micros(160)?,
+        started_at: Some(WallTime::from_micros(120)?),
+        provider_ms: Some(1),
+        reason: Some("fixture failure".into()),
+        result: "",
+        complete: true,
+        redacted: false,
+        resolved_route: Some(route()),
+        applied_route: Some(route()),
+        observed_route: Some(route()),
+        usage: UsageRecord::default(),
+    };
+    store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
+    assert!(!terminal_tmp.exists());
+    assert_eq!(std::fs::read_to_string(outside)?, "keep");
+    Ok(())
+}
+
 fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outcome> {
     match store.record(id, call)?.state {
         AttemptState::Terminal { outcome, .. } => Ok(outcome),

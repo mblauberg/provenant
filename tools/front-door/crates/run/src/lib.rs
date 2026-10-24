@@ -77,7 +77,6 @@ pub enum RunError {
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
-
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]

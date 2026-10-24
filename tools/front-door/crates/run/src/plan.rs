@@ -6,7 +6,7 @@ use std::{ffi::OsStr, path::PathBuf};
 
 pub struct AttemptPaths {
     /// Provider scratch and build output live below this attempt, never in a
-    /// shared system temporary directory. Attempt removal removes it too.
+    /// shared system temporary directory. Settlement removes it best-effort.
     pub temporary: PathBuf,
 }
 
