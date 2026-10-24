@@ -13,4 +13,5 @@ Observe another generation with `provenant fabric landing wait --reference
 refs/heads/main --generation N --wait SECONDS`. The budget is 1–14400 seconds;
 exit 124 means the observation expired. Waiting never acquires a lease.
 Ownership refusal exits 1. A lease is advisory coordination, not push authority.
-Fenced home-host push and reconciliation belong to the Git transport step F7.
+Use `provenant fabric landing push` for a fenced push and
+`provenant fabric landing reconcile` to settle its recorded outcome.

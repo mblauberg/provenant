@@ -41,6 +41,6 @@ links and verify volatile provider or model claims at the live runtime.
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | Skill names and catalogue | [Repository README](../../README.md#skill-library) and `skills/*/SKILL.md` |
 | Fabric | [Fabric Rust design](../specs/rust-port/design/fabric.md) |
-| Provider compatibility | [`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml) |
+| Provider activation | [`activation.json`](../../tools/front-door/tests/fixtures/providers/activation.json) |
 | Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |
 | Live work, dependencies and user gates | [GitHub issues and Project Status](https://github.com/mblauberg/provenant/issues) |

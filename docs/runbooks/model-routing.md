@@ -4,17 +4,17 @@ Run `provenant route list` to inspect the catalogue and cached availability.
 Use `provenant --json route list` for records, or `--adapter NAME` to narrow it.
 Resolve a named route with `provenant route resolve --route NAME`, or select
 an exact model with `--model ADAPTER/ID` and optional `--effort LEVEL`.
-The `utility` pool sits below junior for mechanical work, trying low-cost
-non-training Haiku at low effort and Luna before free DeepSeek and GLM.
+The `utility` pool tries Claude Haiku at low effort, then Codex Luna, then free
+OpenCode DeepSeek and GLM entries. OpenCode is currently disabled, so those
+members are skipped and the pool falls through to Claude or Codex.
 Select it with
 `--route utility`; `--confidential` excludes training or unclassified members
 and fallbacks. Free pool members require `--allow-free` (default false), even
 when they do not train. It uses exact routing, with no classifier or synonyms.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
-is authoritative for this pool. Fabric currently accepts route preferences
-but its unavailable submission owner does not resolve them;
-there is no Fabric `confidential` preference in this slice.
+is authoritative for this pool. Fabric submission is wired; use the resolved
+route recorded for the attempt when checking what ran.
 
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 

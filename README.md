@@ -79,17 +79,21 @@ PROVENANT="$RELEASE/bin/provenant"
 `RELEASE` and `LEGACY_CHECKOUT` are absolute paths. `--legacy-checkout` is
 needed when the plan must match entries from that exact checkout; it never
 authorises a broad scan. Repeat `--harness` for each selected client.
+`--adopt-existing` adopts only compatible existing client entries whose
+configuration uses the supported selector fields and no environment values.
 Hooks default off. `--hooks on` requires recorded `HookSpec` policies and
 fixtures. Review the complete dry-run output before applying it. Unresolved
 legacy entries remain visible in the install result and `check install`
 findings. `uninstall --harness NAME` removes unchanged owned entries and keeps
 the state root, release assets and running binary.
 
-For checkout development, use the Rust workspace:
+For checkout development, use the Rust workspace. An uninstalled binary needs
+an absolute `PROVENANT_ROOT` pointing at the checkout:
 
 ```sh
+export PROVENANT_ROOT="$PWD"
 (cd tools/front-door && cargo check --workspace --all-targets)
-provenant check harness
+PROVENANT_ROOT="$PWD" cargo run --manifest-path tools/front-door/Cargo.toml -- check harness
 ```
 
 Run only focused crate tests locally. CI runs workspace tests, Rust lint,
@@ -101,22 +105,11 @@ macOS release checks, spelling, workflow lint and Markdown link checks.
 The [Fabric MCP registration notes](docs/runbooks/fabric-mcp-registration.md)
 describe registration through `provenant install` and preservation of unrelated
 client configuration. Fabric registration and direct provider execution are
-separate; dispatch activation is owned by
-[adapter compatibility](config/adapter-compatibility.yaml).
-
-| Client or provider | Fabric MCP registration | Direct provider execution |
-|---|---|---|
-| Claude Code | Supported | Enabled Anthropic primary |
-| Codex | Supported | Enabled OpenAI primary |
-| Agy | Supported | Enabled optional broker; the receipt records the runtime model family |
-| Cursor | Supported | Enabled optional Composer/Grok and hosted third-party broker |
-| Kiro | Supported | Disabled; see [`kiro-acp` policy](config/adapter-compatibility.yaml) |
-| OpenCode | Supported | Enabled optional free/Zen worker (`opencode/<model>`); explicit model required |
-
-Provider CLI versions and digests are diagnostic observations, not admission
-locks. Direct dispatch enforces the checked-in activation decision and uses
-fresh adapter capability evidence where the route requires it; a CLI update
-does not by itself require a compatibility-table edit.
+separate. Use `provenant install --help` to see supported harness clients. Run
+`provenant route list` to inspect current route availability. Execution
+activation is recorded in
+[`activation.json`](tools/front-door/tests/fixtures/providers/activation.json);
+only Claude and Codex are enabled today.
 
 Claude account selection preserves the inherited `CLAUDE_CONFIG_DIR` when using
 its ambient identity, including leaving it unset. Confined non-default lanes use
@@ -242,6 +235,14 @@ workflow skill. Removing a folder from `library/` and re-running the installer
 prunes its link.
 
 ## Documentation and help
+
+Use `provenant help` for the current command tree. Common command groups are
+`config show|set|unset`, `route`, `dispatch`, `lanes`, `output`, `cancel`,
+`resume`, `reconcile`, `workflow`, `quota`, `telemetry stats` and `worktree`.
+For writing checks, use `provenant check writing PATH...`. Operational examples
+live in the [runbooks](docs/runbooks/), including [model routing](docs/runbooks/model-routing.md),
+[Fabric hosts](docs/runbooks/fabric-hosts.md), and
+[landing leases](docs/runbooks/landing-lease.md).
 
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.

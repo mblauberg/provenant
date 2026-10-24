@@ -70,15 +70,13 @@ A live session retains the prior constitution until restart.
 
 Documentation claims sit in three tiers, and the third is deliberate:
 
-1. **Source-owned.** Marked regions in the README and
-   `docs/ARCHITECTURE.md` remain maintained documentation.
-   Rust harness asset checks binds the architecture regions to
-   `config/risk-policy.json` and the delivery lifecycle contract. The README
-   skill count is machine-checked; its catalogue prose is review-owned.
-2. **Review-checked.** Runtime schema and migration structure is owned by code
-   and tests. Specification prose, fenced commands, placeholders and unbound
-   projections remain review-owned. Relative Markdown links in `docs/` and each
-   `SKILL.md` are machine-checked; skill-reference links and other links remain
+1. **Code-checked.** Runtime schema and migration structure is owned by code
+   and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
+   machine-checked.
+2. **Review-checked.** The README skill count and architecture risk factors are
+   maintained from current files and code; no harness check binds those regions
+   to a source file. Specification prose, fenced commands, placeholders,
+   unbound projections, skill-reference links and other links remain
    review-owned.
    `HARNESS.md` stays compact because it is read before cross-provider dispatch,
    risk-tier, authority or memory decisions; see [`AGENTS.md`](AGENTS.md).
@@ -124,7 +122,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
    detection-in-use as the routing-regression backstop. Publication to other
    users re-arms the full requirement; this ADR must be revisited in any
    public-release checklist.
-9. Re-run the public-safety and full harness gates.
+9. Re-run `provenant check harness` and the applicable targeted checks.
 
 Split a skill when its triggers, artifacts or completion gates differ
 meaningfully and a single-entrypoint branch selector cannot keep them
@@ -172,8 +170,8 @@ live backup folders as the normal safety boundary.
 The `provenant-config` crate owns source stamping, typed `release.json`,
 immutable release installation and the managed-file receipt. Its library
 supports dry-run previews, digest checks and removal of unchanged owned entries.
-The `install`, `check install` and `uninstall` CLI verbs and client-specific edits remain for the later CLI cut-over; the old Python manager
-commands are retired.
+The Rust CLI ships `install`, `check install` and `uninstall`; the old Python
+manager commands are retired.
 
 ## Change the delivery kernel
 
