@@ -335,7 +335,7 @@ impl RunStore {
         })
     }
     pub fn lanes(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
-        if !(1..=100).contains(&query.limit) {
+        if !(1..=100).contains(&query.limit) || query.targets.len() > 100 {
             return Err(RunError::Validation("lane page bounds"));
         }
         let project = self.context.project_id.to_string();
@@ -372,13 +372,19 @@ impl RunStore {
             .collect::<Result<_>>()?;
         Ok(LanePage { lanes, next })
     }
-    pub fn events(&self, after: u64, limit: usize, call: &Request<'_>) -> Result<Vec<RunEvent>> {
+    pub fn events(
+        &self,
+        after: u64,
+        limit: usize,
+        attempt: Option<AttemptId>,
+        call: &Request<'_>,
+    ) -> Result<Vec<RunEvent>> {
         if !(1..=64).contains(&limit) {
             return Err(RunError::Validation("event page bounds"));
         }
         call.retry(|| {
-            let mut query = self.db.prepare("SELECT sequence,record FROM events WHERE project=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
-            let rows = query.query_map(params![self.context.project_id.to_string(), sql_int(after)?, limit as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            let mut query = self.db.prepare("SELECT sequence,record FROM events WHERE project=?1 AND sequence>?2 AND (?4 IS NULL OR attempt=?4) ORDER BY sequence LIMIT ?3")?;
+            let rows = query.query_map(params![self.context.project_id.to_string(), sql_int(after)?, limit as i64, attempt.map(|a| a.to_string())], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
             let mut page = Vec::new();
             let mut size = 0;
             for row in rows {
@@ -438,7 +444,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             .result
             .as_ref()
             .ok_or(RunError::Validation("terminal result missing"))?;
-        // Only a refusal before supervisor custody lacks exit evidence.
+        // Only a refusal or cancellation before spawn lacks exit evidence.
         match &r.exit_evidence {
             Some(evidence)
                 if evidence.path != artifact_path(r.attempt_id, "process-exit.json")?
@@ -448,8 +454,8 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 return Err(RunError::Validation("terminal exit artifact"));
             }
             Some(_) => {}
-            None if outcome == Outcome::Rejected && r.started_at.is_none() && r.generation == 0 => {
-            }
+            None if matches!(outcome, Outcome::Rejected | Outcome::Cancelled)
+                && r.started_at.is_none() => {}
             None => return Err(RunError::Validation("terminal exit evidence missing")),
         }
         if finished_at < r.queued_at

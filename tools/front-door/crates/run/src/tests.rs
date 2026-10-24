@@ -209,7 +209,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
             .collect::<Result<Vec<_>>>()?,
         vec![fact]
     );
-    let events = store.events(0, 64, &call)?;
+    let events = store.events(0, 64, None, &call)?;
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].revision, record.revision);
     let mut replacement = publication();
@@ -454,7 +454,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
         }
-        assert_eq!(store.events(0, 64, &call)?.len(), 2);
+        assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
         assert!(
             store
                 .read_output(
@@ -540,12 +540,12 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         store.attempt(id, &call),
         Err(RunError::Nonterminal)
     ));
-    assert_eq!(store.events(0, 64, &call)?.len(), 1);
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 1);
     assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Open);
     store.db.pragma_update(None, "max_page_count", 10000)?;
     store.recover_terminal(id, &exit(), &call)?;
     assert_eq!(admission_count(&store)?, 0);
-    assert_eq!(store.events(0, 64, &call)?.len(), 2);
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
     assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store

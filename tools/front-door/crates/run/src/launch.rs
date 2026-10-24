@@ -39,6 +39,12 @@ pub trait Providers {
     /// Decode the sealed stdout capture of a provider that exited.
     fn decode(&self, route: &RouteRecord, stdout: &[u8], exit: &ExitObservation) -> Decoded;
 }
+enum HandOff {
+    /// Failed before anything was sent to a guardian.
+    Local(String),
+    /// The guardian may have received the launch.
+    Uncertain(String),
+}
 #[derive(Debug)]
 pub enum Started {
     Launched(AttemptId),
@@ -99,28 +105,43 @@ impl RunStore {
             let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
             let prompt = String::from_utf8(prompt)
                 .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
-            started.push(match providers.prepare(task, &prompt) {
+            let now = || {
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))
+            };
+            let plan = match providers.prepare(task, &prompt) {
+                Ok(plan) => plan,
                 Err(reason) => {
-                    let now = call
-                        .clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?;
-                    self.refuse(id, &reason, now, call)?;
+                    self.withdraw(id, Outcome::Rejected, &reason, now()?, call)?;
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            let record = match self.mark_starting(id, &plan.route, call) {
+                Ok(record) => record,
+                // A concurrent start already took this attempt.
+                Err(RunError::Conflict) => continue,
+                Err(error) => return Err(error),
+            };
+            started.push(match self.hand_off(task, plan, context, &record, call) {
+                Ok(()) => Started::Launched(id),
+                // Nothing reached a guardian: the attempt ends here.
+                Err(HandOff::Local(error)) => {
+                    let reason = format!("launch preparation failed: {error}");
+                    self.withdraw(id, Outcome::Rejected, &reason, now()?, call)?;
                     Started::Refused {
                         attempt: id,
                         reason,
                     }
                 }
-                Ok(plan) => match self.hand_off(task, plan, context, id, call) {
-                    Ok(()) => Started::Launched(id),
-                    Err(error) => {
-                        self.launch_unknown(run, call)?;
-                        Started::Unknown {
-                            attempt: id,
-                            error: error.to_string(),
-                        }
-                    }
-                },
+                Err(HandOff::Uncertain(error)) => {
+                    self.launch_unknown(run, call)?;
+                    Started::Unknown { attempt: id, error }
+                }
             });
         }
         Ok(started)
@@ -130,28 +151,26 @@ impl RunStore {
         task: &TaskRequest,
         plan: PreparedLaunch,
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
-        id: AttemptId,
+        record: &AttemptRecord,
         call: &Request<'_>,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let record = self.mark_starting(id, &plan.route, call)?;
+    ) -> std::result::Result<(), HandOff> {
+        let local = |error: &dyn std::fmt::Display| HandOff::Local(error.to_string());
+        let id = record.attempt_id;
         let scope = Scope {
             run: record.run_id,
             attempt: id,
             generation: record.generation,
         };
-        let mut lease = custody::acquire_reader(
-            self.attempt_dir(record.run_id, id, false)?,
-            scope,
-            call.budget,
-            call.cancel,
-            call.clock,
-        )?;
-        let reservation = PublicationReservation::prepare(
-            self.attempt_dir(record.run_id, id, false)?,
-            call.budget,
-            call.cancel,
-            call.clock,
-        )?;
+        let directory = || {
+            self.attempt_dir(record.run_id, id, false)
+                .map_err(|e| local(&e))
+        };
+        let mut lease =
+            custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
+                .map_err(|e| local(&e))?;
+        let reservation =
+            PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
+                .map_err(|e| local(&e))?;
         let route = format!(
             "{}/{}",
             plan.route.provider.as_deref().unwrap_or_default(),
@@ -168,7 +187,7 @@ impl RunStore {
             environment: plan.environment,
             cwd: plan.cwd,
             stdin: plan.stdin,
-            holder_context: context(&record)?,
+            holder_context: context(record).map_err(|e| local(&e))?,
         };
         let capture = CapturePlan {
             wall_ms: task.provider_timeout_seconds.saturating_mul(1000),
@@ -185,7 +204,7 @@ impl RunStore {
             capture,
             reservation,
         )
-        .map_err(|failure| failure.error)?;
+        .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
         Ok(())
     }
     fn launch_unknown(&self, run: RunId, call: &Request<'_>) -> Result<()> {

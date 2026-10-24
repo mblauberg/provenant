@@ -19,7 +19,9 @@ pub const HOST_ACTIVE: u64 = 64;
 pub const PROJECT_ACTIVE: u64 = 16;
 pub const HOST_QUEUED: u64 = 256;
 
-/// Floors and windows recorded on each ticket at submission.
+/// Floors and windows recorded on each ticket at submission. A task queued
+/// behind its own run's concurrency gets one provider timeout per earlier
+/// wave on top of the admission window, so deep batches are not refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmissionPolicy {
     pub memory_floor_basis_points: u64,
@@ -64,6 +66,7 @@ impl RunStore {
         tx: &Connection,
         attempt: &AttemptRecord,
         concurrency: u64,
+        queue_seconds: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
             "SELECT sequence FROM attempts WHERE id=?1",
@@ -84,7 +87,10 @@ impl RunStore {
             startup_spacing_ms: self.policy.startup_spacing_ms,
             run_concurrency: concurrency,
             quota_permit: None,
-            admission_deadline: deadline(attempt.queued_at, self.policy.admission_seconds)?,
+            admission_deadline: deadline(
+                attempt.queued_at,
+                self.policy.admission_seconds.saturating_add(queue_seconds),
+            )?,
         };
         tx.execute(
             "INSERT INTO admission(attempt,project,run,active,record) VALUES (?1,?2,?3,0,?4)",
@@ -177,8 +183,13 @@ impl RunStore {
                 }
                 _ => false,
             };
-            if fits && let Some(record) = self.claim(id, now, &call)? {
-                return Ok(record);
+            if fits {
+                match self.claim(id, now, &call) {
+                    Ok(Some(record)) => return Ok(record),
+                    // A busy store is transient; keep waiting to the deadline.
+                    Ok(None) | Err(RunError::Contention) => {}
+                    Err(error) => return Err(error),
+                }
             }
             if cancel.is_cancelled() {
                 return Err(RunError::Cancelled);
@@ -206,9 +217,6 @@ impl RunStore {
                 return Err(RunError::Refused);
             }
             let mut ticket = self.ticket(tx, id)?;
-            if ticket.active {
-                return Ok(Some(old));
-            }
             let (host, project, run): (i64, i64, i64) = tx.query_row(
                 "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1), COUNT(*) FILTER (WHERE run=?2) FROM admission WHERE active=1",
                 params![old.project_id.to_string(), old.run_id.to_string()],
@@ -225,7 +233,8 @@ impl RunStore {
                 .query_row("SELECT last_start FROM spacing WHERE id=1", [], |r| r.get(0))
                 .optional()?;
             let spacing = sql_int(ticket.startup_spacing_ms)?;
-            if last.is_some_and(|last| now_ms.saturating_sub(last) < spacing) {
+            // A wall clock that stepped back does not hold every start.
+            if last.is_some_and(|last| last <= now_ms && now_ms - last < spacing) {
                 return Ok(None);
             }
             tx.execute(

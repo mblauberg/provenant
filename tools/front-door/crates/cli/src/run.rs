@@ -302,14 +302,18 @@ struct ManifestTask {
     delivery_id: Option<DeliveryId>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
-    let file = std::fs::File::open(path).map_err(|error| {
+    let invalid = |error: &dyn std::fmt::Display| {
         Fail::new(
             Status::Invalid,
             "INVALID",
             format!("{}: {error}", path.display()),
         )
-    })?;
-    read_text(file)
+    };
+    // A FIFO or device would block or never end.
+    if !std::fs::metadata(path).map_err(|e| invalid(&e))?.is_file() {
+        return Err(invalid(&"not a regular file"));
+    }
+    read_text(std::fs::File::open(path).map_err(|e| invalid(&e))?)
 }
 fn read_text(source: impl Read) -> Result<String, Fail> {
     let mut bytes = Vec::new();
@@ -442,7 +446,20 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
         for (index, task) in manifest.tasks.into_iter().enumerate() {
             let prompt = match (task.prompt, task.prompt_file) {
                 (Some(prompt), None) => prompt,
-                (None, Some(file)) => read_bounded(&base.join(file))?,
+                (None, Some(file))
+                    if file
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))) =>
+                {
+                    read_bounded(&base.join(file))?
+                }
+                (None, Some(_)) => {
+                    return Err(Fail::new(
+                        Status::Invalid,
+                        "INVALID",
+                        "prompt_file must be relative to the manifest, without ..",
+                    ));
+                }
                 _ => {
                     return Err(Fail::new(
                         Status::Invalid,
@@ -723,14 +740,27 @@ fn wait_lanes(
     let cancel = CancelToken::new();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let call = request(&clock, &cancel)?;
-    let selected: Vec<AttemptId> = session
-        .store
-        .lanes(&lane_query(targets, targets.is_empty(), 100, 0), &call)?
-        .lanes
-        .iter()
-        .filter(|lane| !targets.is_empty() || !settled(&lane.state).0)
-        .map(|lane| lane.attempt_id)
-        .collect();
+    // Without targets, the selection is the current nonterminal work. The
+    // host caps bound it, so every page is snapshotted.
+    let mut selected = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = session
+            .store
+            .lanes(&lane_query(targets, !targets.is_empty(), 100, after), &call)?;
+        selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
+        match page.next {
+            Some(next) if selected.len() < 1000 => after = next,
+            Some(_) => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    "INVALID",
+                    "wait selection exceeds 1000 lanes",
+                ));
+            }
+            None => break,
+        }
+    }
     loop {
         let call = request(&clock, &cancel)?;
         let lanes = selected
@@ -817,14 +847,8 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         Part::Prompt => run::ArtifactPart::Prompt,
         Part::Stderr => run::ArtifactPart::Stderr,
         Part::Events => {
-            let mut events = Vec::new();
-            let mut after = 0;
-            loop {
-                let page = session.store.events(after, 64, &call)?;
-                let Some(last) = page.last() else { break };
-                after = last.sequence;
-                events.extend(page.into_iter().filter(|e| e.attempt_id == id));
-            }
+            // An attempt has a handful of revisions; offset is an event cursor.
+            let events = session.store.events(command.offset, 64, Some(id), &call)?;
             let human = events
                 .iter()
                 .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))

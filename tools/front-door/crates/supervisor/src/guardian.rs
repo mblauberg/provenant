@@ -1018,11 +1018,12 @@ impl Driver<'_> {
             return;
         }
         let exit = record.durable_observation();
+        // About 30 s in all, so a contended store does not strand custody.
         let mut delay = Duration::from_millis(50);
-        for attempt in 0..6 {
+        for attempt in 0..12 {
             if attempt > 0 {
                 let _ = self.reactor.wait(&[], delay);
-                delay = delay.saturating_mul(2);
+                delay = delay.saturating_mul(2).min(Duration::from_secs(5));
             }
             if holder
                 .terminal(&self.holder_context, &self.attempt, &exit)

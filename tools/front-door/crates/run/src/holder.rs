@@ -38,7 +38,22 @@ impl HolderContext {
     pub fn encode(&self) -> Result<Vec<u8>> {
         crate::db::bytes(self)
     }
+    /// Open the store, retrying transient failures for about 30 s so a busy
+    /// host does not turn into a refused or stranded attempt.
     fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
+        let mut delay = std::time::Duration::from_millis(100);
+        for _ in 0..10 {
+            match Self::open_once(raw) {
+                Err(RunError::Contention | RunError::Sqlite(_) | RunError::Io(_)) => {
+                    std::thread::park_timeout(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_secs(5));
+                }
+                other => return other,
+            }
+        }
+        Self::open_once(raw)
+    }
+    fn open_once(raw: &[u8]) -> Result<(Self, RunStore)> {
         let context: Self = crate::db::decode(raw)?;
         let mut inputs =
             RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());

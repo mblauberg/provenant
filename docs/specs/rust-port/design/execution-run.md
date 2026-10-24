@@ -709,14 +709,20 @@ scheduler daemon. Within that, the lane decided:
   before spawn, like the old per-task waiter. Caps are 64 active per host, 16
   per project, the run's concurrency and 256 queued per host (checked at
   submit). Floors are 20 s host start spacing, 5% free memory and 500 MiB of
-  disk, with a 3600 s admission deadline. A failed probe keeps the attempt
-  queued. Refusal or expiry publishes a never-spawned exit, which becomes
-  `rejected`.
+  disk. The admission deadline is 3600 s plus one provider timeout for each
+  earlier wave of the task's own run, so a deep batch at low concurrency is not
+  refused. A failed probe or a busy store keeps the attempt waiting. Refusal or
+  expiry publishes a never-spawned exit, which becomes `rejected`. Guardians
+  poll independently with backoff capped at 2 s, so admission is roughly but
+  not strictly first come, first served; a strict queue would let one dead
+  guardian block its project until its deadline.
 - **Attempt flow** is queued, then starting (generation 1, applied route,
   before handoff), then running (admitted), then terminal. A prepare refusal
-  becomes `rejected` with no custody and no exit evidence. A handoff that does
-  not confirm marks the operation `launch_unknown` and leaves the attempt
-  starting for `reconcile`.
+  becomes `rejected` with no custody and no exit evidence, as does a local
+  failure before anything reaches a guardian. A handoff that does not confirm
+  marks the operation `launch_unknown` and leaves the attempt starting for
+  `reconcile`. The guardian retries the terminal commit for about 30 s;
+  `reconcile` finishes anything still held after that.
 - **The holder decodes the sealed `stdout.log` after exit.** Success requires
   exit 0, a complete non-empty result and an observed route that verifies.
   A wall-deadline stop becomes `timed_out` and an explicit cancellation becomes

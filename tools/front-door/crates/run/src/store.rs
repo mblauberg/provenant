@@ -199,7 +199,7 @@ impl RunStore {
             if queued + input.request.tasks.len() as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
             tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
-            for task in &input.request.tasks {
+            for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: 1, revision: 1, generation: 0,
@@ -209,7 +209,8 @@ impl RunStore {
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,1,1,0,?5)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
-                self.queue_ticket(tx, &attempt, input.request.concurrency)?;
+                let waves = index as u64 / input.request.concurrency.max(1);
+                self.queue_ticket(tx, &attempt, input.request.concurrency, waves.saturating_mul(task.provider_timeout_seconds))?;
             }
             Ok(())
         })?;
@@ -296,13 +297,19 @@ impl RunStore {
     /// Refuse an attempt that never reached supervisor custody, such as one
     /// whose provider command could not be prepared. Its record carries no
     /// exit evidence, no start time and an empty sealed result.
-    pub fn refuse(
+    /// End an attempt that never reached a provider: refused before spawn or
+    /// cancelled while queued. It has no custody to release and no exit.
+    pub fn withdraw(
         &self,
         id: AttemptId,
+        outcome: Outcome,
         reason: &str,
         finished_at: WallTime,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
+        if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
+            return Err(RunError::Validation("withdrawal outcome"));
+        }
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
         let _writer = dir.lock(
@@ -316,12 +323,12 @@ impl RunStore {
         if let AttemptState::Terminal { .. } = old.state {
             return Ok(old);
         }
-        if old.state != AttemptState::Queued {
+        if !matches!(old.state, AttemptState::Queued | AttemptState::Starting) {
             return Err(RunError::Conflict);
         }
         let revision = old.revision;
         let publication = TerminalPublication {
-            outcome: Outcome::Rejected,
+            outcome,
             finished_at,
             started_at: None,
             provider_ms: None,
