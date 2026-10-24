@@ -6,6 +6,8 @@ use provenant_records::Harness;
 pub const PRE_TOOL_USE: &str = "pre-tool-use";
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
+pub const CHAIR_PROMPT: &str = "chair-prompt";
+pub const CHAIR_START: &str = "chair-start";
 pub const PRE_PUSH: &str = "pre-push";
 #[derive(Clone, Copy)]
 pub enum Handler {
@@ -13,6 +15,8 @@ pub enum Handler {
     PreCompact,
     Compact,
     PrePush,
+    ChairPrompt,
+    ChairStart,
 }
 pub struct HookSpec {
     pub registration: HookRegistration,
@@ -64,6 +68,28 @@ pub static HOOK_SPECS: &[HookSpec] = &[
         handler: Handler::PrePush,
         fixture: None,
     },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "UserPromptSubmit",
+            matcher: None,
+            timeout: Some(10),
+            command: &["hook", "claude", CHAIR_PROMPT],
+        },
+        handler: Handler::ChairPrompt,
+        fixture: None,
+    },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "SessionStart",
+            matcher: None,
+            timeout: Some(5),
+            command: &["hook", "claude", CHAIR_START],
+        },
+        handler: Handler::ChairStart,
+        fixture: None,
+    },
 ];
 impl Hook {
     pub fn spec(&self) -> &'static HookSpec {
@@ -72,8 +98,10 @@ impl Hook {
             Self::Claude(ClaudeHook::PreCompact) => 1,
             Self::Claude(ClaudeHook::Compact) => 2,
             Self::Git(GitHook::PrePush { .. }) => 3,
+            Self::Claude(ClaudeHook::ChairPrompt) => 4,
+            Self::Claude(ClaudeHook::ChairStart) => 5,
         };
-        // These four exhaustive grammar variants correspond to the static rows.
+        // These exhaustive grammar variants correspond to the static rows.
         &HOOK_SPECS[index]
     }
 }
