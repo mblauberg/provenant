@@ -105,8 +105,9 @@ impl Driver<'_> {
 
     /// Ends the group of a provider that already exited, on cancellation or
     /// natural exit alike: TERM then, after the descendant grace, KILL to the
-    /// provider's group while its unreaped leader still reserves the PGID. Returns once no live member remains or
-    /// the bounded budget is spent; settlement is judged by the caller.
+    /// provider's group while its unreaped leader still reserves the PGID.
+    /// Returns once no live member remains or the bounded budget is spent;
+    /// settlement is judged by the caller.
     fn terminate_group(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
