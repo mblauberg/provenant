@@ -342,6 +342,14 @@ fn render(
     (data, format!("host {}\n{human}", hosts.join(",")))
 }
 
+/// Whether `host`, a peer label or host ID, names this machine.
+pub(super) fn names_local_host(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
+    let peer = Peer::open(edge)?;
+    let local = peer.context.identity.host;
+    Ok(HostId::parse(host).is_ok_and(|id| id == local)
+        || peer.context.peer_host(host) == Some(local))
+}
+
 pub(super) fn dispatch(
     edge: &Edge<'_>,
     host: &str,

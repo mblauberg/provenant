@@ -1292,6 +1292,40 @@ fn peer_dispatch_refuses_writers_and_unknown_hosts_before_contact() -> Result {
             .is_some_and(|m| m.contains("#1457")),
         "{writer}"
     );
+    // The local host's own ID is local placement, not a peer: the writer is
+    // then judged by its worktree (the primary checkout is refused), never by
+    // the peer-host rule.
+    let output = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?;
+    let (status, local_writer) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            local,
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "local-writer",
+            "--prompt-file",
+            prompt,
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_ne!(
+        local_writer["error"]["code"], "UNSUPPORTED",
+        "{local_writer}"
+    );
+    assert!(
+        !local_writer.to_string().contains("#1457"),
+        "{local_writer}"
+    );
     let (status, unknown) = json_command(
         &rig,
         &[

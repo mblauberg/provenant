@@ -103,9 +103,11 @@ the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
 keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
 takes the same placement as an optional `host` field.
 
-Only read-only placement is available. `--mode worktree-write` with `--host`
-refuses with `UNSUPPORTED`, because peer writer worktrees need a transport this
+Only read-only placement is available on a peer. `--mode worktree-write` with
+`--host` naming a peer refuses with `UNSUPPORTED`, because peer writer worktrees need a transport this
 build lacks ([#1457](https://github.com/mblauberg/provenant/issues/1457)).
+Naming this host (its host ID, or a peer label that resolves to it) is local
+placement: the flag is dropped and the writer runs here.
 Other limits on a peer run:
 
 - explicit task IDs and route fallback are refused;

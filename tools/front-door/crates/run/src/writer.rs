@@ -167,7 +167,14 @@ pub fn prepare_writer(
         .open_verified_directory(OsStr::new(&project.to_string()))
         .map_err(unregistered)?;
     let (directory, binding) =
-        worktrees::writer_custody(&project_state, project, &worktree, &branch, base)?;
+        worktrees::writer_custody(&project_state, project, &worktree, &branch, base).map_err(
+            |error| match error {
+                worktrees::WorktreeError::NotFound => {
+                    RunError::WorktreeUnregistered(request.worktree.clone())
+                }
+                other => other.into(),
+            },
+        )?;
     Ok(WriterLaunch {
         worktree,
         branch,

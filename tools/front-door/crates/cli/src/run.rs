@@ -769,7 +769,7 @@ pub fn submit(
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
     reply_waited("dispatch", dispatch_inner(command, edge))
 }
-fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     let access = &command.access;
     let unsupported = |what: &str| {
         Err(Fail::new(
@@ -788,6 +788,19 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     {
         return unsupported("network, capability or read-root access");
     }
+    // A writer needs its worktree on this machine, so naming this host is
+    // ordinary local placement; only a peer is refused.
+    if matches!(access.mode, Mode::WorktreeWrite)
+        && command
+            .host
+            .as_deref()
+            .map(|host| remote::names_local_host(edge, host))
+            .transpose()?
+            == Some(true)
+    {
+        command.host = None;
+    }
+    let access = &command.access;
     if command.host.is_some() && matches!(access.mode, Mode::WorktreeWrite) {
         return Err(Fail::new(
             Status::Refused,

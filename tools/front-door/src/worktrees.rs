@@ -16,6 +16,11 @@ use serde::Serialize;
 use std::{ffi::OsStr, path::Component, sync::Arc, time::Duration};
 use thiserror::Error;
 
+/// A checkout writes the whole tree and a 1.8 GB repository took well over the
+/// 5 second read budget. Ten minutes covers very large checkouts yet still ends
+/// a hung `git worktree add`; `create` rolls back what a timeout leaves.
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[derive(Debug, Error)]
 enum Error {
     #[error(transparent)]
@@ -174,6 +179,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
         workers: &crate::worktree_tests::FreeWorkers,
         clock: &clock,
         utility_budget: budget,
+        mutation_budget: UtilityBudget::bounded(MUTATION_TIMEOUT)?,
         lock_budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?,
     };
     let result = match command {

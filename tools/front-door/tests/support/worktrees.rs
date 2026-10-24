@@ -47,6 +47,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
+            "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
         ],
         |name| {
             let result = match name {
@@ -81,6 +82,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
+                }
+                "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command" => {
+                    dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command()
                 }
                 _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
             };
@@ -1151,7 +1155,24 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
 }
 
 fn dispatch_into_an_unregistered_worktree_names_the_create_command() -> Result {
+    unregistered_worktree_dispatch_is_refused(false)
+}
+
+// Once another worktree is registered the project's state directory exists,
+// so the missing record is the foreign worktree's own.
+fn dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command() -> Result
+{
+    unregistered_worktree_dispatch_is_refused(true)
+}
+
+fn unregistered_worktree_dispatch_is_refused(register_sibling: bool) -> Result {
     let rig = repository()?;
+    if register_sibling {
+        ok(
+            &rig,
+            &["worktree", "create", "managed", "--base", "HEAD", "--json"],
+        )?;
+    }
     git(
         &rig,
         &["worktree", "add", "-qb", "foreign", ".worktrees/foreign"],

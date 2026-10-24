@@ -72,7 +72,7 @@ pub enum UtilityError {
     UnprobedRepository,
     #[error("utility {stream} exceeded its capture limit; output cannot be used as evidence")]
     Truncated { stream: &'static str },
-    #[error("utility read timed out; output cannot be used as evidence")]
+    #[error("utility command timed out; output cannot be used as evidence")]
     TimedOut,
     #[error("utility read was cancelled; output cannot be used as evidence")]
     Cancelled,
