@@ -92,6 +92,41 @@ fn bash_guard_denies_process_control_and_bad_input() -> Result {
 }
 
 #[test]
+fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
+    let rig = TestRig::new()?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
+    let mut decide = |command: &str| -> Result<Option<String>> {
+        input["tool_input"]["command"] = command.into();
+        let output = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", "pre-tool-use"],
+            Some(&serde_json::to_vec(&input)?),
+        )?;
+        assert_eq!(code(&output), 0);
+        if output.stdout.bytes.is_empty() {
+            return Ok(None);
+        }
+        let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        Ok(deny["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .map(str::to_owned))
+    };
+    let remedy = decide("git stash")?.ok_or("git stash allowed")?;
+    assert!(remedy.contains("WIP commit"), "{remedy}");
+    assert!(decide("git stash push -m tag")?.is_none());
+    assert!(decide("sleep 30")?.is_some());
+
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.guard]\ndeny = ['sleep-poll']\n",
+    )?;
+    assert!(decide("git stash")?.is_none());
+    assert!(decide("sleep 30")?.is_some());
+    Ok(())
+}
+#[test]
 fn denial_write_failure_uses_recorded_exit_two_fallback() -> Result {
     let rig = TestRig::new()?;
     // Duplicate the read-only stdin pipe onto stdout. The binary starts

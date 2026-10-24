@@ -32,6 +32,7 @@ struct GuardInput {
     hook_event_name: String,
     tool_name: String,
     tool_input: serde_json::Value,
+    cwd: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 struct AdvisoryInput {
@@ -44,7 +45,7 @@ struct AdvisoryInput {
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let deadline = Instant::now() + LOCAL_BUDGET;
     match hook.spec().handler {
-        Handler::Guard => guard(deadline),
+        Handler::Guard => guard(globals, deadline),
         Handler::PreCompact => advisory(HookEvent::PreCompact, globals, deadline),
         Handler::Compact => advisory(HookEvent::SessionStart, globals, deadline),
         Handler::PrePush => {
@@ -79,7 +80,7 @@ fn deny(reason: &str) -> u8 {
         2
     }
 }
-fn guard(deadline: Instant) -> u8 {
+fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -106,10 +107,37 @@ fn guard(deadline: Instant) -> u8 {
     if provenant_confinement::shell_command::check(&tool.command).is_err() {
         return deny(provenant_confinement::shell_command::DENY_REASON);
     }
+    let cwd = event
+        .cwd
+        .filter(|cwd| cwd.is_absolute())
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(cwd) = cwd {
+        let config = guard_config(globals, &cwd);
+        if let Some(remedy) = provenant_confinement::guard::violation(&tool.command, &cwd, &config)
+        {
+            return deny(remedy);
+        }
+    }
     if Instant::now() >= deadline {
         return deny("hook input rejected: bounded-input error (policy timed out)");
     }
     0
+}
+/// The `[domains.guard]` rules. Unreadable config keeps every rule on, since
+/// the rules only refuse patterns and the remedy is always available.
+fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::GuardConfig {
+    let read = || -> Result<_, Error> {
+        let assets = crate::roots::product_root()?;
+        let roots = crate::roots::roots(globals, &assets, cwd)?;
+        let domains = provenant_config::read_with_domains(
+            &roots,
+            &LocalFs,
+            &provenant_cli::domains::SECTIONS,
+        )?
+        .domains;
+        Ok(domains.guard)
+    };
+    read().unwrap_or_default()
 }
 fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {

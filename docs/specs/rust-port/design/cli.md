@@ -315,6 +315,26 @@ nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
+The same handler then applies the workflow guard rules (#1319) to the simple
+commands the shell-command lexer reports, so there is no second parser. Rule
+ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
+`-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
+`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`git checkout` of a branch or revision, when the directory is a repository
+whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
+(`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+omitting an id disables that rule and an unknown id is a schema error. Unreadable
+config keeps every rule on. Input the lexer cannot parse is denied by the
+process-control check above, not by these rules. Codex and OpenCode have no
+recorded `PreToolUse` registration, so only Claude carries the rules; their
+lanes rely on the sandbox and the pre-push hook.
+
+`worktree create` records the primary checkout's `HEAD` before `git worktree
+add` and refuses with `PrimaryMoved` (refused outcome) if it differs afterwards
+(#1331), so a lane cannot silently move or detach the primary. Dispatch needs
+no change; it only sees the refusal.
+
 `PreCompact` reads validated cwd/session identity and emits advisory findings,
 always 0. `SessionStart` reads that session's already-published checkpoint from
 the new root and emits at most 8 KiB context, otherwise nothing, always 0.

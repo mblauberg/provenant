@@ -64,6 +64,8 @@ pub enum WorktreeError {
     RegistrationUnconfirmed,
     #[error("worktree identity changed during the operation")]
     IdentityChanged,
+    #[error("primary checkout HEAD moved during worktree creation")]
+    PrimaryMoved,
     #[error("worktree result path cannot be represented safely")]
     PathEncoding,
     #[error(transparent)]
@@ -1087,6 +1089,7 @@ pub fn create(
     if !root_identity.same_identity(&named_root) {
         return Err(WorktreeError::UnknownWriter);
     }
+    let primary_head = primary_head(context, cancel)?;
     execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -1097,6 +1100,12 @@ pub fn create(
         },
         cancel,
     )?;
+    // Creating a linked worktree must leave the primary's HEAD, branch or
+    // detached, exactly as it was (#1331). A hook or race that moved it is
+    // reported rather than hidden; the worktree stays for the operator.
+    if primary_head != self::primary_head(context, cancel)? {
+        return Err(WorktreeError::PrimaryMoved);
+    }
     context.repo.revalidate()?;
     let fresh = read_worktrees(context, cancel)?;
     let entry = fresh
@@ -1151,6 +1160,30 @@ pub fn create(
             WorkerState::Unknown => WriterState::Unknown,
         },
     })
+}
+
+/// The primary checkout's `HEAD` file (it lives in the common git dir, so a
+/// linked worktree finds it too) and, when symbolic, the commit it resolves to,
+/// so a reset or commit on the same branch also counts as a move. Read
+/// failures propagate: an unreadable snapshot must not disable the check.
+fn primary_head(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<(Vec<u8>, Option<GitOid>), WorktreeError> {
+    let bytes = std::fs::read(context.repo.common_git_dir().join("HEAD"))
+        .map_err(|_| WorktreeError::InvalidOutput)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    let Some(name) = text.trim_end().strip_prefix("ref: ") else {
+        return Ok((bytes, None));
+    };
+    let name = GitRefName::new(name).map_err(|_| WorktreeError::InvalidOutput)?;
+    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
+    let commit = if exit_code(&outcome)? == 0 {
+        Some(parse_oid(trim_ascii(&outcome.stdout.bytes))?)
+    } else {
+        None
+    };
+    Ok((bytes, commit))
 }
 
 fn pin_revision(
@@ -1816,6 +1849,30 @@ mod lifecycle_tests {
         assert!(!created.path.exists());
         let tips = read_branch_tips(&context, &cancellation)?;
         assert!(tips.contains_key(&GitRefName::branch("feature/lifecycle")?));
+        Ok(())
+    }
+
+    #[test]
+    fn create_leaves_the_primary_head_alone() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let head_file = fixture.root.join(".git/HEAD");
+        let request = |branch: &str| WorktreeCreate {
+            branch: branch.to_owned(),
+            base: None,
+        };
+
+        create(&context, request("feature/attached"), &cancel())?;
+        assert_eq!(fs::read_to_string(&head_file)?, "ref: refs/heads/main\n");
+
+        // A primary left detached stays detached: creation neither repairs nor moves it.
+        fixture.run(&["checkout", "--quiet", "--detach"])?;
+        let detached = fs::read_to_string(&head_file)?;
+        assert!(!detached.starts_with("ref:"));
+        create(&context, request("feature/detached"), &cancel())?;
+        assert_eq!(fs::read_to_string(&head_file)?, detached);
         Ok(())
     }
 
