@@ -37,6 +37,7 @@ impl Providers for Fake {
         &self,
         _: &TaskRequest,
         prompt: &str,
+        _: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
         self.prompt.replace(prompt.into());
@@ -456,7 +457,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         attempt: orphan,
         generation: 1,
     };
-    drop(provenant_supervisor::custody::acquire_reader(
+    drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
         call.budget,

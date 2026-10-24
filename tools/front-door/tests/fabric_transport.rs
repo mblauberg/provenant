@@ -498,6 +498,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 tasks: tasks
                     .iter()
                     .map(|task_id| TaskRequest {
+                        writer: None,
                         profile: provenant_records::run::HarnessProfile::default(),
                         task_id: *task_id,
                         prompt_digest: CanonicalV1::file_digest(b"prompt"),

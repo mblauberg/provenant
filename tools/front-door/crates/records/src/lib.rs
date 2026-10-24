@@ -15,7 +15,6 @@ mod yaml;
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
     AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, Usage,
-    UsageCounts,
 };
 pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
 pub use finding::Finding;

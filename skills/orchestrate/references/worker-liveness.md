@@ -21,4 +21,3 @@ Never signal a PID inferred from a stale record or an empty observation.
 Run owns detached custody and recovery. Use `provenant reconcile RUN` for
 recovery and `provenant resume RUN/TASK/ATTEMPT` with an authorised prompt for
 continuation. Consult `provenant help` for operation IDs and prompt flags.
-Python liveness probes, watchdogs and detached launcher scripts are retired.

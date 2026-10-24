@@ -461,7 +461,13 @@ the CLI-owned submission path has no input-reference handling.
 
 For `fabric_graph`, `run` and `resume` take a project-local graph document path;
 `status` and `cancel` take its `id`. The document declares each node's `access`
-as `read_only` or `worktree_write`; a writer also names its absolute `worktree`.
+as `read_only` or `worktree_write`; a writer names its registered `worktree`
+as an absolute path or a path relative to the selected repository's primary
+root. The shared CLI/run submission path preserves that scope, verifies its
+project registration and acquires the supervisor writer lease before compiling
+confinement. A terminal Git sequencer check can turn provider success into a
+failed attempt. Lost custody retains the reservation for chair recovery; see
+[worktrees](../../../worktrees.md#writer-custody-recovery).
 The run owner must enforce those permissions before launching a provider.
 A graph attempt may use its next route after an auth refusal, usage limit or
 unavailable adapter when no provider launched. After launch, only read-only

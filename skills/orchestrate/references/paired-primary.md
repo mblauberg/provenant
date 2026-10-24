@@ -83,9 +83,9 @@ needs durable peer exchange. Only the chair mutates shared pair state.
   assume ownership and verify the referenced artifacts; Fabric does not
   transfer chair authority or provider custody automatically.
 
-The run-directory driver lease is retired. The chair owns one active loop;
-other primaries own bounded stages. Rust run/supervisor owns writer custody,
-and `provenant fabric landing` owns the separate advisory landing fence.
+The chair owns one active loop; other primaries own bounded stages. Rust
+run/supervisor owns writer custody, and `provenant fabric landing` owns the
+separate advisory landing fence.
 
 ## Default rotation
 

@@ -182,6 +182,20 @@ fn distance(a: &str, b: &str) -> usize {
 /// Check a value against the knob's type, range, enum values and nullability.
 fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
     match value {
+        Value::Bool(_) if spec.kind == "bool" => Ok(()),
+        Value::Array(items) if spec.kind == "string_list" => {
+            if items.len() <= 128
+                && items.iter().all(|v| {
+                    v.as_str().is_some_and(|s| {
+                        !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control)
+                    })
+                })
+            {
+                Ok(())
+            } else {
+                Err("type")
+            }
+        }
         Value::Null if spec.nullable => Ok(()),
         Value::Null => Err("not_nullable"),
         Value::String(text) if spec.kind == "enum" => spec
@@ -202,6 +216,12 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
 }
 fn from_toml(item: &Item) -> Option<Value> {
     match item.as_value()? {
+        toml_edit::Value::Boolean(b) => Some(Value::Bool(*b.value())),
+        toml_edit::Value::Array(items) => items
+            .iter()
+            .map(|v| v.as_str().map(Value::from))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
         toml_edit::Value::String(s) if s.value() == NULL => Some(Value::Null),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
@@ -211,6 +231,9 @@ fn from_toml(item: &Item) -> Option<Value> {
 fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     if text == NULL {
         return Ok(Value::Null);
+    }
+    if matches!(spec.kind.as_str(), "bool" | "string_list") {
+        return serde_json::from_str(text).map_err(|_| "type");
     }
     if spec.kind == "int" {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
@@ -283,9 +306,17 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             check(spec, &value).map_err(|rule| invalid(name, rule))?;
             let item = match &value {
                 Value::Null => toml_edit::value(NULL),
+                Value::Bool(b) => toml_edit::value(*b),
+                Value::Array(items) => {
+                    let mut array = toml_edit::Array::new();
+                    for item in items {
+                        array.push(item.as_str().ok_or_else(|| invalid(name, "type"))?);
+                    }
+                    toml_edit::value(array)
+                }
                 Value::Number(n) => toml_edit::value(n.as_i64().unwrap_or_default()),
                 Value::String(s) => toml_edit::value(s.as_str()),
-                _ => return Err(invalid(name, "type")),
+                Value::Object(_) => return Err(invalid(name, "type")),
             };
             let knobs = doc
                 .entry("knobs")
@@ -361,5 +392,37 @@ pub fn edit_config(
         provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error } => {
             Err(sync_error.into())
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod chair_tests {
+    use super::*;
+    #[test]
+    fn chair_string_list_preserves_order_and_rejects_non_strings() {
+        let text = apply(
+            None,
+            KnobEdit::Set {
+                name: "chair.switch_accounts",
+                value: "[\"second\",\"first\"]",
+            },
+        )
+        .unwrap();
+        let doc: DocumentMut = text.parse().unwrap();
+        assert_eq!(
+            from_toml(&doc["knobs"]["chair.switch_accounts"]),
+            Some(serde_json::json!(["second", "first"]))
+        );
+        assert!(
+            apply(
+                None,
+                KnobEdit::Set {
+                    name: "chair.switch_accounts",
+                    value: "[42]"
+                }
+            )
+            .is_err()
+        );
     }
 }

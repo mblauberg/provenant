@@ -650,7 +650,6 @@ pub(crate) fn validate_access(
             path.is_empty()
                 || path.len() > 4096
                 || path.contains('\0')
-                || !std::path::Path::new(path).is_absolute()
                 || std::path::Path::new(path)
                     .components()
                     .any(|part| part == std::path::Component::ParentDir)

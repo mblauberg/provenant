@@ -1,4 +1,4 @@
-//! Typed TOML asset schema. State owns deserialisation and bounded asset loading.
+//! Typed TOML asset schema and price-table validation. The composition edge loads the asset.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

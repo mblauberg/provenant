@@ -1,6 +1,6 @@
 ---
 name: skill-craft
-description: "Use for Agent Skill audits/creation/revision: triggers, structure, fixtures, overlap, token cost. Default read-only; edits need authority. Not for packaging (plugin-creator) or delivery (implement)."
+description: "Use to audit, create or revise Agent Skills, including triggers, structure, examples and overlap. Default to read-only; edits need authority. Use the plugin tooling for packaging and implement for delivery."
 ---
 
 # Skill craft
@@ -69,3 +69,5 @@ Both branches follow this without restating it in two voices:
   `THIRD_PARTY_NOTICES.md` index, with the full licence text under `LICENSES/`.
   See [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) for this skill's
   own Skill Optimizer lineage.
+
+Reference eval cases (not run by CI): [boundary trace cases](evals/boundary_trace_cases.yaml).

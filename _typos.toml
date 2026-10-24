@@ -4,10 +4,6 @@ locale = "en-au"
 # Code spans quote identifiers verbatim, including upstream API spellings.
 extend-ignore-re = ["`[^`\\n]+`"]
 
-[files]
-# Vendored bundles are generated upstream.
-extend-exclude = ["runtime/ui-live/modern-screenshot.umd.js", "runtime/ui-evidence/detector/detect-antipatterns-browser.js"]
-
 [default.extend-words]
 # UI terminology, hyphenated prefixes and a cited publication title.
 dialogs = "dialogs"
