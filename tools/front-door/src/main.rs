@@ -1,4 +1,5 @@
 // The process edge composes typed owners and owns ordinary result delivery.
+mod chair;
 mod checks;
 mod fabric;
 mod hooks;
@@ -360,6 +361,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 })
             }
         }
+        Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Quota(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;
