@@ -37,9 +37,8 @@ severity.
 ## Disposition
 
 At adjudication, the chair records each finding as `confirmed`,
-`false_positive`, `reviewer_bias` or `duplicate` with
-the Rust workflow owner; duplicate findings also name
-`--duplicate-of`.
+`false_positive`, `reviewer_bias` or `duplicate`; duplicate findings also name
+the finding they duplicate.
 
 ## Output
 
