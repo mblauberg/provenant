@@ -43,8 +43,6 @@ pub enum EdgeError {
     Io(#[from] io::Error),
     #[error("invalid Fabric setup")]
     Invalid,
-    #[error("Git executable is unavailable")]
-    GitUnavailable,
 }
 
 struct Factory {

@@ -45,6 +45,8 @@ pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("provider evidence could not be committed: {0}")]
+    ProviderEvidence(String),
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {0}")]

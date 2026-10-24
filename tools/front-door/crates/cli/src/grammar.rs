@@ -41,6 +41,8 @@ pub enum Command {
     },
     Root,
     #[command(subcommand)]
+    Accounts(crate::accounts::Accounts),
+    #[command(subcommand)]
     Hosts(Hosts),
     #[command(subcommand)]
     Config(Config),

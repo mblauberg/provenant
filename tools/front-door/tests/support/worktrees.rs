@@ -786,9 +786,10 @@ impl provenant_run::Providers for WriterProvider {
         route: &provenant_run::RouteRecord,
         stdout: &[u8],
         exit: &provenant_supervisor::custody::ExitObservation,
-    ) -> provenant_run::Decoded {
+        provider_state: &std::path::Path,
+    ) -> std::result::Result<provenant_run::Decoded, String> {
         let registry = provenant_cli::run::Registry::default();
-        provenant_run::Providers::decode(&registry, route, stdout, exit)
+        provenant_run::Providers::decode(&registry, route, stdout, exit, provider_state)
     }
 }
 
@@ -798,6 +799,7 @@ fn fixture_route() -> provenant_run::RouteRecord {
         model: Some("claude/test-model".into()),
         effort: None,
         account_label: None,
+        ..Default::default()
     }
 }
 
@@ -1139,14 +1141,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
-    )?;
     let home = rig.root.join("fixture-home");
-    fs::create_dir_all(home.join(".claude"))?;
+    fs::create_dir_all(home.join(".claude-fixture"))?;
     fs::create_dir_all(home.join(".codex"))?;
-    fs::write(home.join(".codex/auth.json"), b"fixture credential")?;
+    fs::write(
+        home.join(".codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(home.join(path))?;
     }
@@ -1154,6 +1155,30 @@ fn lane_prepare_isolates_nested_state() -> Result {
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     fs::copy(std::env::current_exe()?, &executable)?;
+    // Production preparation needs registered, freshly observed accounts.
+    let home = fs::canonicalize(&home)?;
+    let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
+    let mut accounts = String::new();
+    for (adapter, label, directory) in [
+        ("codex", "default", home.join(".codex")),
+        ("claude", "fixture", home.join(".claude-fixture")),
+    ] {
+        let key = provenant_providers::accounts::detect(
+            &executor,
+            adapter,
+            &executable,
+            &home,
+            &directory,
+            &rig.root,
+        )?;
+        accounts.push_str(&format!(
+            "[domains.accounts.entries.{adapter}-{label}]\nadapter={adapter:?}\nlabel={label:?}\nkey={key:?}\ndirectory={:?}\n",
+            directory.to_str().ok_or("account path")?
+        ));
+    }
+    let config =
+        |depth: u8| format!("schema_version=1\n[knobs]\n'lanes.max_depth'={depth}\n{accounts}");
+    fs::write(rig.state.join("config.toml"), config(1))?;
     for (adapter, writer) in [
         ("codex", false),
         ("codex", true),
@@ -1177,9 +1202,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
         if !writer {
             task.writer = None;
         }
+        // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
-            provider: adapter.into(),
-            model: format!("{adapter}/fixture-model"),
+            provider: "claude".into(),
+            model: "claude/claude-sonnet-5".into(),
             effort: None,
         };
         let attempt = roots.state.as_path().join(format!(
@@ -1189,6 +1215,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let paths = provenant_run::LaunchPaths {
             attempt_id: prepared.attempts[0].attempt_id,
             lane_depth: 1,
+            run_id: prepared.run_id,
+            deadline_unix_ms: 4_000_000_000_000,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
@@ -1208,7 +1236,14 @@ fn lane_prepare_isolates_nested_state() -> Result {
         // independent setup paths rather than failing on the same auth entry.
         task.fallback.push(provenant_run::RouteRecord {
             provider: Some(adapter.into()),
-            model: Some(format!("{adapter}/fixture-fallback")),
+            model: Some(
+                if adapter == "codex" {
+                    "codex/gpt-6-luna"
+                } else {
+                    "claude/claude-haiku-5-5"
+                }
+                .into(),
+            ),
             ..Default::default()
         });
         let staging = if writer {
@@ -1216,24 +1251,27 @@ fn lane_prepare_isolates_nested_state() -> Result {
         } else {
             &paths.temporary
         };
-        let poison = if adapter == "codex" {
-            paths.provider_state.join("candidate-0/auth.json")
-        } else {
-            staging.join("candidate-0/provenant-settings.json")
-        };
-        fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
-        fs::write(&poison, b"partial setup")?;
+        // The Claude primary fails on its settings file; a Codex fallback must
+        // also not collide with a partial candidate-0 auth entry.
+        for poison in [
+            staging.join("candidate-0/provenant-settings.json"),
+            paths.provider_state.join("candidate-0/auth.json"),
+        ] {
+            fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
+            fs::write(&poison, b"partial setup")?;
+        }
         let token = provenant_providers::claude::refresh_if_expiring(
             &FixtureCredential,
             &provenant_providers::claude::Login {
                 executable: &executable,
                 home: &home,
                 user: "fixture".as_ref(),
-                config_dir: &home.join(".claude"),
+                config_dir: &home.join(".claude-fixture"),
                 scratch: &paths.scratch,
             },
             &|| 1000,
             2000,
+            None,
         )?;
         let mut launch = provenant_cli::run::prepare_fixture(
             &registry,
@@ -1241,7 +1279,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             "fixture prompt",
             &paths,
             &executable,
-            (adapter == "claude").then_some(&token),
+            Some(&token),
         )?;
         assert!(
             launch
@@ -1387,10 +1425,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         // Raise the host limit only for a second call. It must create records
         // in the configured child store while leaving the parent store absent.
         if adapter == "codex" && !writer {
-            fs::write(
-                rig.state.join("config.toml"),
-                "schema_version=1\n[knobs]\n'lanes.max_depth'=2\n",
-            )?;
+            fs::write(rig.state.join("config.toml"), config(2))?;
             let mut options = provenant_supervisor::exec::ExecOptions::new(
                 &launch.argv,
                 &launch.cwd,
@@ -1413,10 +1448,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                     .exists()
             );
             assert!(!rig.state.join("run.sqlite3").exists());
-            fs::write(
-                rig.state.join("config.toml"),
-                "schema_version=1\n[knobs]\n'lanes.max_depth'=1\n",
-            )?;
+            fs::write(rig.state.join("config.toml"), config(1))?;
         }
         verify_lane_profile(
             &mut launch,

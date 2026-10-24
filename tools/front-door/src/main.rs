@@ -189,6 +189,41 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
     match command {
         Command::Hosts(command) => hosts::run(command, globals),
+        Command::Accounts(command) => {
+            run_edge(
+                &inv.leaf,
+                globals,
+                |edge| match provenant_cli::accounts::execute(
+                    &command, edge.roots, edge.home, edge.cwd,
+                ) {
+                    Ok(data) => provenant_cli::run::Reply {
+                        human: data
+                            .entries
+                            .values()
+                            .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
+                            .collect(),
+                        result: CommandResult::new(&inv.leaf, Outcome::Ok, serde_json::json!(data)),
+                    },
+                    Err(message) => {
+                        let mut result = CommandResult::new(
+                            &inv.leaf,
+                            Outcome::Refused,
+                            serde_json::Value::Null,
+                        );
+                        result.error = Some(CommandError {
+                            code: "ACCOUNT".into(),
+                            message,
+                            cause: None,
+                            repair: None,
+                        });
+                        provenant_cli::run::Reply {
+                            result,
+                            human: String::new(),
+                        }
+                    }
+                },
+            )
+        }
         Command::Root => {
             #[derive(Serialize)]
             struct RootInfo {
@@ -430,6 +465,26 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
 }
 fn main() -> ExitCode {
+    // Fake provider identity probes for production account observation.
+    #[cfg(test)]
+    match std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .and_then(|arg| arg.to_str())
+    {
+        Some("--version") => {
+            let _ = writeln!(io::stdout().lock(), "fixture-provider 1.0.0");
+            return ExitCode::SUCCESS;
+        }
+        Some("auth") => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                r#"{{"loggedIn":true,"email":"fixture@example.test"}}"#
+            );
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     #[cfg(test)]
     if std::env::args_os()
         .nth(1)

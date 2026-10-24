@@ -1204,7 +1204,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             config_dir: Path::new(config),
             scratch: Path::new("/scratch/empty"),
         };
-        let result = refresh_if_expiring(&script, &login, &|| now, deadline);
+        let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
         (result, script.calls.into_inner().unwrap())
     };
     let hour = 3_600_000;

@@ -23,6 +23,7 @@ use std::{
 };
 
 mod provider;
+pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
 
@@ -147,7 +148,8 @@ impl run::Providers for Registry<'_> {
         route: &run::RouteRecord,
         stdout: &[u8],
         exit: &ExitObservation,
-    ) -> run::Decoded {
+        provider_state: &Path,
+    ) -> Result<run::Decoded, String> {
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
@@ -161,10 +163,10 @@ impl run::Providers for Registry<'_> {
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
             .map(|r| r.adapter)
         else {
-            return failed("route names no registered adapter");
+            return Ok(failed("route names no registered adapter"));
         };
         let Ok(mut state) = adapter.stream(None) else {
-            return failed("provider stream is unavailable");
+            return Ok(failed("provider stream is unavailable"));
         };
         let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
         let code = match exit.termination {
@@ -177,22 +179,46 @@ impl run::Providers for Registry<'_> {
             state,
             provenant_providers::ExitObservation { code, timed_out },
         ) else {
-            return failed("provider outcome is malformed");
+            return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        let rollout = (adapter.id() == "codex")
+            .then(|| {
+                outcome.session().and_then(|thread| {
+                    provenant_providers::codex_rollout::observe(provider_state, thread).ok()
+                })
+            })
+            .flatten();
+        let observed_model = if adapter.id() == "codex" {
+            // Missing or invalid rollout evidence cannot fall back to another source.
+            rollout.as_ref().map(|turn| turn.model.as_str())
+        } else {
+            outcome.model()
+        };
         let mut decoded = run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: true,
-            observed_route: outcome.model().map(|model| run::RouteRecord {
+            observed_route: observed_model.map(|model| run::RouteRecord {
                 provider: Some(adapter.id().into()),
                 model: Some(if model.contains('/') {
                     model.into()
                 } else {
                     format!("{}/{model}", adapter.id())
                 }),
-                effort: route.effort.clone(),
-                account_label: None,
+                effort: rollout
+                    .as_ref()
+                    .map_or_else(|| route.effort.clone(), |turn| turn.effort.clone()),
+                account_label: route.account_label.clone(),
+                account_key: route.account_key.clone(),
+                source: Some(
+                    if rollout.is_some() {
+                        "codex_rollout"
+                    } else {
+                        "provider_stream"
+                    }
+                    .into(),
+                ),
             }),
             usage: run::UsageRecord::default(),
             reason: None,
@@ -229,7 +255,7 @@ impl run::Providers for Registry<'_> {
                 )
             }
         };
-        if let Some(ProviderEvent::QuotaLimited { message, .. }) = events
+        if let Some(ProviderEvent::QuotaLimited { message, pool }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
@@ -240,14 +266,33 @@ impl run::Providers for Registry<'_> {
                 .unwrap_or_else(|| {
                     "provider quota exhausted (message redaction unavailable)".into()
                 });
-            let mut end = reason.len().min(8192);
+            let repair = if pool.as_deref() == Some("opencode-free") {
+                "; free tier exhausted; use a paid route or wait for its allowance reset"
+            } else {
+                ""
+            };
+            let mut end = reason.len().min(8192 - repair.len());
             while !reason.is_char_boundary(end) {
                 end -= 1;
             }
             reason.truncate(end);
+            if let Some(pool) = pool {
+                if let Some(state_root) = provider_state.ancestors().nth(5) {
+                    crate::quota::persist_provider_refusal(
+                        state_root,
+                        route,
+                        Some(pool),
+                        jiff::Timestamp::now().as_second(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if self.roots.is_some() {
+                    return Err("quota evidence has no state root".into());
+                }
+            }
+            reason.push_str(repair);
             decoded.reason = Some(reason);
         }
-        decoded
+        Ok(decoded)
     }
 }
 fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequest, String> {
@@ -458,6 +503,7 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
                 model: Some(model.clone()),
                 effort: None,
                 account_label: None,
+                ..Default::default()
             })
         })
         .collect()
@@ -1768,12 +1814,26 @@ mod tests {
             ),
         ] {
             let event = json!({"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":message}}}});
-            let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+            let decoded = registry
+                .decode(
+                    &route,
+                    event.to_string().as_bytes(),
+                    &exit,
+                    Path::new("/unused"),
+                )
+                .unwrap();
             assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
-            assert_eq!(decoded.reason.as_deref(), Some(expected));
+            assert_eq!(decoded.reason.as_deref(), Some(format!("{expected}; free tier exhausted; use a paid route or wait for its allowance reset").as_str()));
         }
         let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
-        let decoded = registry.decode(&route, event.to_string().as_bytes(), &exit);
+        let decoded = registry
+            .decode(
+                &route,
+                event.to_string().as_bytes(),
+                &exit,
+                Path::new("/unused"),
+            )
+            .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
         let reason = decoded.reason.unwrap();
         assert!(
