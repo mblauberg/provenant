@@ -155,11 +155,14 @@ pub fn detect(
         #[serde(rename = "loggedIn")]
         logged_in: bool,
         email: String,
+        #[serde(rename = "orgId", default)]
+        org_id: Option<String>,
     }
     let status: Status =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;
     if !status.logged_in {
         return Err(ProviderError::UnknownIdentity);
     }
-    crate::identity::fingerprint(&status.email).ok_or(ProviderError::UnknownIdentity)
+    crate::identity::claude_account(&status.email, status.org_id.as_deref())
+        .ok_or(ProviderError::UnknownIdentity)
 }

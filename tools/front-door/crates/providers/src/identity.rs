@@ -8,6 +8,20 @@ use serde::Deserialize;
 pub fn fingerprint(identity: &str) -> Option<String> {
     digest(&identity.trim().to_lowercase())
 }
+/// Claude's key binds the organisation UUID from `auth status` to the email, so
+/// re-logging a directory into another org on the same email changes the key.
+/// A status without `orgId` keeps the email-only key. Registrations made before
+/// this scheme no longer match and need `accounts register` again.
+pub fn claude_account(email: &str, org_id: Option<&str>) -> Option<String> {
+    match org_id.map(str::trim).filter(|org| !org.is_empty()) {
+        Some(org) => digest(&format!(
+            "{} {}",
+            email.trim().to_lowercase(),
+            org.to_lowercase()
+        )),
+        None => fingerprint(email),
+    }
+}
 fn digest(identity: &str) -> Option<String> {
     if identity.is_empty() || identity.len() > 4096 || identity.chars().any(char::is_control) {
         return None;

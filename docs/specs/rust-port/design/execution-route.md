@@ -175,7 +175,9 @@ access or an inferred Agy identity.
 
 Account registrations live in `S/config.toml`, under
 `[domains.accounts.entries.<adapter>-<label>]`, with adapter, display label,
-provider-detected key and canonical directory. `accounts register LABEL
+provider-detected key and canonical directory. A Claude key hashes the email
+and the `orgId` from `auth status` (email only when absent), so a directory
+re-logged into another org fails revalidation with "re-register it". `accounts register LABEL
 --adapter claude|codex --directory PATH` validates sign-in before saving;
 `accounts list` shows only these non-secret records. Claude labels bind exactly
 to `~/.claude-<label>`; rotating `~/.claude` is never a fixed registration.
@@ -588,7 +590,8 @@ macOS 27.0.1 arm64, 2026-10-24):
   preferences, trust, DNS and directory services, `/dev` nodes, zoneinfo).
   Secret and protected denials still override it.
 - Exec roots grant exec only, never reads. Readable install files come from
-  the CLI's own package (`package_root`: the parent of its `bin/`); a shared
+  the CLI's own package (`package_root`: the parent of its `bin/`, or the `bin/`
+  itself under a hidden home tree such as `~/.cargo` or `~/.local`); a shared
   prefix such as `/opt/homebrew` or `/usr/local` is refused, so its `etc/` and
   `var/` stay unreadable.
 - Codex: refreshing its token rewrites `~/.codex/auth.json` in place through

@@ -355,11 +355,19 @@ pub(crate) fn homebrew_tools(
 }
 
 /// The CLI's own install directory: the parent of a `bin/` directory, or the
-/// executable's directory. A shared prefix (`/opt/homebrew`, `/usr/local`,
+/// executable's directory. A `bin/` directly under a hidden home tool tree
+/// (`~/.cargo/bin`, `~/.local/bin`) grants only that `bin/`, never the tree
+/// (`credentials.toml`, `share/`). A shared prefix (`/opt/homebrew`, `/usr/local`,
 /// `/usr`) is refused: its `etc/` and `var/` must never become readable.
 pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
     let package = match executable.parent() {
-        Some(bin) if bin.file_name() == Some("bin".as_ref()) => bin.parent(),
+        Some(bin) if bin.file_name() == Some("bin".as_ref()) => {
+            let tree = bin.parent();
+            let hidden = tree
+                .and_then(Path::file_name)
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
+            if hidden { Some(bin) } else { tree }
+        }
         parent => parent,
     }
     .ok_or(ProviderError::InvalidPath)?;

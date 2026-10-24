@@ -2005,3 +2005,35 @@ fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
     }
     Ok(())
 }
+
+#[test]
+fn package_root_never_grants_a_hidden_home_tool_tree() {
+    use crate::launch::package_root;
+    let direct = Path::new("/home/u/.cargo/bin/codex");
+    assert_eq!(
+        package_root(direct).unwrap(),
+        Path::new("/home/u/.cargo/bin")
+    );
+    let versioned = Path::new("/home/u/.local/share/claude/versions/2.1.310");
+    assert_eq!(
+        package_root(versioned).unwrap(),
+        Path::new("/home/u/.local/share/claude/versions")
+    );
+    let cask = Path::new("/opt/homebrew/Caskroom/codex/0.159.0/bin/codex");
+    assert_eq!(
+        package_root(cask).unwrap(),
+        Path::new("/opt/homebrew/Caskroom/codex/0.159.0")
+    );
+}
+
+#[test]
+fn claude_account_key_binds_the_organisation() {
+    let email = identity::fingerprint("a@example.test");
+    assert_eq!(identity::claude_account("a@example.test", None), email);
+    let one = identity::claude_account("a@example.test", Some("org-1"));
+    assert_ne!(one, email);
+    assert_ne!(
+        one,
+        identity::claude_account("a@example.test", Some("org-2"))
+    );
+}
