@@ -343,7 +343,8 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
+    let mut run = input();
+    run.request.tasks[0].account = Some("fixture-account".into());
     store.create(&run, &call)?;
     let prior = run.attempts[0].attempt_id;
     let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
@@ -371,6 +372,12 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.parent, Some(prior));
+    assert_eq!(
+        store.request(continued.run_id, &call)?.tasks[0]
+            .account
+            .as_deref(),
+        Some("fixture-account")
+    );
     assert_eq!(store.resume(&resume("r1", 0, 20)?, &call)?, continued);
     let mut changed = resume("r1", 0, 20)?;
     changed.prompt = "other".into();

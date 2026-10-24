@@ -2,11 +2,11 @@
 mod claude;
 mod opencode;
 
+use provenant_providers::identity::{base64url, codex_account, cursor_account};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
 };
-use provenant_records::CanonicalV1;
 use provenant_supervisor::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
@@ -77,9 +77,28 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |n| n.as_secs() as i64)
 }
+// Keep Lane Q's Claude identity scheme in the provider owner.
 fn fingerprint(identity: &str, length: usize) -> String {
-    let digest = CanonicalV1::file_digest(identity.trim().to_lowercase().as_bytes()).to_string();
-    digest.strip_prefix("sha256:").unwrap_or(&digest)[..length].to_owned()
+    provenant_providers::identity::fingerprint(identity)
+        .and_then(|s| s.get(..length).map(str::to_owned))
+        .unwrap_or_default()
+}
+fn cursor_token(dir: &Path) -> Option<String> {
+    use rusqlite::{Connection, OpenFlags};
+    let db = Connection::open_with_flags(dir.join("state.vscdb"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()?;
+    db.busy_timeout(Duration::from_millis(250)).ok()?;
+    let token: String = db.query_row("SELECT substr(value,1,1048577) FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1", [], |r| r.get(0)).ok()?;
+    (token.len() <= LIMIT).then_some(token)
+}
+fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
+    match adapter {
+        "codex" => read(&dir.join("auth.json"))
+            .ok()
+            .and_then(|b| codex_account(&b)),
+        "cursor" => cursor_token(dir).and_then(|s| cursor_account(&s)),
+        _ => None,
+    }
 }
 
 fn expand(home: &Path, path: &str) -> PathBuf {
@@ -147,10 +166,17 @@ impl LiveQuota {
                         {
                             return Err(QuotaError::Invalid("absolute identity directory"));
                         }
+                        let detected = matches!(adapter, "codex" | "cursor")
+                            .then(|| signin_key(adapter, &dir).unwrap_or_else(|| "unknown".into()));
+                        let key = detected.as_deref().unwrap_or(label);
                         let scope = AccountScope {
                             adapter: adapter.into(),
-                            account_key: label.clone(),
-                            label: label.clone(),
+                            account_key: key.into(),
+                            label: if key == "unknown" || label == "default" {
+                                key.into()
+                            } else {
+                                label.clone()
+                            },
                         };
                         scope.validate()?;
                         accounts.push(Account {
@@ -164,6 +190,8 @@ impl LiveQuota {
                     if dir.exists() {
                         let label = if adapter == "agy" {
                             agy_identity(&dir).unwrap_or_else(|| "default".into())
+                        } else if matches!(adapter, "codex" | "cursor") {
+                            signin_key(adapter, &dir).unwrap_or_else(|| "unknown".into())
                         } else {
                             "default".into()
                         };
@@ -180,6 +208,8 @@ impl LiveQuota {
                 }
             }
         }
+        let mut seen = std::collections::BTreeSet::new();
+        accounts.retain(|a| seen.insert((a.scope.adapter.clone(), a.scope.account_key.clone())));
         if accounts.len() > provenant_quota::MAX_ACCOUNTS {
             return Err(QuotaError::Invalid("account bound"));
         }
@@ -332,6 +362,18 @@ impl QuotaEffects for LiveQuota {
             .find(|a| a.scope == *plan.account())
             .ok_or(ProbeFailure::Auth)?;
         let deadline = plan.input().deadline_unix_seconds;
+        let check_identity = || {
+            if matches!(account.scope.adapter.as_str(), "codex" | "cursor")
+                && signin_key(&account.scope.adapter, &account.identity_dir)
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    != account.scope.account_key
+            {
+                return Err(ProbeFailure::Auth);
+            }
+            Ok(())
+        };
+        check_identity()?;
         let mut details = QuotaDetails {
             plan: account
                 .options
@@ -352,6 +394,7 @@ impl QuotaEffects for LiveQuota {
             }
             _ => return Err(ProbeFailure::Disabled),
         };
+        check_identity()?;
         Ok(ProbeCapture {
             stdout: serde_json::to_vec(&json!({"payload":payload,"details":details}))
                 .map_err(|_| ProbeFailure::Malformed)?,
@@ -406,18 +449,7 @@ impl LiveQuota {
         )
     }
     fn cursor(&self, account: &Account, deadline: i64) -> Result<Value, ProbeFailure> {
-        use rusqlite::{Connection, OpenFlags};
-        let db = Connection::open_with_flags(
-            account.identity_dir.join("state.vscdb"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|_| ProbeFailure::Auth)?;
-        db.busy_timeout(Duration::from_millis(250))
-            .map_err(|_| ProbeFailure::Auth)?;
-        let token: String = db.query_row("SELECT substr(value,1,1048577) FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1", [], |r| r.get(0)).map_err(|_| ProbeFailure::Auth)?;
-        if token.len() > LIMIT {
-            return Err(ProbeFailure::Auth);
-        }
+        let token = cursor_token(&account.identity_dir).ok_or(ProbeFailure::Auth)?;
         let claims = token
             .split('.')
             .nth(1)
@@ -502,28 +534,6 @@ impl LiveQuota {
         details.fingerprint = Some(actual);
         Ok(payload)
     }
-}
-fn base64url(s: &str) -> Option<Vec<u8>> {
-    let (mut bits, mut count) = (0u32, 0u32);
-    let mut bytes = Vec::new();
-    for c in s.bytes().take_while(|b| *b != b'=') {
-        let n = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'-' | b'+' => 62,
-            b'_' | b'/' => 63,
-            _ => return None,
-        };
-        bits = (bits << 6) | n as u32;
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            bytes.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(bytes)
 }
 fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;

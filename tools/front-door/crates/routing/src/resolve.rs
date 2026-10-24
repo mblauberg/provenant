@@ -41,7 +41,7 @@ impl RoutingContext<'_> {
         if !provenant_config::DomainConfig::validate(self.config).is_empty() {
             return Err(RoutingError::InvalidValue);
         }
-        if self.availability.len() > 32
+        if self.availability.len() > 128
             || self.quota.len() > 256
             || self.registry.len() > 32
             || self.host.len() > 128
@@ -51,7 +51,7 @@ impl RoutingContext<'_> {
         let mut seen = std::collections::BTreeSet::new();
         for record in self.availability {
             validate_availability(record, &record.adapter)?;
-            if !seen.insert(&record.adapter) {
+            if !seen.insert((&record.adapter, &record.account_key)) {
                 return Err(RoutingError::Availability);
             }
         }
@@ -259,6 +259,57 @@ fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -
             .model(model)
             .is_some_and(|row| row.trains_on_prompts == Some(false))
 }
+/// Dispatch-only override. Filter the immutable provider observations before
+/// resolving, so quota and readiness are checked for the selected account.
+/// Without an override the first registered observation remains the selection;
+/// this does not implement quota-driven account switching (#1115).
+pub fn resolve_for_account(
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    account: Option<&str>,
+) -> Result<ResolvedRoute, RoutingError> {
+    let Some(account) = account else {
+        return resolve(request, context);
+    };
+    if !crate::request::identifier(account) || account == "unknown" {
+        return Err(RoutingError::InvalidValue);
+    }
+    context.validate()?;
+    let adapters: std::collections::BTreeSet<&str> = match &request.choice {
+        RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
+        RouteChoice::NamedRoute(name) => {
+            if let Some(pool) = context.catalogue.pools.get(name) {
+                pool.iter().map(|member| member.model.adapter()).collect()
+            } else {
+                [context
+                    .config
+                    .routes
+                    .get(name)
+                    .ok_or(RoutingError::UnknownRoute)?
+                    .model
+                    .adapter()]
+                .into_iter()
+                .collect()
+            }
+        }
+    };
+    let availability: Vec<_> = context
+        .availability
+        .iter()
+        .filter(|a| {
+            !adapters.contains(a.adapter.as_str()) || a.account_key.as_deref() == Some(account)
+        })
+        .cloned()
+        .collect();
+    resolve(
+        request,
+        &RoutingContext {
+            availability: &availability,
+            ..*context
+        },
+    )
+}
+
 pub fn resolve(
     request: &RouteRequest,
     context: &RoutingContext<'_>,

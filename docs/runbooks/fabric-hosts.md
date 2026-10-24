@@ -10,19 +10,19 @@ owns the replacement boundaries.
 ## Commands
 
 ```sh
-provenant fabric host list
+provenant help
+provenant hosts list
 provenant hosts doctor
-provenant hosts doctor workshop --json
-provenant help dispatch
-provenant help lanes
-provenant help output
+provenant peer
+provenant fabric dispatch --help
 ```
 
-`fabric host list` reads local and configured peer health. `hosts doctor`
-probes provider sign-in; an optional SSH alias runs doctor on that host.
-The CLI grammar lives in `tools/front-door/crates/cli/src/grammar.rs` and
-`tools/front-door/crates/cli/src/fabric.rs`. There is no `hosts list`,
-top-level `peer`, `fabric dispatch` or `fabric lanes` command.
+`hosts list` reads local and configured peer health. `hosts doctor` probes
+provider sign-in; optional host selectors target configured peers. The hidden
+top-level `peer` command is the fixed SSH protocol entrypoint. Fabric dispatch
+is `provenant fabric dispatch`. The Rust CLI grammar lives in
+`tools/front-door/crates/cli/src/grammar.rs` and
+`tools/front-door/crates/cli/src/fabric.rs`.
 
 ## Configure hosts
 
@@ -57,11 +57,11 @@ seconds. The complete field validation and compiled defaults live in
 
 Configure SSH aliases and keys in the user's OpenSSH configuration. The Rust
 transport discovers `/usr/bin/ssh` or `/bin/ssh` and sends the fixed remote
-command `provenant fabric peer`. It accepts no configurable peer command or
+command `provenant peer`. It accepts no configurable peer command or
 SSH-program environment override. A restricted key can use:
 
 ```text
-command="provenant fabric peer",restrict ssh-ed25519 <public-key> user
+command="provenant peer",restrict ssh-ed25519 <public-key> user
 ```
 
 Verify that the receiving host can resolve the binary in this non-interactive

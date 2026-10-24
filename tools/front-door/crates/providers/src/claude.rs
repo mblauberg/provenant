@@ -35,6 +35,7 @@ const MIN_LIFETIME_MS: u64 = 60 * 1000;
 pub struct OauthToken {
     access: String,
     expires_at_ms: u64,
+    account: Option<(String, std::path::PathBuf)>,
 }
 
 impl std::fmt::Debug for OauthToken {
@@ -44,6 +45,12 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    #[cfg(test)]
+    pub(crate) fn for_account(mut self, key: &str, dir: &Path) -> Self {
+        self.account = Some((key.into(), dir.to_owned()));
+        self
+    }
+
     /// Parses the keychain item's JSON, keeping only the access token and its
     /// expiry. An empty or expired token is refused.
     pub(crate) fn parse(item: &[u8], now_ms: u64) -> Result<Self, ProviderError> {
@@ -73,6 +80,7 @@ impl OauthToken {
         Ok(Self {
             access: oauth.access,
             expires_at_ms: oauth.expires_at_ms,
+            account: None,
         })
     }
 
@@ -195,7 +203,80 @@ pub fn refresh_if_expiring(
     Ok(token)
 }
 
-/// Claude uses the default config directory. The host reads its login token
+/// Load a token for a registered identity. The status probes bracket the secret
+/// read/refresh so a rotating default directory cannot be attributed by path.
+/// This uses Lane Q's fingerprint, never token material, for identity.
+pub fn refresh_for_account(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+) -> Result<OauthToken, ProviderError> {
+    if account.adapter() != "claude" || login.config_dir != account.directory() {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    let check = || -> Result<(), ProviderError> {
+        let remaining = deadline_ms.saturating_sub(now_ms());
+        if remaining == 0 {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        let argv = [
+            login.executable.into(),
+            "auth".into(),
+            "status".into(),
+            "--json".into(),
+        ];
+        let env = [
+            ("HOME".into(), login.home.into()),
+            ("USER".into(), login.user.into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()),
+        ];
+        let mut options = ExecOptions::new(
+            &argv,
+            login.scratch,
+            Duration::from_millis(remaining.min(4000)),
+        );
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let out = executor
+            .execute(options)
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+        if out.termination != Termination::Exit(0)
+            || out.timed_out
+            || out.stdout.truncated
+            || out.stdout.read_failed
+            || out.drain_truncated
+            || out.cancelled
+        {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        #[derive(Deserialize)]
+        struct Status {
+            #[serde(rename = "loggedIn")]
+            logged_in: bool,
+            email: String,
+        }
+        let status: Status = serde_json::from_slice(&out.stdout.bytes)
+            .map_err(|_| ProviderError::UnknownIdentity)?;
+        if !status.logged_in
+            || crate::identity::fingerprint(&status.email).as_deref() != Some(account.key())
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        Ok(())
+    };
+    check()?;
+    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms)?;
+    check()?;
+    token.account = Some((account.key().into(), account.directory().to_owned()));
+    Ok(token)
+}
+
+/// Claude uses the selected config directory. The host reads its login token
 /// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
 /// unreadable. Recorded writer-shell activation additionally denies keychain
 /// services and the security executable, and uses a private config directory.
@@ -212,6 +293,17 @@ fn prepare(
         return Err(ProviderError::UnsupportedPolicy);
     }
     let token = input.token.ok_or(ProviderError::UnsupportedPolicy)?;
+    if token.account.is_some() && input.account.is_none() {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    if let Some(account) = input.account
+        && token
+            .account
+            .as_ref()
+            .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
+    {
+        return Err(ProviderError::IdentityMismatch);
+    }
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
         (Session::Resume, None) => return Err(ProviderError::UnknownIdentity),
@@ -257,10 +349,11 @@ fn prepare(
         argv.extend(["--effort".into(), effort.into()]);
     }
 
-    let project = input
-        .home
-        .join(".claude/projects")
-        .join(project_key(input.cwd));
+    let config_dir = input.account.map_or_else(
+        || input.home.join(".claude"),
+        |account| account.directory().to_owned(),
+    );
+    let project = config_dir.join("projects").join(project_key(input.cwd));
     let transcript_dir = project.join(&session_id);
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
@@ -288,6 +381,8 @@ fn prepare(
             .join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
         setup.push(SetupStep::CreateDir(config));
+    } else if input.account.is_some() {
+        env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
     Ok(LaunchSpec {
         argv,

@@ -42,38 +42,19 @@ flowchart LR
 | Content | Owner |
 |---|---|
 | Task classes, tiers, roles, efforts, degradation policy | `orchestrate` skill, routing reference |
-| Alias tables, family/adapter preferences, activation gates | `config/model-routing.json` |
-| Resolution and receipt behaviour | `provenant route` |
+| Route catalogue, resolution and receipt behaviour | `provenant route list` and `provenant route resolve` |
 | Review-pressure ladder and risk tiers | `HARNESS.md` |
 | Correlated-error caveat on cross-family review | `orchestrate` skill, routing reference |
 
 Nothing above is restated here. If you want to know what a route *must* be, read
 those. This file only helps you pick among what they already allow.
 
-### The hard catalogue, and the alias order
+### Checking the live catalogue
 
-`config/model-routing.json` is the hard catalogue and the only thing that
-decides what is *admissible*. It maps a task class to an alias (`principal`,
-`senior`, `junior`) and each alias to the models a family can serve it with.
-Those aliases are deliberately not version-pinned: that indirection is what lets
-a model be swapped without touching a single call site, and it is what the
-harness actually routes on.
-
-This file sits above that. It names concrete, version-bearing models, because
-that is the level real preferences live at. It never widens what the catalogue
-admits, and it must never be turned into something that narrows it either. A
-preference that becomes a gate has stopped being a preference.
-
-`config/model-preferences.json` remains machine plumbing for coarse family
-affinity and fair spreading. Do not put version-bearing preferences there; they
-change too often and carry no room for the reason.
-
-One mechanical detail matters when editing this file. Where an alias in the
-catalogue lists several models, **the order is the resolution order**: the first
-is what an automated dispatch gets, and the rest stay admissible. So a
-preference written here only becomes the automatic default if the catalogue
-array is ordered to match. Change both together. A preference that contradicts
-the array is not a preference, it is a stale note.
+The bundled Rust catalogue owns route availability and resolution. Use
+`provenant route list` to inspect named routes and `provenant route resolve`
+to check a route or exact model. This dossier records advisory preferences;
+it does not set aliases, weights, activation gates or admissibility.
 
 For numbers rather than judgement, see the
 [model benchmark registry](research/model-benchmarks/README.md): published
@@ -342,11 +323,10 @@ it can also take frontend legwork. It is a different family for cross-family
 review legs and is reachable at `-high`, `-medium` and `-low`. Use
 `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
-**Route pools carry these preferences as weights.** The pools live only in
-`config/model-routing.json` `routes`; `provenant route list` prints them with live
-availability (available models in full, others behind a per-pool count line;
-`--all` lists everything). To change a preference, edit the weight or order
-there; nothing else restates them.
+**Route pools carry the configured route choices.** Use
+`provenant route list` to inspect the available routes and
+`provenant route resolve` to see the selected model and effort. This dossier
+does not configure route weights or order.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do

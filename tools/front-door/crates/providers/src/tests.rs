@@ -672,6 +672,7 @@ fn fixture_input<'a>(
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
+        account: None,
         token,
         cwd,
         nonce: [9; 16],
@@ -685,7 +686,8 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
     let token = fixture_token();
     for entry in REGISTRY {
         let id = entry.adapter.id();
-        let route = route(id, "fixture-model");
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
         // Only Codex reads a credential inside the sandbox.
         let confined = read_only_plan("/fixture", (id == "codex").then_some("login"));
         let token = (id == "claude").then_some(&token);
@@ -1074,6 +1076,7 @@ type Call = (Vec<String>, Vec<String>, std::path::PathBuf);
 /// Answers keychain reads from a script and records every call.
 struct KeychainScript {
     items: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+    statuses: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
     calls: std::sync::Mutex<Vec<Call>>,
 }
 
@@ -1098,6 +1101,8 @@ impl provenant_supervisor::exec::Executor for KeychainScript {
             .collect();
         let stdout = if argv[0] == "/usr/bin/security" {
             self.items.lock().unwrap().pop_front().unwrap()
+        } else if argv.get(1).is_some_and(|a| a == "auth") {
+            self.statuses.lock().unwrap().pop_front().unwrap()
         } else {
             vec![]
         };
@@ -1134,6 +1139,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     let run_by = |config: &str, items: Vec<Vec<u8>>, deadline: u64| {
         let script = KeychainScript {
             items: std::sync::Mutex::new(items.into()),
+            statuses: Default::default(),
             calls: std::sync::Mutex::new(vec![]),
         };
         let login = Login {
@@ -1286,7 +1292,6 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         PathScope::Subtree => path.starts_with(&grant.path),
     };
     let prompt = Prompt::new("fixture prompt".into());
-    let token = fixture_token();
     for &(id, forbidden) in cases {
         let adapter = REGISTRY
             .iter()
@@ -1303,6 +1308,12 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         };
         let outcome = replay(adapter, recording, EXIT)?.1;
         let route = route(id, outcome.model().unwrap_or("fixture-model"));
+        let account_dir = std::path::Path::new("/fixture/identities/opaque");
+        let account = matches!(id, "claude" | "codex")
+            .then(|| identity::RegisteredAccount::new(id, "opaque-account", account_dir.into()))
+            .transpose()?;
+        let account_token =
+            (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
         // Synthetic continuation for path-policy coverage, including disabled
         // adapters without answering-model evidence. This enables no mode.
         let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
@@ -1318,8 +1329,9 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                     &plan,
                     &prompt,
                     std::path::Path::new("/fixture/repo"),
-                    (id == "claude").then_some(&token),
+                    account_token.as_ref(),
                 );
+                input.account = account.as_ref();
                 input.continuation = (session == Session::Resume).then_some(&continuation);
                 let launch = match adapter.prepare(input) {
                     Ok(launch) => launch,
@@ -1359,12 +1371,151 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
     Ok(())
 }
 
+#[test]
+fn selected_accounts_control_provider_environment_and_exact_authentication_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::path::Path;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    for adapter in ["claude", "codex"] {
+        for key in ["fixture-one", "fixture-two"] {
+            let mut route = route(adapter, "fixture-model");
+            let email = format!("{key}@example.test");
+            let account_key = if adapter == "claude" {
+                identity::fingerprint(&email).unwrap()
+            } else {
+                key.into()
+            };
+            route.account_key = Some(account_key.clone());
+            let dir = Path::new("/fixture/identities").join(key);
+            let account = identity::RegisteredAccount::new(adapter, &account_key, dir.clone())?;
+            let selected_token;
+            let token = if adapter == "claude" {
+                let status =
+                    serde_json::to_vec(&serde_json::json!({"loggedIn":true,"email":email}))?;
+                let script = KeychainScript {
+                    items: std::sync::Mutex::new([br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#.to_vec()].into()),
+                    statuses: std::sync::Mutex::new([status.clone(), status].into()),
+                    calls: Default::default(),
+                };
+                selected_token = claude::refresh_for_account(
+                    &script,
+                    &claude::Login {
+                        executable: Path::new("/fixture/bin/claude"),
+                        home: Path::new("/fixture/home"),
+                        user: "fixture".as_ref(),
+                        config_dir: &dir,
+                        scratch: Path::new("/fixture/scratch"),
+                    },
+                    &account,
+                    &|| 1000,
+                    10000,
+                )?;
+                &selected_token
+            } else {
+                &token
+            };
+            let confined = read_only_plan("/fixture", (adapter == "codex").then_some("login"));
+            let mut input = fixture_input(
+                &route,
+                &confined,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(token),
+            );
+            input.account = Some(&account);
+            let unplaced = fixture_input(
+                &route,
+                &confined,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(token),
+            );
+            assert!(
+                REGISTRY
+                    .iter()
+                    .find(|r| r.adapter.id() == adapter)
+                    .unwrap()
+                    .adapter
+                    .prepare(unplaced)
+                    .is_err()
+            );
+            let spec = REGISTRY
+                .iter()
+                .find(|r| r.adapter.id() == adapter)
+                .unwrap()
+                .adapter
+                .prepare(input)?;
+            if adapter == "claude" {
+                let mut unattributed_route = route.clone();
+                unattributed_route.account_key = None;
+                assert!(matches!(
+                    claude::Claude.prepare(fixture_input(
+                        &unattributed_route,
+                        &confined,
+                        &prompt,
+                        Path::new("/fixture/repo"),
+                        Some(token)
+                    )),
+                    Err(ProviderError::IdentityMismatch)
+                ));
+                let other_key = identity::fingerprint("other@example.test").unwrap();
+                let other = identity::RegisteredAccount::new(
+                    "claude",
+                    &other_key,
+                    Path::new("/fixture/identities/other").into(),
+                )?;
+                let mut other_route = route.clone();
+                other_route.account_key = Some(other_key);
+                let mut wrong_token = fixture_input(
+                    &other_route,
+                    &confined,
+                    &prompt,
+                    Path::new("/fixture/repo"),
+                    Some(token),
+                );
+                wrong_token.account = Some(&other);
+                assert!(matches!(
+                    claude::Claude.prepare(wrong_token),
+                    Err(ProviderError::IdentityMismatch)
+                ));
+                assert!(
+                    spec.env
+                        .iter()
+                        .any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v == dir.as_os_str())
+                );
+                assert!(
+                    spec.profile
+                        .spec
+                        .state_writes
+                        .iter()
+                        .all(|g| g.path.starts_with(&dir))
+                );
+            } else {
+                // The accepted design keeps runtime state per attempt. Only the
+                // selected identity's auth.json is linked into CODEX_HOME.
+                let auth = dir.join("auth.json");
+                assert_eq!(spec.profile.spec.authentication[0].roots[0].path, auth);
+                assert_eq!(
+                    spec.profile.spec.authentication[0].in_place_writes[0].path,
+                    auth
+                );
+                assert!(
+                    matches!(&spec.setup[0], SetupStep::Symlink { target, .. } if target == &auth)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "recording")]
 #[test]
 fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
 -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let route = route("claude", "fixture-model");
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
     let launch = claude::Claude.prepare(fixture_input(
@@ -1403,7 +1554,8 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
 #[test]
 fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let route = route("claude", "fixture-model");
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
     let launch = claude::Claude.prepare(fixture_input(
