@@ -1,5 +1,6 @@
-use crate::{ExitObservation, ProviderEvent, ProviderOutcome, StreamState};
-use provenant_confinement::ConfinedPlan;
+use crate::{
+    ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
+};
 use provenant_records::ResolvedRoute;
 use serde::{Deserialize, Serialize};
 
@@ -17,14 +18,18 @@ pub enum ProviderError {
     IdentityMismatch,
     #[error("provider continuation identity is unknown")]
     UnknownIdentity,
+    #[error("launch path is not absolute or lies outside the plan's roots")]
+    InvalidPath,
+    #[error("confinement plan asks for a policy this adapter cannot honour")]
+    UnsupportedPolicy,
+    #[error("provider login token is unavailable, unreadable or expired")]
+    CredentialUnavailable,
 }
 
-/// No provider effects qualify for activation. An uninhabited plan cannot be
+/// No preflight probe form is recorded yet. An uninhabited plan cannot be
 /// forged or accidentally executed; qualifying recordings must precede effects.
 #[derive(Debug)]
 pub enum PreflightPlan {}
-#[derive(Debug)]
-pub enum AdapterLaunchSpec {}
 
 pub struct PreflightInput {
     pub route: ResolvedRoute,
@@ -63,6 +68,9 @@ impl Prompt {
     pub fn new(text: String) -> Self {
         Self(text)
     }
+    pub fn text(&self) -> &str {
+        &self.0
+    }
     pub fn check_argv(&self) -> Result<(), ProviderError> {
         if self.0.len() > 65_536 {
             Err(ProviderError::PromptTooLarge)
@@ -70,16 +78,6 @@ impl Prompt {
             Ok(())
         }
     }
-}
-
-/// Frozen confinement policy, compiled before launch by the composition edge.
-/// No provider can launch until activation evidence is available.
-pub struct PrepareInput<'a> {
-    pub route: &'a ResolvedRoute,
-    pub confined: &'a ConfinedPlan,
-    pub prompt: &'a Prompt,
-    pub continuation: Option<&'a Continuation>,
-    pub grant_digest: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -105,6 +103,7 @@ impl Continuation {
         outcome: &ProviderOutcome,
         route: &ResolvedRoute,
         grant_digest: &str,
+        model_on_wire: bool,
     ) -> Result<Self, ProviderError> {
         if outcome.adapter() != adapter || route.adapter != adapter {
             return Err(ProviderError::IdentityMismatch);
@@ -115,8 +114,12 @@ impl Continuation {
             .clone()
             .ok_or(ProviderError::UnknownIdentity)?;
         // Requested models cannot substitute for answering-model evidence.
-        if outcome.model() != Some(route.model.as_str()) {
-            return Err(ProviderError::UnknownIdentity);
+        // Codex's exec stream has no model position; its resume argv pins the
+        // same `-m`, and any model it does report must still match.
+        match outcome.model() {
+            Some(model) if model == route.model => {}
+            None if !model_on_wire => {}
+            _ => return Err(ProviderError::UnknownIdentity),
         }
         Ok(Self {
             adapter: adapter.into(),
@@ -224,8 +227,8 @@ pub(crate) fn verify_lineage(
 
 pub trait Adapter: Sync {
     fn id(&self) -> &'static str;
-    /// Activation is a provider-owned recording gate, independent of cache/config.
-    /// No current invocation form has qualifying evidence.
+    /// Activation is a provider-owned recording gate, independent of cache/config:
+    /// true when any mode of this adapter is enabled in the recorded matrix.
     fn execution_enabled(&self) -> bool {
         false
     }
@@ -236,7 +239,7 @@ pub trait Adapter: Sync {
         plan: &PreflightPlan,
         capture: &[u8],
     ) -> Result<AvailabilityRecord, ProviderError>;
-    fn prepare(&self, input: PrepareInput<'_>) -> Result<AdapterLaunchSpec, ProviderError>;
+    fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
     /// If a later line fails, events from earlier lines in that call are
     /// retained in `finish().final_events()` alongside the malformed outcome.

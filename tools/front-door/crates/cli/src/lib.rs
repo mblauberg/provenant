@@ -447,6 +447,31 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     walk(model, "provenant".into(), &mut commands);
     HelpCatalogue { commands }
 }
+/// Canonical installed verb paths. Never derived from raw caller arguments.
+pub fn usage_verbs() -> Vec<String> {
+    fn walk(command: &clap::Command, path: String, verbs: &mut Vec<String>) {
+        let children: Vec<_> = command.get_subcommands().collect();
+        if children.is_empty() && !path.is_empty() {
+            verbs.push(path);
+        } else {
+            for child in children {
+                let name = child.get_name();
+                walk(
+                    child,
+                    if path.is_empty() {
+                        name.into()
+                    } else {
+                        format!("{path} {name}")
+                    },
+                    verbs,
+                );
+            }
+        }
+    }
+    let mut verbs = vec!["parse".into(), "version".into()];
+    walk(&command_model(), String::new(), &mut verbs);
+    verbs
+}
 fn constraints(path: &str) -> Vec<String> {
     let values: &[&str] = match path {
         "provenant dispatch" => &[

@@ -6,7 +6,9 @@ The status item shows the highest-use available account and its percentage. The 
 
 Binding limits must have a reset time and must not be advisory. Rust `credit_only` accounts have spent their plan allowance and appear as "Exhausted, drawing on credits", with the allowance reset time when known.
 
-The app reads all quota data from the CLI. It does not read credentials, tokens or the Keychain. Quota probes stay disabled unless a provider has a qualifying activation recording and recorded runtime authority. Until then, the CLI reports the provider status without inventing an account identity.
+The app reads all quota data from the CLI. It does not read credentials, tokens or the Keychain. The panel shows the configured account label, plan, usage windows, and available credit or reset details; an unavailable reading keeps its reported status and is never represented as zero.
+
+For Claude, `~/.claude-pro`, `~/.claude-anese`, and `~/.claude-michael` remain signed in to their fixed accounts. Only `~/.claude` rotates between them, and the CLI selects that default profile with `CLAUDE_CONFIG_DIR` unset. The CLI matches accounts by a short hash of the authenticated identity, uses the freshest unexpired token for each account, and asks Claude Code to refresh an expired fixed-profile token before reading quota. Raw email addresses are not stored.
 
 ## Build and run
 

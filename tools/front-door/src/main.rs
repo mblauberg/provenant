@@ -5,7 +5,9 @@ mod hooks;
 mod hosts;
 mod install;
 mod overflow;
+mod quota_live;
 mod roots;
+mod usage;
 #[cfg(test)]
 #[path = "../tests/support/worktrees.rs"]
 mod worktree_tests;
@@ -349,9 +351,13 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             provenant_cli::run::reconcile(cmd, edge)
         }),
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::stats(cmd, edge)
-            })
+            if cmd.usage {
+                usage::run(&cmd, globals)
+            } else {
+                run_edge(&inv.leaf, globals, |edge| {
+                    provenant_cli::run::stats(cmd, edge)
+                })
+            }
         }
         Command::Quota(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
@@ -360,9 +366,22 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 roots::roots(globals, &assets, &project)
             })();
             match resolved {
-                Ok(roots) => {
-                    provenant_cli::quota::run(cmd, globals, &roots, provenant_providers::REGISTRY)
-                }
+                Ok(roots) => match quota_live::LiveQuota::new(roots.state.as_path()) {
+                    Ok(effects) => provenant_cli::quota::run(
+                        cmd,
+                        globals,
+                        &roots,
+                        provenant_providers::REGISTRY,
+                        &effects,
+                    ),
+                    Err(_) => fail(
+                        &inv.leaf,
+                        Outcome::Invalid,
+                        "QUOTA_CONFIG",
+                        "invalid quota accounts configuration",
+                        globals,
+                    ),
+                },
                 Err(error) => fail(
                     &inv.leaf,
                     Outcome::Error,
@@ -413,7 +432,17 @@ fn main() -> ExitCode {
             }
         };
     }
-    let status = match provenant_cli::parse(std::env::args_os().skip(1)) {
+    let started = std::time::Instant::now();
+    let parsed = provenant_cli::parse(std::env::args_os().skip(1));
+    let (verb, globals) = match &parsed {
+        ParseOutcome::Invocation(inv) => (inv.leaf.as_str(), &inv.globals),
+        ParseOutcome::Invalid { globals, .. } => ("parse", globals),
+        ParseOutcome::Help { globals, .. } => ("help", globals),
+        ParseOutcome::Version { globals } => ("version", globals),
+    };
+    let verb = verb.to_owned();
+    let usage_roots = usage::selected_roots(globals);
+    let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
             "parse",
@@ -469,5 +498,13 @@ fn main() -> ExitCode {
             ),
         },
     };
+    if let Some(roots) = usage_roots {
+        usage::record_cli(
+            &roots,
+            &verb,
+            status,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+    }
     ExitCode::from(status)
 }

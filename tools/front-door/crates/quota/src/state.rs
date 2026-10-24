@@ -22,6 +22,22 @@ fn reference(text: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
 }
+fn detail_text(text: &str, maximum: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= maximum
+        && !text.chars().any(char::is_control)
+        && !text.contains(['@', '/', '\\'])
+}
+fn fingerprint(text: &str) -> bool {
+    let (hex, length) = text
+        .strip_prefix("google-")
+        .map_or((text, 16), |hex| (hex, 12));
+    hex.len() == length
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 impl AccountScope {
     pub fn validate(&self) -> Result<(), QuotaError> {
         if !component(&self.adapter)
@@ -43,6 +59,25 @@ impl QuotaSnapshot {
             || self.windows.len() > MAX_WINDOWS
             || !reference(&self.source_ref)
             || self.authority_ref.as_ref().is_some_and(|r| !reference(r))
+            || self.details.as_ref().is_some_and(|details| {
+                details
+                    .plan
+                    .as_ref()
+                    .is_some_and(|value| !detail_text(value, 128))
+                    || details
+                        .fingerprint
+                        .as_ref()
+                        .is_some_and(|value| !fingerprint(value))
+                    || details
+                        .credit_balance
+                        .as_ref()
+                        .is_some_and(|value| !detail_text(value, 128))
+                    || details
+                        .note
+                        .as_ref()
+                        .is_some_and(|value| !detail_text(value, 256))
+                    || details.reset_expiries_unix_seconds.len() > MAX_WINDOWS
+            })
         {
             return Err(QuotaError::Invalid("snapshot header or bounds"));
         }

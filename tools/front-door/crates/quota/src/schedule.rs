@@ -34,6 +34,7 @@ const INTERVALS: &[(&str, u64, u64)] = &[
     ("codex", 900, 300),
     ("cursor", 1800, 600),
     ("agy", 1200, 900),
+    ("opencode", 300, 120),
 ];
 pub const TICK_BUDGET_SECONDS: i64 = 55;
 pub fn interval(adapter: &str, trigger: Trigger, power: Power) -> Option<u64> {
@@ -455,6 +456,7 @@ mod tests {
             observed_unix_seconds: 50,
             source_ref: "fixture".into(),
             authority_ref: None,
+            details: None,
             windows: vec![],
         });
         let intent = reserve(Some(&r), &a, 400, "claim", Trigger::Manual, Power::Ac).unwrap();
@@ -463,8 +465,21 @@ mod tests {
             complete(&current, "claim", 456, Err(ProbeFailure::Network), None),
             Err(QuotaError::Conflict)
         ));
-        let failed = complete(&current, "claim", 420, Err(ProbeFailure::Network), None).unwrap();
+        let failed = complete(&current, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
+        let row = report(
+            &[failed.replacement.clone().unwrap()],
+            &[],
+            &QuotaQuery { adapter: None },
+            420,
+            "report.json".into(),
+        )
+        .unwrap()
+        .accounts
+        .remove(0);
+        assert_eq!(row.status, QuotaStatus::Stale);
+        assert_eq!(row.error, Some(ProbeFailure::Auth));
+        assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 50);
         assert!(failed.check(Some(&r)).is_err());
     }
 }

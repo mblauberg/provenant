@@ -78,7 +78,9 @@ impl Admission<'_> {
                 snapshot.status,
                 QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
             ) && snapshot.windows.iter().any(|w| {
-                self.pools.contains(&w.pool)
+                self.pools
+                    .iter()
+                    .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
                     && w.used_basis_points >= 10000
                     && w.resets_unix_seconds
                         .is_none_or(|r| r > self.now_unix_seconds)
@@ -102,22 +104,29 @@ impl Admission<'_> {
                     .checked_add(3600)
                     .ok_or(QuotaError::TimeRange)?,
             );
-            let comparable_newer = snapshot.is_some_and(|s| {
-                s.observed_unix_seconds <= self.now_unix_seconds
-                    && s.observed_unix_seconds > refusal.observed_unix_seconds
-                    && matches!(
-                        s.status,
-                        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-                    )
-                    && refusal.pool.as_ref().is_some_and(|pool| {
-                        s.windows.iter().any(|w| {
-                            w.pool == *pool
-                                // A lapsed reset is not evidence that the provider
-                                // has rolled over a window refused after that reset.
-                                && w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+            let comparable_newer = fresh
+                && record.is_some_and(|r| r.last_error.is_none())
+                && snapshot.is_some_and(|s| {
+                    s.observed_unix_seconds > refusal.observed_unix_seconds
+                        && matches!(
+                            s.status,
+                            QuotaStatus::Available
+                                | QuotaStatus::CreditOnly
+                                | QuotaStatus::Exhausted
+                        )
+                        && refusal.pool.as_ref().is_some_and(|pool| {
+                            let mut windows = s
+                                .windows
+                                .iter()
+                                .filter(|w| matches_pool(&route.adapter, &w.pool, pool))
+                                .peekable();
+                            windows.peek().is_some()
+                                && windows.all(|w| {
+                                    // A lapsed reset alone cannot clear a refusal.
+                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                })
                         })
-                    })
-            });
+                });
             if expires > self.now_unix_seconds
                 && !comparable_newer
                 && refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p))
@@ -138,6 +147,14 @@ impl Admission<'_> {
             ),
         })
     }
+}
+
+fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
+    window == pool
+        || (adapter == "agy"
+            && window
+                .split_once('.')
+                .is_some_and(|(group, _)| group == pool))
 }
 
 impl AdmissionPermit {
@@ -211,13 +228,30 @@ mod admission_tests {
             observed_unix_seconds: 900,
             source_ref: "fixture".into(),
             authority_ref: None,
+            details: None,
             windows: vec![QuotaWindow {
+                window_seconds: None,
                 pool: "pool-a".into(),
                 used_basis_points: 10000,
                 resets_unix_seconds: Some(2000),
             }],
         });
         record
+    }
+    #[test]
+    fn failed_probe_preserves_recent_exhaustion() {
+        let mut record = record(QuotaStatus::Exhausted);
+        record.last_error = Some(ProbeFailure::Auth);
+        assert!(matches!(
+            Admission {
+                now_unix_seconds: 1000,
+                records: &[record],
+                refusals: &[],
+                pools: &["pool-a".into()],
+            }
+            .admit(&route(), &"operation".parse().unwrap()),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
     }
     #[test]
     fn refusal_without_pool_keeps_bounded_wait() {
@@ -227,6 +261,7 @@ mod admission_tests {
         snapshot.windows[0].used_basis_points = 3000;
         snapshot.windows[0].resets_unix_seconds = Some(-2600);
         snapshot.windows.push(QuotaWindow {
+            window_seconds: None,
             pool: "pool-b".into(),
             used_basis_points: 1000,
             resets_unix_seconds: Some(303400),
@@ -452,7 +487,9 @@ mod refusal_scope_tests {
                 observed_unix_seconds: observed,
                 source_ref: "fixture".into(),
                 authority_ref: None,
+                details: None,
                 windows: vec![QuotaWindow {
+                    window_seconds: None,
                     pool: pool.into(),
                     used_basis_points: 0,
                     resets_unix_seconds: Some(2000),
@@ -470,6 +507,52 @@ mod refusal_scope_tests {
                 .is_ok(),
                 allowed,
                 "{model}/{key}/{pool}/{observed}/{now}"
+            );
+        }
+        let mut route = route.clone();
+        route.adapter = "agy".into();
+        let mut account = account;
+        account.adapter = "agy".into();
+        let mut refusal = refusal;
+        refusal.account = account.clone();
+        refusal.pool = Some("gemini".into());
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 960,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![
+                QuotaWindow {
+                    pool: "gemini.weekly".into(),
+                    window_seconds: Some(604800),
+                    used_basis_points: 170,
+                    resets_unix_seconds: Some(3000),
+                },
+                QuotaWindow {
+                    pool: "gemini.5h".into(),
+                    window_seconds: Some(18000),
+                    used_basis_points: 670,
+                    resets_unix_seconds: Some(2000),
+                },
+            ],
+        });
+        for (weekly, allowed) in [(170, true), (10000, false)] {
+            record.snapshot.as_mut().unwrap().windows[0].used_basis_points = weekly;
+            assert_eq!(
+                Admission {
+                    now_unix_seconds: 1000,
+                    records: &[record.clone()],
+                    refusals: &[refusal.clone()],
+                    pools: &["gemini".into()]
+                }
+                .admit(&route, &op)
+                .is_ok(),
+                allowed
             );
         }
     }

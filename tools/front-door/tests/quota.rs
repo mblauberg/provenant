@@ -43,6 +43,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let shown: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
     assert_eq!(shown["command"], "quota show");
     assert_eq!(shown["data"]["coverage"]["known"], 0);
+    assert_eq!(shown["data"]["accounts"][0]["account"]["adapter"], "codex");
     assert!(!rig.state.exists());
     let tick = rig.command(&["quota", "tick", "--json"])?;
     assert_eq!(
@@ -55,7 +56,9 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let tick: serde_json::Value = serde_json::from_slice(&tick.stdout.bytes)?;
     assert_eq!(tick["command"], "quota tick");
     assert_eq!(tick["data"]["coverage"]["total"], 5);
-    assert_eq!(tick["data"]["accounts"], serde_json::json!([]));
+    assert_eq!(tick["data"]["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(tick["data"]["accounts"][0]["status"], "unknown");
+    assert_eq!(tick["data"]["accounts"][0]["error"], "missing_cli");
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
     assert_eq!(disk, tick["data"]);
@@ -157,6 +160,12 @@ fn malformed_records_and_unsafe_directories_fail_without_replacing_report() -> R
 
 fn quota_rig() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    let config = rig.home.join(".agents/config");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(
+        config.join("telemetry.json"),
+        br#"{"accounts":{"claude":{},"codex":{"default":{}},"agy":{},"cursor":{},"opencode":{}}}"#,
+    )?;
     for key in [
         "XDG_DATA_HOME",
         "XDG_RUNTIME_DIR",
@@ -199,7 +208,8 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     let rig = quota_rig()?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
     let windows = (0..64).map(|i| serde_json::json!({"pool":format!("{i:02}{}", "p".repeat(250)),"used_basis_points":0,"resets_unix_seconds":null})).collect::<Vec<_>>();
-    for i in 0..128 {
+    // Leave one slot for the configured Codex account.
+    for i in 0..127 {
         let key = format!("account-{i}");
         let account = serde_json::json!({"adapter":"claude","account_key":key,"label":"work"});
         let record = serde_json::json!({"schema_version":1,"account":account,"revision":1,

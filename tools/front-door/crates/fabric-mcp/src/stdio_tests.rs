@@ -441,6 +441,8 @@ const SHORT_TIMEOUTS: Timeouts = Timeouts {
 
 fn completed(id: &Id) -> Event {
     Event::Completed(Completion {
+        tool: "fabric_identity",
+        started: Instant::now(),
         id: id.clone(),
         reply: protocol::result(id, json!({"content":[],"isError":false}), false),
     })
@@ -517,6 +519,7 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
             shutdown: Duration::from_millis(400),
             ..SHORT_TIMEOUTS
         },
+        &FakeFactory::new(Arc::new(Gate::default())),
     );
     assert!(
         matches!(result, Err(Error::Output(error)) if error.kind() == io::ErrorKind::BrokenPipe)

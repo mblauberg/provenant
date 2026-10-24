@@ -1,79 +1,55 @@
-# Provider wire recordings — build step 0
+# Provider wire recordings
 
-These are sanitised projections of existing recordings for the five retained
-providers in [execution-route.md](../../../../../docs/specs/rust-port/design/execution-route.md).
-They support future decoder tests. **Every execution mode and quota source in
-[activation.json](activation.json) is disabled.** No capture proves the complete
-invocation and confinement contract. This file is evidence for the later static
-registry, not runtime configuration or permission to execute a provider.
-
-[manifest.json](manifest.json) records each fixture's source, SHA-256, known
-CLI version, session/access mode, process exit, substitutions and limitations.
-`null` means unrecorded, never an inferred default. Exact argv and platform are
-unrecorded in every promoted source. Local receipt exits and access modes are
-reported as receipt evidence, not independent proof of confinement. Claude's
-version is from its stream; OpenCode's major version remains unverified, so its
-streams cannot establish v2 acceptance.
+Decoder and activation evidence for the five retained providers in
+[execution-route.md](../../../../../docs/specs/rust-port/design/execution-route.md).
+[activation.json](activation.json) is the runtime gate: `providers::prepare`
+refuses any execution mode it does not enable, and a missing mode is disabled.
 
 ## Coverage and activation
 
-| Adapter | Recorded decoder evidence | Read-only fresh/resume | Writer fresh/resume | Quota |
+| Adapter | Recorded evidence | Read-only fresh/resume | Writer fresh/resume | Quota |
 | --- | --- | --- | --- | --- |
-| Claude | Success, init/answering model mismatch, matching model, continuation pair, authentication error with success subtype | Disabled | Disabled | Disabled |
-| Codex | Success/usage, structured failure, interrupted prefix without terminal | Disabled | Disabled | Disabled |
-| Cursor | Success, thinking deltas, continuation pair | Disabled | Disabled | Disabled |
-| Agy | Init/step updates/success and error result | Disabled | Disabled | Disabled |
-| OpenCode (version unknown) | Text/stop, error, intermediate tool-step finish followed by error and nonzero exit | Disabled | Disabled | Disabled |
+| Claude | Live confined runs (2.1.310); success, model mismatch, matching model, continuation pair, authentication failure | Enabled | Enabled | Lane D |
+| Codex | Live confined runs (0.159.0); success/usage, structured failure, interrupted prefix | Enabled | Enabled | Lane D |
+| Cursor | Success, thinking deltas, continuation pair | Disabled | Disabled | Lane D |
+| Agy | Init/step updates/success and error result | Disabled | Disabled | Lane D |
+| OpenCode | Projected (version unknown): text/stop, error, tool-step finish then error and nonzero exit. Launch form prepared; live v2.0.32 stream lacked `step_finish` | Disabled | Disabled | Lane D |
 
-The tracked fresh/resume labels follow the existing continuation-test pairs;
-matching session placeholders preserve that relationship. They do not prove
-accepted resume argv. OpenCode `step_finish` with `reason: tool-calls` is an
-intermediate step, not terminal success. A zero receipt exit alone proves
-neither an answering identity nor a safe invocation.
+## Live recordings
 
-Enable a mode only after a recording proves its exact selector, effort,
-default service controls where applicable, CLI version/platform, accepted
-fresh/resume invocation and access/confinement form. Independent disclosure and
-confinement readiness remain required. Read-only evidence never enables a
-writer. A missing adapter/mode defaults to disabled. Quota also needs recorded
-windows/resets, missing data, 401/429 and Retry-After plus runtime authority;
-these fixtures grant no credential access.
+`<adapter>/live-<access>-<session>.jsonl` are complete streams from the
+recorder (`crates/providers/examples/record.rs`, feature `recording`), which
+runs the CLI under the compiled Rust confinement profile with a clean
+environment and a trivial prompt, then probes every claimed permission.
+`<adapter>/recordings.json` holds their manifest entries: CLI version,
+platform, redacted argv, access and session mode, exit, decoded outcome and
+answering model. `<adapter>/confinement.json` holds the probed observations per
+access mode, which `prepare` attaches to the provider profile.
 
-Recovered retry, nested tool/subagent identity, malformed protocol and quota
-cases remain gaps. The later decoder tests must add explicitly synthetic
-negative inputs for gaps without calling them CLI acceptance recordings. The
-partial Codex fixture keeps only the interrupted stream's initial protocol
-records; tool payloads are omitted. No malformed bytes or user content from a
-local stream are copied.
+An enabled mode must cite a live capture with the same access and session mode,
+marked `activation_eligible`, that decoded as success; a test enforces this, so
+read-only evidence never enables a writer. Each live capture replays through
+the real decoder, resumes bound to their fresh capture's continuation.
+`claude/live-auth-required.jsonl` is not activation evidence: it records how a
+rejected sign-in decodes (`Refused`). Claude's recordings use the host-read
+access token in `CLAUDE_CODE_OAUTH_TOKEN`; the keychain is unreadable inside.
 
-## Public-data boundary
+Redaction substitutes session ids, paths under `HOME` or the recording root,
+emails, `prefix_<id>` and UUID identifiers and token-shaped strings. Model
+text, usage and timestamps are kept. Credentials are opened only by the CLIs,
+except Claude's access token, which the host reads outside the sandbox and
+passes in the environment; probes read zero bytes from them.
 
-Only the named tracked JSONL streams and bounded local `events.jsonl` streams
-with companion `adapter-receipt.json` were read. Local event streams over 1 MiB
-were skipped. No live provider, network probe, prompt/result file, credential
-file, auth store or real harness configuration was used. Source files were not
-modified. Tracked stream provenance comes from commits `38b234f2` and
-`b9b824fc`; listing seeds and synthetic `fabric-v1` records are not execution
-acceptance evidence. Kiro is outside this design.
+## Projected recordings
 
-All non-allowlisted strings are replaced in memory. The closed allowlist keeps
-only protocol enum values, public model IDs and recorded CLI versions. Empty
-strings, booleans and nulls retain their wire meaning. Measurements, costs,
-durations and numeric timestamps are replaced by zero with their JSON number
-form retained: these fixtures test shape, not measured amounts or date logic.
-Decimal numbers here are external JSON wire forms, not Rust numeric models.
+The other files are sanitised projections of earlier tracked streams and
+local receipts, listed in [manifest.json](manifest.json) with source, SHA-256,
+substitutions and limitations. `null` there means unrecorded. They prove decoder
+shapes only: no exact argv, platform or confinement form, so they enable
+nothing. Their strings are replaced by stable `FIXTURE_<CLASS>_<NUMBER>`
+placeholders and their numbers by zero. OpenCode's major version is unverified,
+so its streams cannot establish v2 acceptance. OpenCode `step_finish` with
+`reason: tool-calls` is an intermediate step, not terminal success.
 
-Stable `FIXTURE_<CLASS>_<NUMBER>` substitutions preserve equal string values
-across the corpus. Classes cover session, request/message/event identifiers,
-filesystem paths/snapshots, timestamps, arbitrary text, unclassified strings
-and dynamic keys. All answer, prompt, error-description and thinking text is
-synthetic placeholder text. Local source locators also replace run, task and
-attempt identifiers. The manifest stores substitution classes, never original
-values or a reversal map. Local Claude init inventories and all local tool
-events/payloads are omitted; other per-capture projections are documented.
-
-Step 0 adds no Rust implementation or fixture-loading helper. The design's
-snapshot helper belongs with the actual decoders. No Python/TS owner is replaced
-here; the deletion gates in steps 1–4 still apply.
-
-Author route: `codex/gpt-6.1-sol@high` via Fabric.
+Recovered retry, nested tool/subagent identity and quota windows remain gaps;
+tests cover them with inputs labelled synthetic.

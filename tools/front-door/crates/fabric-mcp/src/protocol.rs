@@ -71,6 +71,7 @@ enum Era {
 #[derive(Default)]
 pub struct Protocol {
     era: Option<Era>,
+    usage_tool: Option<&'static str>,
 }
 pub enum Action {
     Reply(Value),
@@ -103,6 +104,9 @@ fn server_info() -> Value {
     json!({"name":"provenant-fabric","version":env!("CARGO_PKG_VERSION")})
 }
 impl Protocol {
+    pub(crate) fn usage_tool(&self) -> Option<&'static str> {
+        self.usage_tool
+    }
     pub fn modern(&self) -> bool {
         matches!(self.era, Some(Era::Modern))
     }
@@ -121,6 +125,7 @@ impl Protocol {
         bytes: &[u8],
         mut limits: provenant_records::Limits,
     ) -> Action {
+        self.usage_tool = None;
         limits.max_bytes = limits.max_bytes.min(MAX_FRAME as u64);
         limits.max_depth = limits.max_depth.min(64);
         limits.max_members = limits.max_members.min(100_000);
@@ -286,6 +291,7 @@ impl Protocol {
                     Ok(call) => call,
                     Err(_) => return refuse(-32602, "Invalid tool call envelope"),
                 };
+                self.usage_tool = Some(ToolCall::usage_name(&call.name));
                 let call = match ToolCall::parse(&call.name, call.arguments) {
                     Ok(call) => call,
                     Err(InvalidInput::UnknownTool) => return refuse(-32602, "Unknown tool name"),

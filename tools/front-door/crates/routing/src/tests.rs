@@ -28,6 +28,8 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
     Ok(RouteRequest {
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
+        confidential: false,
+        allow_free: false,
         fallback: Fallback::None,
     })
 }
@@ -63,7 +65,7 @@ fn exact_unknown_is_retained_but_never_upgraded_or_activated()
     assert!(matches!(
         route.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Disabled
+            reason: RouteExclusionReason::UnknownAvailability
         }
     ));
     assert_eq!(route.exclusions.len(), 1);
@@ -84,6 +86,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         efforts: vec!["low".into(), "high".into()],
         evidence_ref: "synthetic-controls".into(),
         family: None,
+        trains_on_prompts: None,
     });
     let config = RoutingConfig {
         routes: BTreeMap::from([(
@@ -98,6 +101,8 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     let mut query = RouteRequest {
         choice: RouteChoice::NamedRoute("review".into()),
         effort: None,
+        confidential: false,
+        allow_free: false,
         fallback: Fallback::None,
     };
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
@@ -115,6 +120,91 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     ));
     Ok(())
 }
+#[test]
+fn utility_pool_resolves_and_confidential_skips_training_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue
+        .models
+        .iter_mut()
+        .find(|row| row.model.as_str() == "claude/claude-haiku-5-5")
+        .expect("utility member is catalogued")
+        .trains_on_prompts = Some(true);
+    let config = RoutingConfig::default();
+    let mut context = context(&catalogue, &config, now()?);
+    let mut query = RouteRequest {
+        choice: RouteChoice::NamedRoute("utility".into()),
+        effort: None,
+        confidential: true,
+        allow_free: false,
+        fallback: Fallback::Models(BoundedModels::new(vec![
+            ModelId::parse("claude/claude-haiku-5-5")?,
+            ModelId::parse("codex/unclassified")?,
+        ])?),
+    };
+    let route = resolve(&query, &context)?;
+    assert_eq!(route.model, "gpt-6-luna");
+    assert!(route.alternatives.as_slice().is_empty());
+    query.fallback = Fallback::None;
+
+    query.confidential = false;
+    assert_eq!(resolve(&query, &context)?.model, "claude-haiku-5-5");
+    let registry = [
+        provenant_providers::Registration {
+            adapter: &provenant_providers::claude::Claude,
+            quota_source: None,
+        },
+        provenant_providers::Registration {
+            adapter: &RecordedFixture(&provenant_providers::codex::Codex),
+            quota_source: None,
+        },
+    ];
+    let mut records = [availability()];
+    records[0].observed_models = vec!["gpt-6-luna".into()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    context.registry = &registry;
+    context.availability = &records;
+    context.access = &access;
+    let route = resolve(&query, &context)?;
+    assert_eq!(route.model, "gpt-6-luna");
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
+#[test]
+fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let query = serde_json::json!({"choice":{"kind":"named_route","value":"utility"},"effort":null,"confidential":true});
+    let request: RouteRequest = serde_json::from_value(query.clone())?;
+    assert_eq!(
+        resolve(&request, &context(&catalogue, &config, now()?))?
+            .effort
+            .as_deref(),
+        Some("low")
+    );
+    // Confidential callers cannot use the paid members in this fixture.
+    for row in &mut catalogue.models {
+        if row.model.adapter() != "opencode" {
+            row.trains_on_prompts = Some(true);
+        }
+    }
+    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
+    let mut query = query;
+    query["allow_free"] = serde_json::json!(true);
+    let request: RouteRequest = serde_json::from_value(query)?;
+    assert_eq!(
+        resolve(&request, &context(&catalogue, &config, now()?))?.model,
+        "opencode/deepseek-v4.1-flash-free"
+    );
+    Ok(())
+}
+
 #[test]
 fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -138,12 +228,13 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
         ["second", "third"]
     );
     assert_eq!(route.exclusions.len(), 3);
-    assert!(route.alternatives.as_slice().iter().all(|a| matches!(
-        a.readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Disabled
-        }
-    )));
+    assert!(
+        route
+            .alternatives
+            .as_slice()
+            .iter()
+            .all(|a| matches!(a.readiness, RouteReadiness::Unavailable { .. }))
+    );
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/primary")?])?);
     assert!(matches!(
         resolve(&query, &context),
@@ -172,6 +263,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         efforts: vec!["high".into()],
         evidence_ref: "test".into(),
         family: None,
+        trains_on_prompts: None,
     });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -191,7 +283,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "recordings-20261024-v1".into(),
+        catalogue_revision: "recordings-20261024-utility-v1".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         last_preflight_error: None,
@@ -217,8 +309,20 @@ fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::e
         listed.availability.first().and_then(|a| a.age_seconds),
         Some(20)
     );
+    // Enabled and available, Codex reaches the next gate: disclosure.
     assert!(matches!(
         resolve(&request("codex/test")?, &context)?.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::DisclosureDenied
+        }
+    ));
+    // A fresh record cannot activate an adapter the matrix leaves disabled.
+    let mut cursor = availability();
+    cursor.adapter = "cursor".into();
+    let records = [cursor];
+    context.availability = &records;
+    assert!(matches!(
+        resolve(&request("cursor/test")?, &context)?.readiness,
         RouteReadiness::Unavailable {
             reason: RouteExclusionReason::Disabled
         }
@@ -368,6 +472,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         efforts: vec![],
         family: Some("anthropic".into()),
         evidence_ref: "test".into(),
+        trains_on_prompts: None,
     });
     assert_eq!(
         FamilyFact::from_verified(
@@ -464,7 +569,7 @@ impl provenant_providers::Adapter for RecordedFixture {
     fn prepare(
         &self,
         i: provenant_providers::PrepareInput<'_>,
-    ) -> Result<provenant_providers::AdapterLaunchSpec, provenant_providers::ProviderError> {
+    ) -> Result<provenant_providers::LaunchSpec, provenant_providers::ProviderError> {
         self.0.prepare(i)
     }
     fn stream(
@@ -531,6 +636,7 @@ fn quota(
             observed_unix_seconds: observed,
             source_ref: "fixture".into(),
             authority_ref: None,
+            details: None,
             windows: vec![],
         },
     })

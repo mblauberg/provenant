@@ -23,11 +23,22 @@ routing capacity; a reviewer must meet the author's required tier.
 provenant route list
 provenant route list --adapter codex
 provenant route resolve --route senior
+provenant route resolve --route utility
 provenant route resolve --model ADAPTER/ID --effort LEVEL
 ```
 
-Run `provenant help route` for flags. Named routes and exact model selectors
-are mutually exclusive. Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
+The `utility` pool sits below junior for mechanical work, trying low-cost
+non-training Haiku at low effort and Luna before free DeepSeek and GLM. Free
+pool members require `--allow-free` (default false). Use `--route utility`
+for Rust route resolution; `--confidential` excludes
+training or unclassified members and fallbacks. There is no classifier or
+synonym inference. The bundled Rust catalogue owns the pool; Rust does not
+read the legacy `config/model-routing.json`. Fabric accepts a route preference
+but its submission owner remains unavailable.
+
+Run `provenant help route` for flags. Named routes and
+exact model selectors are mutually exclusive. Explicit fallbacks use
+`--fallback ADAPTER/ID,ADAPTER/ID`.
 The resolved attempt record owns route provenance. Never claim an unavailable
 or substituted provider supplied a missing review leg.
 

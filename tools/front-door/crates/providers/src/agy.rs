@@ -1,7 +1,8 @@
 use crate::{ProviderError, ProviderEvent as E, stream::wire};
 use serde::Deserialize;
 pub struct Agy;
-crate::adapter!(Agy, "agy");
+crate::adapter!(Agy, "agy", crate::launch::unrecorded);
+const MODEL_ON_WIRE: bool = true;
 crate::quota_source!(Agy, "agy");
 #[derive(Deserialize)]
 #[serde(tag = "event")]
