@@ -72,6 +72,19 @@ fn plan_and_private_home_round_trip_without_exposing_credentials() {
     let token = "fixture-secret-never-in-plan";
     fs::write(root.join("user-state/oauth_creds.json"), token).unwrap();
     fs::write(root.join("user-state/installation_id"), "existing").unwrap();
+    let controls = [
+        "settings.json",
+        "config/mcp_config.json",
+        "config/plugins/run",
+        "sidecars/run",
+        "plugin_data/file",
+        "knowledge/file",
+    ];
+    for relative in controls {
+        let path = root.join("user-state").join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "user control").unwrap();
+    }
     let plan = ConfinedPlan::new(request(root)).unwrap();
     let recipe = plan.agy_home().unwrap();
     assert!(!format!("{recipe:?}").contains(token));
@@ -79,12 +92,25 @@ fn plan_and_private_home_round_trip_without_exposing_credentials() {
     let state = prepared.path().join(".gemini/antigravity-cli");
     assert!(state.join("bin").is_dir());
     assert!(!state.join("oauth_creds.json").exists());
+    for relative in controls {
+        let path = state.join(relative);
+        assert!(!path.exists(), "{relative}");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "lane control").unwrap();
+    }
     assert_eq!(
         fs::read(state.join("installation_id")).unwrap(),
         b"existing"
     );
     fs::write(state.join("history.jsonl"), "new history\n").unwrap();
     prepared.copy_back().unwrap();
+    for relative in controls {
+        assert_eq!(
+            fs::read(root.join("user-state").join(relative)).unwrap(),
+            b"user control",
+            "{relative}"
+        );
+    }
     assert_eq!(
         fs::read(root.join("user-state/history.jsonl")).unwrap(),
         b"new history\n"

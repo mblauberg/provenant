@@ -437,6 +437,54 @@ macOS 27.0.1 arm64, 2026-10-24):
   unimplemented, so routing reports enabled adapters as `UnknownAvailability`
   until the run lane supplies them.
 
+### Writer confinement follow-up (#927, #1255, #1414)
+
+User configuration remains outside writable provider state. The provider test
+table names Claude settings/hooks/skills/CLAUDE.md and ide/jobs/state/teams,
+Codex config/rules/hooks/skills/extensions, OpenCode config/plugins/skills,
+Agy Gemini MCP/plugins and sidecars/plugin_data/knowledge, Cursor
+hooks/extensions/skills/plans/ai-tracking, and shared npm state. Disabled
+adapters refuse before returning grants; the recording feature exercises the
+prepared OpenCode recipe without enabling it. Agy's private-home test also
+proves controls are neither seeded nor copied back. These are policy tests,
+not new live smoke rows; Agy/Cursor activation and the outstanding #927 live
+rows remain unverified. Kiro is retired.
+
+Claude has a writer-shell candidate under the recorder only. It keeps the
+host-read `CLAUDE_CODE_OAUTH_TOKEN` in memory and puts `CLAUDE_CONFIG_DIR`
+inside retained private state; no credential file is written (R7 takes
+precedence over #1414's file-backed suggestion). It uses `bypassPermissions`
+with `Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, allows system
+tool execution, and explicitly denies `/usr/bin/security` and keychain IPC
+(`SecurityServer`, `securityd`, `securityd.xpc`). User keychain files have no
+read grant. The recorder requires a matching successful Bash tool result with the exact
+probe output,
+denied keychain-tool execution and denied zero-byte keychain-file opening,
+plus the existing confinement probes, for fresh and resume launches.
+Keychain IPC denial is currently a compiled policy rule only: neither the
+denied executable nor the file-open probe reaches that IPC call. Until an
+allowed-client IPC probe is implemented and recorded, the recorder marks this
+candidate ineligible for activation (`keychain_ipc_proof: false`). The shell
+can see its selected provider token in the inherited environment; no token
+scrubbing is claimed, and other credentials must remain inaccessible.
+
+Claude recording requires `--account pro` and always selects the host's
+default `.claude` identity; it has no alternate-account fallback.
+Before enabling the activation matrix's `shell_enabled`, narrow Claude's
+current any-host TCP 443 rule (`claude.rs`, `provider_api`) to the required
+provider endpoints, or remove `CLAUDE_CODE_OAUTH_TOKEN` from the shell's
+environment. The current combination lets shell commands send that token to
+any HTTPS host. This is an activation prerequisite alongside a chair-approved
+pro-account throwaway-worktree recording; `shell_enabled` stays **false** until
+both gates pass. Existing file-tool writer activation is unchanged. `writer_shell_proof` and `keychain_ipc_proof` in each cited capture must back
+any shell activation; no old file-edit capture enables Bash. The pro quota
+and account gate applies before running this recorder, including retries;
+never use the anese identity. The Rust writer launcher must also consume
+confinement's host-prepared directories and per-worktree cargo cache described
+in [supervisor](supervisor.md). Shared Git config and packed refs stay
+read-only under that design; #1255's host fetch/upstream handoff still needs
+runtime composition and its conformance test.
+
 Each capture manifest records source provenance, CLI version/platform, redacted
 argv, fresh/resume and access mode, exit and redaction rules. It must prove the
 exact selector/effort/default service controls and confinement form being enabled.

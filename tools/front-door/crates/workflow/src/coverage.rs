@@ -255,11 +255,13 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
         );
     }
     let cross = picked.iter().filter(|c| c.cross_family.is_some()).count() as u64;
-    let waived = ctx
-        .blockers
-        .iter()
-        .filter(|b| b.expires_at > ctx.now)
-        .count() as u64;
+    let mut blocker_evidence = Vec::new();
+    for blocker in ctx.blockers.iter().filter(|b| b.expires_at > ctx.now) {
+        if !blocker_evidence.contains(&&blocker.reference) {
+            blocker_evidence.push(&blocker.reference);
+        }
+    }
+    let waived = (need.saturating_sub(cross) as usize).min(blocker_evidence.len()) as u64;
     if need.saturating_sub(cross) > waived {
         note(
             "missing_cross_family_leg",
@@ -285,9 +287,15 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     if need == 0 {
         diagnostics.retain(|d| matches!(d.code, "blocking_review" | "stale_subject"));
     }
-    let incomplete = diagnostics
-        .iter()
-        .any(|d| !matches!(d.code, "blocking_review" | "stale_subject") || need > 0);
+    let incomplete = diagnostics.iter().any(|d| {
+        matches!(
+            d.code,
+            "missing_reviews"
+                | "missing_cross_family_leg"
+                | "missing_adversarial_lens"
+                | "author_tier_unknown"
+        )
+    });
     let status = if failed {
         Status::Failed
     } else if need > 0 && incomplete {
@@ -425,6 +433,22 @@ mod tests {
     }
 
     #[test]
+    fn surplus_ineligible_review_does_not_block_satisfied_coverage() {
+        let authors = [author(attested(ModelTier::Senior))];
+        let good = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "correctness",
+        );
+        let extra = review(3, RouteProvenance::Unknown {}, None, "security");
+        let report = run(RiskTier::Substantial, &authors, &[good, extra], &[]);
+        assert_eq!(report.status, Status::Passed);
+        assert_eq!(report.counted.len(), 1);
+        assert!(codes(&report).contains(&"reviewer_route_unknown"));
+    }
+
+    #[test]
     fn selection_finds_distinct_lens_and_family_legs_a_greedy_pick_would_miss() {
         let authors = [author(attested(ModelTier::Senior))];
         let reviews = [
@@ -473,6 +497,34 @@ mod tests {
         assert_eq!(waived.status, Status::Passed);
         let expired = run(RiskTier::Substantial, &authors, &[same], &[blocker(1_000)]);
         assert_eq!(expired.status, Status::Incomplete);
+    }
+
+    #[test]
+    fn duplicate_blocker_evidence_waives_only_one_cross_family_leg() {
+        let authors = [author(observed(ModelTier::Senior, "openai"))];
+        let reviews = [
+            review(
+                2,
+                observed(ModelTier::Senior, "openai"),
+                Some("openai"),
+                "correctness",
+            ),
+            review(
+                3,
+                observed(ModelTier::Senior, "openai"),
+                Some("openai"),
+                "security",
+            ),
+        ];
+        let same_blocker = blocker(2_000);
+        let report = run(
+            RiskTier::Crucial,
+            &authors,
+            &reviews,
+            &[same_blocker.clone(), same_blocker],
+        );
+        assert_eq!(report.status, Status::Incomplete);
+        assert!(codes(&report).contains(&"missing_cross_family_leg"));
     }
 
     #[test]

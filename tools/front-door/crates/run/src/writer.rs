@@ -3,8 +3,8 @@ use crate::{Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
-        AnchoredDirectory, Anchors, BackendContext, ProviderProfile, required_anchors,
-        system_backend,
+        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProviderProfile,
+        prepare_writer_directories, required_anchors, system_backend,
     },
     repo::GitRefName,
     worktrees,
@@ -18,7 +18,7 @@ use provenant_supervisor::{
 use std::io::Read;
 use std::{
     ffi::{OsStr, OsString},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -153,6 +153,8 @@ pub struct LaunchConfinement {
     pub plan: ConfinedPlan,
     pub profile: ProviderProfile,
     pub writer: Option<WriterLaunch>,
+    /// Canonical host home; the writer's lane cargo cache derives from it.
+    pub home: PathBuf,
 }
 impl LaunchConfinement {
     pub(crate) fn command(&self, argv: &[OsString], cancel: &CancelToken) -> Result<Vec<OsString>> {
@@ -166,12 +168,21 @@ impl LaunchConfinement {
         })
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
+        // Run holds writer custody here: create the derived ref parents and the
+        // private lane cache before they are anchored.
+        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+            (writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(&LocalFs, worktree, branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
+        }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(RunError::Confinement)?;
         let anchors = Anchors {
+            home: &self.home,
             directories: &directories,
             safe_fs: &LocalFs,
             worktree: writer,
