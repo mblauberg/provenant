@@ -2,15 +2,12 @@ use crate::{Categories, PriceError, PriceIdentity, PriceTable};
 use provenant_core::{AttemptId, ProjectId, TaskId, WallTime};
 use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
 use serde::Serialize;
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use thiserror::Error;
 
 pub const MAX_ATTEMPTS: u64 = 100_000;
 pub const MAX_GROUPS: u64 = 10_000;
-pub const MAX_KEY_BYTES: u64 = 1_048_576;
+pub const MAX_KEY_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TelemetryError {
@@ -36,12 +33,6 @@ pub struct Window {
     pub detail: bool,
 }
 impl Window {
-    fn validate(&self) -> Result<(), TelemetryError> {
-        if self.since.zip(self.until).is_some_and(|(s, u)| s >= u) {
-            return Err(TelemetryError::InvalidWindow);
-        }
-        Ok(())
-    }
     fn includes(&self, fact: &AttemptFact) -> bool {
         self.since.is_none_or(|s| fact.finished_at >= s)
             && self.until.is_none_or(|u| fact.finished_at < u)
@@ -98,14 +89,9 @@ fn route_fields(route: &RouteFact) -> [&Option<String>; 4] {
         &route.account_label,
     ]
 }
-fn report_order(a: &RouteFact, b: &RouteFact) -> Ordering {
-    for (a, b) in route_fields(a).into_iter().zip(route_fields(b)) {
-        let ordering = a.is_none().cmp(&b.is_none()).then_with(|| a.cmp(b));
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    Ordering::Equal
+/// Exact field order with missing values last.
+fn report_key(route: &RouteFact) -> [(bool, &Option<String>); 4] {
+    route_fields(route).map(|field| (field.is_none(), field))
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RouteGroup {
@@ -204,24 +190,41 @@ impl Accumulator {
 #[derive(Default)]
 struct GroupBudget {
     groups: u64,
-    bytes: u64,
+    bytes: usize,
 }
 impl GroupBudget {
-    fn reserve(&mut self, bytes: u64) -> Result<(), TelemetryError> {
-        let new_bytes = self
-            .bytes
-            .checked_add(bytes)
-            .ok_or(TelemetryError::Overflow)?;
-        if self.groups >= MAX_GROUPS {
-            return Err(TelemetryError::TooLarge("10,000 groups"));
+    /// Reserves a new group's key bytes before inserting it. Key lengths are of
+    /// live strings and the total stays at most 1 MiB, so sums cannot overflow.
+    fn group<'a, K: Ord>(
+        &mut self,
+        map: &'a mut BTreeMap<K, Accumulator>,
+        key: K,
+        bytes: usize,
+    ) -> Result<&'a mut Accumulator, TelemetryError> {
+        match map.entry(key) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                if self.groups >= MAX_GROUPS {
+                    return Err(TelemetryError::TooLarge("10,000 groups"));
+                }
+                if self.bytes + bytes > MAX_KEY_BYTES {
+                    return Err(TelemetryError::TooLarge("1 MiB of group keys"));
+                }
+                self.groups += 1;
+                self.bytes += bytes;
+                Ok(entry.insert(Accumulator::default()))
+            }
         }
-        if new_bytes > MAX_KEY_BYTES {
-            return Err(TelemetryError::TooLarge("1 MiB of group keys"));
-        }
-        self.groups += 1;
-        self.bytes = new_bytes;
-        Ok(())
     }
+}
+
+fn groups<K, G>(
+    map: BTreeMap<K, Accumulator>,
+    group: impl Fn(K, Totals) -> G,
+) -> Result<Vec<G>, TelemetryError> {
+    map.into_iter()
+        .map(|(key, total)| Ok(group(key, total.finish()?)))
+        .collect()
 }
 
 /// Reduces selected facts without I/O. Invalid duplicates are refused, never
@@ -232,7 +235,9 @@ pub fn stats(
     prices: &PriceTable,
     window: Window,
 ) -> Stats {
-    window.validate()?;
+    if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
+        return Err(TelemetryError::InvalidWindow);
+    }
     let mut total = Accumulator::default();
     let mut routes = BTreeMap::<RouteFact, Accumulator>::new();
     let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
@@ -241,7 +246,7 @@ pub fn stats(
     let mut latest = BTreeMap::<(ProjectId, TaskId), (u64, AttemptOutcome)>::new();
     let mut coverage = Coverage::default();
     let mut budget = GroupBudget::default();
-    for fact in facts {
+    for mut fact in facts {
         if !window.includes(&fact) {
             continue;
         }
@@ -260,43 +265,32 @@ pub fn stats(
                 "duplicate attempt ID or task/attempt number",
             ));
         }
-        // Check retained bytes before cloning a potentially large route key.
-        let route_ref = fact.resolved_route.as_ref();
-        let fields = route_ref.map(route_fields);
-        let bytes = fields.into_iter().flatten().try_fold(0u64, |sum, field| {
-            if field.as_ref().is_some_and(|s| s.trim().is_empty()) {
-                return Err(TelemetryError::InvalidFact("empty route identity"));
-            }
-            sum.checked_add(
-                u64::try_from(field.as_ref().map_or(0, String::len))
-                    .map_err(|_| TelemetryError::Overflow)?,
-            )
-            .ok_or(TelemetryError::Overflow)
-        })?;
-        if bytes > MAX_KEY_BYTES {
-            return Err(TelemetryError::TooLarge("1 MiB of group keys"));
+        let fields = fact.resolved_route.iter().flat_map(route_fields).flatten();
+        if fields.clone().any(|field| field.trim().is_empty()) {
+            return Err(TelemetryError::InvalidFact("empty route identity"));
         }
-        let key = fact.resolved_route.clone().unwrap_or(RouteFact {
+        let bytes: usize = fields.map(String::len).sum();
+        let key = fact.resolved_route.take().unwrap_or(RouteFact {
             provider: None,
             model: None,
             effort: None,
             account_label: None,
         });
-        let price = key
+        // Unknown routes and models have no rates. A validated table only holds
+        // all-zero rates for verified-free entries.
+        let rates = key
             .provider
             .as_deref()
             .zip(key.model.as_deref())
-            .and_then(|(p, m)| prices.get(p, m));
-        let unknown_rates = crate::Rates::default();
-        let rates = price.map_or(&unknown_rates, |p| &p.rates);
-        let verified_free = price.is_some_and(|p| {
-            p.billing == crate::BillingKind::Free
-                || p.rates.values().iter().all(|rate| **rate == Some(0))
-        });
+            .and_then(|(p, m)| prices.get(p, m))
+            .cloned()
+            .unwrap_or_default();
+        let verified_free = rates.values() == [Some(0); 4];
+        let counts = counts(&fact.usage);
         let mut numerator = 0u128;
         let mut missing_price = false;
         let mut missing_cost = false;
-        for ((count, rate), missing) in counts(&fact.usage)
+        for ((count, rate), missing) in counts
             .into_iter()
             .zip(rates.usage_rates())
             .zip(coverage.missing_categories.values_mut())
@@ -309,7 +303,7 @@ pub fn stats(
                 (Some(0), _) => {}
                 (Some(n), Some(r)) => {
                     numerator = numerator
-                        .checked_add(u128::from(n) * u128::from(*r))
+                        .checked_add(u128::from(n) * u128::from(r))
                         .ok_or(TelemetryError::Overflow)?;
                 }
                 (Some(_), None) => {
@@ -320,19 +314,15 @@ pub fn stats(
         }
         add(
             &mut coverage.missing_usage,
-            u64::from(counts(&fact.usage).iter().all(Option::is_none)),
+            u64::from(counts.iter().all(Option::is_none)),
         )?;
         add(&mut coverage.missing_price, u64::from(missing_price))?;
         add(
             &mut coverage.missing_account,
             u64::from(key.account_label.is_none()),
         )?;
-        if !routes.contains_key(&key) {
-            budget.reserve(bytes)?;
-        }
-        routes
-            .entry(key.clone())
-            .or_default()
+        budget
+            .group(&mut routes, key.clone(), bytes)?
             .record(&fact, numerator, missing_cost)?;
         if window.detail {
             let day = fact
@@ -341,25 +331,14 @@ pub fn stats(
                 .to_zoned(jiff::tz::TimeZone::UTC)
                 .date()
                 .to_string();
-            let daily_key = (day, key);
-            if !daily.contains_key(&daily_key) {
-                budget.reserve(
-                    bytes
-                        .checked_add(
-                            u64::try_from(daily_key.0.len())
-                                .map_err(|_| TelemetryError::Overflow)?,
-                        )
-                        .ok_or(TelemetryError::Overflow)?,
-                )?;
-            }
-            daily
-                .entry(daily_key)
-                .or_default()
+            let bytes = bytes + day.len();
+            budget
+                .group(&mut daily, (day, key), bytes)?
                 .record(&fact, numerator, missing_cost)?;
         }
         let current = latest
             .entry((fact.project_id, fact.task_id))
-            .or_insert((fact.attempt_number, fact.terminal_state));
+            .or_insert((0, fact.terminal_state));
         if fact.attempt_number > current.0 {
             *current = (fact.attempt_number, fact.terminal_state);
         }
@@ -370,43 +349,21 @@ pub fn stats(
     for (_, state) in latest.into_values() {
         add(latest_task_outcomes.entry(state).or_default(), 1)?;
     }
-    let mut routes = routes
-        .into_iter()
-        .map(|(route, total)| {
-            Ok(RouteGroup {
-                route,
-                totals: total.finish()?,
-            })
-        })
-        .collect::<Result<Vec<_>, TelemetryError>>()?;
-    routes.sort_by(|a, b| report_order(&a.route, &b.route));
-    let daily_accounts = if window.detail {
-        let mut groups = daily
-            .into_iter()
-            .map(|((day, route), total)| {
-                Ok(DailyGroup {
-                    day,
-                    route,
-                    totals: total.finish()?,
-                })
-            })
-            .collect::<Result<Vec<_>, TelemetryError>>()?;
-        groups.sort_by(|a, b| {
-            a.day
-                .cmp(&b.day)
-                .then_with(|| report_order(&a.route, &b.route))
-        });
-        Some(groups)
-    } else {
-        None
-    };
+    let mut routes = groups(routes, |route, totals| RouteGroup { route, totals })?;
+    routes.sort_by(|a, b| report_key(&a.route).cmp(&report_key(&b.route)));
+    let mut daily = groups(daily, |(day, route), totals| DailyGroup {
+        day,
+        route,
+        totals,
+    })?;
+    daily.sort_by(|a, b| (&a.day, report_key(&a.route)).cmp(&(&b.day, report_key(&b.route))));
     Ok(StatsReport {
         scope: "supervised_terminal_attempts",
-        window,
         prices: prices.identity.clone(),
         totals: total.finish()?,
         routes,
-        daily_accounts,
+        daily_accounts: window.detail.then_some(daily),
+        window,
         latest_task_outcomes,
         coverage,
     })

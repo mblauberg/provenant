@@ -35,22 +35,18 @@ pub struct Rates {
     pub output_excluding_reasoning: Option<u64>,
 }
 impl Rates {
-    pub(crate) fn values(&self) -> [&Option<u64>; 4] {
+    pub(crate) fn values(&self) -> [Option<u64>; 4] {
         [
-            &self.uncached_input,
-            &self.cache_read,
-            &self.cache_write,
-            &self.output_excluding_reasoning,
+            self.uncached_input,
+            self.cache_read,
+            self.cache_write,
+            self.output_excluding_reasoning,
         ]
     }
-    pub(crate) fn usage_rates(&self) -> [&Option<u64>; 5] {
-        [
-            &self.uncached_input,
-            &self.cache_read,
-            &self.cache_write,
-            &self.output_excluding_reasoning,
-            &self.output_excluding_reasoning,
-        ]
+    /// Rates in `Categories` order; reasoning reuses the output rate.
+    pub(crate) fn usage_rates(&self) -> [Option<u64>; 5] {
+        let [uncached_input, cache_read, cache_write, output] = self.values();
+        [uncached_input, cache_read, cache_write, output, output]
     }
 }
 
@@ -94,10 +90,10 @@ pub struct PriceIdentity {
 #[derive(Clone, Debug)]
 pub struct PriceTable {
     pub(crate) identity: PriceIdentity,
-    models: BTreeMap<(String, String), ConfiguredModel>,
+    models: BTreeMap<(String, String), Rates>,
 }
 impl PriceTable {
-    pub(crate) fn get(&self, provider: &str, model: &str) -> Option<&ConfiguredModel> {
+    pub(crate) fn get(&self, provider: &str, model: &str) -> Option<&Rates> {
         self.models.get(&(provider.to_owned(), model.to_owned()))
     }
 }
@@ -136,18 +132,18 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
             return Err(PriceError::Invalid("model identity or source references"));
         }
         let rates = model.rates.values();
-        if rates.iter().any(|r| **r == Some(0)) && !model.zero_rate_verified {
+        if rates.contains(&Some(0)) && !model.zero_rate_verified {
             return Err(PriceError::Invalid(
                 "zero rate requires explicit verification",
             ));
         }
-        if model.billing == BillingKind::Free && rates.iter().any(|r| **r != Some(0)) {
+        if model.billing == BillingKind::Free && rates != [Some(0); 4] {
             return Err(PriceError::Invalid(
                 "free billing requires four verified zero rates",
             ));
         }
         let key = (model.provider.clone(), model.model.clone());
-        if models.insert(key, model.clone()).is_some() {
+        if models.insert(key, model.rates.clone()).is_some() {
             return Err(PriceError::Invalid("duplicate provider/model"));
         }
     }

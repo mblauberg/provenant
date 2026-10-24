@@ -6,16 +6,32 @@ use thiserror::Error;
 pub struct IdError;
 
 fn decode_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
-    if text.len() != N.checked_mul(2)? {
-        return None;
-    }
-    let mut result = [0; N];
-    let (pairs, _) = text.as_bytes().as_chunks::<2>();
-    for (out, pair) in result.iter_mut().zip(pairs) {
-        *out = crate::bytes::decode_hex_byte(pair)?;
-    }
-    Some(result)
+    crate::unhex(text)?.try_into().ok()
 }
+
+/// Text wire form for a validated value whose only constructor is `parse`.
+macro_rules! text_wire {
+    ($name:ty, $error:ty) => {
+        impl std::str::FromStr for $name {
+            type Err = $error;
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                Self::parse(text)
+            }
+        }
+        impl TryFrom<String> for $name {
+            type Error = $error;
+            fn try_from(text: String) -> Result<Self, Self::Error> {
+                Self::parse(&text)
+            }
+        }
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.to_string()
+            }
+        }
+    };
+}
+pub(crate) use text_wire;
 
 macro_rules! ids {
     ($($name:ident),+ $(,)?) => {$ (
@@ -34,34 +50,11 @@ macro_rules! ids {
                 f.write_str(&crate::hex(&self.0))
             }
         }
-        impl std::str::FromStr for $name {
-            type Err = IdError;
-            fn from_str(text: &str) -> Result<Self, Self::Err> { Self::parse(text) }
-        }
-        impl TryFrom<String> for $name {
-            type Error = IdError;
-            fn try_from(text: String) -> Result<Self, Self::Error> { Self::parse(&text) }
-        }
-        impl From<$name> for String {
-            fn from(id: $name) -> Self { id.to_string() }
-        }
+        text_wire!($name, IdError);
     )+};
 }
 ids!(
-    HostId,
-    ProjectId,
-    WorkspaceId,
-    RepoId,
-    ActorId,
-    RunId,
-    TaskId,
-    ClaimId,
-    MessageId,
-    AttemptId,
-    DeliveryId,
-    SessionId,
-    InstallId,
-    ImportId
+    HostId, ProjectId, RepoId, ActorId, RunId, TaskId, ClaimId, MessageId, AttemptId, DeliveryId,
 );
 
 /// Caller-selected idempotency key, as specified by execution-run.
@@ -95,23 +88,7 @@ impl std::fmt::Display for OperationId {
         f.write_str(&self.0)
     }
 }
-impl std::str::FromStr for OperationId {
-    type Err = OperationIdError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::parse(text)
-    }
-}
-impl TryFrom<String> for OperationId {
-    type Error = OperationIdError;
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-impl From<OperationId> for String {
-    fn from(id: OperationId) -> Self {
-        id.0
-    }
-}
+text_wire!(OperationId, OperationIdError);
 
 /// Full Git object ID; the repository owner checks the selected algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -141,23 +118,7 @@ impl std::fmt::Display for GitOid {
         })
     }
 }
-impl std::str::FromStr for GitOid {
-    type Err = GitOidError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::parse(text)
-    }
-}
-impl TryFrom<String> for GitOid {
-    type Error = GitOidError;
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-impl From<GitOid> for String {
-    fn from(oid: GitOid) -> Self {
-        oid.to_string()
-    }
-}
+text_wire!(GitOid, GitOidError);
 
 /// Provenant record digest, distinct from raw-file and Git identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -185,26 +146,10 @@ impl std::fmt::Display for Digest {
         write!(f, "sha256:{}", crate::hex(&self.0))
     }
 }
-impl std::str::FromStr for Digest {
-    type Err = DigestError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::parse(text)
-    }
-}
-impl TryFrom<String> for Digest {
-    type Error = DigestError;
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-impl From<Digest> for String {
-    fn from(digest: Digest) -> Self {
-        digest.to_string()
-    }
-}
+text_wire!(Digest, DigestError);
 
 #[cfg(test)]
-mod object_tests {
+mod tests {
     use super::*;
     #[test]
     fn full_git_ids_require_lowercase_without_algorithm_confusion() {
@@ -231,23 +176,13 @@ mod object_tests {
             "/tests/fixtures/git-oids.json"
         )))
         .unwrap();
-        let objects = fixture
-            .get("objects")
-            .and_then(serde_json::Value::as_array)
-            .unwrap();
+        let objects = fixture["objects"].as_array().unwrap();
         assert_eq!(objects.len(), 2);
         for object in objects {
-            let text = object
-                .get("oid")
-                .and_then(serde_json::Value::as_str)
-                .unwrap();
+            let text = object["oid"].as_str().unwrap();
             let oid = GitOid::parse(text).unwrap();
             assert_eq!(oid.to_string(), text);
-            match object
-                .get("format")
-                .and_then(serde_json::Value::as_str)
-                .unwrap()
-            {
+            match object["format"].as_str().unwrap() {
                 "sha1" => assert!(matches!(oid, GitOid::Sha1(_))),
                 "sha256" => assert!(matches!(oid, GitOid::Sha256(_))),
                 format => panic!("unexpected fixture format: {format}"),
@@ -263,11 +198,6 @@ mod object_tests {
             assert!(OperationId::parse(bad).is_err());
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
     #[test]
     fn identifiers_are_validated_at_the_wire_boundary() {
         let spelling = "01abcdef2345678901abcdef23456789";
@@ -293,13 +223,5 @@ mod tests {
         }
         assert!(serde_json::from_str::<RunId>("12").is_err());
         assert_eq!(RunId::from_bytes([255; 16]).to_string(), "f".repeat(32));
-    }
-
-    #[test]
-    fn message_ids_round_trip() {
-        let id = MessageId::from_bytes([42; 16]);
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(serde_json::from_str::<MessageId>(&json).unwrap(), id);
-        assert!(serde_json::from_str::<MessageId>("\"invalid\"").is_err());
     }
 }
