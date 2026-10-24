@@ -332,13 +332,23 @@ pub struct LandingFence {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     generation: u64,
 }
+#[derive(Debug, thiserror::Error)]
+#[error("invalid landing token")]
+pub struct LandingTokenError;
+
+impl From<LandingTokenError> for EdgeError {
+    fn from(_: LandingTokenError) -> Self {
+        Self::Invalid
+    }
+}
+
 impl LandingFence {
     /// The fence secret never enters argv or clap's diagnostics.
-    pub fn proof(self) -> Result<LandingProof, EdgeError> {
+    pub fn proof(self) -> Result<LandingProof, LandingTokenError> {
         let token = std::env::var("PROVENANT_LANDING_TOKEN")
             .ok()
             .and_then(|value| value.parse::<Token>().ok())
-            .ok_or(EdgeError::Invalid)?;
+            .ok_or(LandingTokenError)?;
         Ok(LandingProof {
             reference: self.reference,
             id: self.id,
@@ -422,10 +432,6 @@ pub(crate) enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
-    #[error(
-        "project home is remote; local coordination is refused until home routing is available"
-    )]
-    HomeUnavailable,
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)
@@ -842,7 +848,6 @@ pub fn run(
                     (Outcome::Invalid, "invalid_input")
                 }
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
-                EdgeError::HomeUnavailable => (Outcome::Error, "home_unavailable"),
                 _ => (Outcome::Error, "io"),
             };
             let mut result = CommandResult::new(&command, status, Value::Null);
