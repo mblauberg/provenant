@@ -1044,7 +1044,6 @@ impl Drop for ProviderGroup {
     }
 }
 
-/// Liveness probe only (signal 0): true unless every PID is provably absent.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn kill_failure(error: &io::Error) -> DeliveryFailure {
     match error.raw_os_error() {
@@ -1055,6 +1054,7 @@ fn kill_failure(error: &io::Error) -> DeliveryFailure {
     }
 }
 
+/// Liveness probe only (signal 0): true unless every PID is provably absent.
 pub(crate) fn any_pid_alive(pids: &[i64]) -> bool {
     pids.iter().any(|&pid| match i32::try_from(pid) {
         Ok(pid) if pid > 0 => {
