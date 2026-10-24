@@ -820,27 +820,129 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
         _ => FacadeError::Io,
     }
 }
+/// Map a shared run-edge refusal to its stable facade code.
+fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
+    match fail.code {
+        "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
+        "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
+        "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
+        "NOT_FOUND" => FacadeError::NotFound,
+        "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
+        "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
+        "UNSUPPORTED" => FacadeError::OwnerUnavailable,
+        _ => FacadeError::Io,
+    }
+}
 impl BinaryRunOwner<'_> {
+    fn call<'a>(
+        &'a self,
+        budget: WaitBudget,
+        cancel: &'a CancelToken,
+    ) -> provenant_run::Request<'a> {
+        provenant_run::Request {
+            clock: &self.factory.clock,
+            budget,
+            cancel,
+        }
+    }
+    fn session(
+        &self,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_cli::run::Session, FacadeError> {
+        let ctx = &self.factory.context;
+        let context = provenant_run::ExecutionContext {
+            state_root: ctx.roots.state.clone(),
+            project_id: ctx.identity.project,
+            actor_id: ctx.identity.inbox.actor,
+            read_prompts: false,
+        };
+        let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
+            .map_err(run_error)?;
+        Ok(provenant_cli::run::Session { store, context })
+    }
     fn store(
         &self,
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_run::RunStore, FacadeError> {
-        let ctx = &self.factory.context;
-        provenant_run::RunStore::open(
-            &provenant_run::ExecutionContext {
-                state_root: ctx.roots.state.clone(),
-                project_id: ctx.identity.project,
-                actor_id: ctx.identity.inbox.actor,
-                read_prompts: false,
-            },
-            &provenant_run::Request {
-                clock: &self.factory.clock,
-                budget,
-                cancel,
-            },
-        )
-        .map_err(run_error)
+        Ok(self.session(budget, cancel)?.store)
+    }
+    /// Run the shared launch path with this process's resolved roots.
+    fn with_edge<T>(
+        &self,
+        action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
+    ) -> Result<T, FacadeError> {
+        let assets = crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?;
+        action(&provenant_cli::run::Edge {
+            roots: &self.factory.context.roots,
+            home: &self.factory.home,
+            assets: &assets,
+            cwd: &self.factory.cwd,
+        })
+        .map_err(fail_error)
+    }
+    /// The attempts of a run this owner just accepted or continued.
+    fn receipt(
+        &self,
+        session: &provenant_cli::run::Session,
+        operation_id: provenant_core::OperationId,
+        run: &provenant_run::RunRecord,
+        started: &[provenant_run::Started],
+        call: &provenant_run::Request<'_>,
+    ) -> Result<SubmissionReceipt, FacadeError> {
+        // An uncertain handoff is reconciled by receipt lookup, never relaunched.
+        if started
+            .iter()
+            .any(|s| matches!(s, provenant_run::Started::Unknown { .. }))
+        {
+            return Err(FacadeError::LaunchUnknown { operation_id });
+        }
+        let page = session
+            .store
+            .lanes(
+                &provenant_run::LaneQuery {
+                    targets: vec![provenant_run::LaneTarget {
+                        run: run.run_id,
+                        task: None,
+                        attempt: None,
+                    }],
+                    all: true,
+                    limit: 100,
+                    after: 0,
+                },
+                call,
+            )
+            .map_err(run_error)?;
+        Ok(SubmissionReceipt {
+            operation_id,
+            targets: page
+                .lanes
+                .iter()
+                .map(|lane| AttemptTarget {
+                    attempt: lane.attempt_id,
+                    host: Some(self.factory.context.identity.host),
+                })
+                .collect(),
+        })
+    }
+    /// A local attempt, or the forwarded answer for another host's attempt.
+    fn remote(
+        &self,
+        target: &AttemptTarget,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Option<PeerResult>, FacadeError> {
+        match target.host {
+            Some(host) if host != self.factory.context.identity.host => {
+                if !self.allow_remote {
+                    return Err(FacadeError::ConfinementRefused);
+                }
+                self.peer(host, action, budget, cancel).map(Some)
+            }
+            _ => Ok(None),
+        }
     }
     fn snapshot(
         &self,
@@ -923,6 +1025,10 @@ impl BinaryRunOwner<'_> {
         {
             PeerResult::Error { code, .. } => Err(match code.as_str() {
                 "not_found" => FacadeError::NotFound,
+                "worktree_missing" => FacadeError::WorktreeMissing,
+                "invalid_input" => FacadeError::InvalidInput,
+                "confinement_refused" => FacadeError::ConfinementRefused,
+                "continuation_unsupported" => FacadeError::ContinuationUnsupported,
                 "owner_unavailable" => FacadeError::OwnerUnavailable,
                 "cancelled" => FacadeError::Cancelled,
                 _ => FacadeError::HomeUnavailable,
@@ -934,34 +1040,173 @@ impl BinaryRunOwner<'_> {
 impl RunOwner for BinaryRunOwner<'_> {
     fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
-            submit: false,
+            submit: true,
             list: false,
             status: true,
             wait: true,
-            cancel: false,
-            resume: false,
-            output: false,
+            cancel: true,
+            resume: provenant_cli::run::Registry { roots: None }.continues_sessions(),
+            output: true,
             events: true,
         }
     }
-    // TODO(chair): bind these mutations and exported output to Lane B's run
-    // service after it lands. Fabric must never create queued rows as a substitute
-    // for dispatch, signal a recorded PID, or reconstruct a provider invocation.
+    /// Submissions take the CLI's scan, record and launch path. Fabric never
+    /// creates queued rows itself or reconstructs a provider invocation.
     fn submit(
         &mut self,
-        _: SubmitInput,
-        _: WaitBudget,
-        _: &CancelToken,
+        input: SubmitInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        Err(FacadeError::OwnerUnavailable)
+        use provenant_cli::run::{Submission, Submitted, derived_task, requested, worktree_access};
+        let SubmitInput::Submission {
+            operation_id,
+            tasks,
+            concurrency,
+        } = input;
+        let mut submitted = Vec::new();
+        for (index, task) in tasks.into_iter().enumerate() {
+            worktree_access(
+                task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
+                task.worktree.as_deref().map(Path::new),
+                &self.factory.cwd,
+            )
+            .map_err(fail_error)?;
+            if !task.inputs.is_empty() {
+                return Err(FacadeError::InvalidInput);
+            }
+            let route = &task.route;
+            let model = match (&route.adapter, &route.model) {
+                (_, Some(model)) if model.contains('/') => Some(model.clone()),
+                (Some(adapter), Some(model)) => Some(format!("{adapter}/{model}")),
+                (None, Some(_)) => return Err(FacadeError::InvalidInput),
+                (_, None) => None,
+            };
+            let name = match model {
+                Some(_) => None,
+                None => route.role.as_deref().or(route.task_class.as_deref()),
+            };
+            submitted.push(Submitted {
+                task_id: derived_task(&operation_id, index).map_err(fail_error)?,
+                prompt: task.prompt,
+                route: requested(model.as_deref(), name, route.effort.clone())
+                    .map_err(fail_error)?,
+                fallback: Vec::new(),
+                provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
+                delivery_id: task.delivery_id,
+            });
+        }
+        let session = self.session(budget, cancel)?;
+        let call = self.call(budget, cancel);
+        let (run, started) = self.with_edge(|edge| {
+            provenant_cli::run::submit(
+                &session,
+                edge,
+                Submission {
+                    operation_id: operation_id.clone(),
+                    tasks: submitted,
+                    concurrency: u64::from(concurrency),
+                },
+                &call,
+            )
+        })?;
+        self.receipt(&session, operation_id, &run, &started, &call)
     }
     fn output(
         &mut self,
-        _: OutputInput,
-        _: WaitBudget,
-        _: &CancelToken,
+        input: OutputInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
     ) -> Result<OutputResult, FacadeError> {
-        Err(FacadeError::OwnerUnavailable)
+        let target = match &input {
+            OutputInput::Read { target, .. } | OutputInput::Fetch { target, .. } => target.clone(),
+        };
+        if let Some(answer) = self.remote(
+            &target,
+            PeerAction::Output {
+                input: input.clone(),
+            },
+            budget,
+            cancel,
+        )? {
+            return match answer {
+                PeerResult::Output(value) => Ok(value),
+                _ => Err(FacadeError::StateCorrupt),
+            };
+        }
+        let session = self.session(budget, cancel)?;
+        let call = self.call(budget, cancel);
+        let record = session
+            .store
+            .record(target.attempt, &call)
+            .map_err(run_error)?;
+        let digest = |chunk: &provenant_run::OutputChunk| {
+            provenant_core::Digest::from_bytes(*chunk.digest.bytes())
+        };
+        match input {
+            OutputInput::Read {
+                part,
+                offset,
+                max_bytes,
+                ..
+            } => {
+                let artifact = match part {
+                    OutputPart::Stdout => provenant_run::ArtifactPart::Result,
+                    OutputPart::Stderr => provenant_run::ArtifactPart::Stderr,
+                    OutputPart::Combined => return Err(FacadeError::InvalidInput),
+                };
+                let chunk = session
+                    .store
+                    .read_output(
+                        record.attempt_id,
+                        artifact,
+                        provenant_run::ByteRange { offset, max_bytes },
+                        &session.context,
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                Ok(OutputResult::Chunk {
+                    target,
+                    part,
+                    offset: chunk.offset,
+                    next_offset: chunk.next_offset,
+                    eof: chunk.eof,
+                    digest: digest(&chunk),
+                    bytes: OutputBytes::from_bytes(chunk.bytes),
+                })
+            }
+            OutputInput::Fetch {
+                artifact,
+                max_bytes,
+                ..
+            } => {
+                // Only the attempt's own bound result is fetchable.
+                let bound = record.result.as_ref().ok_or(FacadeError::NotFound)?;
+                if artifact.path != bound.path || artifact.digest.is_some_and(|d| d != bound.digest)
+                {
+                    return Err(FacadeError::NotFound);
+                }
+                let chunk = session
+                    .store
+                    .read_output(
+                        record.attempt_id,
+                        provenant_run::ArtifactPart::Result,
+                        provenant_run::ByteRange {
+                            offset: 0,
+                            max_bytes,
+                        },
+                        &session.context,
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                Ok(OutputResult::Artifact {
+                    target,
+                    artifact,
+                    digest: digest(&chunk),
+                    bytes: OutputBytes::from_bytes(chunk.bytes),
+                })
+            }
+        }
     }
     fn run(
         &mut self,
@@ -1036,9 +1281,79 @@ impl RunOwner for BinaryRunOwner<'_> {
                     );
                 }
             }
-            RunInput::List { .. } | RunInput::Cancel { .. } | RunInput::Resume { .. } => {
-                Err(FacadeError::OwnerUnavailable)
+            RunInput::Cancel {
+                ref target,
+                ref operation_id,
+            } => {
+                if let Some(answer) = self.remote(
+                    target,
+                    PeerAction::Run {
+                        input: input.clone(),
+                    },
+                    budget,
+                    cancel,
+                )? {
+                    return match answer {
+                        PeerResult::Run(value) => Ok(*value),
+                        _ => Err(FacadeError::StateCorrupt),
+                    };
+                }
+                let store = self.store(budget, cancel)?;
+                let call = self.call(budget, cancel);
+                let reason = format!("cancelled by Fabric operation {operation_id}");
+                store
+                    .cancel(target.attempt, &reason, &call)
+                    .map_err(run_error)?;
+                Ok(RunResult::Cancel {
+                    attempt: store.record(target.attempt, &call).map_err(run_error)?,
+                })
             }
+            RunInput::Resume {
+                ref target,
+                ref operation_id,
+                ref prompt,
+                expected_generation,
+            } => {
+                if let Some(answer) = self.remote(
+                    target,
+                    PeerAction::Run {
+                        input: input.clone(),
+                    },
+                    budget,
+                    cancel,
+                )? {
+                    return match answer {
+                        PeerResult::Run(value) => Ok(*value),
+                        _ => Err(FacadeError::StateCorrupt),
+                    };
+                }
+                if !self.capabilities().resume {
+                    return Err(FacadeError::ContinuationUnsupported);
+                }
+                let session = self.session(budget, cancel)?;
+                let call = self.call(budget, cancel);
+                let (run, started) = self.with_edge(|edge| {
+                    provenant_cli::run::continue_attempt(
+                        &session,
+                        edge,
+                        target.attempt,
+                        operation_id.clone(),
+                        prompt.clone(),
+                        expected_generation,
+                        &call,
+                    )
+                })?;
+                let receipt =
+                    self.receipt(&session, operation_id.clone(), &run, &started, &call)?;
+                let attempt = receipt.targets.first().ok_or(FacadeError::StateCorrupt)?;
+                Ok(RunResult::Resume {
+                    attempt: session
+                        .store
+                        .record(attempt.attempt, &call)
+                        .map_err(run_error)?,
+                })
+            }
+            RunInput::List { .. } => Err(FacadeError::OwnerUnavailable),
         }
     }
     fn events(
@@ -1128,18 +1443,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ));
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
-            AttemptState::Terminal { outcome, .. } => Ok(AttemptObservation::Terminal {
-                launched: attempt.provider_launched.unwrap_or(true),
-                attempt_ref: reference,
-                outcome: match outcome {
-                    Outcome::Succeeded => AttemptOutcome::Succeeded,
-                    Outcome::AuthRequired => AttemptOutcome::AuthRequired,
-                    Outcome::RateLimited | Outcome::QuotaLimited => AttemptOutcome::UsageLimited,
-                    Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                    Outcome::Failed => AttemptOutcome::TaskFailed,
-                    _ => AttemptOutcome::OtherFailure,
-                },
-            }),
+            AttemptState::Terminal { outcome, .. } => {
+                let launched = attempt.provider_launched.unwrap_or(true);
+                Ok(AttemptObservation::Terminal {
+                    launched,
+                    attempt_ref: reference,
+                    outcome: match outcome {
+                        Outcome::Succeeded => AttemptOutcome::Succeeded,
+                        Outcome::AuthRequired => AttemptOutcome::AuthRequired,
+                        Outcome::RateLimited | Outcome::QuotaLimited => {
+                            AttemptOutcome::UsageLimited
+                        }
+                        // A route refused before launch leaves the next route free to try.
+                        Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
+                        Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                        Outcome::Failed => AttemptOutcome::TaskFailed,
+                        _ => AttemptOutcome::OtherFailure,
+                    },
+                })
+            }
             _ => Ok(AttemptObservation::Pending {
                 attempt_ref: reference,
             }),

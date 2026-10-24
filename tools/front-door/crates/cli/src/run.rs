@@ -36,10 +36,11 @@ pub struct Reply {
     pub result: CommandResult<Value>,
     pub human: String,
 }
-struct Fail {
-    status: Status,
-    code: &'static str,
-    message: String,
+/// A refused or failed owner call: envelope status, stable code and message.
+pub struct Fail {
+    pub status: Status,
+    pub code: &'static str,
+    pub message: String,
 }
 impl Fail {
     fn new(status: Status, code: &'static str, message: impl Into<String>) -> Self {
@@ -65,6 +66,21 @@ impl From<run::RunError> for Fail {
         };
         Self::new(status, code, error.to_string())
     }
+}
+/// A reply whose reader deadline expired still reports what it saw.
+fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
+    let mut expired = false;
+    let mut out = reply(
+        command,
+        outcome.map(|(data, human, timed_out)| {
+            expired = timed_out;
+            (data, human)
+        }),
+    );
+    if expired {
+        out.result.status = Status::Timeout;
+    }
+    out
 }
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
     match outcome {
@@ -261,9 +277,10 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     })
 }
 
-struct Session {
-    store: run::RunStore,
-    context: run::ExecutionContext,
+/// An open store and the identity it is scoped to.
+pub struct Session {
+    pub store: run::RunStore,
+    pub context: run::ExecutionContext,
 }
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
     Ok(run::Request {
@@ -288,7 +305,7 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
         context,
     })
 }
-fn now(clock: &SystemClock) -> Result<WallTime, Fail> {
+fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
         .wall_now()
         .map_err(|error| Fail::new(Status::Error, "TIME", error.to_string()))
@@ -345,7 +362,8 @@ fn read_text(source: impl Read) -> Result<String, Fail> {
     String::from_utf8(bytes)
         .map_err(|_| Fail::new(Status::Invalid, "INVALID", "input is not UTF-8"))
 }
-fn requested(
+/// Exactly one of `ADAPTER/ID` or a named route.
+pub fn requested(
     model: Option<&str>,
     route: Option<&str>,
     effort: Option<String>,
@@ -396,7 +414,7 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
 }
 /// Task IDs default to a value derived from the operation, so replaying the
 /// same operation reproduces the same canonical request.
-fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
+pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
     let digest = CanonicalV1::record_digest("run-task-id", 1, &(operation.as_str(), index))
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     let mut bytes = [0; 16];
@@ -404,10 +422,126 @@ fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
     Ok(TaskId::from_bytes(bytes))
 }
 
-pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
-    reply("dispatch", dispatch_inner(command, edge))
+/// Refuse input that matches a secret pattern before any record exists. The
+/// message never repeats the input.
+fn scan(prompt: &str) -> Result<(), Fail> {
+    provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).map_err(|_| {
+        Fail::new(
+            Status::Refused,
+            "SECRET_INPUT",
+            "input matches a secret pattern; remove the secret and retry",
+        )
+    })
 }
-fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+/// Worktree access is explicit. A missing local worktree is named first; a
+/// worktree with read-only access is refused, never run read-only.
+pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Result<(), Fail> {
+    match worktree {
+        None if !writer => Ok(()),
+        None => Err(Fail::new(
+            Status::Invalid,
+            "WORKTREE_REQUIRED",
+            "worktree-write access needs --worktree",
+        )),
+        Some(path) if !cwd.join(path).is_dir() => Err(Fail::new(
+            Status::Invalid,
+            "WORKTREE_MISSING",
+            format!(
+                "local worktree {} does not exist; create it with `provenant worktree create <name>`",
+                path.display()
+            ),
+        )),
+        Some(_) if !writer => Err(Fail::new(
+            Status::Invalid,
+            "WORKTREE_NOT_APPLICABLE",
+            "--worktree requires --mode worktree-write",
+        )),
+        Some(_) => Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "worktree-write dispatch is not available in this build",
+        )),
+    }
+}
+
+/// One task of a submission, from CLI flags, a manifest or Fabric.
+pub struct Submitted {
+    pub task_id: TaskId,
+    pub prompt: String,
+    pub route: run::RequestedRoute,
+    pub fallback: Vec<String>,
+    pub provider_timeout: u64,
+    pub delivery_id: Option<DeliveryId>,
+}
+pub struct Submission {
+    pub operation_id: OperationId,
+    pub tasks: Vec<Submitted>,
+    pub concurrency: u64,
+}
+/// Scan, record and launch read-only work: the one path the CLI and Fabric
+/// share. Replaying an operation returns its run and launches nothing new.
+pub fn submit(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    #[derive(Serialize)]
+    struct Authority<'a> {
+        mode: &'static str,
+        network: bool,
+        cwd: &'a Path,
+    }
+    let authority = CanonicalV1::record_digest(
+        "run-authority",
+        1,
+        &Authority {
+            mode: "read_only",
+            network: false,
+            cwd: edge.cwd,
+        },
+    )
+    .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+    let mut requests = Vec::new();
+    let mut attempts = Vec::new();
+    for task in submission.tasks {
+        scan(&task.prompt)?;
+        requests.push(run::TaskRequest {
+            task_id: task.task_id,
+            prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
+            route: task.route,
+            fallback: fallback(&task.fallback)?,
+            authority_digest: authority,
+            provider_timeout_seconds: task.provider_timeout,
+            delivery_id: task.delivery_id,
+        });
+        attempts.push(run::NewAttempt {
+            attempt_id: fresh(AttemptId::from_bytes)?,
+            task_id: task.task_id,
+            prompt: task.prompt,
+        });
+    }
+    let prepared = run::PreparedRun {
+        run_id: fresh(RunId::from_bytes)?,
+        operation_id: submission.operation_id,
+        request: run::CanonicalRequest {
+            schema_version: 1,
+            tasks: requests,
+            concurrency: submission.concurrency,
+            parent: None,
+        },
+        attempts,
+        created_at: now(call.clock)?,
+    };
+    let record = session.store.create(&prepared, call)?;
+    let started = launch(session, record.run_id, edge, call)?;
+    Ok((record, started))
+}
+
+pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
+    reply_waited("dispatch", dispatch_inner(command, edge))
+}
+fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     let access = &command.access;
     let unsupported = |what: &str| {
         Err(Fail::new(
@@ -416,9 +550,11 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
             format!("{what} is not available in this build"),
         ))
     };
-    if matches!(access.mode, Mode::WorktreeWrite) || access.worktree.is_some() {
-        return unsupported("worktree-write dispatch");
-    }
+    worktree_access(
+        matches!(access.mode, Mode::WorktreeWrite),
+        access.worktree.as_deref(),
+        edge.cwd,
+    )?;
     if matches!(access.network, Switch::On)
         || !access.capability.is_empty()
         || !access.read_root.is_empty()
@@ -431,7 +567,6 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let created_at = now(&clock)?;
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
@@ -532,66 +667,41 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String),
             command.delivery_id,
         ));
     }
-    #[derive(Serialize)]
-    struct Authority<'a> {
-        mode: &'static str,
-        network: bool,
-        cwd: &'a Path,
-    }
-    let authority = CanonicalV1::record_digest(
-        "run-authority",
-        1,
-        &Authority {
-            mode: "read_only",
-            network: false,
-            cwd: edge.cwd,
-        },
-    )
-    .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
-    let mut requests = Vec::new();
-    let mut attempts = Vec::new();
-    for (task_id, prompt, route, fallback_models, delivery_id) in tasks {
-        requests.push(run::TaskRequest {
-            task_id,
-            prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
-            route,
-            fallback: fallback(&fallback_models)?,
-            authority_digest: authority,
-            provider_timeout_seconds: command.provider_timeout,
-            delivery_id,
-        });
-        attempts.push(run::NewAttempt {
-            attempt_id: fresh(AttemptId::from_bytes)?,
-            task_id,
-            prompt,
-        });
-    }
     let concurrency = if command.input.manifest.is_some() {
         command.concurrency
     } else {
         1
     };
-    let prepared = run::PreparedRun {
-        run_id: fresh(RunId::from_bytes)?,
-        operation_id: command.operation_id.clone(),
-        request: run::CanonicalRequest {
-            schema_version: 1,
-            tasks: requests,
-            concurrency,
-            parent: None,
-        },
-        attempts,
-        created_at,
-    };
+    let tasks = tasks
+        .into_iter()
+        .map(
+            |(task_id, prompt, route, fallback, delivery_id)| Submitted {
+                task_id,
+                prompt,
+                route,
+                fallback,
+                provider_timeout: command.provider_timeout,
+                delivery_id,
+            },
+        )
+        .collect();
     let session = open(edge, &call)?;
-    let record = session.store.create(&prepared, &call)?;
-    let started = launch(&session, record.run_id, edge, &call)?;
+    let (record, started) = submit(
+        &session,
+        edge,
+        Submission {
+            operation_id: command.operation_id,
+            tasks,
+            concurrency,
+        },
+        &call,
+    )?;
     report(&session, &record, &started, command.wait, edge, &call)
 }
 
 /// Hand every queued attempt of `run` to its own guardian. Fabric's facade
 /// shares this path with the CLI leaves.
-fn launch(
+pub fn launch(
     session: &Session,
     run: RunId,
     edge: &Edge<'_>,
@@ -635,13 +745,13 @@ fn report(
     wait: Option<u64>,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
-) -> Result<(Value, String), Fail> {
+) -> Result<(Value, String, bool), Fail> {
     let target = Target {
         run: record.run_id,
         task: None,
         attempt: None,
     };
-    let (mut data, human, _) = match wait {
+    let (mut data, human, timed_out) = match wait {
         Some(seconds) => wait_lanes(session, &[target], Condition::All, seconds, edge)?,
         None => {
             let page = session
@@ -657,7 +767,7 @@ fn report(
     if !unknown.is_empty() {
         data["launch_unknown"] = json!(unknown);
     }
-    Ok((data, format!("run {}\n{human}", record.run_id)))
+    Ok((data, format!("run {}\n{human}", record.run_id), timed_out))
 }
 
 fn lane_query(targets: &[Target], all: bool, limit: u64, after: u64) -> run::LaneQuery {
@@ -833,8 +943,7 @@ fn wait_lanes(
 }
 
 pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
-    let mut expired = false;
-    let mut out = reply(
+    reply_waited(
         "lanes",
         (|| {
             let clock = SystemClock::new();
@@ -842,10 +951,7 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
             let call = request(&clock, &cancel)?;
             let session = open(edge, &call)?;
             if let Some(seconds) = command.wait {
-                let (data, human, timed_out) =
-                    wait_lanes(&session, &command.id, command.condition, seconds, edge)?;
-                expired = timed_out;
-                return Ok((data, human));
+                return wait_lanes(&session, &command.id, command.condition, seconds, edge);
             }
             let after = match &command.cursor {
                 Some(cursor) => cursor
@@ -857,14 +963,10 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                 &lane_query(&command.id, command.all, command.limit, after),
                 &call,
             )?;
-            Ok(render_lanes(&page.lanes, page.next, edge))
+            let (data, human) = render_lanes(&page.lanes, page.next, edge);
+            Ok((data, human, false))
         })(),
-    );
-    // A reader deadline still reports the lanes it saw.
-    if expired {
-        out.result.status = Status::Timeout;
-    }
-    out
+    )
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
@@ -1016,9 +1118,43 @@ fn state_tag(value: &impl Serialize) -> String {
 /// Continue one terminal attempt with new input as a new single-task run on
 /// the same route and access.
 pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
-    reply("resume", resume_inner(command, edge))
+    reply_waited("resume", resume_inner(command, edge))
 }
-fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+/// Continue one terminal attempt, scanned and launched on the shared path.
+/// `expected_generation` counts the attempt's prior continuations.
+pub fn continue_attempt(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: AttemptId,
+    operation_id: OperationId,
+    prompt: String,
+    expected_generation: u64,
+    call: &run::Request<'_>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    scan(&prompt)?;
+    if !(Registry { roots: None }).continues_sessions() {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "resume needs provider sessions, which providers do not expose yet",
+        ));
+    }
+    let run = session.store.resume(
+        &run::Resume {
+            prior,
+            expected_generation,
+            operation_id,
+            run_id: fresh(RunId::from_bytes)?,
+            attempt_id: fresh(AttemptId::from_bytes)?,
+            prompt,
+            created_at: now(call.clock)?,
+        },
+        call,
+    )?;
+    let started = launch(session, run.run_id, edge, call)?;
+    Ok((run, started))
+}
+fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -1030,13 +1166,6 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fai
         Some(path) => read_bounded(path)?,
         None => read_text(std::io::stdin().lock())?,
     };
-    if !(Registry { roots: None }).continues_sessions() {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "resume needs provider sessions, which providers do not expose yet",
-        ));
-    }
     let session = open(edge, &call)?;
     let record = session.store.record(prior, &call)?;
     if record.run_id != target.run || target.task.is_some_and(|task| task != record.task_id) {
@@ -1046,24 +1175,20 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String), Fai
             "attempt is not in that run/task",
         ));
     }
-    let run = session.store.resume(
-        &run::Resume {
-            prior,
-            // The CLI continues an attempt once; a second continuation of the
-            // same attempt is a conflict, not a new branch.
-            expected_generation: 0,
-            operation_id: command.operation_id,
-            run_id: fresh(RunId::from_bytes)?,
-            attempt_id: fresh(AttemptId::from_bytes)?,
-            prompt,
-            created_at: now(&clock)?,
-        },
+    // The CLI continues an attempt once; a second continuation of the same
+    // attempt is a conflict, not a new branch.
+    let (run, started) = continue_attempt(
+        &session,
+        edge,
+        prior,
+        command.operation_id,
+        prompt,
+        0,
         &call,
     )?;
-    let started = launch(&session, run.run_id, edge, &call)?;
-    let (mut data, human) = report(&session, &run, &started, command.wait, edge, &call)?;
+    let (mut data, human, timed_out) = report(&session, &run, &started, command.wait, edge, &call)?;
     data["resumed_from"] = json!(prior);
-    Ok((data, human))
+    Ok((data, human, timed_out))
 }
 
 /// Recover runs whose guardian or submitter died: commit durable exits,

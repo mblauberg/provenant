@@ -712,7 +712,7 @@ Libraries use thiserror enums with typed sources and relevant IDs/paths, without
 raw secret values. Expected contention, stale fences and uncertainty are data.
 Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `stale_fence`, `home_unavailable`, `peer_version`, `launch_unknown`,
-`continuation_unsupported`, `confinement_refused`, `state_corrupt`,
+`continuation_unsupported`, `confinement_refused`, `worktree_missing`, `state_corrupt`,
 `publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. Use CLI's exits: 0 success,
 1 failed/refused/findings, 2 invalid input/version, 3 cannot proceed (setup,

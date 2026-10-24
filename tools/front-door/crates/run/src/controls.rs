@@ -265,17 +265,34 @@ impl RunStore {
                 if record.state != AttemptState::Starting {
                     return Ok(uncertain(&"running attempt has no launch summary"));
                 }
-                let recovery =
-                    match custody::acquire_recovery(dir()?, call.budget, call.cancel, call.clock) {
-                        Ok(recovery) => recovery,
-                        Err(error) => return Ok(uncertain(&error)),
-                    };
-                if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
-                    return Ok(uncertain(&"launch custody is not provably absent"));
-                }
-                if read_sealed(&dir()?, "process-exit.json", RECORD_LIMIT)?.is_some() {
-                    return Ok(uncertain(&"exit exists without a launch summary"));
-                }
+                // The submitter died before reserving: the held lease proves no
+                // handoff began and keeps a late reservation out.
+                let attempt = dir()?;
+                let unreserved =
+                    custody::prove_unreserved(&attempt, call.budget, call.cancel, call.clock)
+                        .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+                let _recovery = match unreserved {
+                    Some(lease) => Held::Unreserved(lease),
+                    None => {
+                        let recovery = match custody::acquire_recovery(
+                            dir()?,
+                            call.budget,
+                            call.cancel,
+                            call.clock,
+                        ) {
+                            Ok(recovery) => recovery,
+                            Err(error) => return Ok(uncertain(&error)),
+                        };
+                        if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent
+                        {
+                            return Ok(uncertain(&"launch custody is not provably absent"));
+                        }
+                        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
+                            return Ok(uncertain(&"exit exists without a launch summary"));
+                        }
+                        Held::Reserved(Box::new(recovery))
+                    }
+                };
                 let now = call
                     .clock
                     .wall_now()
@@ -296,4 +313,10 @@ impl RunStore {
             Err(error) => Ok(uncertain(&error)),
         }
     }
+}
+/// Writer exclusion held across a withdrawal.
+#[expect(dead_code, reason = "held only for its lock")]
+enum Held {
+    Unreserved(custody::Unreserved),
+    Reserved(Box<custody::Recovery>),
 }

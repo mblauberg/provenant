@@ -131,6 +131,53 @@ impl RunStore {
     /// request. No scheduler, admission or launch is implied by acceptance here.
     pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
         validate_request(input)?;
+        // A crash before sealing left the operation prepared under its own
+        // IDs; a replay with fresh IDs adopts them rather than conflicting.
+        if let Some(op) = self.operation(&input.operation_id, call)?
+            && op.state == OperationState::Prepared
+            && op.request_digest == input.request.digest()?
+            && op.run_id != input.run_id
+        {
+            return self.create_exact(&self.adopt(op.run_id, input, call)?, call);
+        }
+        self.create_exact(input, call)
+    }
+    fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
+        let ids: Vec<(String, String)> = call.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT task,id FROM attempts WHERE run=?1 AND project=?2")?;
+            let rows = query.query_map(
+                params![run.to_string(), self.context.project_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        let attempts = input
+            .attempts
+            .iter()
+            .map(|new| {
+                let (_, id) = ids
+                    .iter()
+                    .find(|(task, _)| *task == new.task_id.to_string())
+                    .ok_or(RunError::Conflict)?;
+                Ok(NewAttempt {
+                    attempt_id: AttemptId::parse(id)
+                        .map_err(|_| RunError::Validation("attempt index ID"))?,
+                    task_id: new.task_id,
+                    prompt: new.prompt.clone(),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(PreparedRun {
+            run_id: run,
+            operation_id: input.operation_id.clone(),
+            request: input.request.clone(),
+            attempts,
+            created_at: input.created_at,
+        })
+    }
+    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
         let digest = input.request.digest()?;
         let context = &self.context;
         let existing = self.operation(&input.operation_id, call)?;
@@ -348,12 +395,44 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         let revision = old.revision;
+        let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
+        // An interrupted withdrawal resumes its own sealed facts, so a retry
+        // never renders a second finished_at or reason.
+        let (outcome, finished_at, reason) =
+            match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
+                Some(raw) => {
+                    let saved: AttemptRecord = decode(&raw)?;
+                    super::reader::validate_attempt(&saved)?;
+                    match saved.state {
+                        AttemptState::Terminal {
+                            outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
+                            exit_code: None,
+                            finished_at,
+                            reason,
+                        } if saved.attempt_id == id
+                            && saved.run_id == old.run_id
+                            && saved.generation == old.generation
+                            && saved.exit_evidence.is_none()
+                            && saved.provider_launched == Some(false)
+                            && Some(saved.revision) == revision.checked_add(1) =>
+                        {
+                            (saved_outcome, finished_at, reason)
+                        }
+                        _ => return Err(RunError::TerminalRecoveryRequired),
+                    }
+                }
+                None => (
+                    outcome,
+                    finished_at,
+                    Some(reason.chars().take(256).collect()),
+                ),
+            };
         let publication = TerminalPublication {
             outcome,
             finished_at,
             started_at: None,
             provider_ms: None,
-            reason: Some(reason.chars().take(256).collect()),
+            reason,
             result: "",
             complete: true,
             redacted: false,
@@ -362,13 +441,16 @@ impl RunStore {
             observed_route: None,
             usage: UsageRecord::default(),
         };
-        self.attempt_dir(old.run_id, id, true)?;
         self.commit_terminal(old, revision, &publication, None, None, false, call)
             .map(Some)
     }
-    /// Seal terminal intent and result, then commit the attempt, run summary,
+    /// Seal result and terminal intent, then commit the attempt, run summary,
     /// operation state, released admission and event together. The caller
     /// holds the run's publication lock.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one commit point for every terminal path"
+    )]
     fn commit_terminal(
         &self,
         old: AttemptRecord,
@@ -434,28 +516,24 @@ impl RunStore {
         super::reader::validate_attempt(&next)?;
         let intent = bytes(&next)?;
         let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
-        // Persist the exact terminal intent before sealing its result. Recovery
-        // uses these facts and sealed bytes, never newly rendered result text.
+        // Seal the result, then the exact terminal intent that names it. A
+        // crash between them leaves a result-only orphan, which the edge
+        // recovers with revalidated facts; intent never names missing bytes.
         match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
             Some(saved) if saved != intent => return Err(RunError::TerminalRecoveryRequired),
             Some(_) => {}
             None => {
-                // A result-only orphan must not acquire conflicting intent.
-                // Preserve it for a retry supplying its original result/facts.
-                if let Some(saved) = read_sealed(&attempt_dir, "result.md", RESULT_LIMIT)?
-                    && saved != publication.result.as_bytes()
-                {
-                    return Err(RunError::ArtifactMismatch);
-                }
+                seal(
+                    &attempt_dir,
+                    "result.md",
+                    publication.result.as_bytes(),
+                    RESULT_LIMIT,
+                )?;
+                #[cfg(test)]
+                crate::tests::crash_at("result");
                 seal(&attempt_dir, "terminal-pending.json", &intent, RECORD_LIMIT)?;
             }
         }
-        seal(
-            &attempt_dir,
-            "result.md",
-            publication.result.as_bytes(),
-            RESULT_LIMIT,
-        )?;
         #[cfg(test)]
         crate::tests::crash_at("sealed");
         self.write(call, |tx| {

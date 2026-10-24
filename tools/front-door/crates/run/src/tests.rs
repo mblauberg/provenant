@@ -358,7 +358,8 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
     Ok(())
 }
 pub(crate) fn crash_at(phase: &str) {
-    if std::env::var("PROVENANT_RUN_TEST_CRASH").as_deref() == Ok(phase) {
+    let wanted = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
+    if wanted.strip_prefix("withdraw-").unwrap_or(&wanted) == phase {
         std::process::exit(73);
     }
 }
@@ -375,6 +376,18 @@ fn publication_crash_worker() -> TestResult {
     let input = input();
     store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
+    let crash = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
+    if crash.starts_with("withdraw-") {
+        store.withdraw(
+            input.attempts[0].attempt_id,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "cancelled before the crash",
+            WallTime::from_micros(150)?,
+            &call,
+        )?;
+        return Err("crash phase was not reached".into());
+    }
     seal_exit_fixture(&store, &input)?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
@@ -388,7 +401,14 @@ fn publication_crash_worker() -> TestResult {
 #[test]
 fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResult {
     let executor = SystemExecutor::new(1)?;
-    for phase in ["reserved", "sealed", "transaction", "committed"] {
+    for phase in [
+        "reserved",
+        "result",
+        "sealed",
+        "transaction",
+        "committed",
+        "withdraw-sealed",
+    ] {
         let temp = tempfile::tempdir_in("/tmp")?;
         let context = context(temp.path())?;
         let argv: Vec<OsString> = vec![
@@ -449,7 +469,11 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             assert!(store.attempt(id, &call).is_ok());
         }
-        store.create(&input, &call)?;
+        // A replay mints fresh IDs; it must land on the reserved ones.
+        let mut replay = self::input();
+        replay.run_id = RunId::from_bytes([9; 16]);
+        replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+        assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
         seal_exit_fixture(&store, &input)?;
         if matches!(phase, "sealed" | "transaction") {
             assert_eq!(admission_count(&store)?, 1);
@@ -460,6 +484,30 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 Err(RunError::TerminalRecoveryRequired)
             ));
             store.recover_terminal(id, &exit(), &call)?;
+            assert_eq!(admission_count(&store)?, 0);
+        } else if phase == "withdraw-sealed" {
+            // The retry renders a new time and reason; the sealed intent wins.
+            let record = store
+                .withdraw(
+                    id,
+                    AttemptState::Queued,
+                    Outcome::Cancelled,
+                    "retried",
+                    WallTime::from_micros(900)?,
+                    &call,
+                )?
+                .ok_or("withdrawal was already terminal")?;
+            let sealed = WallTime::from_micros(150)?;
+            assert!(matches!(
+                record.state,
+                AttemptState::Terminal { finished_at, .. } if finished_at == sealed
+            ));
+            assert_eq!(admission_count(&store)?, 0);
+        } else if phase == "result" {
+            assert_eq!(admission_count(&store)?, 1);
+            let mut recomputed = publication();
+            recomputed.result = "different text after restart";
+            store.recover_result_only(id, &recomputed, &exit(), &call)?;
             assert_eq!(admission_count(&store)?, 0);
         } else {
             store.publish_terminal(id, 1, &publication(), &exit(), &call)?;

@@ -1069,6 +1069,37 @@ pub fn acquire_recovery(
         reservation,
     })
 }
+/// Writer exclusion over an attempt directory that holds no reservation, launch
+/// summary or exit. Reservations precede every guardian handoff, so none began;
+/// while this lease lives no reservation can be created.
+#[derive(Debug)]
+pub struct Unreserved {
+    _lease: LockGuard,
+}
+/// `None` when any reservation, launch or exit evidence exists; recover those
+/// with [`acquire_recovery`] or [`reattach`].
+pub fn prove_unreserved(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<Option<Unreserved>> {
+    let lease = directory.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget,
+        cancel,
+        clock,
+    )?;
+    for name in ["reservation.json", "launch.json", "process-exit.json"] {
+        match directory.metadata_at(OsStr::new(name), false) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(Unreserved { _lease: lease }))
+}
 fn validate_anchor(directory: &Directory, reservation: &Reservation) -> Result<()> {
     reservation.validate()?;
     let metadata = directory.metadata()?;

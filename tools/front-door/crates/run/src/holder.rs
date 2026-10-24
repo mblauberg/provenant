@@ -235,6 +235,10 @@ impl RunStore {
             observed_route: decoded.observed_route,
             usage: decoded.usage,
         };
+        // A result sealed without intent predates a crash: keep its bytes.
+        if read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some() {
+            return self.recover_result_only(id, &publication, exit, call);
+        }
         self.publish_terminal(id, record.revision, &publication, exit, call)
     }
 }

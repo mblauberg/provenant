@@ -173,7 +173,7 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 }
 
 #[test]
-fn graph_run_persists_start_before_reporting_missing_dispatch() -> Result {
+fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let rig = TestRig::new()?;
     std::fs::write(
         rig.project.join("graph.json"),
@@ -181,7 +181,7 @@ fn graph_run_persists_start_before_reporting_missing_dispatch() -> Result {
             &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"},{"adapter":"fixture","model":"two"}]}]}),
         )?,
     )?;
-    let tick = rig.command(&[
+    let run = rig.command(&[
         "fabric",
         "graph",
         "run",
@@ -189,93 +189,46 @@ fn graph_run_persists_start_before_reporting_missing_dispatch() -> Result {
         "graph.json",
         "--json",
     ])?;
-    assert_eq!(code(&tick), 3);
-    let status = rig.command(&["fabric", "graph", "status", "edge", "--json"])?;
     assert_eq!(
-        code(&status),
+        code(&run),
         0,
         "{}",
-        String::from_utf8_lossy(&status.stderr.bytes)
+        String::from_utf8_lossy(&run.stderr.bytes)
     );
-    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    assert_eq!(
-        status["data"]["checkpoint"]["nodes"][0]["attempts"]
-            .as_array()
-            .ok_or("attempts")?
-            .len(),
-        1
-    );
-    assert_eq!(
-        status["data"]["checkpoint"]["nodes"][0]["attempts"][0]["state"],
-        "starting"
-    );
-    // Every harness reaches the same graph checkpoint and admission fence.
+    let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+    assert_eq!(run["data"]["status"], "complete");
+    let node = &run["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(node["state"], "failed");
+    // Neither fixture route is configured, so each is refused before launch and
+    // the graph moves on to the next route rather than claiming a task failure.
+    let attempts = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(attempts.len(), 2);
+    for attempt in attempts {
+        assert_eq!(attempt["state"], "terminal");
+        assert_eq!(attempt["launched"], false);
+        assert_eq!(attempt["outcome"], "adapter_unavailable");
+        assert!(attempt["attempt_ref"].as_str().is_some());
+    }
+    // Every harness reads the same persisted checkpoint.
     let frames = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":"cancel","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"cancel","id":"edge"}}}),
+            json!({"jsonrpc":"2.0","id":"status","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"status","id":"edge"}}}),
+            json!({"jsonrpc":"2.0","id":"resume","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"resume","document":"graph.json"}}}),
         ],
     )?;
-    let cancelled = &frames
-        .iter()
-        .find(|frame| frame["id"] == "cancel")
-        .ok_or("cancel reply")?["result"];
-    // A starting attempt without a reference cannot be claimed as stopped.
-    assert_eq!(cancelled["structuredContent"]["code"], "launch_unknown");
-    assert!(
-        cancelled["structuredContent"]["operation_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("graph-"))
-    );
-    for (op, arguments, expected_status) in [
-        ("status", json!({"op":"status","id":"edge"}), "cancelled"),
-        (
-            "run",
-            json!({"op":"run","document":"graph.json"}),
-            "cancelled",
-        ),
-    ] {
-        let frames = mcp(
-            &rig,
-            &[
-                json!({"jsonrpc":"2.0","id":op,"method":"tools/call","params":{"name":"fabric_graph","arguments":arguments}}),
-            ],
-        )?;
+    for op in ["status", "resume"] {
         let result = &frames
             .iter()
             .find(|frame| frame["id"] == op)
             .ok_or("graph reply")?["result"];
         assert_ne!(result["isError"], true, "{result}");
-        assert_eq!(result["structuredContent"]["status"], expected_status);
+        assert_eq!(result["structuredContent"]["status"], "complete");
         assert_eq!(
-            result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"]
-                .as_array()
-                .ok_or("attempts")?
-                .len(),
-            1
+            result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"],
+            node["attempts"]
         );
     }
-    let frames = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":"resume","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"resume","document":"graph.json"}}}),
-        ],
-    )?;
-    let resumed = &frames
-        .iter()
-        .find(|frame| frame["id"] == "resume")
-        .ok_or("resume reply")?["result"];
-    assert_eq!(resumed["structuredContent"]["code"], "owner_unavailable");
-    let status = rig.command(&["fabric", "graph", "status", "edge", "--json"])?;
-    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    assert_eq!(status["data"]["checkpoint"]["cancelled"], false);
-    assert_eq!(
-        status["data"]["checkpoint"]["nodes"][0]["attempts"]
-            .as_array()
-            .ok_or("attempts")?
-            .len(),
-        1
-    );
     rig.assert_legacy_unchanged()
 }
 

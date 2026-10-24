@@ -50,6 +50,27 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let again: serde_json::Value =
         serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
     assert_eq!(again["data"]["run_id"], value["data"]["run_id"]);
+    // Secret-bearing input is refused before any record and never echoed.
+    let secret = format!("use ghp_{}", "a1".repeat(18));
+    let mut refused = args;
+    refused[7] = "secret";
+    let out = rig.execute(binary, &refused, Some(secret.as_bytes()))?;
+    let text = String::from_utf8_lossy(&out.stdout.bytes);
+    assert!(
+        text.contains("SECRET_INPUT") && !text.contains(&secret[4..]),
+        "{text}"
+    );
+    // A worktree is never silently run read-only (#1310); a missing one says so (#1309).
+    for (mode, worktree, expected) in [
+        ("read-only", ".", "INVALID"),
+        ("worktree-write", "missing-worktree", "WORKTREE_MISSING"),
+    ] {
+        let mut flags = args.to_vec();
+        flags.extend(["--host", "workshop", "--mode", mode, "--worktree", worktree]);
+        let out = rig.execute(binary, &flags, Some(b"hello"))?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(value["error"]["code"], expected, "{value}");
+    }
     let attempt = format!(
         "{}/{}/{}",
         lane["run_id"].as_str().ok_or("run")?,

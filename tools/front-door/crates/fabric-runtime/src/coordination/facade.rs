@@ -162,6 +162,8 @@ pub enum FacadeError {
     ContinuationUnsupported,
     #[error("request violates confinement")]
     ConfinementRefused,
+    #[error("local worktree does not exist; create it with `provenant worktree create`")]
+    WorktreeMissing,
     #[error("stored state is corrupt")]
     StateCorrupt,
     #[error("output publication failed")]
@@ -188,6 +190,7 @@ impl FacadeError {
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::ConfinementRefused => "confinement_refused",
+            Self::WorktreeMissing => "worktree_missing",
             Self::StateCorrupt => "state_corrupt",
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",

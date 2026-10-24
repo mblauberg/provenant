@@ -456,3 +456,18 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     assert!(store.reconcile(batch.run_id, &fake, &call)?.is_empty());
     Ok(())
 }
+#[test]
+fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(id, &route(), &call)?;
+    let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+    assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    Ok(())
+}

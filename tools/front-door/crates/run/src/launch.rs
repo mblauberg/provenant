@@ -189,6 +189,12 @@ impl RunStore {
         let mut lease =
             custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
+        // Reconcile may have withdrawn this attempt before the lease existed.
+        match self.record(id, call) {
+            Ok(now) if now.revision == record.revision => {}
+            Ok(_) => return Err(local(&"attempt changed before handoff")),
+            Err(error) => return Err(local(&error)),
+        }
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
