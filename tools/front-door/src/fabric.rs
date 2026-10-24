@@ -1025,21 +1025,26 @@ impl BinaryRunOwner<'_> {
             })?
             .result
         {
-            PeerResult::Error { code, .. } => Err(match code.as_str() {
-                "not_found" => FacadeError::NotFound,
-                "worktree_missing" => FacadeError::WorktreeMissing,
-                "output_too_large" => FacadeError::OutputTooLarge,
-                "invalid_input" => FacadeError::InvalidInput,
-                "confinement_refused" => FacadeError::ConfinementRefused,
-                "continuation_unsupported" => FacadeError::ContinuationUnsupported,
-                "owner_unavailable" => FacadeError::OwnerUnavailable,
-                "cancelled" => FacadeError::Cancelled,
-                "conflict" => FacadeError::Conflict,
-                "busy" => FacadeError::Busy,
-                _ => FacadeError::HomeUnavailable,
-            }),
+            PeerResult::Error { code, operation_id } => Err(peer_error(&code, operation_id)),
             value => Ok(value),
         }
+    }
+}
+/// Decode a peer's refusal, keeping the operation an uncertain mutation names.
+fn peer_error(code: &str, operation_id: Option<provenant_core::OperationId>) -> FacadeError {
+    match (code, operation_id) {
+        ("launch_unknown", Some(operation_id)) => FacadeError::LaunchUnknown { operation_id },
+        ("not_found", _) => FacadeError::NotFound,
+        ("worktree_missing", _) => FacadeError::WorktreeMissing,
+        ("output_too_large", _) => FacadeError::OutputTooLarge,
+        ("invalid_input", _) => FacadeError::InvalidInput,
+        ("confinement_refused", _) => FacadeError::ConfinementRefused,
+        ("continuation_unsupported", _) => FacadeError::ContinuationUnsupported,
+        ("owner_unavailable", _) => FacadeError::OwnerUnavailable,
+        ("cancelled", _) => FacadeError::Cancelled,
+        ("conflict", _) => FacadeError::Conflict,
+        ("busy", _) => FacadeError::Busy,
+        _ => FacadeError::HomeUnavailable,
     }
 }
 impl RunOwner for BinaryRunOwner<'_> {
@@ -1881,5 +1886,30 @@ pub fn events(
             &error.to_string(),
             globals,
         ),
+    }
+}
+#[cfg(test)]
+mod peer_tests {
+    #[test]
+    fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // The home host answers an unobservable cancel through `peer_result`.
+        let id = provenant_core::OperationId::parse("stop")?;
+        let unknown = super::FacadeError::LaunchUnknown {
+            operation_id: id.clone(),
+        };
+        let reply =
+            super::peer_result::<()>(Err(unknown), Some(id), |()| super::PeerResult::Error {
+                code: String::new(),
+                operation_id: None,
+            });
+        let super::PeerResult::Error { code, operation_id } = reply else {
+            return Err("expected a peer refusal".into());
+        };
+        assert!(matches!(
+            super::peer_error(&code, operation_id),
+            super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop"
+        ));
+        Ok(())
     }
 }

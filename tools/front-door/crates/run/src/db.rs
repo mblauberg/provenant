@@ -127,6 +127,9 @@ impl RunStore {
             if version(tx)? == 0 {
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
+            if version(tx)? == 1 {
+                tx.execute_batch(include_str!("schema_v2.sql"))?;
+            }
             Ok(())
         })?;
         companions(&store.root)?;
@@ -147,7 +150,7 @@ impl RunStore {
 }
 fn version(db: &Connection) -> Result<i64> {
     let (version, has_schema): (i64, bool) = db.query_row("SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    if !(0..=1).contains(&version) || (version == 0 && has_schema) {
+    if !(0..=2).contains(&version) || (version == 0 && has_schema) {
         return Err(RunError::Version(version));
     }
     Ok(version)

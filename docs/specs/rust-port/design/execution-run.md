@@ -753,9 +753,11 @@ scheduler daemon. Within that, the lane decided:
   for half the call budget; if its launch summary never appears it is reported
   as unobservable and the command fails, so the caller retries or reconciles.
   One attempt's failure never hides the other receipts. The operation ID is
-  bound to its target in `cancellations` before anything is touched: the same
+  bound to its target in `cancellations` (schema version 2, added to a
+  version 1 store on open) before anything is touched: the same
   ID and target is a replay, another target is an operation conflict. Fabric
-  reports an unobservable cancel as `launch_unknown`.
+  reports an unobservable cancel as `launch_unknown` with its operation ID,
+  locally and through a peer.
 - **Resume** creates a new single-task run whose attempt is the next attempt
   number of the prior task, with `retry_of` set and route, access and timeout
   copied from it. Each terminal attempt can be continued once: a

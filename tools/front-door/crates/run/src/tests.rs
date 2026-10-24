@@ -677,3 +677,24 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
     Ok(())
 }
+
+#[test]
+fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 1 left it.
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("DROP TABLE cancellations; PRAGMA user_version=1;")?;
+    let store = RunStore::open(&context, &call)?;
+    let op = OperationId::parse("stop")?;
+    store.bind_cancel(&op, "attempt", &call)?;
+    assert!(matches!(
+        store.bind_cancel(&op, "other", &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
