@@ -93,7 +93,10 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
     )?;
     assert_eq!(resolved["data"]["model"], "gpt-6.1-sol");
     assert_eq!(resolved["data"]["effort"], Value::Null);
-    assert_eq!(resolved["data"]["readiness"]["reason"], "disabled");
+    assert_eq!(
+        resolved["data"]["readiness"]["reason"],
+        "unknown_availability"
+    );
     assert_eq!(
         resolved["data"]["alternatives"][0]["model"],
         "openrouter/~anthropic/claude-haiku-latest"

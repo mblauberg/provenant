@@ -2,7 +2,7 @@
   "schema_version": 1,
   "design_step": 0,
   "author_route": "codex/gpt-6.1-sol@high",
-  "purpose": "Sanitised wire-shape evidence only; no adapter or mode is activated.",
+  "purpose": "Sanitised wire-shape projections; they activate nothing. Live activation evidence is in <adapter>/recordings.json.",
   "captures": [
     {
       "id": "codex-success",

@@ -454,9 +454,20 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         continuation.validate(&route, "different"),
         Err(ProviderError::IdentityMismatch)
     ));
+    // Codex's exec stream never names a model, so its continuation pins the
+    // requested one; an adapter that reports models must have reported it.
     let codex = replay(&codex::Codex, fixture!("codex/success.jsonl"), EXIT)?.1;
+    codex::Codex
+        .continuation(&codex, &self::route("codex", "requested"), "grants")?
+        .validate(&self::route("codex", "requested"), "grants")?;
+    let unanswered = replay(
+        &claude::Claude,
+        fixture!("claude/live-auth-required.jsonl"),
+        EXIT,
+    )?
+    .1;
     assert!(matches!(
-        codex::Codex.continuation(&codex, &self::route("codex", "requested"), "grants"),
+        claude::Claude.continuation(&unanswered, &route, "grants"),
         Err(ProviderError::UnknownIdentity)
     ));
     Ok(())
@@ -578,49 +589,342 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     ));
 }
 
-#[test]
-fn prepare_refuses_unrecorded_launches() -> Result<(), ProviderError> {
+fn read_only_plan(root: &str, authentication: Option<&str>) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
-    let confined = ConfinedPlan::new(PlanRequest {
+    let grant = |path: &str| PathGrant {
+        path: format!("{root}/{path}").into(),
+        scope: PathScope::Subtree,
+    };
+    ConfinedPlan::new(PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
             mode: AccessMode::ReadOnly,
-            scratch: PathGrant {
-                path: "/tmp/fixture-scratch".into(),
-                scope: PathScope::Subtree,
-            },
-            private_state: None,
-            read_roots: vec![],
+            scratch: grant("scratch"),
+            private_state: Some(grant("state")),
+            read_roots: vec![grant("repo")],
             protected_roots: vec![],
             secret_roots: vec![],
-            selected_authentication: None,
+            selected_authentication: authentication.map(Into::into),
             include_continuation: false,
             network: vec![],
             capabilities: vec![],
             nested_confinement: false,
         },
     })
-    .unwrap();
+    .expect("fixture plan")
+}
+
+const FIXTURE_TOKEN: &str = "fixture-access-token";
+
+fn fixture_token() -> crate::claude::OauthToken {
+    let item = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"{FIXTURE_TOKEN}","refreshToken":"fixture-refresh","expiresAt":4000000000000}}}}"#
+    );
+    crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
+}
+
+fn fixture_input<'a>(
+    route: &'a ResolvedRoute,
+    confined: &'a provenant_confinement::ConfinedPlan,
+    prompt: &'a Prompt,
+    cwd: &'a std::path::Path,
+    token: Option<&'a crate::claude::OauthToken>,
+) -> PrepareInput<'a> {
+    let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
+    PrepareInput {
+        route,
+        confined,
+        prompt,
+        continuation: None,
+        grant_digest: "fixture",
+        executable,
+        home: std::path::Path::new("/fixture/home"),
+        user: std::ffi::OsStr::new("fixture"),
+        token,
+        cwd,
+        nonce: [9; 16],
+    }
+}
+
+#[test]
+fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
+    let repo = std::path::Path::new("/fixture/repo");
+    let token = fixture_token();
     for entry in REGISTRY {
-        let route = route(entry.adapter.id(), "fixture");
+        let id = entry.adapter.id();
+        let route = route(id, "fixture-model");
+        // Only Codex reads a credential inside the sandbox.
+        let confined = read_only_plan("/fixture", (id == "codex").then_some("login"));
+        let token = (id == "claude").then_some(&token);
+        let result = entry
+            .adapter
+            .prepare(fixture_input(&route, &confined, &prompt, repo, token));
+        if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
+            assert!(
+                matches!(result, Err(ProviderError::Disabled { .. })),
+                "{id}"
+            );
+            continue;
+        }
+        let spec = result?;
+        let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
+        // Nothing is inherited: the environment is exactly the allow-list.
+        let keys: Vec<_> = spec
+            .env
+            .iter()
+            .map(|(key, _)| key.to_string_lossy())
+            .collect();
+        let extra: &[&str] = match id {
+            "codex" => &["CODEX_HOME", "SHELL"],
+            "claude" => &[
+                "CLAUDE_CODE_TMPDIR",
+                "DISABLE_AUTOUPDATER",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ],
+            _ => &[],
+        };
+        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG"]
+            .iter()
+            .chain(extra)
+            .copied()
+            .collect();
+        assert_eq!(keys, expected, "{id}");
+        assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
+        assert!(
+            !argv.iter().any(|arg| arg.contains("fixture prompt")),
+            "{id}"
+        );
+        match id {
+            "codex" => {
+                assert!(argv.iter().any(|arg| arg == "service_tier=\"default\""));
+                assert!(
+                    !argv
+                        .iter()
+                        .any(|arg| arg.contains("fast") || arg.contains("priority"))
+                );
+            }
+            "claude" => {
+                let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob");
+                // The host's token is the only credential: no keychain or
+                // other credential path is readable and nothing else runs.
+                assert!(
+                    spec.env
+                        .iter()
+                        .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN"
+                            && value == FIXTURE_TOKEN)
+                );
+                assert!(spec.profile.spec.authentication.is_empty());
+                assert_eq!(spec.profile.spec.process_executables.len(), 1);
+                assert!(matches!(
+                    entry
+                        .adapter
+                        .prepare(fixture_input(&route, &confined, &prompt, repo, None)),
+                    Err(ProviderError::UnsupportedPolicy)
+                ));
+                let with_login = read_only_plan("/fixture", Some("login"));
+                assert!(matches!(
+                    entry.adapter.prepare(fixture_input(
+                        &route,
+                        &with_login,
+                        &prompt,
+                        repo,
+                        Some(&fixture_token())
+                    )),
+                    Err(ProviderError::UnsupportedPolicy)
+                ));
+            }
+            _ => {}
+        }
+        // The package is the CLI's own install directory, never a shared
+        // prefix whose etc/ and var/ would become readable.
+        let shared = PrepareInput {
+            executable: std::path::Path::new("/opt/homebrew/bin/provider"),
+            ..fixture_input(&route, &confined, &prompt, repo, token)
+        };
         assert!(matches!(
-            entry.adapter.prepare(PrepareInput {
-                route: &route,
-                confined: &confined,
-                prompt: &prompt,
-                continuation: None,
-                grant_digest: "fixture"
-            }),
-            Err(ProviderError::Disabled { .. })
+            entry.adapter.prepare(shared),
+            Err(ProviderError::InvalidPath)
+        ));
+        let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .iter()
+                .all(|grant| grant.path == package)
+        );
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .all(|grant| grant.path == package || !grant.path.starts_with("/opt"))
+        );
+        // A read-only launch may only start inside a declared read root.
+        assert!(matches!(
+            entry.adapter.prepare(fixture_input(
+                &route,
+                &confined,
+                &prompt,
+                std::path::Path::new("/fixture/elsewhere"),
+                token,
+            )),
+            Err(ProviderError::InvalidPath)
         ));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct LiveCapture {
+    id: String,
+    fixture: String,
+    session_mode: Session,
+    access_mode: Access,
+    process_exit: Option<i64>,
+    outcome: String,
+    answering_model: Option<String>,
+    activation_eligible: bool,
+    argv: Vec<String>,
+}
+
+fn recordings(adapter: &str) -> Vec<LiveCapture> {
+    let text = match adapter {
+        "codex" => fixture!("codex/recordings.json"),
+        "claude" => fixture!("claude/recordings.json"),
+        _ => "[]",
+    };
+    serde_json::from_str(text).expect("recordings manifest")
+}
+
+fn requested_model(capture: &LiveCapture) -> String {
+    let flag = capture
+        .argv
+        .iter()
+        .position(|arg| arg == "-m" || arg == "--model")
+        .expect("model flag");
+    capture.argv[flag + 1].clone()
+}
+
+/// Replays one live capture through the real decoder; a resume capture is
+/// bound to the continuation its fresh capture produced.
+fn replay_live(
+    adapter: &dyn Adapter,
+    id: &str,
+    bytes: &str,
+    fresh: Option<&str>,
+) -> Result<(), ProviderError> {
+    let captures = recordings(adapter.id());
+    let capture = captures.iter().find(|c| c.id == id).expect("capture");
+    let route = route(adapter.id(), &requested_model(capture));
+    let continuation = match fresh {
+        Some(fresh) => Some(adapter.continuation(&replay(adapter, fresh, EXIT)?.1, &route, "g")?),
+        None => None,
+    };
+    let mut state = adapter.stream(continuation.as_ref())?;
+    for chunk in bytes.as_bytes().chunks(17) {
+        adapter.observe(&mut state, chunk)?;
+    }
+    let exit = ExitObservation {
+        code: capture.process_exit,
+        timed_out: false,
+    };
+    let outcome = adapter.finish(state, exit)?;
+    assert_eq!(format!("{:?}", outcome.status()), capture.outcome, "{id}");
+    assert_eq!(outcome.model(), capture.answering_model.as_deref(), "{id}");
+    assert!(outcome.session().is_some(), "{id}");
+    Ok(())
+}
+
+macro_rules! live_replay {
+    ($name:ident, $adapter:expr, $id:literal, $file:literal $(, after $fresh:literal)?) => {
+        #[test]
+        fn $name() -> Result<(), ProviderError> {
+            #[allow(unused_mut, unused_assignments)]
+            let mut fresh = None;
+            $(fresh = Some(fixture!($fresh));)?
+            replay_live(&$adapter, $id, fixture!($file), fresh)
+        }
+    };
+}
+live_replay!(
+    live_codex_read_only_fresh,
+    codex::Codex,
+    "codex-live-read_only-fresh",
+    "codex/live-read_only-fresh.jsonl"
+);
+live_replay!(live_codex_read_only_resume, codex::Codex, "codex-live-read_only-resume", "codex/live-read_only-resume.jsonl", after "codex/live-read_only-fresh.jsonl");
+live_replay!(
+    live_codex_worktree_write_fresh,
+    codex::Codex,
+    "codex-live-worktree_write-fresh",
+    "codex/live-worktree_write-fresh.jsonl"
+);
+live_replay!(live_codex_worktree_write_resume, codex::Codex, "codex-live-worktree_write-resume", "codex/live-worktree_write-resume.jsonl", after "codex/live-worktree_write-fresh.jsonl");
+live_replay!(
+    live_claude_read_only_fresh,
+    claude::Claude,
+    "claude-live-read_only-fresh",
+    "claude/live-read_only-fresh.jsonl"
+);
+live_replay!(live_claude_read_only_resume, claude::Claude, "claude-live-read_only-resume", "claude/live-read_only-resume.jsonl", after "claude/live-read_only-fresh.jsonl");
+live_replay!(
+    live_claude_worktree_write_fresh,
+    claude::Claude,
+    "claude-live-worktree_write-fresh",
+    "claude/live-worktree_write-fresh.jsonl"
+);
+live_replay!(live_claude_worktree_write_resume, claude::Claude, "claude-live-worktree_write-resume", "claude/live-worktree_write-resume.jsonl", after "claude/live-worktree_write-fresh.jsonl");
+live_replay!(
+    live_claude_auth_required,
+    claude::Claude,
+    "claude-live-auth-required",
+    "claude/live-auth-required.jsonl"
+);
+
+#[test]
+fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
+    #[derive(Deserialize)]
+    struct Matrix {
+        execution_modes: Vec<Mode>,
+    }
+    #[derive(Deserialize)]
+    struct Mode {
+        adapter: String,
+        access_mode: Access,
+        session_mode: Session,
+        enabled: bool,
+        capture_refs: Vec<String>,
+    }
+    let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
+    for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
+        let captures = recordings(&mode.adapter);
+        assert!(!mode.capture_refs.is_empty(), "{}", mode.adapter);
+        for reference in &mode.capture_refs {
+            let capture = captures
+                .iter()
+                .find(|capture| &capture.id == reference)
+                .expect("cited capture");
+            // Read-only evidence never enables a writer, nor fresh a resume.
+            assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
+            assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
+            assert!(capture.activation_eligible, "{reference}");
+            assert_eq!(capture.outcome, "Success", "{reference}");
+            assert!(
+                capture
+                    .fixture
+                    .starts_with(&format!("{}/live-", mode.adapter))
+            );
+        }
+    }
 }
 
 #[test]
@@ -711,4 +1015,163 @@ fn claude_signin_does_not_call_a_locked_or_present_identity_signed_out() {
     );
     let report = serde_json::to_string(&signin_status(negative, Some(1), C::Present)).unwrap();
     assert!(!report.contains("never-publish"));
+}
+
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+
+/// One recorded call: argv, environment and working directory.
+type Call = (Vec<String>, Vec<String>, std::path::PathBuf);
+
+/// Answers keychain reads from a script and records every call.
+struct KeychainScript {
+    items: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+    calls: std::sync::Mutex<Vec<Call>>,
+}
+
+impl provenant_supervisor::exec::Executor for KeychainScript {
+    fn execute(
+        &self,
+        options: provenant_supervisor::exec::ExecOptions<'_>,
+    ) -> Result<provenant_supervisor::exec::ExecOutcome, provenant_supervisor::exec::ExecError>
+    {
+        let text = |items: &[OsString]| {
+            items
+                .iter()
+                .map(|item| item.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let argv = text(options.argv);
+        let env = options
+            .env
+            .unwrap_or_default()
+            .iter()
+            .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+            .collect();
+        let stdout = if argv[0] == "/usr/bin/security" {
+            self.items.lock().unwrap().pop_front().unwrap()
+        } else {
+            vec![]
+        };
+        self.calls
+            .lock()
+            .unwrap()
+            .push((argv, env, options.cwd.to_owned()));
+        Ok(provenant_supervisor::exec::ExecOutcome {
+            termination: provenant_supervisor::exec::Termination::Exit(0),
+            stdout: provenant_supervisor::exec::CapturedStream {
+                bytes: stdout,
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        })
+    }
+}
+
+#[test]
+fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token() {
+    use crate::claude::{Login, refresh_if_expiring};
+    let now = 1_000_000_000_u64;
+    let item = |token: &str, expires: u64| {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"fixture-refresh","expiresAt":{expires}}}}}"#
+        )
+        .into_bytes()
+    };
+    let run_by = |config: &str, items: Vec<Vec<u8>>, deadline: u64| {
+        let script = KeychainScript {
+            items: std::sync::Mutex::new(items.into()),
+            calls: std::sync::Mutex::new(vec![]),
+        };
+        let login = Login {
+            executable: Path::new("/opt/homebrew/bin/claude"),
+            home: Path::new("/home/u"),
+            user: OsStr::new("u"),
+            config_dir: Path::new(config),
+            scratch: Path::new("/scratch/empty"),
+        };
+        let result = refresh_if_expiring(&script, &login, &|| now, deadline);
+        (result, script.calls.into_inner().unwrap())
+    };
+    let hour = 3_600_000;
+    let run = |config: &str, items: Vec<Vec<u8>>| run_by(config, items, now + hour);
+
+    // A spent deadline runs nothing.
+    let (token, calls) = run_by("/home/u/.claude", vec![], now);
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    assert!(calls.is_empty());
+
+    // A live token is used as read: no refresh, and Debug never shows it.
+    let (token, calls) = run("/home/u/.claude", vec![item("fixture-access", now + hour)]);
+    let token = token.expect("live token");
+    let printed = format!("{token:?}");
+    assert!(!printed.contains("fixture-access") && !printed.contains("fixture-refresh"));
+    assert_eq!(calls.len(), 1);
+    let (argv, env, cwd) = &calls[0];
+    assert_eq!(
+        argv[1..],
+        [
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            "u",
+            "-w"
+        ]
+    );
+    assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
+    assert_eq!(cwd, Path::new("/scratch/empty"));
+
+    // Inside the window the CLI refreshes once, in the empty scratch directory
+    // with hooks, MCP servers, slash commands and session files off.
+    let expiring = item("fixture-access", now + 14 * 60 * 1000);
+    let (token, calls) = run(
+        "/home/u/.claude",
+        vec![expiring.clone(), item("fixture-renewed", now + hour)],
+    );
+    token.expect("refreshed token");
+    let (argv, _, cwd) = &calls[1];
+    assert_eq!(argv[0], "/opt/homebrew/bin/claude");
+    for flag in [
+        "--safe-mode",
+        "--strict-mcp-config",
+        r#"{"disableAllHooks":true}"#,
+        "--disable-slash-commands",
+        "--no-session-persistence",
+    ] {
+        assert!(argv.iter().any(|a| a == flag), "{flag}");
+    }
+    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(calls.len(), 3);
+
+    // The CLI may keep a token inside the window; one with a minute left is
+    // accepted, one about to expire is refused.
+    let (token, _) = run("/home/u/.claude", vec![expiring.clone(), expiring.clone()]);
+    token.expect("still usable");
+    let (token, _) = run(
+        "/home/u/.claude",
+        vec![expiring, item("fixture-access", now + 30_000)],
+    );
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+
+    // Another identity's directory names its own keychain item and config.
+    let (token, calls) = run(
+        "/home/u/.claude-work",
+        vec![b"not json".to_vec(), b"not json".to_vec()],
+    );
+    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    let (argv, env, _) = &calls[0];
+    let suffix = crate::claude::keychain_suffix(b"/home/u/.claude-work");
+    assert_eq!(argv[3], format!("Claude Code-credentials-{suffix}"));
+    assert!(env.contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned()));
+    assert!(
+        calls[1]
+            .1
+            .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
+    );
 }

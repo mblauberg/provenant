@@ -101,6 +101,9 @@ impl StreamState {
         self.session = Some(session.into());
         self.expected_model = Some(model.into());
     }
+    pub(crate) fn adapter(&self) -> &'static str {
+        self.adapter
+    }
     pub(crate) fn check_adapter(&self, adapter: &str) -> Result<(), ProviderError> {
         if self.adapter == adapter {
             Ok(())

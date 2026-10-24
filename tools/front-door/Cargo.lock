@@ -556,8 +556,10 @@ dependencies = [
  "provenant-core",
  "provenant-quota",
  "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

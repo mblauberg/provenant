@@ -1,0 +1,170 @@
+[
+  {
+    "access_mode": "read_only",
+    "activation_eligible": true,
+    "answering_model": null,
+    "argv": [
+      "/opt/homebrew/Caskroom/codex/0.159.0/bin/codex",
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-c",
+      "service_tier=\"default\"",
+      "-m",
+      "gpt-6-luna",
+      "-"
+    ],
+    "cli_version": "codex-cli 0.159.0",
+    "confinement": "sandbox-exec deny-default profile, observations in codex/confinement.json",
+    "fixture": "codex/live-read_only-fresh.jsonl",
+    "id": "codex-live-read_only-fresh",
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok",
+    "session_mode": "fresh",
+    "sha256": "68b0508713db76d1088aef92e3d6bd40167420e8b5517cb2bd4c1e214ab3176c",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ]
+  },
+  {
+    "access_mode": "read_only",
+    "activation_eligible": true,
+    "answering_model": null,
+    "argv": [
+      "/opt/homebrew/Caskroom/codex/0.159.0/bin/codex",
+      "exec",
+      "resume",
+      "FIXTURE_SESSION_IDENTIFIER",
+      "--json",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-c",
+      "service_tier=\"default\"",
+      "-m",
+      "gpt-6-luna",
+      "-"
+    ],
+    "cli_version": "codex-cli 0.159.0",
+    "confinement": "sandbox-exec deny-default profile, observations in codex/confinement.json",
+    "fixture": "codex/live-read_only-resume.jsonl",
+    "id": "codex-live-read_only-resume",
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok again",
+    "session_mode": "resume",
+    "sha256": "7178bcd381edcce069b98e3ea86f8fe3110cf8d58c67034c7773594f4b2295e9",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ]
+  },
+  {
+    "access_mode": "worktree_write",
+    "activation_eligible": true,
+    "answering_model": null,
+    "argv": [
+      "/opt/homebrew/Caskroom/codex/0.159.0/bin/codex",
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-c",
+      "service_tier=\"default\"",
+      "-m",
+      "gpt-6-luna",
+      "-"
+    ],
+    "cli_version": "codex-cli 0.159.0",
+    "confinement": "sandbox-exec deny-default profile, observations in codex/confinement.json",
+    "fixture": "codex/live-worktree_write-fresh.jsonl",
+    "id": "codex-live-worktree_write-fresh",
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Create the file note.txt in the current directory containing the word ok, then reply with the word ok",
+    "session_mode": "fresh",
+    "sha256": "ae4062581a6d90492cf2a2b2ce47df2e040a93c0bbd172c6759cdf3d31749a5b",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ]
+  },
+  {
+    "access_mode": "worktree_write",
+    "activation_eligible": true,
+    "answering_model": null,
+    "argv": [
+      "/opt/homebrew/Caskroom/codex/0.159.0/bin/codex",
+      "exec",
+      "resume",
+      "FIXTURE_SESSION_IDENTIFIER",
+      "--json",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-c",
+      "service_tier=\"default\"",
+      "-m",
+      "gpt-6-luna",
+      "-"
+    ],
+    "cli_version": "codex-cli 0.159.0",
+    "confinement": "sandbox-exec deny-default profile, observations in codex/confinement.json",
+    "fixture": "codex/live-worktree_write-resume.jsonl",
+    "id": "codex-live-worktree_write-resume",
+    "kind": "live_recording",
+    "outcome": "Success",
+    "platform": "macOS 27.0.1 arm64",
+    "process_exit": 0,
+    "prompt": "Reply with the word ok again",
+    "session_mode": "resume",
+    "sha256": "046d7d65822dbe2ff09882e114cead9b6adb51ae8321da12fb636e94599f429e",
+    "source": {
+      "kind": "live_confined_run",
+      "recorder": "crates/providers/examples/record.rs"
+    },
+    "substitution_classes": [
+      "session_identifier",
+      "local_path",
+      "email",
+      "identifier",
+      "token"
+    ]
+  }
+]

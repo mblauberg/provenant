@@ -65,7 +65,7 @@ fn exact_unknown_is_retained_but_never_upgraded_or_activated()
     assert!(matches!(
         route.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Disabled
+            reason: RouteExclusionReason::UnknownAvailability
         }
     ));
     assert_eq!(route.exclusions.len(), 1);
@@ -228,12 +228,13 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
         ["second", "third"]
     );
     assert_eq!(route.exclusions.len(), 3);
-    assert!(route.alternatives.as_slice().iter().all(|a| matches!(
-        a.readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Disabled
-        }
-    )));
+    assert!(
+        route
+            .alternatives
+            .as_slice()
+            .iter()
+            .all(|a| matches!(a.readiness, RouteReadiness::Unavailable { .. }))
+    );
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/primary")?])?);
     assert!(matches!(
         resolve(&query, &context),
@@ -308,8 +309,20 @@ fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::e
         listed.availability.first().and_then(|a| a.age_seconds),
         Some(20)
     );
+    // Enabled and available, Codex reaches the next gate: disclosure.
     assert!(matches!(
         resolve(&request("codex/test")?, &context)?.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::DisclosureDenied
+        }
+    ));
+    // A fresh record cannot activate an adapter the matrix leaves disabled.
+    let mut cursor = availability();
+    cursor.adapter = "cursor".into();
+    let records = [cursor];
+    context.availability = &records;
+    assert!(matches!(
+        resolve(&request("cursor/test")?, &context)?.readiness,
         RouteReadiness::Unavailable {
             reason: RouteExclusionReason::Disabled
         }
@@ -556,7 +569,7 @@ impl provenant_providers::Adapter for RecordedFixture {
     fn prepare(
         &self,
         i: provenant_providers::PrepareInput<'_>,
-    ) -> Result<provenant_providers::AdapterLaunchSpec, provenant_providers::ProviderError> {
+    ) -> Result<provenant_providers::LaunchSpec, provenant_providers::ProviderError> {
         self.0.prepare(i)
     }
     fn stream(
