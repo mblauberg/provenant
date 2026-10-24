@@ -435,8 +435,9 @@ fn submitted_policy(
     operation: &str,
     concurrency: Option<u64>,
     knobs: &[&str],
+    route: Value,
 ) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
-    let task = json!({"prompt":"fixture", "route":{"model":"codex/fixture","task_class":"mechanical"},"timeout_ms":60000});
+    let task = json!({"prompt":"fixture", "route":route,"timeout_ms":60000});
     let mut arguments = json!({"op":"submission","operation_id":operation,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
     if let Some(n) = concurrency {
         arguments["concurrency"] = n.into();
@@ -462,6 +463,61 @@ fn submitted_policy(
         rig.state.join("runs").join(run).join("request.json"),
     )?)?;
     Ok((request, attempt))
+}
+
+#[test]
+fn submission_preserves_explicit_named_route_tier() -> Result {
+    let rig = TestRig::new()?;
+    let (request, _) = submitted_policy(
+        &rig,
+        "named-tier",
+        None,
+        &[],
+        json!({"route":"senior","task_class":"mechanical"}),
+    )?;
+    assert_eq!(
+        request.tasks[0].route,
+        provenant_records::run::RequestedRoute::Named {
+            name: "senior".into(),
+            effort: None,
+        }
+    );
+    assert_eq!(
+        request.tasks[0].profile.task_class.as_deref(),
+        Some("mechanical")
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn submission_does_not_advertise_unsupported_inputs() -> Result {
+    let rig = TestRig::new()?;
+    let replies = mcp(
+        &rig,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})],
+    )?;
+    let tools = replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("tools")?;
+    let submit = tools["result"]["tools"]
+        .as_array()
+        .ok_or("tool list")?
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .ok_or("fabric_submit")?;
+    assert!(!submit["inputSchema"].to_string().contains("inputs"));
+
+    let reply = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"unsupported-inputs","tasks":[{"prompt":"fixture","inputs":[],"route":{"route":"senior"},"timeout_ms":60000}]}}}),
+        ],
+    )?;
+    let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    assert_eq!(call["result"]["structuredContent"]["code"], "invalid_input");
+    rig.assert_legacy_unchanged()
 }
 
 #[test]
@@ -491,7 +547,13 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             1,
         ),
     ] {
-        let (request, attempt) = submitted_policy(&rig, operation, explicit, &knobs)?;
+        let (request, attempt) = submitted_policy(
+            &rig,
+            operation,
+            explicit,
+            &knobs,
+            json!({"model":"codex/fixture","task_class":"mechanical"}),
+        )?;
         assert_eq!(request.concurrency, expected);
         let task = &request.tasks[0];
         assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
@@ -521,7 +583,13 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         ("config-silence", vec![], 2000),
         ("dispatch-silence", vec!["lanes.silence_seconds=1"], 1000),
     ] {
-        let (request, _) = submitted_policy(&rig, operation, None, &knobs)?;
+        let (request, _) = submitted_policy(
+            &rig,
+            operation,
+            None,
+            &knobs,
+            json!({"model":"codex/fixture","task_class":"mechanical"}),
+        )?;
         let plan = provenant_run::capture_plan(&request.tasks[0]);
         assert_eq!(plan.silence_ms, threshold);
         assert!(!plan.silent(threshold - 1, Some(0)));

@@ -3677,14 +3677,6 @@
                       }
                     ]
                   },
-                  "inputs": {
-                    "items": {
-                      "$ref": "#/$defs/Artifact"
-                    },
-                    "maxItems": 100,
-                    "minItems": 0,
-                    "type": "array"
-                  },
                   "prompt": {
                     "maxLength": 65536,
                     "minLength": 1,
