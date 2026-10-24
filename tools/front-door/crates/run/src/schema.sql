@@ -29,6 +29,10 @@ CREATE TABLE spacing (
 CREATE TABLE continuations (
  target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)
 ) STRICT;
+CREATE TABLE cancellations (
+ project TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, target TEXT NOT NULL,
+ PRIMARY KEY(project, actor, operation)
+) STRICT;
 CREATE TABLE events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
  attempt TEXT NOT NULL REFERENCES attempts(id), revision INTEGER NOT NULL,

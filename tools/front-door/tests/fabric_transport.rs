@@ -331,5 +331,26 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             .iter()
             .any(|event| event["record"]["kind"] == "run_changed")
     );
+    // A cancel operation is bound to its target: a replay is answered, the
+    // same ID for another target is a conflict.
+    let other = json!({"host":null,"attempt":"00000000000000000000000000000001"});
+    let cancel = |id: u64, target: &Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":target,"operation_id":"stop"}}});
+    let replies = mcp(
+        &rig,
+        &[cancel(1, &target), cancel(2, &target), cancel(3, &other)],
+    )?;
+    for id in [1, 2] {
+        let reply = &replies.iter().find(|r| r["id"] == id).ok_or("cancel")?["result"];
+        assert_ne!(reply["isError"], true, "{reply}");
+        assert_eq!(
+            reply["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
+            "{reply}"
+        );
+    }
+    let conflict = &replies.iter().find(|r| r["id"] == 3).ok_or("conflict")?["result"];
+    assert_eq!(
+        conflict["structuredContent"]["code"], "conflict",
+        "{conflict}"
+    );
     rig.assert_legacy_unchanged()
 }

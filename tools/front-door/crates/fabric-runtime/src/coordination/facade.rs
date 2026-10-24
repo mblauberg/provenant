@@ -164,6 +164,8 @@ pub enum FacadeError {
     ConfinementRefused,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
+    #[error("artifact exceeds max_bytes; page it with an output read")]
+    OutputTooLarge,
     #[error("stored state is corrupt")]
     StateCorrupt,
     #[error("output publication failed")]
@@ -191,6 +193,7 @@ impl FacadeError {
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
+            Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt => "state_corrupt",
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",

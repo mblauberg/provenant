@@ -121,7 +121,7 @@ pub(super) fn exit() -> ExitObservation {
 }
 #[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -257,7 +257,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
 }
 #[test]
 fn oversize_is_refused_before_publication_or_read() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -315,7 +315,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
 #[test]
 fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResult {
     use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -409,7 +409,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         "committed",
         "withdraw-sealed",
     ] {
-        let temp = tempfile::tempdir_in("/tmp")?;
+        let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let argv: Vec<OsString> = vec![
             std::env::current_exe()?.into_os_string(),
@@ -530,7 +530,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
 
 #[test]
 fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -571,7 +571,7 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
 
 #[test]
 fn full_database_retains_admission_and_recovers_original_terminal_intent() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -655,7 +655,7 @@ fn admission_count(store: &RunStore) -> std::result::Result<i64, rusqlite::Error
 
 #[test]
 fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();

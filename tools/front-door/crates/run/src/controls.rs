@@ -57,6 +57,35 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Bind a cancel operation to its target before any attempt is touched.
+    /// The same ID for the same target is a replay; for another target it is
+    /// an operation conflict.
+    pub fn bind_cancel(
+        &self,
+        operation: &OperationId,
+        target: &str,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let (project, actor) = (
+            self.context.project_id.to_string(),
+            self.context.actor_id.to_string(),
+        );
+        let bound: String = call.retry(|| {
+            self.db.execute(
+                "INSERT INTO cancellations VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
+                params![project, actor, operation.as_str(), target],
+            )?;
+            Ok(self.db.query_row(
+                "SELECT target FROM cancellations WHERE project=?1 AND actor=?2 AND operation=?3",
+                params![project, actor, operation.as_str()],
+                |r| r.get(0),
+            )?)
+        })?;
+        if bound != target {
+            return Err(RunError::OperationConflict);
+        }
+        Ok(())
+    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.

@@ -87,7 +87,7 @@ fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
 
 #[test]
 fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
@@ -146,7 +146,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
 
 #[test]
 fn prepare_refusal_is_terminal_without_custody() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
@@ -178,7 +178,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
 
 #[test]
 fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
@@ -234,7 +234,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
 
 #[test]
 fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
@@ -276,13 +276,20 @@ fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outco
 
 #[test]
 fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let batch = two_tasks(2);
     store.create(&batch, &call)?;
     let [queued, starting] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+    let op = provenant_core::OperationId::parse("stop")?;
+    store.bind_cancel(&op, &queued.to_string(), &call)?;
+    store.bind_cancel(&op, &queued.to_string(), &call)?;
+    assert!(matches!(
+        store.bind_cancel(&op, &starting.to_string(), &call),
+        Err(RunError::OperationConflict)
+    ));
 
     assert_eq!(
         store.cancel(queued, "stop", &call)?,
@@ -332,7 +339,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
 
 #[test]
 fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
@@ -392,7 +399,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 
 #[test]
 fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
@@ -458,7 +465,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
 }
 #[test]
 fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;

@@ -60,6 +60,7 @@ impl From<run::RunError> for Fail {
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
             E::Nonterminal => (Status::Refused, "NONTERMINAL"),
             E::Conflict => (Status::Refused, "CONFLICT"),
+            E::Cancelled => (Status::Error, "CANCELLED"),
             E::Refused => (Status::Refused, "REFUSED"),
             E::Capacity => (Status::Refused, "QUEUE_FULL"),
             E::Contention => (Status::Error, "CONTENTION"),
@@ -1068,6 +1069,15 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                     "no matching attempts",
                 ));
             }
+            let target = &targets[0];
+            let bound = match (target.attempt, target.task) {
+                (Some(attempt), _) => attempt.to_string(),
+                (None, Some(task)) => format!("{}/{task}", target.run),
+                (None, None) => target.run.to_string(),
+            };
+            session
+                .store
+                .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
             for id in selected {

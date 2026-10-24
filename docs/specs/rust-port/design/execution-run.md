@@ -752,8 +752,10 @@ scheduler daemon. Within that, the lane decided:
   receipt says requested, not exited. An attempt still mid-handoff is retried
   for half the call budget; if its launch summary never appears it is reported
   as unobservable and the command fails, so the caller retries or reconciles.
-  One attempt's failure never hides the other receipts. Cancellation is
-  naturally idempotent, so the operation ID is echoed, not stored.
+  One attempt's failure never hides the other receipts. The operation ID is
+  bound to its target in `cancellations` before anything is touched: the same
+  ID and target is a replay, another target is an operation conflict. Fabric
+  reports an unobservable cancel as `launch_unknown`.
 - **Resume** creates a new single-task run whose attempt is the next attempt
   number of the prior task, with `retry_of` set and route, access and timeout
   copied from it. Each terminal attempt can be continued once: a
@@ -806,7 +808,8 @@ scheduler daemon. Within that, the lane decided:
 - **Fabric's facade** calls the CLI's shared `submit`, `continue_attempt`,
   cancel and output paths, so Fabric submissions, graph nodes and the CLI
   admit, record and launch identically. Output fetch accepts only the
-  attempt's bound result digest. Remote runs forward to the owning host. Run
+  attempt's bound result digest and returns the whole result, paging the
+  64 KiB reader, or refuses with `output_too_large`. Remote runs forward to the owning host. Run
   listing stays `owner_unavailable`. A graph route refused before launch
   (`rejected`, never launched) maps to `adapter_unavailable`, so the graph
   tries the next route.

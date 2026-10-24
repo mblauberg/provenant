@@ -829,6 +829,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
         "CONFLICT" | "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
+        "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
         "UNSUPPORTED" => FacadeError::OwnerUnavailable,
         _ => FacadeError::Io,
@@ -1027,6 +1028,7 @@ impl BinaryRunOwner<'_> {
             PeerResult::Error { code, .. } => Err(match code.as_str() {
                 "not_found" => FacadeError::NotFound,
                 "worktree_missing" => FacadeError::WorktreeMissing,
+                "output_too_large" => FacadeError::OutputTooLarge,
                 "invalid_input" => FacadeError::InvalidInput,
                 "confinement_refused" => FacadeError::ConfinementRefused,
                 "continuation_unsupported" => FacadeError::ContinuationUnsupported,
@@ -1189,25 +1191,36 @@ impl RunOwner for BinaryRunOwner<'_> {
                 {
                     return Err(FacadeError::NotFound);
                 }
-                let chunk = session
-                    .store
-                    .read_output(
-                        record.attempt_id,
-                        provenant_run::ArtifactPart::Result,
-                        provenant_run::ByteRange {
-                            offset: 0,
-                            max_bytes,
-                        },
-                        &session.context,
-                        &call,
-                    )
-                    .map_err(run_error)?;
-                Ok(OutputResult::Artifact {
-                    target,
-                    artifact,
-                    digest: digest(&chunk),
-                    bytes: OutputBytes::from_bytes(chunk.bytes),
-                })
+                // A fetch returns the whole artifact or refuses; the reader
+                // pages at 64 KiB, below Fabric's fetch limit.
+                let mut bytes = Vec::new();
+                loop {
+                    let chunk = session
+                        .store
+                        .read_output(
+                            record.attempt_id,
+                            provenant_run::ArtifactPart::Result,
+                            provenant_run::ByteRange {
+                                offset: bytes.len() as u64,
+                                max_bytes: provenant_records::run::OUTPUT_LIMIT,
+                            },
+                            &session.context,
+                            &call,
+                        )
+                        .map_err(run_error)?;
+                    if chunk.len > max_bytes {
+                        return Err(FacadeError::OutputTooLarge);
+                    }
+                    bytes.extend_from_slice(&chunk.bytes);
+                    if chunk.eof {
+                        return Ok(OutputResult::Artifact {
+                            target,
+                            artifact,
+                            digest: digest(&chunk),
+                            bytes: OutputBytes::from_bytes(bytes),
+                        });
+                    }
+                }
             }
         }
     }
@@ -1303,10 +1316,19 @@ impl RunOwner for BinaryRunOwner<'_> {
                 }
                 let store = self.store(budget, cancel)?;
                 let call = self.call(budget, cancel);
-                let reason = format!("cancelled by Fabric operation {operation_id}");
                 store
+                    .bind_cancel(operation_id, &target.attempt.to_string(), &call)
+                    .map_err(run_error)?;
+                let reason = format!("cancelled by Fabric operation {operation_id}");
+                let receipt = store
                     .cancel(target.attempt, &reason, &call)
                     .map_err(run_error)?;
+                // Without a launch summary nothing was asked to stop.
+                if let provenant_run::CancelReceipt::Unobservable { .. } = receipt {
+                    return Err(FacadeError::LaunchUnknown {
+                        operation_id: operation_id.clone(),
+                    });
+                }
                 Ok(RunResult::Cancel {
                     attempt: store.record(target.attempt, &call).map_err(run_error)?,
                 })
