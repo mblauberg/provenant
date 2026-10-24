@@ -130,6 +130,33 @@ pub(super) fn exit() -> ExitObservation {
     }
 }
 #[test]
+fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        open_pr: false,
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempts[0].attempt_id;
+    let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    let receipt = record.delivery.ok_or("delivery state missing")?;
+    assert_eq!(receipt.state, WriterDeliveryState::NotAttempted);
+    assert_eq!((receipt.remote.as_str(), receipt.head), ("origin", None));
+    Ok(())
+}
+#[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

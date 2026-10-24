@@ -151,8 +151,21 @@ pub fn prepare_writer(
     )
     .map_err(error)?;
     let state_dir = Directory::open_anchor(state)?;
-    let projects = state_dir.open_verified_directory(OsStr::new("worktrees"))?;
-    let project_state = projects.open_verified_directory(OsStr::new(&project.to_string()))?;
+    // Git knows the worktree but Provenant holds no state for it: it was not
+    // created by `provenant worktree create`.
+    let unregistered = |error: provenant_supervisor::fs::FsError| {
+        if error.is_not_found() {
+            RunError::WorktreeUnregistered(request.worktree.clone())
+        } else {
+            error.into()
+        }
+    };
+    let projects = state_dir
+        .open_verified_directory(OsStr::new("worktrees"))
+        .map_err(unregistered)?;
+    let project_state = projects
+        .open_verified_directory(OsStr::new(&project.to_string()))
+        .map_err(unregistered)?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, project, &worktree, &branch, base)?;
     Ok(WriterLaunch {

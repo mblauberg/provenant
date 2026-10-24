@@ -110,6 +110,10 @@ pub enum WriterDeliveryState {
     /// Delivery was requested but the lane head equals the head at launch, so
     /// nothing was pushed. The lane is not failed; the chair sees no commit.
     NoNewCommits,
+    /// Delivery was requested but no host delivery ran for this attempt (for
+    /// example a recovered terminal), so nothing was pushed and the chair must
+    /// deliver the head by hand.
+    NotAttempted,
     /// The writer succeeded, but host delivery needs chair pickup. No retry.
     Failed {
         stage: WriterDeliveryStage,

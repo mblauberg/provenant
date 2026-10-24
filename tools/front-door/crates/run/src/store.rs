@@ -523,6 +523,22 @@ impl RunStore {
                 let receipt: WriterDeliveryReceipt = decode(&raw)?;
                 next.head = receipt.head;
                 next.delivery = Some(receipt);
+            } else if let Some(deliver) = self
+                .request(old.run_id, call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == old.task_id)
+                .and_then(|task| task.deliver)
+            {
+                // Requested delivery that never ran must not read as success
+                // with no trace.
+                next.delivery = Some(WriterDeliveryReceipt {
+                    schema_version: 1,
+                    remote: deliver.remote,
+                    branch: deliver.branch,
+                    head: None,
+                    state: WriterDeliveryState::NotAttempted,
+                });
             }
         }
         if matches!(old.state, AttemptState::Terminal { .. }) {

@@ -61,6 +61,11 @@ pub enum RunError {
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
+    #[error(
+        "worktree {0} is not registered with Provenant; create it with \
+         `provenant worktree create --base <branch> <branch>`"
+    )]
+    WorktreeUnregistered(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
