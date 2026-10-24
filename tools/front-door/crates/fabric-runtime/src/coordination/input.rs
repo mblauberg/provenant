@@ -665,16 +665,18 @@ mod tests {
             &backoff,
         );
 
-        let error = service
-            .task(
-                TaskInput::Claim {
-                    id: provenant_core::TaskId::from_bytes([3; 16]),
-                    lease_ms: 999,
-                },
-                budget,
-                &cancel,
-            )
-            .unwrap_err();
+        // Task mutations need an operation id; `mutate` supplies a fresh one.
+        let error = CoordinationApi::mutate(
+            &service,
+            crate::coordination::Mutation::Task(TaskInput::Claim {
+                id: provenant_core::TaskId::from_bytes([3; 16]),
+                lease_ms: 999,
+            }),
+            None,
+            budget,
+            &cancel,
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             CoordinationError::Input(error) if error.path == "lease_ms"

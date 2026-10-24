@@ -1113,7 +1113,7 @@ mod tests {
                 actor: ActorId::from_bytes([2; 16]),
             }
         }
-        fn service(&self) -> CoordinationService<'_> {
+        fn service(&self) -> LocalCoordination<'_> {
             let budget = WaitBudget::cli(self.clock.mono_now(), 5).expect("test budget");
             let cancel = CancelToken::new();
             let request = Request {
@@ -1123,7 +1123,7 @@ mod tests {
                 backoff: &self.backoff,
             };
             let store = Store::open(&self.root, &request).expect("isolated store");
-            CoordinationService::new(store, self.project, self.actor, &self.clock, &self.backoff)
+            LocalCoordination::new(store, self.project, self.actor, &self.clock, &self.backoff)
         }
         fn budget(&self) -> WaitBudget {
             WaitBudget::mcp(self.clock.mono_now(), 5).expect("test MCP budget")
@@ -1168,7 +1168,7 @@ mod tests {
         let backoff = ThreadWait;
         let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
         let cancel = CancelToken::new();
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &root,
             ProjectId::from_bytes([31; 16]),
             ActorId::from_bytes([32; 16]),
@@ -1385,7 +1385,7 @@ mod tests {
             panic!("update result")
         };
         assert_eq!(updated.objective, "review and report");
-        let other = CoordinationService::new(
+        let other = LocalCoordination::new(
             Store::open(
                 &fixture.root,
                 &Request {
@@ -1489,7 +1489,7 @@ mod tests {
         let fixture = Fixture::new();
         let clock = AdvancingClock::new();
         let cancel = CancelToken::new();
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &fixture.root,
             fixture.project,
             fixture.actor,
@@ -1555,7 +1555,7 @@ mod tests {
         let clock = SimulatedClock(std::cell::Cell::new(0));
         let cancel = CancelToken::new();
         let budget = || WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
-        let service = CoordinationService::open(
+        let service = LocalCoordination::open(
             &fixture.root,
             fixture.project,
             fixture.actor,
