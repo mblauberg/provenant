@@ -231,7 +231,10 @@ impl Matcher {
         let path = path
             .to_str()
             .ok_or(WritingError::Invalid("path is not UTF-8"))?;
-        let quoted = self.quoted_paths.iter().any(|p| path.starts_with(p));
+        let quoted = self
+            .quoted_paths
+            .iter()
+            .any(|p| Path::new(path).starts_with(Path::new(p)));
         let latex = self.latex
             && matches!(
                 Path::new(path).extension().and_then(|x| x.to_str()),

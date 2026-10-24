@@ -194,7 +194,21 @@ fn utility_requires_free_opt_in_and_keeps_haiku_low_effort()
             row.trains_on_prompts = Some(true);
         }
     }
-    assert!(resolve(&request, &context(&catalogue, &config, now()?)).is_err());
+    match resolve(&request, &context(&catalogue, &config, now()?)).unwrap_err() {
+        RoutingError::NoEligiblePoolMember { exclusions } => {
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "confidential model")
+            );
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "free model disabled")
+            );
+        }
+        error => panic!("unexpected pool error: {error}"),
+    }
     let mut query = query;
     query["allow_free"] = serde_json::json!(true);
     let request: RouteRequest = serde_json::from_value(query)?;
@@ -753,6 +767,49 @@ fn activation_availability_access_and_scoped_quota_are_independent_gates()
         120,
     )?];
     context.quota = &current;
+    assert_eq!(
+        reason(&resolve(&query, &context)?),
+        Some(&RouteExclusionReason::Exhausted)
+    );
+    let newer_unknown = [
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            1,
+            80,
+            120,
+        )?,
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Unknown,
+            2,
+            90,
+            120,
+        )?,
+    ];
+    context.quota = &newer_unknown;
+    assert!(reason(&resolve(&query, &context)?).is_none());
+    let expired_newest = [
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            1,
+            80,
+            120,
+        )?,
+        quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::Exhausted,
+            2,
+            90,
+            99,
+        )?,
+    ];
+    context.quota = &expired_newest;
     assert_eq!(
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::Exhausted)

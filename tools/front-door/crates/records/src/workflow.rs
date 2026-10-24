@@ -48,7 +48,7 @@ pub struct RiskFactors {
     pub external_effects: ExternalEffects,
     pub critical_surface: CriticalSurface,
 }
-/// User settings may strengthen the compiled factor floors.
+/// Compiled factor floors used by the composition edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskPolicy {
@@ -73,7 +73,7 @@ pub struct ApprovalRef {
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,
 }
-/// Constructed only by the composition edge after reading originating user authority.
+/// Evidence reference supplied by the composition edge for user approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserApproval {
     pub actor_id: ActorId,
@@ -225,7 +225,6 @@ enum DecisionState {
 #[derive(Debug, Clone, Copy)]
 pub struct DecisionContext {
     pub tier: RiskTier,
-    pub scope_requires_approval: bool,
     pub created_at: UtcMicros,
     pub updated_at: UtcMicros,
 }
@@ -308,9 +307,7 @@ impl Decision {
             {
                 return Err(RecordError::DecisionBounds);
             }
-            if (context.tier == RiskTier::Terminal || context.scope_requires_approval)
-                && self.user_approval().is_none()
-            {
+            if context.tier == RiskTier::Terminal && self.user_approval().is_none() {
                 return Err(RecordError::DecisionApproval);
             }
         }
@@ -384,7 +381,6 @@ impl DeliveryReceipt {
         self.risk.validate_shape()?;
         self.decision.validate(DecisionContext {
             tier: self.risk.tier(),
-            scope_requires_approval: false,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -405,7 +401,6 @@ impl DeliveryReceipt {
         self.updated_at = self.updated_at.max(at);
         self.decision = decide(DecisionContext {
             tier: self.risk.tier(),
-            scope_requires_approval: false,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })?;
@@ -471,7 +466,7 @@ impl DeliveryReceipt {
         self.updated_at
     }
 }
-/// Settings are passed in by the caller; workflow never loads configuration.
+/// Policy is supplied by the caller; production currently uses compiled defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewPolicy {
@@ -590,10 +585,9 @@ mod tests {
     #[test]
     fn decisions_enforce_approval_bounds_and_nonblank_reason() {
         for constructor in [Decision::accept, Decision::abandon] {
-            for (tier, scope) in [(RiskTier::Terminal, false), (RiskTier::Routine, true)] {
+            for tier in [RiskTier::Terminal] {
                 let context = DecisionContext {
                     tier,
-                    scope_requires_approval: scope,
                     created_at: time(10),
                     updated_at: time(20),
                 };
@@ -634,7 +628,6 @@ mod tests {
             }
             let context = DecisionContext {
                 tier: RiskTier::Routine,
-                scope_requires_approval: false,
                 created_at: time(10),
                 updated_at: time(20),
             };
@@ -685,7 +678,6 @@ mod tests {
         assert!(serde_json::from_value::<DeliveryReceipt>(value).is_err());
         let context = DecisionContext {
             tier: RiskTier::Routine,
-            scope_requires_approval: false,
             created_at: time(10),
             updated_at: time(20),
         };
@@ -728,7 +720,6 @@ mod tests {
         previous.decision = Decision::accept(
             DecisionContext {
                 tier: RiskTier::Routine,
-                scope_requires_approval: false,
                 created_at: time(20),
                 updated_at: time(20),
             },

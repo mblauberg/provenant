@@ -3,6 +3,7 @@ use provenant_supervisor::fs::{Directory, FileKind};
 use std::{ffi::OsStr, path::Component};
 const MAX_FILES: usize = 256;
 const MAX_TOTAL: usize = 16 * 1024 * 1024;
+const MAX_VISITED_ENTRIES: usize = 4096;
 fn relative<'a>(root: &Path, path: &'a Path) -> Result<&'a Path, WritingError> {
     let path = if path.is_absolute() {
         path.strip_prefix(root)
@@ -101,7 +102,7 @@ struct Scan<'a> {
 impl Scan<'_> {
     fn visit(&mut self, dir: &Directory, name: &OsStr, path: &Path) -> Result<(), WritingError> {
         self.visited += 1;
-        if self.visited > 4096 {
+        if self.visited > MAX_VISITED_ENTRIES {
             return Err(WritingError::EvidenceLimit);
         }
         let metadata = dir.metadata_at(name, false).map_err(|e| {
