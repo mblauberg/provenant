@@ -166,8 +166,13 @@ pub struct Dispatch {
     pub access: Access,
     #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub provider_timeout: u64,
-    #[arg(long, default_value = "4", requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=8))]
-    pub concurrency: u64,
+    #[arg(long, requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=8))]
+    pub concurrency: Option<u64>,
+    /// Override an effective harness knob for this dispatch (NAME=VALUE).
+    #[arg(long = "knob")]
+    pub knobs: Vec<String>,
+    #[arg(long)]
+    pub task_class: Option<String>,
     #[arg(long)]
     pub host: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]

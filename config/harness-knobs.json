@@ -2,23 +2,27 @@
   "schema_version": 1,
   "knobs": {
     "effort.shift": {
-      "type": "int", "min": -1, "max": 1, "default": 0, "status": "wired",
+      "type": "int", "min": -1, "max": 1, "default": 0, "status": "advisory",
+      "reason": "No evidenced effort controls or task-class floor policy exist in the Rust routing catalogue.",
       "effect": "Moves a task-class route's effort one step along the effort ladder, never below the task class's policy minimum and only to an effort every configured model takes.",
       "trade_off": "-1 saves reasoning tokens where a route sits above its minimum; +1 buys depth at roughly proportional token cost.",
       "floor": {"crucial": 0}
     },
     "lanes.silence_seconds": {
       "type": "int", "min": 1, "max": 3600, "default": 300, "status": "wired",
-      "effect": "Re-check a silent provider after this many seconds and retain liveness, event and worktree observations; never kill it for silence.",
-      "trade_off": "Lower records silence sooner at the cost of more process and worktree observations."
+      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
+      "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
-      "effect": "Upper bound on lanes one batch runs at once; a lower requested concurrency still stands.",
+      "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/run/src/admission.rs",
+      "effect": "Default number of lanes one batch runs at once; an explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
     },
     "context.ceiling_tokens": {
-      "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "wired",
+      "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "advisory",
+      "reason": "Rust dispatch has no context-compaction path to consume a token ceiling.",
       "effect": "Auto-compaction ceiling for a dispatch that names none; null keeps the catalogue's context.ceiling_tokens.",
       "trade_off": "Lower compacts sooner, so each turn re-reads fewer tokens, at more risk that a long lane loses detail."
     },
@@ -62,7 +66,8 @@
       "trade_off": "Fewer juniors cut lens passes and tokens; more widen family spread on blind spots."
     },
     "routing.pool_mode": {
-      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "wired",
+      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "advisory",
+      "reason": "Rust routing resolves exact routes and explicit fallbacks; it has no weighted model-pool owner.",
       "effect": "top always takes the highest-weight available model; rotate spreads picks by weight across the pool.",
       "trade_off": "rotate spreads quota and families across models at some cost in consistency between lanes."
     },
@@ -80,6 +85,7 @@
     },
     "quota.pace_tolerance": {
       "type": "int", "min": 0, "max": 20, "default": 4, "status": "advisory",
+      "reason": "Rust quota computes availability and admission, not pace against a tolerance.",
       "effect": "Percentage points either side of even use before a quota window reads as ahead of pace or reserve.",
       "trade_off": "Lower flags pacing pressure earlier (fewer limit hits, more rerouting); higher tolerates bursts."
     }

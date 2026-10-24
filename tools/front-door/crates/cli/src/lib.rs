@@ -605,7 +605,7 @@ mod tests {
             panic!("dispatch")
         };
         assert_eq!(request.provider_timeout, 3600);
-        assert_eq!(request.concurrency, 4);
+        assert_eq!(request.concurrency, None);
         let mut words = base.to_vec();
         words.extend(["--mode", "worktree-write"]);
         invalid(&words);
