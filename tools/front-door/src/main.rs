@@ -283,6 +283,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             let holder = provenant_cli::run::HostHolder::new(&holder);
             let hooks = provenant_supervisor::GuardianHooks {
                 holder: Some(&holder),
+                nested_children: Some(&holder),
                 #[cfg(test)]
                 observer: Some(&provenant_supervisor::fixture::RecordedBootObserver),
                 ..Default::default()

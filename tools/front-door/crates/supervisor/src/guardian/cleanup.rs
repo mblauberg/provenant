@@ -185,14 +185,14 @@ impl Driver<'_> {
             Ok(census) => census,
             Err(_) => {
                 self.descendant_stop_allowed = false;
-                self.registry_listed = false;
+                self.escapee_stop_allowed = false;
                 self.reservation.census_incomplete = true;
                 return None;
             }
         };
         let Some(root) = self.reservation.provider.as_ref() else {
             self.descendant_stop_allowed = false;
-            self.registry_listed = false;
+            self.escapee_stop_allowed = false;
             self.reservation.census_incomplete = true;
             return None;
         };
@@ -299,7 +299,11 @@ impl Driver<'_> {
         self.protected
             .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
-        self.registry_listed = registry_listed;
+        self.escapee_stop_allowed = registry_listed
+            || (self.registry.is_none()
+                && self
+                    .nested_children
+                    .is_some_and(|store| store.is_empty(&self.holder_context)));
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
@@ -507,7 +511,7 @@ impl Driver<'_> {
                 }
             }
             #[cfg(target_os = "macos")]
-            if self.registry_listed {
+            if self.escapee_stop_allowed {
                 for delivery in child.stop_marked(escalation, &marked) {
                     self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }

@@ -142,10 +142,20 @@ pub(crate) fn handoff(
     Ok(())
 }
 
+/// The host's nested child lane records for one attempt, read through its
+/// opaque holder context. Only a definite "empty" counts: an unreadable store
+/// or an unknown context answers `false`, never `true`.
+pub trait NestedChildStore {
+    fn is_empty(&self, context: &[u8]) -> bool;
+}
+
 /// Composition seam for Run's bounded provider decoder and confinement filter.
 #[derive(Default)]
 pub struct GuardianHooks<'a> {
     pub children: Option<&'a dyn ChildRegistry>,
+    /// Answers whether the attempt can have no nested child lane when no
+    /// registry is wired.
+    pub nested_children: Option<&'a dyn NestedChildStore>,
     /// Run's terminal transaction. Without one, custody stays fenced after
     /// exit until an explicit recovery verifies Run's release attestations.
     pub holder: Option<&'a dyn Holder>,
@@ -386,7 +396,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         protected: std::collections::BTreeSet::new(),
         registry: hooks.children,
         descendant_stop_allowed: false,
-        registry_listed: false,
+        escapee_stop_allowed: false,
+        nested_children: hooks.nested_children,
         attempt: inherited.attempt_directory,
         writer_dir: inherited.writer_directory,
         reservation,
@@ -445,10 +456,12 @@ struct Driver<'a> {
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
-    /// The nested-child registry was read this tick. Owners it lists that
-    /// cannot be proven stay in `protected`, so a stop aimed at one exact
-    /// other identity is safe even when `descendant_stop_allowed` is not.
-    registry_listed: bool,
+    /// A stop aimed at one exact sandbox escapee is safe this tick: either the
+    /// nested-child registry was read (owners it lists that cannot be proven
+    /// stay in `protected`), or no registry is wired and the host reports no
+    /// nested child lane records. Independent of `descendant_stop_allowed`.
+    escapee_stop_allowed: bool,
+    nested_children: Option<&'a dyn NestedChildStore>,
 }
 #[derive(Default)]
 struct Events {

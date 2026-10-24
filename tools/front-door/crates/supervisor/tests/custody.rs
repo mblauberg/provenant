@@ -1,6 +1,6 @@
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
-    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
+    ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     clock::SystemClock,
     custody::*,
@@ -20,6 +20,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const S2_CENSUS_GATE_ONCE: &str = "s2-census-gate-once";
 const S2_CENSUS_PAUSED: &str = "s2-census-paused";
 const S2_CENSUS_RELEASE: &str = "s2-census-release";
+const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 
@@ -926,6 +927,50 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     wait_for_identity_absence(&owner_identity)?;
     Ok(())
 }
+/// The production shape: no registry is wired, so the host's child store
+/// decides. An empty store ends the escapee; a store with records, which could
+/// hold a nested owner, leaves it alive and reported.
+#[cfg(target_os = "macos")]
+fn escapee_is_ended_only_when_the_host_reports_no_nested_children(root: &Path) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
+    let case = |name: &str| -> Result<(ExitObservation, ProcessIdentity, UnixStream)> {
+        let ready_path = root.join(format!("{name}.sock"));
+        let ready_listener = UnixListener::bind(&ready_path)?;
+        let (_writer, handle) = start(
+            root,
+            name,
+            "s2-detach-provider",
+            &[
+                ready_path.into_os_string(),
+                scope().attempt.sandbox_lookup_name().into(),
+            ],
+            CapturePlan {
+                root_flush_ms: 30,
+                descendant_grace_ms: 10,
+                ..CapturePlan::default()
+            },
+        )?;
+        let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+        byte(&mut stream, b'R')?;
+        let escapee = process_identity(read_pid_line(&mut stream)?)?;
+        let exit = exited(&handle)?;
+        Ok((exit, escapee, stream))
+    };
+    let (exit, escapee, _stream) = case("empty")?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    wait_for_identity_absence(&escapee)?;
+    std::fs::create_dir_all(home.join("children/nested-lane"))?;
+    let (exit, escapee, stream) = case("records")?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    process_identity(escapee.pid)?;
+    // Only the process this test started: it exits when its socket closes.
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
     let ready_path = root.join("mark-ready.sock");
@@ -1071,6 +1116,17 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
     Ok(())
 }
 
+struct FileNestedChildren {
+    home: PathBuf,
+}
+impl NestedChildStore for FileNestedChildren {
+    fn is_empty(&self, _: &[u8]) -> bool {
+        match std::fs::read_dir(self.home.join("children")) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+    }
+}
 struct FileChildRegistry {
     home: PathBuf,
 }
@@ -1673,6 +1729,11 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
+        "escapee_is_ended_only_when_the_host_reports_no_nested_children",
+        escapee_is_ended_only_when_the_host_reports_no_nested_children,
+    ),
+    #[cfg(target_os = "macos")]
+    (
         "detached_descendant_in_the_attempt_sandbox_is_found_and_ended",
         detached_descendant_in_the_attempt_sandbox_is_found_and_ended,
     ),
@@ -1773,6 +1834,9 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        // The production shape wires no registry; only the host's child store.
+        let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
+        let store = FileNestedChildren { home: home.clone() };
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
@@ -1782,7 +1846,8 @@ fn main() -> Result<()> {
         provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
-                children: Some(&registry),
+                children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
+                nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
                 exit_publisher: publisher.as_ref().map(|item| item as &dyn ExitPublisher),
                 stdout_decoder: Some(&Decoder),

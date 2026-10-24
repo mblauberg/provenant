@@ -54,6 +54,27 @@ impl Drop for HostHolder<'_> {
         let _ = self.stop(None);
     }
 }
+impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
+    /// No nested child lane can exist while the attempt's child store is
+    /// absent or has no entries. Any other state, or a failed read, is not empty.
+    fn is_empty(&self, raw: &[u8]) -> bool {
+        let Ok(context) = serde_json::from_slice::<run::HolderContext>(raw) else {
+            return false;
+        };
+        let store = context
+            .roots
+            .state_root
+            .join("children")
+            .join(context.attempt_id.to_string());
+        match std::fs::symlink_metadata(&store) {
+            Ok(meta) if meta.is_dir() => {
+                std::fs::read_dir(&store).is_ok_and(|mut entries| entries.next().is_none())
+            }
+            Ok(_) => false,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+}
 impl Holder for HostHolder<'_> {
     fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
         self.inner.admit(raw, attempt)?;
