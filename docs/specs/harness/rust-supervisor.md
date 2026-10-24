@@ -464,7 +464,7 @@ its 397 lines of tests stay until that fallback retires.
   keeps.
 - [Graph runner](graph-runner.md): consumes run-registry liveness, whose call
   sites S4 preserves.
-- [Fabric v2](../fabric-v2.md): attempt states, statuses and the cleanup rules
+- [Fabric v2 design history](../../archive/specs/fabric-v2.md): attempt states, statuses and the cleanup rules
   ported in S2.
 - [Worker liveness](../../../skills/orchestrate/references/worker-liveness.md):
   kept for the direct-CLI fallback.
