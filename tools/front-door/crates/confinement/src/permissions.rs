@@ -2223,7 +2223,9 @@ mod tests {
         )?;
         fixture.run(&["pack-refs", "--all"])?;
         let missing_parent = common.join("refs/heads/s3");
-        std::fs::remove_dir(&missing_parent)?;
+        if missing_parent.exists() {
+            std::fs::remove_dir(&missing_parent)?;
+        }
         assert!(!missing_parent.exists());
 
         prepare_writer_directories(
@@ -2490,6 +2492,13 @@ mod tests {
                     scope: PathScope::Subtree,
                 }],
                 deny_keychain_access: true,
+                allow_process_fork: true,
+                tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
+                    .map(|path| PathGrant {
+                        path: path.into(),
+                        scope: PathScope::Subtree,
+                    })
+                    .to_vec(),
                 process_executables: executables
                     .iter()
                     .cloned()
@@ -2515,7 +2524,7 @@ mod tests {
                     FixtureOperation::UndeclaredProcessExec,
                     FixtureOutcome::Denied,
                 ),
-                (FixtureOperation::ProcessFork, FixtureOutcome::Denied),
+                (FixtureOperation::ProcessFork, FixtureOutcome::Allowed),
                 (FixtureOperation::StateWrite, FixtureOutcome::Allowed),
                 (FixtureOperation::ShellExec, FixtureOutcome::Allowed),
                 (FixtureOperation::KeychainTool, FixtureOutcome::Denied),
@@ -2648,8 +2657,9 @@ mod tests {
         let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);
         assert!(
             successful_probe(&shell_outcome),
-            "shell: {:?}",
-            shell_outcome.termination
+            "shell: {:?}; {}",
+            shell_outcome.termination,
+            String::from_utf8_lossy(&shell_outcome.stderr.bytes)
         );
         assert!(successful_probe(&run(
             &executables[0],
