@@ -71,3 +71,5 @@ before writing findings.
 - A structural alternative blocks only when tied to a present defect or
   material regression with a safer, validated design. Attractive redesign
   alone is not a finding.
+
+Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).

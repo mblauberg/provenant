@@ -8,13 +8,18 @@ mod holder;
 mod launch;
 mod reader;
 mod store;
+mod writer;
 
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use holder::{HolderContext, RootSeed, RunHolder};
-pub use launch::{Decoded, PreparedLaunch, Providers, Started, capture_plan, concurrency};
+pub use launch::{
+    Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
+    concurrency,
+};
+pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
@@ -27,6 +32,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("confinement refused: {0}")]
+    Confinement(#[from] provenant_confinement::permissions::PermissionError),
+    #[error("writer scope refused: {0}")]
+    Writer(#[from] provenant_confinement::worktrees::WorktreeError),
+    #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
+    WorktreeMissing(std::path::PathBuf),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error("run-store schema version {0} is unsupported")]

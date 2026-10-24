@@ -159,7 +159,13 @@ pub struct GuardianHooks<'a> {
 /// guardian. An error publishes a never-spawned exit and still calls `terminal`.
 pub trait Holder {
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
-    fn terminal(&self, context: &[u8], attempt: &Directory, exit: &ExitObservation) -> Result<()>;
+    fn terminal(
+        &self,
+        context: &[u8],
+        attempt: &Directory,
+        exit: &ExitObservation,
+        custody: &crate::custody::Recovery,
+    ) -> Result<()>;
 }
 /// Final reservation and immutable exit publication share one storage seam.
 pub trait ExitPublisher {
@@ -1020,6 +1026,19 @@ impl Driver<'_> {
             return;
         }
         let exit = record.durable_observation();
+        let Some(lease) = self.writer.take() else {
+            return;
+        };
+        let Ok(directory) = self.writer_dir.try_clone() else {
+            self.writer = Some(lease);
+            return;
+        };
+        let recovery = crate::custody::Recovery {
+            directory,
+            lease,
+            reservation: self.reservation.clone(),
+            guardian_quiescent: true,
+        };
         // About 30 s in all, so a contended store does not strand custody.
         let mut delay = Duration::from_millis(50);
         for attempt in 0..12 {
@@ -1028,7 +1047,7 @@ impl Driver<'_> {
                 delay = delay.saturating_mul(2).min(Duration::from_secs(5));
             }
             if holder
-                .terminal(&self.holder_context, &self.attempt, &exit)
+                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
                 .is_err()
             {
                 continue;
@@ -1047,9 +1066,11 @@ impl Driver<'_> {
                 });
             if verified.is_ok() {
                 let _ = clear_reservation(&self.writer_dir, self.reservation.scope);
+                self.writer = Some(recovery.lease);
                 return;
             }
         }
+        self.writer = Some(recovery.lease);
     }
     fn persist_tracking(&mut self) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();

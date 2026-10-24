@@ -1,6 +1,6 @@
 ---
 name: d2-diagrams
-description: "Use for creating, validating, rendering, or exporting D2 source, including fixed-layout and vector-PDF publication figures. Not for Mermaid, Graphviz, or PlantUML requirements diagrams; use engineering-docs or uml-diagrams."
+description: "Use to create, validate, render or export D2 diagrams, including fixed-layout and vector-PDF figures. For Mermaid, Graphviz or PlantUML diagrams, use engineering-docs."
 ---
 
 # D2 diagrams

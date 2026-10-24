@@ -16,7 +16,7 @@ use provenant_fabric_runtime::{
 use provenant_supervisor::{clock::SystemClock, exec::SystemExecutor};
 use std::{
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc,
     time::Instant,
 };
@@ -817,7 +817,10 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
     match error {
         RunError::NotFound => FacadeError::NotFound,
-        RunError::Refused => FacadeError::ConfinementRefused,
+        RunError::Refused | RunError::Writer(_) | RunError::Confinement(_) => {
+            FacadeError::ConfinementRefused
+        }
+        RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
         RunError::Cancelled => FacadeError::Cancelled,
@@ -1061,7 +1064,7 @@ impl RunOwner for BinaryRunOwner<'_> {
             status: true,
             wait: true,
             cancel: true,
-            resume: provenant_cli::run::Registry { roots: None }.continues_sessions(),
+            resume: provenant_cli::run::Registry::default().continues_sessions(),
             output: true,
             events: true,
         }
@@ -1086,7 +1089,6 @@ impl RunOwner for BinaryRunOwner<'_> {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 task.worktree.as_deref().map(Path::new),
-                &self.factory.cwd,
             )
             .map_err(fail_error)?;
             let route = &task.route;
@@ -1114,6 +1116,7 @@ impl RunOwner for BinaryRunOwner<'_> {
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
                 delivery_id: task.delivery_id,
+                worktree: task.worktree.map(PathBuf::from),
             });
         }
         let session = self.session(budget, cancel)?;

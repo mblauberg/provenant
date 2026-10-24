@@ -13,7 +13,7 @@ use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::custody::{Recovery, RecoveryState, Scope};
 use provenant_supervisor::fs::{FileKind, FsError, Metadata, Publication, PublishMode, SafeDir};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
@@ -21,7 +21,7 @@ use thiserror::Error;
 
 const EVIDENCE_MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionClass {
     OrdinaryInstruction,
@@ -62,6 +62,101 @@ impl ProtectedPath {
 }
 
 impl Git<'_> {
+    /// Discover the complete tracked instruction/control scope. New protected
+    /// paths are also checked by quarantine, including committed additions.
+    pub fn writer_instruction_paths(&self) -> Result<Vec<ProtectedPath>, QuarantineError> {
+        let raw = self
+            .read(GitRead::IndexEntries { paths: Vec::new() })?
+            .stdout
+            .bytes;
+        let mut paths = Vec::new();
+        for entry in parse_index_entries(&raw)? {
+            let entry = entry?;
+            if !is_protected_evidence_path(entry.path) {
+                continue;
+            }
+            let path = Path::new(OsStr::from_bytes(entry.path));
+            paths.push(if under_agents(path) && !is_known_control(path) {
+                ProtectedPath::ordinary(path)?
+            } else {
+                ProtectedPath::policy_control(path)?
+            });
+        }
+        if paths.len() > MAX_DISCLOSURE_FILES {
+            return Err(QuarantineError::Incomplete);
+        }
+        Ok(paths)
+    }
+
+    /// Reopen only a prelaunch snapshot in the provider-inaccessible archive.
+    /// Scope, base and archive identity are checked against held custody.
+    pub fn recover_instruction_snapshot(
+        &self,
+        recovery: &Recovery,
+        base: GitOid,
+        archive: &dyn SafeDir,
+    ) -> Result<InstructionSnapshot, QuarantineError> {
+        let bytes = read_archive(
+            archive,
+            OsStr::new("snapshot.json"),
+            EVIDENCE_MANIFEST_LIMIT as u64,
+        )?;
+        let record: SnapshotRecord = serde_json::from_slice(&bytes)?;
+        let identity = archive.metadata()?;
+        validate_archive(self.repo.root_identity().device, &identity)?;
+        if record.schema_version != 1
+            || record.scope != recovery.scope()
+            || record.head != base
+            || record.archive_device != identity.device
+            || record.archive_inode != identity.inode
+            || record.files.len() > MAX_DISCLOSURE_FILES
+        {
+            return Err(QuarantineError::ArchiveBinding);
+        }
+        let baseline = archive.open_verified_directory(OsStr::new("baseline"))?;
+        let mut files = Vec::new();
+        let mut total = 0;
+        for (index, file) in record.files.into_iter().enumerate() {
+            let path = file
+                .fingerprint
+                .path
+                .to_relative_path()
+                .map_err(|_| QuarantineError::InvalidPath)?;
+            let protected = match file.class {
+                InstructionClass::OrdinaryInstruction => ProtectedPath::ordinary(path.as_path())?,
+                InstructionClass::PolicyControl => ProtectedPath::policy_control(path.as_path())?,
+            };
+            let bytes = read_archive(
+                baseline.as_ref(),
+                OsStr::new(&format!("{index:08}")),
+                MAX_DISCLOSURE_BYTES,
+            )?;
+            total += bytes.len() as u64;
+            if total > MAX_DISCLOSURE_BYTES
+                || file.fingerprint.digest != Some(CanonicalV1::file_digest(&bytes))
+            {
+                return Err(QuarantineError::Incomplete);
+            }
+            files.push(InitialFile {
+                protected,
+                bytes,
+                fingerprint: file.fingerprint,
+            });
+        }
+        let index_records =
+            read_archive(archive, OsStr::new("start-index.z"), MAX_DISCLOSURE_BYTES)?;
+        if CanonicalV1::file_digest(&index_records) != record.index_records_digest {
+            return Err(QuarantineError::Incomplete);
+        }
+        Ok(InstructionSnapshot {
+            scope: record.scope,
+            head: record.head,
+            index: record.index,
+            index_records,
+            files,
+            archive_identity: identity,
+        })
+    }
     pub fn snapshot_instructions(
         &self,
         scope: Scope,
@@ -136,12 +231,71 @@ pub struct InstructionSnapshot {
     archive_identity: Metadata,
 }
 impl InstructionSnapshot {
+    /// Seal the baseline before handoff. The archive is excluded from provider
+    /// grants and retained for terminal recovery; no caller can deserialize this
+    /// authority-bearing type.
+    pub fn persist(&self, archive: &dyn SafeDir) -> Result<(), QuarantineError> {
+        if !archive.metadata()?.same_identity(&self.archive_identity) {
+            return Err(QuarantineError::ArchiveBinding);
+        }
+        archive.mkdir(OsStr::new("baseline"), 0o700)?;
+        let baseline = archive.open_verified_directory(OsStr::new("baseline"))?;
+        for (index, file) in self.files.iter().enumerate() {
+            put(
+                baseline.as_ref(),
+                OsStr::new(&format!("{index:08}")),
+                &file.bytes,
+            )?;
+        }
+        put(archive, OsStr::new("start-index.z"), &self.index_records)?;
+        let record = SnapshotRecord {
+            schema_version: 1,
+            scope: self.scope,
+            head: self.head,
+            index: self.index,
+            index_records_digest: CanonicalV1::file_digest(&self.index_records),
+            archive_device: self.archive_identity.device,
+            archive_inode: self.archive_identity.inode,
+            files: self
+                .files
+                .iter()
+                .map(|file| SnapshotFile {
+                    class: file.protected.class,
+                    fingerprint: file.fingerprint.clone(),
+                })
+                .collect(),
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        if bytes.len() > EVIDENCE_MANIFEST_LIMIT {
+            return Err(QuarantineError::ManifestTooLarge);
+        }
+        put(archive, OsStr::new("snapshot.json"), &bytes)
+    }
     pub fn head(&self) -> GitOid {
         self.head
     }
     pub fn scope(&self) -> Scope {
         self.scope
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotFile {
+    class: InstructionClass,
+    fingerprint: TrackedFingerprint,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotRecord {
+    schema_version: u64,
+    scope: Scope,
+    head: GitOid,
+    index: IndexFingerprint,
+    index_records_digest: FileDigest,
+    archive_device: u64,
+    archive_inode: u64,
+    files: Vec<SnapshotFile>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -192,6 +346,8 @@ struct EvidenceManifest {
     paths: Vec<ArchivedPath>,
     unaccounted_paths: Vec<ArchivedUnaccountedPath>,
     review_required: bool,
+    interrupted_archives: Vec<String>,
+    base_is_ancestor: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,7 +374,7 @@ fn capture_instruction_snapshot(
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(git.repo.root_identity().device, &archive_identity)?;
     let repo = git.repo;
-    if protected.is_empty() || protected.len() > MAX_DISCLOSURE_FILES {
+    if protected.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
     }
     let mut protected = protected.to_vec();
@@ -251,12 +407,15 @@ fn capture_instruction_snapshot(
         .iter()
         .map(|item| item.path.clone())
         .collect::<Vec<_>>();
-    let index_records = git
-        .read(GitRead::IndexEntries {
+    let index_records = if paths.is_empty() {
+        Vec::new()
+    } else {
+        git.read(GitRead::IndexEntries {
             paths: paths.clone(),
         })?
         .stdout
-        .bytes;
+        .bytes
+    };
     let index_by_path = parse_index_entries(&index_records)?.collect::<Result<Vec<_>, _>>()?;
     if index_by_path.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
@@ -347,6 +506,72 @@ fn quarantine_instruction_changes(
     if recovery.scope() != snapshot.scope || recovery.observe() != RecoveryState::Absent {
         return Err(QuarantineError::QuiescenceUnconfirmed);
     }
+    match read_archive(
+        quarantine_dir,
+        OsStr::new("quarantine-result.json"),
+        EVIDENCE_MANIFEST_LIMIT as u64,
+    ) {
+        Ok(bytes) => {
+            let result: QuarantineResultRecord = serde_json::from_slice(&bytes)?;
+            let evidence = read_archive(
+                quarantine_dir,
+                OsStr::new("evidence.json"),
+                EVIDENCE_MANIFEST_LIMIT as u64,
+            )?;
+            if result.schema_version != 1
+                || result.scope != snapshot.scope
+                || result.kind != "instruction_quarantine_result"
+                || result.evidence_digest != CanonicalV1::file_digest(&evidence)
+            {
+                return Err(QuarantineError::Incomplete);
+            }
+            return Ok(if result.review_required {
+                QuarantineOutcome::ReviewRequired {
+                    evidence_digest: result.evidence_digest,
+                }
+            } else {
+                QuarantineOutcome::Restored {
+                    paths: result.restored,
+                    evidence_digest: result.evidence_digest,
+                }
+            });
+        }
+        Err(QuarantineError::Filesystem(error)) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
+    // Evidence is sealed before any restoration. If a prior holder died
+    // afterwards, retain the complete archive and require review rather than
+    // replaying a partly completed restore or certifying changed fingerprints.
+    match read_archive(
+        quarantine_dir,
+        OsStr::new("evidence.json"),
+        EVIDENCE_MANIFEST_LIMIT as u64,
+    ) {
+        Ok(bytes) => {
+            #[derive(Deserialize)]
+            struct Header {
+                schema_version: u64,
+                scope: Scope,
+                kind: String,
+                start_head: GitOid,
+            }
+            let header: Header = serde_json::from_slice(&bytes)?;
+            if header.schema_version != 1
+                || header.scope != snapshot.scope
+                || header.kind != "instruction_quarantine_evidence"
+                || header.start_head != snapshot.head
+            {
+                return Err(QuarantineError::Incomplete);
+            }
+            let evidence_digest = CanonicalV1::file_digest(&bytes);
+            let result = QuarantineOutcome::ReviewRequired { evidence_digest };
+            write_result(quarantine_dir, snapshot.scope, evidence_digest, &result)?;
+            return Ok(result);
+        }
+        Err(QuarantineError::Filesystem(error)) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
+    let interrupted_archives = retain_partial_archive(quarantine_dir)?;
     repo.revalidate()
         .map_err(|_| QuarantineError::ConcurrentChange)?;
     refuse_index_lock(repo.private_dir())?;
@@ -361,8 +586,12 @@ fn quarantine_instruction_changes(
             .bytes,
     )? {
         let entry = entry?;
-        if entry.mode == 0o160000
-            && is_protected_evidence_path(entry.path)
+        if is_protected_evidence_path(entry.path)
+            && (entry.mode == 0o160000
+                || !snapshot
+                    .files
+                    .iter()
+                    .any(|file| path_bytes(&file.protected.path) == entry.path))
             && !status_paths.iter().any(|record| record.path == entry.path)
         {
             protected_gitlinks += 1;
@@ -382,7 +611,24 @@ fn quarantine_instruction_changes(
         .map(|file| file.protected.path.clone())
         .collect::<Vec<_>>();
     let mut evidence_paths = selected.clone();
-    let mut review = head_before != snapshot.head || index_before != snapshot.index;
+    let ancestry = crate::run_utility(
+        git.executor,
+        GitRead::MergeBaseIsAncestor {
+            ancestor: snapshot.head,
+            tip: head_before,
+        },
+        repo,
+        git.runtime,
+        git.budget,
+        git.cancel,
+    )
+    .map_err(GitEvidenceError::from)?;
+    let base_is_ancestor = match ancestry.termination {
+        provenant_supervisor::exec::Termination::Exit(0) => true,
+        provenant_supervisor::exec::Termination::Exit(1) => false,
+        _ => return Err(QuarantineError::Incomplete),
+    };
+    let mut review = !interrupted_archives.is_empty() || !base_is_ancestor;
     let mut current = Vec::with_capacity(snapshot.files.len());
     let mut current_unreadable = Vec::with_capacity(snapshot.files.len());
     let mut total = 0_u64;
@@ -479,32 +725,42 @@ fn quarantine_instruction_changes(
     if evidence_paths.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
     }
-    let commit_diff = git
-        .read(GitRead::Diff {
-            base: snapshot.head,
-            head: head_before,
-            paths: evidence_paths.clone(),
-        })?
-        .stdout
-        .bytes;
-    let index_diff = git
-        .read(GitRead::DiffIndex {
-            paths: evidence_paths.clone(),
-        })?
-        .stdout
-        .bytes;
-    let worktree_diff = git
-        .read(GitRead::DiffWorktree {
-            paths: evidence_paths.clone(),
-        })?
-        .stdout
-        .bytes;
-    let index_records_after = git
-        .read(GitRead::IndexEntries {
-            paths: selected.clone(),
-        })?
-        .stdout
-        .bytes;
+    let (commit_diff, index_diff, worktree_diff, index_records_after) = if evidence_paths.is_empty()
+    {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    } else {
+        (
+            git.read(GitRead::Diff {
+                base: snapshot.head,
+                head: head_before,
+                paths: evidence_paths.clone(),
+            })?
+            .stdout
+            .bytes,
+            git.read(GitRead::DiffIndex {
+                paths: evidence_paths.clone(),
+            })?
+            .stdout
+            .bytes,
+            git.read(GitRead::DiffWorktree {
+                paths: evidence_paths.clone(),
+            })?
+            .stdout
+            .bytes,
+            if selected.is_empty() {
+                Vec::new()
+            } else {
+                git.read(GitRead::IndexEntries {
+                    paths: selected.clone(),
+                })?
+                .stdout
+                .bytes
+            },
+        )
+    };
+    if !commit_diff.is_empty() {
+        review = true;
+    }
     let index_after_observation = read_index_fingerprint(repo.private_dir())?;
     refuse_index_lock(repo.private_dir())?;
     let head_after_observation = git.head()?;
@@ -532,7 +788,11 @@ fn quarantine_instruction_changes(
     ] {
         put_bounded(quarantine_dir, OsStr::new(name), bytes, &mut archive_bytes)?;
     }
-    quarantine_dir.mkdir(OsStr::new("blobs"), 0o700)?;
+    match quarantine_dir.mkdir(OsStr::new("blobs"), 0o700) {
+        Ok(()) => {}
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
     let blobs = quarantine_dir.open_verified_directory(OsStr::new("blobs"))?;
     for (index, file) in snapshot.files.iter().enumerate() {
         let prefix = format!("{index:08}");
@@ -622,6 +882,8 @@ fn quarantine_instruction_changes(
         paths: manifest_paths,
         unaccounted_paths: manifest_unaccounted,
         review_required: review,
+        interrupted_archives,
+        base_is_ancestor,
     };
     let evidence_bytes = serde_json::to_vec(&evidence)?;
     if evidence_bytes.len() > EVIDENCE_MANIFEST_LIMIT {
@@ -685,12 +947,12 @@ fn quarantine_instruction_changes(
     Ok(outcome)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuarantineResultRecord {
     schema_version: u64,
     scope: Scope,
-    kind: &'static str,
+    kind: String,
     evidence_digest: FileDigest,
     restored: Vec<PathWire>,
     review_required: bool,
@@ -708,7 +970,7 @@ fn write_result(
     let bytes = serde_json::to_vec(&QuarantineResultRecord {
         schema_version: 1,
         scope,
-        kind: "instruction_quarantine_result",
+        kind: "instruction_quarantine_result".into(),
         evidence_digest,
         restored,
         review_required,
@@ -716,12 +978,95 @@ fn write_result(
     put(directory, OsStr::new("quarantine-result.json"), &bytes)
 }
 
+fn read_archive(
+    directory: &dyn SafeDir,
+    name: &OsStr,
+    limit: u64,
+) -> Result<Vec<u8>, QuarantineError> {
+    use std::io::Read;
+    let file = directory.open_read(name)?;
+    let metadata = file.metadata()?;
+    if metadata.links != 1
+        || metadata.mode & 0o077 != 0
+        || metadata.uid != provenant_supervisor::fs::effective_uid()
+    {
+        return Err(QuarantineError::ArchiveBinding);
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| QuarantineError::Incomplete)?;
+    if bytes.len() as u64 > limit {
+        return Err(QuarantineError::Incomplete);
+    }
+    Ok(bytes)
+}
+
+/// Preserve interrupted observations in their own archive before collecting
+/// fresh evidence. Even unrelated status changes must not poison every retry.
+fn retain_partial_archive(directory: &dyn SafeDir) -> Result<Vec<String>, QuarantineError> {
+    let mut partial = Vec::new();
+    let mut interrupted = Vec::new();
+    for (count, name) in directory.entries()?.enumerate() {
+        if count >= MAX_DISCLOSURE_FILES {
+            return Err(QuarantineError::Incomplete);
+        }
+        let name = name?;
+        if let Some(text) = name.to_str()
+            && text
+                .strip_prefix("interrupted-")
+                .is_some_and(|id| provenant_core::AttemptId::parse(id).is_ok())
+        {
+            directory.open_verified_directory(&name)?;
+            interrupted.push(text.to_owned());
+        }
+        if [
+            "git-status.z",
+            "protected.head.patch",
+            "protected.index.patch",
+            "protected.disk.patch",
+            "blobs",
+        ]
+        .iter()
+        .any(|item| name == OsStr::new(item))
+        {
+            partial.push(name);
+        }
+    }
+    if !partial.is_empty() {
+        let name = format!(
+            "interrupted-{}",
+            provenant_core::AttemptId::from_bytes(provenant_supervisor::fs::entropy_128()?)
+        );
+        directory.mkdir(OsStr::new(&name), 0o700)?;
+        directory.sync()?;
+        let archive = directory.open_verified_directory(OsStr::new(&name))?;
+        for entry in partial {
+            directory.rename_noreplace_to(&entry, archive.as_ref(), &entry)?;
+            archive.sync()?;
+            directory.sync()?;
+        }
+        interrupted.push(name);
+    }
+    interrupted.sort();
+    Ok(interrupted)
+}
+
 fn put(directory: &dyn SafeDir, name: &OsStr, bytes: &[u8]) -> Result<(), QuarantineError> {
-    match directory.atomic_write(name, ".quarantine-", bytes, 0o600, PublishMode::NoReplace)? {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { .. } => {
+    match directory.atomic_write(name, ".quarantine-", bytes, 0o600, PublishMode::NoReplace) {
+        Ok(Publication::Durable) => Ok(()),
+        Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => {
             Err(QuarantineError::DurabilityUnconfirmed)
         }
+        Err(error) if error.is_exists() => {
+            if read_archive(directory, name, bytes.len() as u64)? != bytes {
+                return Err(QuarantineError::ConcurrentChange);
+            }
+            directory.open_read(name)?.sync()?;
+            directory.sync()?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -876,13 +1221,15 @@ fn is_known_control(path: &Path) -> bool {
         [
             b"AGENTS.md".as_slice(),
             b"HARNESS.md",
+            b"CLAUDE.md",
+            b"GEMINI.md",
             b".git",
             b".gitattributes",
             b".gitmodules",
         ]
         .iter()
         .any(|control| name.as_bytes().eq_ignore_ascii_case(control))
-    }) || [".github", ".githooks", "hooks"]
+    }) || [".github", ".githooks", "hooks", ".claude", ".codex"]
         .iter()
         .any(|root| path.starts_with(root))
 }
@@ -1171,8 +1518,11 @@ mod custody_integration_tests {
         let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "ordinary-archive")?;
-        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
+        let snapshot =
+            git.snapshot_instructions(scope, &git.writer_instruction_paths()?, &archive)?;
+        snapshot.persist(&archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
+        let snapshot = git.recover_instruction_snapshot(&recovery, base, &archive)?;
 
         fs::write(
             fixture.root.join(".agents/a.md"),
@@ -1184,6 +1534,10 @@ mod custody_integration_tests {
         )?;
         let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
 
+        assert_eq!(
+            git.quarantine_instructions(&recovery, &snapshot, &archive)?,
+            outcome
+        );
         match outcome {
             QuarantineOutcome::Restored { paths, .. } => assert_eq!(paths.len(), 1),
             QuarantineOutcome::ReviewRequired { .. } => {
@@ -1198,6 +1552,13 @@ mod custody_integration_tests {
             fs::read(fixture.root.join("unrelated.txt"))?,
             b"unrelated edit retained\n"
         );
+        // A crash between sealed evidence and the result cannot replay a
+        // partial restore. Recovery retains that archive and requires review.
+        archive.unlink(std::ffi::OsStr::new("quarantine-result.json"))?;
+        assert!(matches!(
+            git.quarantine_instructions(&recovery, &snapshot, &archive)?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
         let archive_path = fixture._temp.path().join("ordinary-archive");
         assert!(archive_path.join("evidence.json").is_file());
         assert!(archive_path.join("quarantine-result.json").is_file());
@@ -1351,7 +1712,7 @@ mod custody_integration_tests {
     }
 
     #[test]
-    fn archive_failure_prevents_ordinary_instruction_restoration() -> Result<(), Box<dyn Error>> {
+    fn interrupted_archive_retains_prior_bytes_and_requires_review() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         seed_protected(&fixture)?;
         let base = fixture.head()?;
@@ -1370,9 +1731,26 @@ mod custody_integration_tests {
             b"pre-existing collision",
         )?;
 
-        assert!(
-            git.quarantine_instructions(&recovery, &snapshot, &archive)
-                .is_err()
+        assert!(matches!(
+            git.quarantine_instructions(&recovery, &snapshot, &archive)?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
+            fixture._temp.path().join("failed-archive/evidence.json"),
+        )?)?;
+        let interrupted = manifest["interrupted_archives"][0]
+            .as_str()
+            .ok_or("interrupted archive missing")?;
+        assert_eq!(
+            fs::read(
+                fixture
+                    ._temp
+                    .path()
+                    .join("failed-archive")
+                    .join(interrupted)
+                    .join("git-status.z")
+            )?,
+            b"pre-existing collision"
         );
         assert_eq!(
             fs::read(fixture.root.join(".agents/a.md"))?,

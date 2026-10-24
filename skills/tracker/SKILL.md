@@ -62,3 +62,5 @@ Fabric tasks and current issue/PR references. Before retrying a write,
 reconcile current issues and tasks with `gh` reads to avoid duplicates.
 Return a digest of at most 15 lines with links and blockers. See
 [references/steward.md](references/steward.md).
+
+Reference eval cases (not run by CI): [placement cases](evals/placement_cases.yaml).
