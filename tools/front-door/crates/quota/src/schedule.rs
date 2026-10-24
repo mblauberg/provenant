@@ -329,6 +329,7 @@ pub fn report(
         });
         let fresh = record.snapshot.as_ref().is_some_and(|s| {
             s.observed_unix_seconds <= now
+                && record.last_error.is_none()
                 && age.is_some_and(|a| {
                     a < interval(&record.account.adapter, Trigger::Timer, Power::Ac).unwrap_or(0)
                 })

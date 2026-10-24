@@ -256,13 +256,13 @@ fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::R
     })
 }
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
-    let identity = crate::fabric::context::Context::open(edge.roots.clone(), edge.home, edge.cwd)
-        .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?
-        .identity;
+    let (roots, project_id, actor_id) =
+        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
+            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: edge.roots.state.clone(),
-        project_id: identity.project,
-        actor_id: identity.inbox.actor,
+        state_root: roots.state,
+        project_id,
+        actor_id,
         read_prompts: true,
     };
     Ok(Session {
