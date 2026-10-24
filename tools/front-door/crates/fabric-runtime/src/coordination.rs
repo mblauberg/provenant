@@ -486,7 +486,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<MailResult, CoordinationError> {
-        input.validate_input()?;
+        input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -546,7 +546,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<TaskResult, CoordinationError> {
-        input.validate_input()?;
+        input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -637,7 +637,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<EventsResult, CoordinationError> {
-        input.validate_input()?;
+        input.validate_input(WaitTransport::Cli)?;
         if let Err(error) = self.ensure_active(budget, cancel) {
             return match (&error, &input) {
                 (
@@ -719,7 +719,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<ClaimResult, CoordinationError> {
-        input.validate_input()?;
+        input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
@@ -778,7 +778,7 @@ impl CoordinationApi for CoordinationService<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<LandingResult, CoordinationError> {
-        input.validate_input()?;
+        input.validate_input(WaitTransport::Cli)?;
         if let Err(error) = self.ensure_active(budget, cancel) {
             return match (&error, &input) {
                 (CoordinationError::Timeout, LandingInput::Wait { .. }) => {
@@ -951,7 +951,7 @@ impl CoordinationService<'_> {
                         value => self.claim(value, budget, cancel).map(MutationResult::Claim),
                     },
                     Mutation::Landing(value) => {
-                        value.validate_input()?;
+                        value.validate_input(WaitTransport::Cli)?;
                         match (&value, guard.as_ref()) {
                             (LandingInput::Verify { .. } | LandingInput::Wait { .. }, _) => {
                                 Err(CoordinationError::InvalidInput("read is an observation"))

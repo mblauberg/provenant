@@ -75,7 +75,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
-                    error: clap_error(error),
+                    error: clap_error(error, &argv),
                     globals,
                 },
             };
@@ -96,7 +96,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
         Err(error) => {
             return ParseOutcome::Invalid {
-                error: clap_error(error),
+                error: clap_error(error, &argv),
                 globals,
             };
         }
@@ -128,7 +128,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-fn clap_error(mut error: clap::Error) -> CliError {
+fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     // Clap normally includes the rejected value. Fence tokens are secrets,
     // including malformed tokens, so redact them before either renderer.
     use clap::error::{ContextKind, ContextValue};
@@ -141,7 +141,21 @@ fn clap_error(mut error: clap::Error) -> CliError {
             ContextValue::String("[redacted]".into()),
         );
     }
-    let text = error.to_string();
+    let mut text = error.to_string();
+    if argv.iter().any(|arg| arg == "fabric") {
+        // Clap may echo a secret as an unexpected positional, an invalid value,
+        // a suggestion or a conflict. Scrub token-shaped argv values in every
+        // error kind before either renderer receives the diagnostic.
+        for arg in argv {
+            if let Some(arg) = arg.to_str() {
+                for value in arg.split('=') {
+                    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        text = text.replace(value, "[redacted]");
+                    }
+                }
+            }
+        }
+    }
     let message = text
         .split("\nUsage:")
         .next()

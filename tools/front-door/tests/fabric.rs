@@ -464,3 +464,77 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
+    let rig = TestRig::new()?;
+    let secret = "0123456789abcdef0123456789abcdef";
+    for option in ["--generation", "--unknown"] {
+        let args = [
+            "fabric",
+            "claim",
+            "verify",
+            "00000000000000000000000000000001",
+            secret,
+            option,
+            "1",
+            "--token",
+            secret,
+        ];
+        let value = call(&rig, &args, 2)?;
+        assert!(!serde_json::to_string(&value)?.contains(secret));
+        let human = rig.command(&args)?;
+        assert_eq!(code(&human), 2);
+        assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
+        assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
+    }
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+fn empty_environment_label_falls_through_to_config() -> Result {
+    let mut rig = TestRig::new()?;
+    call(&rig, &["fabric", "identity"], 0)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.fabric]\nagent_label='configured'\n",
+    )?;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_AGENT_LABEL" {
+            *value = "".into();
+        }
+    }
+    assert_eq!(
+        call(&rig, &["fabric", "identity"], 0)?["data"]["inbox"]["agent"],
+        "configured"
+    );
+    Ok(())
+}
+
+#[test]
+fn fabric_never_creates_ancestors_of_the_state_root() -> Result {
+    let mut rig = TestRig::new()?;
+    let parent = rig.root.join("missing-parent");
+    rig.state = parent.join("state");
+    let result = call(&rig, &["fabric", "identity"], 3)?;
+    assert_eq!(result["error"]["code"], "io");
+    assert!(!parent.exists());
+    Ok(())
+}
+
+#[test]
+fn fabric_uses_the_binary_product_root_protection() -> Result {
+    let mut rig = TestRig::new()?;
+    let product = rig.root.join("product");
+    std::fs::create_dir(&product)?;
+    rig.state = product.join("state");
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = product.clone().into_os_string();
+        }
+    }
+    assert_eq!(call(&rig, &["fabric", "identity"], 2)?["status"], "invalid");
+    assert!(!rig.state.exists());
+    Ok(())
+}

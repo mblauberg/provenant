@@ -117,7 +117,7 @@ impl Identity {
         agent_override: Option<&std::ffi::OsStr>,
         key: Option<CrossHostProjectKey>,
     ) -> Result<Self, IdentityError> {
-        let agent = match agent_override {
+        let agent = match agent_override.filter(|value| !value.is_empty()) {
             Some(value) => value.to_str().ok_or(IdentityError::Encoding)?,
             None => {
                 if config.agent_label.is_empty() {

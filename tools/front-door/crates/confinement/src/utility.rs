@@ -221,15 +221,16 @@ pub(crate) enum GitMutation {
 
 /// Pinned absolute utility tools and a verified private home. No environment
 /// from the parent process is inherited by a child.
-pub struct DiscoveredProject {
-    pub location: provenant_config::ProjectLocation,
-    pub repository: Option<VerifiedRepo>,
-}
-
 pub struct UtilityRuntime {
     fs: Arc<dyn SafeFs>,
     git: ExecutablePin,
     home: PrivateHome,
+}
+
+/// Canonical project location and its verified Git origin, when present.
+pub struct DiscoveredProject {
+    pub location: provenant_config::ProjectLocation,
+    pub repository: Option<VerifiedRepo>,
 }
 
 impl UtilityRuntime {

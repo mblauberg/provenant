@@ -87,6 +87,49 @@ fn serve_splits_utf8_across_chunks_and_executes_typed_calls() {
 }
 
 #[test]
+fn nested_tool_arguments_apply_the_mcp_wait_cap() {
+    let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    let request = tool_call(
+        "over-cap",
+        "fabric_events",
+        json!({"op":"read","limit":1,"wait_ms":55001}),
+    );
+    assert_eq!(request["params"]["arguments"]["wait_ms"], 55001);
+    server.send(&request);
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    assert_eq!(frames[1]["id"], "over-cap");
+    assert_eq!(frames[1]["result"]["isError"], true);
+    assert_eq!(
+        frames[1]["result"]["structuredContent"]["code"],
+        "invalid_input"
+    );
+    assert_eq!(
+        frames[1]["result"]["structuredContent"]["path"],
+        "arguments.wait_ms"
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn typed_tool_calls_cannot_bypass_the_mcp_wait_cap() {
+    let factory = FakeFactory::new(Arc::new(Gate::default()));
+    let mut service = factory.open().unwrap();
+    let input = ToolCall::Events(EventsInput::Read {
+        after: None,
+        limit: 1,
+        wait_ms: Some(55001),
+    });
+    // Cancellation ensures an accidentally accepted observation cannot wait.
+    // The input still must fail transport validation before owner execution.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    assert!(matches!(input.execute(&mut service, &cancel),
+        Err(ServiceError::Invalid(error)) if error.path == "wait_ms"));
+}
+
+#[test]
 // MCP 2026-07-28 Server > Tools > Error Handling:
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#error-handling
 fn invalid_tool_arguments_are_results_with_the_field_path() {

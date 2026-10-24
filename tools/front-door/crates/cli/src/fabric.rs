@@ -451,9 +451,14 @@ impl Fabric {
         )
     }
 }
-fn execute(cmd: Fabric, globals: &Globals) -> Result<(Value, bool), EdgeError> {
+fn execute(
+    cmd: Fabric,
+    roots: provenant_core::Roots,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<(Value, bool), EdgeError> {
     let seconds = cmd.wait();
-    let ctx = context::Context::open(globals)?;
+    let ctx = context::Context::open(roots, home, cwd)?;
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
@@ -726,7 +731,13 @@ fn execute(cmd: Fabric, globals: &Globals) -> Result<(Value, bool), EdgeError> {
     Ok((value, false))
 }
 
-pub fn run(cmd: Fabric, globals: &Globals) -> u8 {
+pub fn run(
+    cmd: Fabric,
+    globals: &Globals,
+    roots: &provenant_core::Roots,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> u8 {
     let command = cmd.path();
     let read_only = cmd.read_only();
     let mut result = if matches!(cmd, Fabric::Mcp) {
@@ -739,7 +750,7 @@ pub fn run(cmd: Fabric, globals: &Globals) -> u8 {
         });
         result
     } else {
-        match execute(cmd, globals) {
+        match execute(cmd, roots.clone(), home, cwd) {
             Ok((data, timeout)) => CommandResult::new(
                 &command,
                 if timeout {
@@ -800,7 +811,7 @@ pub fn run(cmd: Fabric, globals: &Globals) -> u8 {
         mode,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
-        |value| context::publish(value, globals),
+        |value| context::publish(value, roots),
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => {

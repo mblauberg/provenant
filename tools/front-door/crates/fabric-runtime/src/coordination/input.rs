@@ -5,6 +5,7 @@ use super::{
     ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, MessageRef, TaskInput, TaskRef,
     TaskState, WorkScope,
 };
+use provenant_core::WaitTransport;
 use provenant_fabric_store::LegacyRef;
 use thiserror::Error;
 
@@ -21,7 +22,7 @@ impl InputError {
 }
 
 pub trait ValidateInput {
-    fn validate_input(&self) -> Result<(), InputError>;
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError>;
 }
 
 macro_rules! bounded_input {
@@ -66,7 +67,7 @@ macro_rules! bounded_input {
                 D: serde::Deserializer<'de>,
             {
                 let input = Self::from(<$wire as serde::Deserialize>::deserialize(deserializer)?);
-                crate::coordination::input::ValidateInput::validate_input(&input)
+                crate::coordination::input::ValidateInput::validate_input(&input, provenant_core::WaitTransport::Cli)
                     .map_err(serde::de::Error::custom)?;
                 Ok(input)
             }
@@ -116,15 +117,8 @@ fn lease(milliseconds: u64) -> Result<(), InputError> {
     Ok(())
 }
 
-fn wait(milliseconds: u64) -> Result<(), InputError> {
-    if !(1_000..=55_000).contains(&milliseconds) {
-        return Err(field("wait_ms"));
-    }
-    Ok(())
-}
-
-fn cli_wait(milliseconds: u64) -> Result<(), InputError> {
-    if !(1_000..=14_400_000).contains(&milliseconds) {
+fn wait(milliseconds: u64, transport: WaitTransport) -> Result<(), InputError> {
+    if !(1_000..=transport.maximum_seconds() * 1_000).contains(&milliseconds) {
         return Err(field("wait_ms"));
     }
     Ok(())
@@ -217,7 +211,7 @@ fn task_text(value: &str, path: &str) -> Result<(), InputError> {
 }
 
 impl ValidateInput for MailInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Send {
                 recipients,
@@ -259,7 +253,7 @@ impl ValidateInput for MailInput {
 }
 
 impl ValidateInput for TaskInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Create { objective, note }
             | Self::Update {
@@ -286,7 +280,7 @@ impl ValidateInput for TaskInput {
 }
 
 impl ValidateInput for EventsInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Read {
                 after,
@@ -298,7 +292,7 @@ impl ValidateInput for EventsInput {
                 }
                 page(*limit, "limit")?;
                 if let Some(milliseconds) = wait_ms {
-                    cli_wait(*milliseconds)?;
+                    wait(*milliseconds, transport)?;
                 }
                 Ok(())
             }
@@ -311,7 +305,7 @@ impl ValidateInput for EventsInput {
 }
 
 impl ValidateInput for ClaimInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Acquire {
                 scope: value,
@@ -328,7 +322,7 @@ impl ValidateInput for ClaimInput {
 }
 
 impl ValidateInput for LandingInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Acquire {
                 reference,
@@ -349,14 +343,14 @@ impl ValidateInput for LandingInput {
                 reference, wait_ms, ..
             } => {
                 landing_reference(reference, "reference")?;
-                cli_wait(*wait_ms)
+                wait(*wait_ms, transport)
             }
         }
     }
 }
 
 impl ValidateInput for IdentityInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Inspect {} => Ok(()),
         }
@@ -364,7 +358,7 @@ impl ValidateInput for IdentityInput {
 }
 
 impl ValidateInput for SubmitInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Submission {
                 tasks, concurrency, ..
@@ -399,7 +393,7 @@ impl ValidateInput for SubmitInput {
 }
 
 impl ValidateInput for RunInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::List { limit, .. } => page(u64::from(*limit), "limit"),
             Self::Status { .. } | Self::Cancel { .. } => Ok(()),
@@ -409,7 +403,7 @@ impl ValidateInput for RunInput {
                 if targets.is_empty() || targets.len() > 100 {
                     return Err(field("targets"));
                 }
-                wait(*wait_ms)
+                wait(*wait_ms, transport)
             }
             Self::Resume { prompt, .. } => task_text(prompt, "prompt"),
         }
@@ -417,7 +411,7 @@ impl ValidateInput for RunInput {
 }
 
 impl ValidateInput for OutputInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Read { max_bytes, .. } if !(1..=65_536).contains(max_bytes) => {
                 Err(field("max_bytes"))
@@ -438,7 +432,7 @@ impl ValidateInput for OutputInput {
 }
 
 impl ValidateInput for HostsInput {
-    fn validate_input(&self) -> Result<(), InputError> {
+    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::List { limit, .. } => page(u64::from(*limit), "limit"),
         }
