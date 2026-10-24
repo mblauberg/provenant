@@ -172,7 +172,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
 }
 
 #[test]
-fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
+fn every_binding_checks_roots_and_dispatches_to_its_owner() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let rig = TestRig::new()?;
     fs::write(rig.project.join("HARNESS.md"), "# fixture")?;
@@ -247,13 +247,21 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
             continue;
         }
         let out = rig.command(&leaf)?;
+        let expected = match leaf.first().copied() {
+            Some("install") => 1,
+            Some("uninstall") => 0,
+            Some("check") if leaf.get(1) == Some(&"install") => 1,
+            _ => 4,
+        };
         assert_eq!(
             code(&out),
-            4,
+            expected,
             "{leaf:?}: {}",
             String::from_utf8_lossy(&out.stderr.bytes)
         );
-        assert!(out.stdout.bytes.is_empty());
+        if expected == 4 {
+            assert!(out.stdout.bytes.is_empty());
+        }
     }
     let internal = rig.command(&[
         "internal",

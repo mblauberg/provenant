@@ -60,6 +60,7 @@ pub struct ReleaseManifest {
 pub enum OwnedValue {
     File { digest: FileDigest, mode: u64 },
     Link { target: AbsolutePath },
+    Selector { value: serde_json::Value },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +75,8 @@ pub struct OwnedEntry {
 pub struct ResolvedHarnessTarget {
     pub harness: Harness,
     pub skills_dir: AbsolutePath,
+    pub mcp_file: AbsolutePath,
+    pub hook_file: Option<AbsolutePath>,
     pub instruction: Option<AbsolutePath>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +92,7 @@ pub struct InstallReceipt {
     pub harnesses: Vec<Harness>,
     pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
+    pub legacy: Option<LegacyInstall>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
@@ -100,4 +104,13 @@ pub struct VersionInfo {
     pub toolchain: String,
     pub record_schema_version: u64,
     pub config_schema_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyInstall {
+    pub checkout: AbsolutePath,
+    pub home: AbsolutePath,
+    pub manifest_digest: FileDigest,
+    pub git_hooks_dir: Option<AbsolutePath>,
 }

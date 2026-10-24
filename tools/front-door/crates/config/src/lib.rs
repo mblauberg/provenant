@@ -6,11 +6,15 @@
 #![forbid(unsafe_code)]
 
 mod domains;
+mod harness;
 mod loader;
 mod managed;
+pub use harness::{InstallSettings, TargetSettings, apply_install_config};
+mod legacy;
 mod presets;
 mod project_binding;
 mod release;
+mod splice;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(test)]
@@ -136,6 +140,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub schema_version: u64,
     pub profile: Profile,
     pub domains: D,
+    pub install: InstallSettings,
     pub origins: BTreeMap<String, Origin>,
 }
 
@@ -153,7 +158,8 @@ pub struct ConfigCheck {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
-    Snapshots, Targets, check_install, install, plan_install, uninstall,
+    SelectorChange, Snapshots, Targets, check_install, check_install_with_digest, install,
+    plan_install, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

@@ -59,12 +59,27 @@ flowchart TB
 
 ## Quick start
 
-The `provenant-config` Rust crate owns release stamping and managed-file
-installation. It packages typed `release.json`, installs immutable releases and
-publishes the install receipt last. These are library entrypoints; CLI wiring for
-`install`, `check install` and `uninstall` is a later cut-over. The legacy
-`install-harness`, `install-skills` and `check-provenant-install.py` entrypoints
-refuse the retired Python installation path.
+The Rust `provenant-config` crate packages verified releases and manages
+selected harness entries. Install a staged release with the stable `provenant`
+binary, an explicit fresh state root and explicit harness names. The state path
+must be absolute, outside every legacy root and unused before cut-over. Stop
+selected harness clients and config editors before preview, and keep them
+stopped through installation and `check install`.
+
+```sh
+PROVENANT="$HOME/.local/bin/provenant"
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
+"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+```
+
+`RELEASE` and `LEGACY_CHECKOUT` are absolute paths. `--legacy-checkout` is
+needed only when the printed plan should match entries from that exact checkout;
+it never authorises a broad scan. Repeat `--harness` for each selected client.
+Review the complete dry-run output before applying it. The default is
+`--hooks off`; hook registration is available only for handlers with recorded
+`HookSpec` policy and fixtures. `uninstall --harness NAME` removes unchanged
+owned entries and keeps the state root, release assets and running binary.
 
 For checkout development, install the locked Python and Node tools, then run the
 Rust config checks and Node preflight:

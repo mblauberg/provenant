@@ -19,10 +19,9 @@ chain. Class names, descriptions and class-to-tier choices live in
 `task_class_routes`.
 
 Class and size determine tier; role is a label. Missing role uses the worker
-label with a warning. Claude can opt into routing context and the soft roster
-warning with `configure-claude-hooks.py --settings <path> --routing-hook
-scripts/routing_context_hook.py`; the SessionStart hook also runs after
-compaction. The PreToolUse warning never denies a tool call.
+label with a warning. The former Python hook configurator is retired; the
+installer manages recorded hook registrations through the CLI's `HookSpec`
+policy and fixtures.
 
 Retired: `provenant telemetry ingest` and its ledger workflow below;
 [run integration step 2](../specs/rust-port/design/telemetry.md#tests-and-build-sequence) owns caller removal.

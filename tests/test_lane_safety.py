@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -24,7 +23,6 @@ def load(name: str, filename: str):
 
 guard = load("lane_safety_guard_test", "lane_safety_guard.py")
 reap = load("reap_test", "reap.py")
-hooks = load("configure_claude_hooks_test", "configure-claude-hooks.py")
 
 DENIED = [
     "pkill -f server",
@@ -412,41 +410,6 @@ def test_pre_push_ignores_bare_separator_lines(pushing):
     assert git(pushing, "push", "-q", "origin", "topic", check=False).returncode == 0
 
 
-# Claude settings
-
-
-def guard_path(tmp_path):
-    return tmp_path / "scripts" / "lane_safety_guard.py"
-
-
-def test_settings_install_is_idempotent_and_preserves_other_hooks(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({
-        "model": "x",
-        "hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "keep"}]}],
-                  "Stop": [{"hooks": []}]},
-    }))
-    assert hooks.apply(settings, guard_path(tmp_path)) == "installed"
-    assert hooks.apply(settings, guard_path(tmp_path)) == "unchanged"
-    data = json.loads(settings.read_text())
-    entries = data["hooks"]["PreToolUse"]
-    assert [entry["matcher"] for entry in entries] == ["Edit", "Bash"]
-    assert "lane_safety_guard.py" in entries[1]["hooks"][0]["command"]
-    assert data["model"] == "x" and "Stop" in data["hooks"]
-
-
-def test_settings_command_quotes_the_path_for_the_shell(tmp_path):
-    guard_file = tmp_path / "a$(touch pwned)b" / "lane_safety_guard.py"
-    assert hooks.hook_command(guard_file).startswith("python3 ")
-    command = hooks.hook_command(guard_file, sys.executable)
-    done = subprocess.run(
-        ["sh", "-c", f"set -- {command}; printf '%s\\n' \"$1\" \"$2\""],
-        capture_output=True, text=True, cwd=tmp_path, check=False,
-    )
-    assert done.stdout.splitlines() == [sys.executable, str(guard_file)]
-    assert not (tmp_path / "pwned").exists()
-
-
 def test_reap_skips_kill_when_pid_identity_changed(sleeper, monkeypatch, capsys):
     process = sleeper("sh", "-c", "trap '' TERM; while :; do sleep 1; done")
     real = reap.process_info
@@ -464,52 +427,3 @@ def test_reap_skips_kill_when_pid_identity_changed(sleeper, monkeypatch, capsys)
     assert status == 1
     assert process.poll() is None
     assert "KILL skipped" in capsys.readouterr().out
-
-
-def test_settings_repoint_replaces_the_managed_entry(tmp_path):
-    settings = tmp_path / "settings.json"
-    hooks.apply(settings, tmp_path / "zz-previous" / "lane_safety_guard.py")
-    hooks.apply(settings, guard_path(tmp_path))
-    entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
-    assert len(entries) == 1 and "zz-previous" not in entries[0]["hooks"][0]["command"]
-
-
-def test_settings_remove_leaves_only_foreign_entries(tmp_path):
-    settings = tmp_path / "settings.json"
-    hooks.apply(settings, guard_path(tmp_path))
-    assert hooks.apply(settings, None) == "removed"
-    assert json.loads(settings.read_text()) == {}
-
-
-def test_settings_write_goes_through_a_symlink(tmp_path):
-    real = tmp_path / "real.json"
-    real.write_text("{}")
-    link = tmp_path / "settings.json"
-    link.symlink_to(real)
-    hooks.apply(link, guard_path(tmp_path))
-    assert link.is_symlink()
-    assert "PreToolUse" in json.loads(real.read_text())["hooks"]
-
-
-def test_settings_refuse_unreadable_json(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text("{not json")
-    with pytest.raises(hooks.ConfigError):
-        hooks.apply(settings, guard_path(tmp_path))
-    assert settings.read_text() == "{not json"
-
-
-def test_utility_hook_install_preserves_lane_safety_and_other_post_hooks(tmp_path):
-    settings = tmp_path / 'settings.json'
-    settings.write_text(json.dumps({'hooks': {'PostToolUse': [{'matcher': 'Read', 'hooks': [{'command': 'keep'}]}]}}))
-    hooks.apply(settings, guard_path(tmp_path))
-    digest = tmp_path / 'scripts/utility_output_hook.py'
-    assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'installed'
-    assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'unchanged'
-    data = json.loads(settings.read_text())
-    assert data['hooks']['PostToolUse'][1]['hooks'][0]['timeout'] == 30
-    assert shlex.split(data['hooks']['PostToolUse'][1]['hooks'][0]['command'])[0] == sys.executable
-    assert data['hooks']['PreToolUse'][0]['matcher'] == 'Bash'
-    assert [entry['matcher'] for entry in data['hooks']['PostToolUse']] == ['Read', 'Bash']
-    hooks.apply(settings, None)
-    assert len(json.loads(settings.read_text())['hooks']['PostToolUse']) == 2

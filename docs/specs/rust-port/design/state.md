@@ -511,8 +511,9 @@ read transcripts, revive runs/processes/claims/leases/sessions, or import
 telemetry/quota history. The old ledger remains available to the old install;
 telemetry owns retirement of the OTel collector. `tests/test_host_identity.py`
 and the old OTel cases in `tests/test_install_harness.py` are counted once by
-state. Those cases move to `tests/test_install_otel_collector.py`, so telemetry
-excludes them.
+state. The separately moved collector helper tests and Swift collector tests
+retire with the OTel sources in slice 4; they are excluded from telemetry's
+budget. Existing installed services and data remain outside source deletion.
 
 Source reads must not write SQLite journals, SHM or checkpoints. Require a
 quiescent self-contained source or supplied consistent snapshot; refuse a
@@ -579,13 +580,13 @@ The old inert Rust config/knob implementation was already deleted by slice 1
 `Preset` policy types introduced during slice 2 are withdrawn before landing,
 so they are not deletions relative to `origin/main`.
 
-Slice 3 retires the Python installation entrypoints `scripts/install-harness`,
-`scripts/install-skills` and `scripts/check-provenant-install.py` as explicit
-exit-3 stubs. Slice 4 owns deleting those stubs when its command wiring replaces
-them. The last file retains the read-only `provider_registration_status` query
-until Fabric's consumer is replaced. Its query tests and the live OTel
-installer tests remain; OTel tests move to `tests/test_install_otel_collector.py`.
-Tests are removed only when their subject retires.
+Slice 3 retired `scripts/install-harness`, `scripts/install-skills` and the
+checker entrypoint as exit-3 stubs. Slice 4 deletes the two shell stubs and the
+checker module's CLI stub when command wiring lands. The read-only
+`provider_registration_status` query and `tests/test_check_provenant_install.py`
+remain because `scripts/fabric_hosts.py` still imports the query. The OTel
+installer helper and both collector test modules retire with the Swift source
+and plist. Tests are removed only when their subject retires.
 
 Slice 5 removes `skills/_shared/harness_profile.py`,
 `scripts/harness_profile.py`, `config/harness-knobs.json`,
@@ -621,7 +622,7 @@ owner slices. The explicit transport and new registrations land at cut-over.
 | CLI parser, PR #1386 (deleted here; state owner accepted) | `scripts/configure-fabric-mcp.py` | 818 |
 | 4 | `scripts/configure-claude-hooks.py` | 134 |
 | 4 | `scripts/configure-codex-skill-overrides.py` | 140 |
-| 4 | `scripts/check-provenant-install.py` | 165 |
+| retained query | `scripts/check-provenant-install.py` (`__main__` stub removed) | 0 |
 
 | Slice | Deleted or trimmed Python tests | Lines removed |
 | --- | --- | ---: |
@@ -636,7 +637,7 @@ owner slices. The explicit transport and new registrations land at cut-over.
 | 3 | `tests/test_install_provenant_command.py` | 272 |
 | 3 | `tests/test_install_skills.py` | 1,311 |
 | CLI parser, PR #1386 (remaining module deleted here) | `tests/test_configure_fabric_mcp.py` | 1,148 |
-| 4 | `tests/test_check_provenant_install.py` | 358 |
+| retained query | `tests/test_check_provenant_install.py` | 0 |
 | 3 | `tests/test_install_harness.py` (deleted) | 2,177 |
 
 Planning baseline Python total: **12,705 lines removed**, of which the state

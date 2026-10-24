@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 provenant-core = { workspace = true }
+provenant-config = { workspace = true }
+provenant-supervisor = { workspace = true }
 provenant-records = { workspace = true }
 
 [lints]

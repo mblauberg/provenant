@@ -1,5 +1,6 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
+mod install;
 mod overflow;
 mod roots;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
@@ -161,9 +162,11 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             unavailable("config show", "config", globals)
         }
-        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", globals),
-        Command::Install(_) => unavailable("install", "config", globals),
-        Command::Uninstall(_) => unavailable("uninstall", "config", globals),
+        Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
+            unavailable("fabric mcp", "fabric", globals)
+        }
+        Command::Install(args) => install::run_install(args, globals),
+        Command::Uninstall(args) => install::run_uninstall(args, globals),
         Command::Route(route) => match route {
             provenant_cli::Route::List(_) => unavailable("route list", "routing", globals),
             provenant_cli::Route::Resolve(_) => unavailable("route resolve", "routing", globals),
@@ -193,7 +196,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Check(check) => {
             let (name, owner, checkout) = match check {
                 provenant_cli::Check::Config(_) => ("check config", "config", false),
-                provenant_cli::Check::Install { .. } => ("check install", "config", false),
+                provenant_cli::Check::Install(args) => {
+                    return install::run_check_install(args, globals);
+                }
                 provenant_cli::Check::Harness(_) => ("check harness", "cli checks", true),
                 provenant_cli::Check::Release { .. } => ("check release", "cli checks", true),
                 provenant_cli::Check::Writing { .. } => ("check writing", "workflow", false),

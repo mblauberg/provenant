@@ -436,8 +436,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "jiff",
+ "provenant-config",
  "provenant-core",
  "provenant-records",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "thiserror",

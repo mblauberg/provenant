@@ -1,28 +1,37 @@
 # Rust release and managed files
 
-The `provenant-config` crate owns source stamping and managed-file installation
-for the Rust port. See the accepted [state design](../specs/rust-port/design/state.md)
-for the full contract.
+The `provenant-config` crate owns release stamping, packaging and managed-file
+installation. See the accepted [state design](../specs/rust-port/design/state.md)
+for the full contract. A staged release contains a verified manifest and
+immutable assets; installation publishes its receipt last. Exact desired bytes
+and links are no-ops, including after a crash before receipt publication.
 
-`build.rs` stamps the workspace source digest. Post-link build orchestration
-calls `package_release` to seal staged files with typed `release.json`. Installation verifies the manifest, file bytes and modes, then puts
-the release at `<state>/releases/<SourceDigest>/`. It applies managed files
-under `<state>/install/install.lock` and publishes `<state>/install/receipt.json` last.
-Exact desired bytes and links are no-ops, including after a crash before receipt
-publication. A dry run creates no root, lock or receipt; `check install` compares
-digests without repair; uninstall removes only unchanged owned entries.
+## Cut-over procedure
 
-The Rust crate exposes these operations as library entrypoints. The CLI does not
-yet wire `install`, `check install` or `uninstall`, and the legacy
-`scripts/install-harness`, `scripts/install-skills` and
-`scripts/check-provenant-install.py` entrypoints refuse the retired Python path.
-The library requires explicit harness selection and manages per-entry links.
-Client MCP/hook editors and legacy-entry matching are part of the later harness cut-over. No command-line installation procedure is
-available in this slice.
+Use the absolute stable `provenant` binary and an explicit, fresh state root
+outside every legacy root. Stage the release at an absolute path. Stop the
+selected harness clients and config editors before preview, and keep them
+stopped through installation and verification. The example selects Claude;
+repeat `--harness` for each client, and provide `--legacy-checkout` only when
+planning exact entries from that old checkout.
 
-The CLI parser now recognises the frozen grammar in [cli.md](../specs/rust-port/design/cli.md).
-`help --json` is its structured catalogue; help and version need no roots.
-`root --json` adds state/project/build identity to the human asset-root path.
-An unbound owner returns `OWNER_UNAVAILABLE`, status `unavailable`, exit 4.
-No route forwards to another owner. A bare `provenant` prints usage and exits
-2, whatever the environment.
+```sh
+PROVENANT="$HOME/.local/bin/provenant"
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
+"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+```
+
+Review every planned change before applying it; a failed preview prevents
+writes. The default is `--hooks off`; enabling hooks requires a recorded
+`HookSpec` policy and fixture for each registered handler. `check install`
+compares the installed binary, assets, receipt and owned selectors without
+repair. To remove an installation, run
+`provenant --state-dir "$STATE" uninstall --harness claude`; it removes only
+unchanged owned entries and keeps the state and release assets. Reapply
+`install` after resolving a partial-write error.
+
+`build.rs` stamps the source digest, and the release build packages typed
+`release.json` with the binary and product assets. The CLI grammar is frozen in
+[cli.md](../specs/rust-port/design/cli.md); `help --json` describes the command
+surface without resolving roots or creating state.

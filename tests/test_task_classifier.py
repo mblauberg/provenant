@@ -6,7 +6,6 @@ from tests.support.modules import load_script
 ROOT = Path(__file__).resolve().parents[1]
 classifier = load_script(ROOT / "scripts/task_classifier.py", "task_classifier_test", register=True)
 hook = load_script(ROOT / "scripts/routing_context_hook.py", "routing_context_hook_test", register=True)
-configure = load_script(ROOT / "scripts/configure-claude-hooks.py", "configure_claude_hooks_test", register=True)
 
 
 def config():
@@ -83,19 +82,6 @@ def test_hook_injects_context_and_warns_without_blocking():
     assert "claude/review" in hook.routing_context(cfg)
     assert hook.soft_warning(cfg, {"tool_name": "mcp__fabric__fabric_dispatch",
                                   "tool_input": {"role": "scout", "model": "gpt-6-luna"}}) is None
-
-
-def test_routing_hook_installer_is_opt_in_and_preserves_other_hooks(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({"user": "keep", "hooks": {"Stop": [{"hooks": []}]}}))
-    hook_script = ROOT / "scripts/routing_context_hook.py"
-    assert configure.main(["--settings", str(settings), "--routing-hook", str(hook_script)]) == 0
-    data = json.loads(settings.read_text())
-    assert data["user"] == "keep" and "Stop" in data["hooks"]
-    assert data["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
-    assert data["hooks"]["PreToolUse"][0]["matcher"] == "Agent|.*fabric_dispatch"
-    assert "--pre-tool" in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert configure.main(["--settings", str(settings), "--remove-routing-hook"]) == 0
 
 
 def test_hook_accepts_legacy_role_against_canonical_roster():

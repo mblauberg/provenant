@@ -31,8 +31,8 @@ pub use yaml::{
 pub mod workflow;
 
 pub use install::{
-    AbsolutePath, Harness, InstallReceipt, OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest,
-    ResolvedHarnessTarget, VersionInfo,
+    AbsolutePath, Harness, InstallReceipt, LegacyInstall, OwnedEntry, OwnedValue, ReleaseFile,
+    ReleaseManifest, ResolvedHarnessTarget, VersionInfo,
 };
 
 mod command_result;

@@ -988,8 +988,14 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
         &mut Reporter::default(),
     )
     .unwrap();
-    assert_eq!(result.actions.len(), 1);
-    assert_eq!(result.actions[0].selector, "receipt");
+    assert_eq!(
+        result
+            .actions
+            .iter()
+            .map(|a| a.selector.as_str())
+            .collect::<Vec<_>>(),
+        ["config", "receipt"]
+    );
     assert!(
         read_receipt(&f.targets, &LocalFs)
             .unwrap()
@@ -1335,6 +1341,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     f.targets.harnesses[0].instruction = Some(codex_instruction.clone());
     f.targets.harnesses.push(HarnessTarget {
         harness: Harness::Claude,
+        mcp_file: f.home.join(".claude.json"),
+        hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: claude_skills.clone(),
         instruction: Some(claude_instruction.clone()),
     });
@@ -1395,6 +1403,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
 
     changed.harnesses = vec![HarnessTarget {
         harness: Harness::Claude,
+        mcp_file: f.home.join(".claude.json"),
+        hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: custom.join("changed/claude/skills"),
         instruction: None,
     }];
@@ -1683,4 +1693,421 @@ fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
     );
     assert!(!f.targets.roots.state.as_path().exists());
     assert!(!f.targets.bin_dir.exists());
+}
+
+#[test]
+fn harness_cutover_previews_mcp_and_dry_run_creates_nothing() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    assert!(plan.actions().iter().any(|a| a.selector == "config"));
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        true,
+    )
+    .unwrap();
+    assert!(!f.home.join(".codex").exists());
+    assert!(!f.targets.roots.state.as_path().exists());
+}
+
+#[test]
+fn mcp_selector_ownership_preserves_user_edits_and_uninstalls_only_unchanged() {
+    let f = Fixture::new();
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let foreign =
+        "# user comment\nmodel = 'user-model'\n[mcp_servers.other]\ncommand = 'foreign' # keep\n";
+    fs::write(&config, foreign).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.starts_with("# user comment\nmodel = 'user-model'\n"));
+    assert!(text.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
+    assert!(text.contains("--state-dir"));
+    let edited = text.replace("user-model", "changed-model");
+    fs::write(&config, &edited).unwrap();
+    assert!(
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.plan().actions().is_empty());
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let after = fs::read_to_string(&config).unwrap();
+    assert!(after.starts_with("# user comment\nmodel = 'changed-model'\n"));
+    assert!(after.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
+    assert!(!after.contains("mcp_servers.fabric"));
+    assert!(f.targets.bin_dir.join("provenant").is_symlink());
+}
+
+#[test]
+fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
+    let mut f = Fixture::new();
+    f.targets.hooks = true;
+    let release = f.release();
+    assert_eq!(
+        Snapshots::capture(&release, &f.targets, &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "hook registration refused: no fixture-backed HookSpec is available"
+    );
+    assert!(!f.targets.roots.state.as_path().exists());
+    f.targets.hooks = false;
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let regular = f.home.join("foreign.toml");
+    fs::write(&regular, "model='keep'\n").unwrap();
+    symlink(&regular, &config).unwrap();
+    let err = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "symlinked or non-regular harness config refused: {}",
+            config.display()
+        )
+    );
+    assert_eq!(fs::read_to_string(&regular).unwrap(), "model='keep'\n");
+    assert!(!f.targets.roots.state.as_path().exists());
+}
+
+#[test]
+fn mcp_conflict_does_not_adopt_foreign_env_or_create_state() {
+    let mut f = Fixture::new();
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let foreign =
+        "[mcp_servers.fabric]\ncommand='foreign'\n[mcp_servers.fabric.env]\nTOKEN='do-not-copy'\n";
+    fs::write(&config, foreign).unwrap();
+    f.targets.adopt_existing = true;
+    let release = f.release();
+    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs);
+    assert_eq!(
+        snapshots.unwrap_err().to_string(),
+        format!("unmanaged destination conflicts: {}", config.display())
+    );
+    assert_eq!(fs::read_to_string(config).unwrap(), foreign);
+    assert!(!f.targets.roots.state.as_path().exists());
+}
+
+#[test]
+fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
+    let mut f = Fixture::new();
+    let legacy = f.home.join("old-checkout");
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[
+            Harness::Claude,
+            Harness::Codex,
+            Harness::Cursor,
+            Harness::Agy,
+            Harness::Opencode,
+        ],
+    );
+    f.targets.legacy_checkout = Some(legacy.clone());
+    for target in &f.targets.harnesses {
+        fs::create_dir_all(&target.skills_dir).unwrap();
+        symlink(
+            legacy.join("skills/autopilot-near"),
+            target.skills_dir.join("autopilot"),
+        )
+        .unwrap();
+        symlink(
+            legacy.join("skills/_shared"),
+            target.skills_dir.join("_shared"),
+        )
+        .unwrap();
+        if let Some(instruction) = &target.instruction {
+            let source = if matches!(target.harness, Harness::Claude | Harness::Codex) {
+                f.home.join(".agents/AGENTS.md")
+            } else {
+                legacy.join("AGENTS.md")
+            };
+            symlink(source, instruction).unwrap();
+        }
+    }
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let p = f.source.join("instructions").join(name);
+        fs::write(&p, b"PROVENANT_AGENT_LABEL instructions\n").unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fs::create_dir_all(f.home.join(".agents")).unwrap();
+    fs::write(
+        f.home.join(".agents/AGENTS.md"),
+        b"Set AGENT_FABRIC_LABEL for messages\n",
+    )
+    .unwrap();
+    let hook = f.home.join(".claude/settings.json");
+    let old_hook = format!(
+        "python3 \"{}/skills/session/scripts/state_check.py\" --hook",
+        legacy.display()
+    );
+    let owned =
+        serde_json::to_string(&serde_json::json!({"type":"command","command":old_hook})).unwrap();
+    let herdr = r#"{"type":"command", "command":"herdr capture", "timeout":2}"#;
+    let before = format!(
+        "{{\n // herdr stays\n \"user\": 7,\n \"hooks\": {{\"PreCompact\":[{{\"hooks\":[{owned}, {herdr}]}}]}}\n}}\n"
+    );
+    fs::write(&hook, &before).unwrap();
+    let codex_hooks = f.home.join(".codex/hooks.json");
+    let codex_foreign = b"{\n // Herdr\n \"hooks\":{\"Stop\":[{\"command\":\"herdr\"}]}\n}\n";
+    fs::write(&codex_hooks, codex_foreign).unwrap();
+    let opencode = f.home.join(".config/opencode/opencode.jsonc");
+    fs::write(&opencode,format!("{{// foreign comment\n\"instructions\":[\"foreign.md\",{},],\n\"theme\": \"user\",}}\n",serde_json::to_string(&f.home.join(".agents/AGENTS.md").to_str().unwrap()).unwrap())).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let plan = f.plan();
+    assert!(plan.actions().iter().any(|a| !a.edits.is_empty()));
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    for target in &f.targets.harnesses {
+        assert!(fs::symlink_metadata(target.skills_dir.join("_shared")).is_err());
+        assert_eq!(
+            fs::read_link(target.skills_dir.join("autopilot")).unwrap(),
+            legacy.join("skills/autopilot-near")
+        );
+        assert!(target.mcp_file.is_file());
+        if let Some(instruction) = &target.instruction {
+            assert!(
+                fs::read_link(instruction)
+                    .unwrap()
+                    .ends_with("instructions/AGENTS.md")
+            );
+        }
+    }
+    let after = fs::read_to_string(&hook).unwrap();
+    assert!(after.contains(herdr));
+    assert!(after.contains("// herdr stays"));
+    assert!(!after.contains("state_check.py"));
+    assert_eq!(fs::read(codex_hooks).unwrap(), codex_foreign);
+    assert_eq!(
+        fs::read_to_string(f.home.join(".agents/AGENTS.md")).unwrap(),
+        "Set PROVENANT_AGENT_LABEL for messages\n"
+    );
+    assert!(
+        fs::read_to_string(&opencode)
+            .unwrap()
+            .contains("// foreign comment")
+    );
+    assert!(f.plan().actions().is_empty());
+    assert!(
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let after = fs::read_to_string(opencode).unwrap();
+    assert!(after.contains("foreign.md"));
+    assert!(after.contains("// foreign comment"));
+    assert!(!after.contains("instructions/AGENTS.md"));
+}
+
+#[test]
+fn whole_skills_link_is_unlinked_without_reading_its_target() {
+    let mut f = Fixture::new();
+    let legacy = f.home.join("unread-old-checkout");
+    f.targets.legacy_checkout = Some(legacy.clone());
+    fs::create_dir_all(f.home.join(".codex")).unwrap();
+    symlink(legacy.join("skills"), f.home.join(".codex/skills")).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(f.home.join(".codex/skills").is_dir());
+    assert!(!f.home.join(".codex/skills").is_symlink());
+    assert!(f.link().is_symlink());
+    assert!(!legacy.exists());
+    assert!(f.plan().actions().is_empty());
+}
+
+#[test]
+fn legacy_checkout_destinations_and_duplicate_owned_instruction_values_refuse() {
+    let mut f = Fixture::new();
+    let legacy = f.home.join("old-checkout");
+    f.targets.legacy_checkout = Some(legacy.clone());
+    f.targets.bin_dir = legacy.join("bin");
+    let release = f.release();
+    let error = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "unmanaged destination conflicts: {}",
+            legacy.join("bin/provenant").display()
+        )
+    );
+    assert!(!legacy.exists());
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets.legacy_checkout = Some(legacy);
+    let config = f.targets.harnesses[0].mcp_file.clone();
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let old = f
+        .home
+        .join(".agents/AGENTS.md")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let bytes = serde_json::to_vec(&serde_json::json!({"instructions":[old,old]})).unwrap();
+    fs::write(&config, &bytes).unwrap();
+    assert_eq!(
+        Snapshots::capture(&release, &f.targets, &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "invalid harness configuration: duplicate owned instruction"
+    );
+    assert_eq!(fs::read(config).unwrap(), bytes);
+    assert!(!f.targets.roots.state.as_path().exists());
+}
+
+#[test]
+fn codex_inline_table_retains_foreign_values_and_comments() {
+    let mut f = Fixture::new();
+    f.targets.adopt_existing = true;
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let before = "# keep top\nmcp_servers = { other = { command = 'foreign' }, fabric = { command = 'old', env = {} } } # keep tail\nmodel = 'user'\n";
+    fs::write(&config, before).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let after = fs::read_to_string(config).unwrap();
+    assert!(after.starts_with("# keep top\n"));
+    assert!(after.contains("other = { command = 'foreign' }"));
+    assert!(after.contains("# keep tail\nmodel = 'user'\n"));
+    assert!(f.plan().actions().is_empty());
+}
+
+#[test]
+fn explicit_user_install_paths_win_over_harness_environment_even_when_default() {
+    let mut f = Fixture::new();
+    let state = f.targets.roots.state.as_path();
+    fs::create_dir_all(state).unwrap();
+    let config = format!(
+        "schema_version=1\n[install.targets.codex]\nhome={}\nconfig={}\n",
+        serde_json::to_string(f.home.join(".codex").to_str().unwrap()).unwrap(),
+        serde_json::to_string(f.home.join(".codex/config.toml").to_str().unwrap()).unwrap()
+    );
+    fs::write(state.join("config.toml"), &config).unwrap();
+    crate::apply_install_config(&mut f.targets, &LocalFs).unwrap();
+    f.targets
+        .apply_environment(None, Some(&f.home.join("alternate")))
+        .unwrap();
+    assert_eq!(
+        f.targets.harnesses[0].skills_dir,
+        f.home.join(".codex/skills")
+    );
+    assert_eq!(
+        f.targets.harnesses[0].mcp_file,
+        f.home.join(".codex/config.toml")
+    );
+    let loaded = crate::load(&f.targets.roots, Some(config.as_bytes())).unwrap();
+    crate::test_support::assert_leaf_origins(&loaded);
+}
+
+#[test]
+fn unresolved_utility_selector_refuses_cutover_and_checks_without_writing() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let config = f.home.join(".claude/settings.json");
+    let before=b"{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"foreign command remains unchanged\"}]}]}}\n";
+    fs::write(&config, before).unwrap();
+    let release = f.release();
+    assert_eq!(
+        Snapshots::capture(&release, &f.targets, &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "legacy cut-over unresolved: PostToolUse/Bash requires a recorded utility-hook interpreter"
+    );
+    assert_eq!(
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "legacy cut-over unresolved: PostToolUse/Bash requires a recorded utility-hook interpreter"
+    );
+    assert_eq!(fs::read(&config).unwrap(), before);
+}
+
+#[test]
+fn check_install_detects_reintroduced_global_legacy_link() {
+    let mut f = Fixture::new();
+    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    fs::create_dir_all(f.home.join(".agents")).unwrap();
+    let global = f.home.join(".agents/AGENTS.md");
+    symlink(
+        f.targets
+            .legacy_checkout
+            .as_ref()
+            .unwrap()
+            .join("AGENTS.md"),
+        &global,
+    )
+    .unwrap();
+    let findings = check_install_for(&f.targets, None, "fixture-target", &LocalFs).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.rule == "legacy_entry" && f.path.to_path_buf().unwrap() == global)
+    );
+}
+
+#[test]
+fn install_uses_strict_configuration_before_planning() {
+    let mut f = Fixture::new();
+    let state = f.targets.roots.state.as_path();
+    fs::create_dir_all(state).unwrap();
+    let bytes = b"schema_version=1\nforeign_key='private sentinel'\n";
+    fs::write(state.join("config.toml"), bytes).unwrap();
+    let error = crate::apply_install_config(&mut f.targets, &LocalFs).unwrap_err();
+    assert!(matches!(
+        error,
+        InstallError::Config(crate::ConfigError::Schema {
+            rule: "unknown_key",
+            ..
+        })
+    ));
+    assert!(!error.to_string().contains("private sentinel"));
+    assert_eq!(
+        fs::read(f.targets.roots.state.as_path().join("config.toml")).unwrap(),
+        bytes
+    );
 }

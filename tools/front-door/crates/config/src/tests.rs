@@ -131,7 +131,6 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
         ),
         ("schema_version=1\n[knobs]", "unknown_key"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
-        ("schema_version=1\n[install]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=18446744073709551616", "syntax"),
         ("schema_version=1\n[domains]\nx=inf", "unknown_key"),

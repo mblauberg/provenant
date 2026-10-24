@@ -9,9 +9,10 @@ API-equivalent cost estimates. Its accepted contract is the
 Step 1 supplies the pure `provenant-telemetry` reducer and its typed
 [TOML price asset](../../config/telemetry-prices.toml). It removes the Python
 ledger, transcript and OTel ingestion, sources, delivery-cost joins, changes,
-comparison and retro reports. Collector source and installer support remain
-until state slice 4 (harness cut-over) removes them with the installer flags. Old ledger and collector data
-stay untouched. There is no history import or transition adapter.
+comparison and retro reports. The Rust product ships no collector or collector installer. Removing that
+source does not alter an already installed LaunchAgent, collector binary,
+harness setting or stored telemetry data. There is no history import or
+transition adapter.
 
 The command is pending CLI integration:
 
@@ -62,11 +63,14 @@ combined groups or 1 MiB of retained group keys. CLI will enforce its separate
 ## Collector retirement
 
 Source deletion does not uninstall an existing collector or edit harness
-configuration. State and telemetry own the user-authorised two-Mac cut-over in
-[the collector retirement checklist](../specs/rust-port/design/telemetry.md#collector-retirement-at-cut-over).
-The retained legacy install supplies the uninstall helper at that cut-over.
-Preserve all old ledger, transcript and collector data and unrelated user
-configuration.
+configuration. Use the stable Rust binary and the explicit `provenant install`
+procedure in the [front-door runbook](front-door.md) to preview and apply
+selected harness changes. Stop selected clients and config editors through
+`check install`; pass `--legacy-checkout` only for exact entries from that
+checkout. The installer does not discover launchd services or delete paths that
+are absent from its printed plan. Retiring an already installed collector needs
+separate host-specific authorization and verification. Preserve old ledger,
+transcript and collector data.
 
 ## Provider quota
 
@@ -505,15 +509,3 @@ unconfigured to keep its accounts apart. The inspected Cursor reference uses
 its SQLite store for authentication, then obtains allowance from the endpoint;
 it does not supply a local token-usage ledger. Cursor usage tokens therefore
 remain receipt-only. Neither missing coverage is represented as zero use.
-
-## Retained OTLP collector
-
-The legacy [Swift collector](../../tools/otlp-collector/otlp-collector.swift),
-plist template and `scripts/install-otel-collector` remain live through state
-slice 4 (harness cut-over). The collector
-accepts OTLP/HTTP JSON on loopback, stores NDJSON under the state root's `otel/`
-directory and supports launchd socket activation. Install with
-`scripts/install-otel-collector install`; uninstall with
-`scripts/install-otel-collector uninstall`. Uninstall preserves data.
-The Python ingest consumer is retired; collector retention supplies the legacy
-installer and the authorised cut-over checklist, not new report ingestion.
