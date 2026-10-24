@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-pub(super) struct Context {
+pub(crate) struct Context {
     pub roots: Roots,
     pub identity: Identity,
     config: FabricConfig,

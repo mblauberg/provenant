@@ -15,8 +15,8 @@ use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
     ProcessFact, ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
 };
-use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
 use provenant_supervisor::custody::WriterBinding;
+use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
 use provenant_supervisor::fs::{
     Directory, FsError, LockGuard, LockMode, Metadata, PublishMode, SafeDir, canonicalize,
 };

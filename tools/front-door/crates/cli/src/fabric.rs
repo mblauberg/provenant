@@ -1,5 +1,5 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
-mod context;
+pub(crate) mod context;
 use crate::{Globals, RenderMode};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{

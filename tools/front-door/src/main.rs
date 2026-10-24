@@ -88,6 +88,37 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
         globals,
     )
 }
+/// Resolve Run's composition paths, then emit the owner's reply.
+fn run_edge(
+    leaf: &str,
+    globals: &provenant_cli::Globals,
+    action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
+) -> u8 {
+    let resolved = (|| -> Result<_, roots::RootError> {
+        let assets = roots::product_root()?;
+        let project = roots::selected_project(globals.project.as_deref(), false)?;
+        let roots = roots::roots(globals, &assets, &project)?;
+        Ok((roots, roots::home()?, assets, project))
+    })();
+    match resolved {
+        Ok((roots, home, assets, cwd)) => {
+            let reply = action(&provenant_cli::run::Edge {
+                roots: &roots,
+                home: &home,
+                assets: &assets,
+                cwd: &cwd,
+            });
+            emit(&reply.result, globals, &reply.human, false)
+        }
+        Err(error) => {
+            let status = match error {
+                roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
+                _ => Outcome::Error,
+            };
+            fail(leaf, status, "ROOT", &error.to_string(), globals)
+        }
+    }
+}
 fn run(inv: provenant_cli::Invocation) -> u8 {
     let globals = &inv.globals;
     let command = match inv.command {
@@ -150,7 +181,16 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 .iter()
                 .map(|fd| std::ffi::OsString::from(fd.to_string()))
                 .collect();
-            match provenant_supervisor::supervise(&descriptors, Default::default()) {
+            let registry = provenant_cli::run::Registry { roots: None };
+            let holder = provenant_run::RunHolder {
+                providers: &registry,
+                resources: &provenant_run::SystemResources,
+            };
+            let hooks = provenant_supervisor::GuardianHooks {
+                holder: Some(&holder),
+                ..Default::default()
+            };
+            match provenant_supervisor::supervise(&descriptors, hooks) {
                 Ok(()) => 0,
                 Err(error) => fail(
                     "internal supervise",
@@ -213,9 +253,15 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ),
             }
         }
-        Command::Dispatch(_) => unavailable("dispatch", "run", globals),
-        Command::Lanes(_) => unavailable("lanes", "run", globals),
-        Command::Output(_) => unavailable("output", "run", globals),
+        Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::dispatch(*cmd, edge)
+        }),
+        Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::lanes(cmd, edge)
+        }),
+        Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::output(cmd, edge)
+        }),
         Command::Cancel(_) => unavailable("cancel", "run", globals),
         Command::Resume(_) => unavailable("resume", "run", globals),
         Command::Reconcile(_) => unavailable("reconcile", "run", globals),

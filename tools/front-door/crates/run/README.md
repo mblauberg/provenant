@@ -14,8 +14,8 @@ then seals canonical `request.json` and exact UTF-8 prompts through supervisor's
 held-directory filesystem API before marking the operation accepted. Replay
 compares the canonical request digest, including prompt digests, route choice,
 authority-plan digest and execution controls. A prepared operation can retry
-publication with its original IDs. Admission and scheduling land in step 2;
-this storage acceptance does not claim a worker or ticket has been acquired.
+publication with its original IDs. It also queues one admission ticket per
+attempt and refuses a submission that would exceed the host queue.
 
 `publish_terminal` requires a scoped, durably published supervisor exit record
 and completed cleanup. It verifies and syncs that file, seals the result, then
@@ -23,7 +23,7 @@ commits the immutable attempt, event, run summary, operation state and released
 ticket together. Publication failures remain nonterminal and return typed
 errors. Retrying the same publication is idempotent; a different terminal
 record is refused. It neither releases supervisor custody nor publishes a
-settlement attestation. Those belong to dispatch's holder composition in step 2.
+settlement attestation; the guardian holder below does both.
 
 Before sealing `result.md`, publication now seals the intended terminal record
 as `terminal-pending.json`. If a restarted publisher computes different text or
@@ -48,12 +48,15 @@ other scoped reads. Workspace selection is refused until the confinement
 association exists. Work snapshots currently describe stored nonterminal work;
 lease/custody observations and durable cursor acknowledgement land with controls.
 
-`read_output` supports sealed prompt and result bytes with exact offsets,
+`read_output` supports sealed prompt and result bytes, and the attempt's
+stderr capture, with exact offsets,
 EOF, clipping, completeness and digest. Reads verify the whole bounded file
 before returning a chunk. Requests above 64 KiB are refused. Prompt/result
 files are bounded at 1 MiB/4 MiB; JSON records and event pages at 1 MiB.
-A byte cut through a UTF-8 scalar is labelled `utf8-fragment`. Capture/event
-output selection, tail reads and exports land with the controls API in step 4.
+A byte cut through a UTF-8 scalar is labelled `utf8-fragment`; invalid stderr
+is labelled `utf8-lossy`. Chunks report the total length so the edge can tail.
+`lanes` pages attempts by run, task or attempt target, or all nonterminal
+attempts, at most 100 per page.
 All artefact references are relative to their run root and traverse verified,
 private directories without following links.
 
@@ -67,25 +70,24 @@ were already absent on this baseline. Shared Python leaves remain for their
 old dispatch, batch, control, provider, Fabric and finaliser importers, as listed
 in the execution-run design's deletion inventory. This crate never calls them.
 
-## Step 2 prerequisite audit
+## Dispatch, admission and the guardian holder
 
-Work route: `codex/gpt-6.1-sol@high`, via Fabric. Milestones 2+3 are incomplete.
-The accepted design requires supervisor/confinement acceptance of the holder
-and writer-reservation protocol before step 2. The current APIs do not yet
-compose that protocol:
+`start` hands each queued attempt to its own same-binary guardian. The edge's
+`Providers::prepare` resolves the route and its fallback and builds the exact
+invocation; a refusal makes that attempt `rejected` while siblings proceed.
+Otherwise the attempt moves to `starting` with generation 1 and its applied
+route, takes reader custody, reserves publication and launches. A handoff that
+does not confirm marks the operation `launch_unknown` for `reconcile`.
 
-- Supervisor's sole same-binary handoff starts `internal supervise`, not a
-  durable run scheduler. `OwnedLaunch` requires a writer lease even for readers.
-- Production `GuardianHooks` supplies stream observation and filtering, but no
-  terminal callback that retains custody through Run's terminal commit.
-- Confinement's `VerifiedWorktree` exposes verified identity/path and its held
-  directories as `dyn SafeDir`; supervisor's `WriterBinding::from_verified`
-  requires concrete `Directory` handles. There is no verified binding API
-  joining those owners.
+`RunHolder` is the guardian's production `Holder`. `admit` runs before spawn
+and waits in `RunStore::admit` until host, project and run concurrency, 20 s
+host start spacing and the memory and disk floors allow a start, or until the
+admission deadline refuses it. `terminal` runs after the sealed exit is
+durable: `finish` decodes the sealed stdout capture, commits the terminal
+record idempotently, and supervisor's `publish_release` writes the settlement
+attestations so custody can clear. The holder context carries a `RootSeed`
+because the guardian's environment is cleared. The design's "Decisions taken
+in steps 2+3" lists the limits and deferrals.
 
-The design/API follow-up is a safe scheduler handoff, a holder finalisation
-hook with validated scope and retained custody, and a confinement-owned writer
-reservation constructor (including a distinct read-only custody path). These
-need owner acceptance and native custody/fault tests. The admission and batch
-implementation, command wiring and legacy deletion must follow together;
-disabled-provider refusals alone would not satisfy the dispatch milestone.
+Tests use fake providers and resources at this boundary. The CLI composes the
+production provider registry and the `dispatch`, `lanes` and `output` leaves.

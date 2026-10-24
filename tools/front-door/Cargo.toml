@@ -49,7 +49,6 @@ ignored-paths = []
 ignored = [
   "provenant-fabric-mcp",
   "provenant-routing",
-  "provenant-run",
   "provenant-telemetry",
 ]
 
@@ -79,6 +78,7 @@ license.workspace = true
 
 [dependencies]
 provenant-workflow = { workspace = true }
+provenant-run = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-cli = { workspace = true }
 provenant-core = { workspace = true }

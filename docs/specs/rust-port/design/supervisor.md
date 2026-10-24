@@ -582,6 +582,12 @@ and syncs held files/directories before minting `SettlementCommit`. That
 receipt permits classified scratch settlement and fence clearing under writer
 exclusion; an absent or invalid attestation retains the fence.
 
+Decision (run steps 2+3): supervisor owns the attestation byte format as
+`custody::publish_release(attempt, scope)`, which the guardian holder calls
+after Run's terminal commit, so Run does not duplicate it. The holder also
+gets `Holder::admit(context, attempt)` before spawn. A refusal publishes a
+never-spawned exit and releases custody without starting the provider.
+
 ## Deletions and build order
 
 Counts are `wc -l` at the source baseline above, not the older supervisor
