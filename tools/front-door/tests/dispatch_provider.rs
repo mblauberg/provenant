@@ -329,6 +329,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         account_label: Some("open-code-free".into()),
         account_key: Some("keyless-free".into()),
         source: Some("fixture_route".into()),
+        pool_selection: None,
     };
     let prompt = "reply OK";
     let prepared = PreparedRun {
@@ -483,6 +484,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         confidentiality: RouteConfidentiality {
             evidence_ref: "fixture-access".into(),
         },
+        pool_selection: None,
     };
     let pools = vec!["opencode-free".to_owned()];
     assert!(matches!(

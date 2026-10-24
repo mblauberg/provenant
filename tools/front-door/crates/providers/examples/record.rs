@@ -371,6 +371,7 @@ fn route(args: &Args) -> ResolvedRoute {
         confidentiality: provenant_records::RouteConfidentiality {
             evidence_ref: "recording".into(),
         },
+        pool_selection: None,
     }
 }
 

@@ -105,16 +105,22 @@ workflow.
 | External effects | none |  | reversible | irreversible |
 | Critical surface | none | public-contract | auth-security, privacy, financial, legal, build-release-gate | life-safety |
 
-The bundled routing catalogue provides ordered `utility`, `junior`, `senior`,
+The bundled routing catalogue provides weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools. Each task selects one named route or
-one exact model; a pool tries its members in order and does not rotate or
-weight them. `task_class` presets affect knobs only and do not alias routes.
+one exact model; a pool makes a deterministic weighted draw among ready
+positive-weight members, with zero-weight members reserved as ordered fallbacks.
+Provider pacing policies and factor reporting are wired, while the factor is
+currently 1.0 pending quota-aware pacing.
+Routing overrides live in the state root's `config.toml`. Use
+`provenant route set` or `provenant route pacing` to change routing, and
+`provenant route list` to inspect effective weights, factors and readiness.
+`task_class` presets affect knobs only and do not alias routes.
 When several families are available, use the tiered-council method by
 submitting separate tasks for distinct exact models, then synthesise in the
 chair. Bind the applied route and effort from each attempt to the receipt.
 Unsupported effort is refused; never invent task-class, role or effort values.
-The runtime governs routing, the bundled catalogue supplies pool membership
-and order, and the mechanics live in `orchestrate`. Prefer per-dispatch
+The runtime governs routing, the bundled catalogue supplies default pool
+membership and pacing, and the mechanics live in `orchestrate`. Prefer per-dispatch
 controls: editing a global provider configuration, such as
 `~/.codex/config.toml`, needs explicit authority for that path and action. Run attempts live under
 `<state>/runs/<run>/attempts/<attempt>/`; the default state root is

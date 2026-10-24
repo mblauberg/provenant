@@ -1232,6 +1232,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
             attempt_id: prepared.attempts[0].attempt_id,
             lane_depth: 1,
             run_id: prepared.run_id,
+            operation_id: prepared.operation_id.clone(),
+            task_index: 0,
             deadline_unix_ms: 4_000_000_000_000,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),

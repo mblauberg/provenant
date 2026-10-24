@@ -209,6 +209,7 @@ fn prepare_with(
         &route_request(task)?,
         roots,
         selected,
+        (paths.operation_id.as_str(), paths.task_index),
         &availability,
         &access,
         &host,
@@ -397,6 +398,7 @@ fn prepare_with(
             effort: route.effort,
             account_label: entry.map(|e| e.label.clone()),
             account_key: route.account_key,
+            pool_selection: route.pool_selection.clone(),
             ..Default::default()
         };
         let stdin = match spec.stdin {
@@ -574,6 +576,7 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
         eligibility: alternative.eligibility.clone(),
         readiness: alternative.readiness.clone(),
         confidentiality: alternative.confidentiality.clone(),
+        pool_selection: base.pool_selection.clone(),
     }
 }
 

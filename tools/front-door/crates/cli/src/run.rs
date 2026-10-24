@@ -224,6 +224,7 @@ impl run::Providers for Registry<'_> {
                     }
                     .into(),
                 ),
+                pool_selection: None,
             }),
             usage: run::UsageRecord::default(),
             reason: None,

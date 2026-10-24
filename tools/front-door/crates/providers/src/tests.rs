@@ -353,6 +353,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         confidentiality: provenant_records::RouteConfidentiality {
             evidence_ref: "fixture-policy".into(),
         },
+        pool_selection: None,
     }
 }
 #[test]

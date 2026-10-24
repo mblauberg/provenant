@@ -138,201 +138,80 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates(
 }
 
 #[test]
-fn bundled_route_pools_list_and_resolve_in_preference_order() -> Result {
+fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> Result {
     let rig = rig()?;
-    let listed = call(&rig, &["route", "list"], 0)?;
-    let pools = listed["data"]["pools"].as_object().ok_or("pools")?;
-    assert_eq!(pools.len(), 6);
+    let set = call(
+        &rig,
+        &[
+            "route",
+            "set",
+            "junior",
+            "codex/gpt-6-luna",
+            "--weight",
+            "7",
+            "--effort",
+            "high",
+            "--efforts",
+            "medium,high,xhigh",
+        ],
+        0,
+    )?;
+    assert_eq!(set["command"], "route set");
+    let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
+    assert!(persisted.contains("[routing]"));
 
-    struct ExpectedMember {
-        model: &'static str,
-        effort: Option<&'static str>,
-        free: bool,
-    }
-    struct ExpectedRoute {
-        name: &'static str,
-        members: Vec<ExpectedMember>,
-        resolved_model: &'static str,
-        resolved_effort: Option<&'static str>,
-    }
-    let cases = [
-        ExpectedRoute {
-            name: "utility",
-            members: vec![
-                ExpectedMember {
-                    model: "claude/claude-haiku-5-5",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "codex/gpt-6-luna",
-                    effort: Some("low"),
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "opencode/opencode/deepseek-v4.1-flash-free",
-                    effort: None,
-                    free: true,
-                },
-                ExpectedMember {
-                    model: "opencode/opencode/glm-5.3-flash-free",
-                    effort: None,
-                    free: true,
-                },
-            ],
-            resolved_model: "claude-haiku-5-5",
-            resolved_effort: None,
-        },
-        ExpectedRoute {
-            name: "junior",
-            members: vec![
-                ExpectedMember {
-                    model: "codex/gpt-6-luna",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "agy/gemini-3.8-flash",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "claude/claude-haiku-5-5",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "opencode/opencode/deepseek-v4.1-flash-free",
-                    effort: None,
-                    free: true,
-                },
-                ExpectedMember {
-                    model: "opencode/opencode/glm-5.3-flash-free",
-                    effort: None,
-                    free: true,
-                },
-            ],
-            resolved_model: "gpt-6-luna",
-            resolved_effort: None,
-        },
-        ExpectedRoute {
-            name: "senior",
-            members: vec![
-                ExpectedMember {
-                    model: "codex/gpt-6.1-sol",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "claude/claude-sonnet-5-5",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "agy/gemini-3.8-flash",
-                    effort: None,
-                    free: false,
-                },
-            ],
-            resolved_model: "gpt-6.1-sol",
-            resolved_effort: None,
-        },
-        ExpectedRoute {
-            name: "principal",
-            members: vec![
-                ExpectedMember {
-                    model: "claude/claude-opus-5-5",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "codex/gpt-6-astra",
-                    effort: None,
-                    free: false,
-                },
-            ],
-            resolved_model: "claude-opus-5-5",
-            resolved_effort: None,
-        },
-        ExpectedRoute {
-            name: "writing",
-            members: vec![
-                ExpectedMember {
-                    model: "codex/gpt-6-luna",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "agy/gemini-3.8-flash",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "claude/claude-sonnet-5-5",
-                    effort: None,
-                    free: false,
-                },
-            ],
-            resolved_model: "gpt-6-luna",
-            resolved_effort: None,
-        },
-        ExpectedRoute {
-            name: "design",
-            members: vec![
-                ExpectedMember {
-                    model: "claude/claude-sonnet-5-5",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "agy/gemini-3.8-flash",
-                    effort: None,
-                    free: false,
-                },
-                ExpectedMember {
-                    model: "claude/claude-opus-5-5",
-                    effort: None,
-                    free: false,
-                },
-            ],
-            resolved_model: "claude-sonnet-5-5",
-            resolved_effort: None,
-        },
-    ];
+    let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    let member = listed["data"]["pools"]["junior"]
+        .as_array()
+        .and_then(|members| members.iter().find(|m| m["model"] == "codex/gpt-6-luna"))
+        .ok_or("configured junior member")?;
+    assert_eq!(member["weight"], 7);
+    assert_eq!(member["effort"], "high");
+    assert_eq!(
+        member["efforts"],
+        serde_json::json!(["medium", "high", "xhigh"])
+    );
+    assert!(member["factor_basis_points"].as_u64().is_some());
+    assert!(member["readiness"].is_object());
 
-    for route in cases {
-        let members = pools
-            .get(route.name)
-            .and_then(Value::as_array)
-            .ok_or("route pool")?;
-        assert_eq!(members.len(), route.members.len(), "{}", route.name);
-        for (member, expected) in members.iter().zip(route.members) {
-            assert_eq!(member["model"], expected.model, "{}", route.name);
-            assert_eq!(
-                member["effort"],
-                expected.effort.map(Value::from).unwrap_or(Value::Null),
-                "{}",
-                route.name
-            );
-            assert_eq!(member["free"], expected.free, "{}", route.name);
-        }
+    let pacing = call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
+    assert_eq!(pacing["command"], "route pacing");
+    let pacing_list = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    assert_eq!(pacing_list["data"]["pacing"]["codex"], "spend");
 
-        let resolved = call(&rig, &["route", "resolve", "--route", route.name], 0)?;
-        assert_eq!(
-            resolved["data"]["model"], route.resolved_model,
-            "{}",
-            route.name
-        );
-        assert_eq!(
-            resolved["data"]["effort"],
-            route
-                .resolved_effort
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-            "{}",
-            route.name
-        );
-    }
+    call(&rig, &["route", "remove", "junior", "codex/gpt-6-luna"], 0)?;
+    let after_remove = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    assert!(
+        !after_remove["data"]["pools"]["junior"]
+            .as_array()
+            .ok_or("junior members")?
+            .iter()
+            .any(|m| m["model"] == "codex/gpt-6-luna")
+    );
+    call(&rig, &["route", "reset", "junior"], 0)?;
+    let reset = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    assert!(
+        reset["data"]["pools"]["junior"]
+            .as_array()
+            .ok_or("reset junior members")?
+            .iter()
+            .any(|m| m["model"] == "codex/gpt-6-luna")
+    );
+
+    fs::write(
+        rig.state.join("config.toml"),
+        r#"schema_version = 1
+[routing]
+pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high", efforts = ["high"] }] }
+"#,
+    )?;
+    let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
+    assert_eq!(code(&out), 2);
+    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let message = rejected["error"]["message"]
+        .as_str()
+        .ok_or("config error")?;
+    assert!(message.contains("routing") && message.contains("weight"));
     Ok(())
 }
 
@@ -355,7 +234,7 @@ fn named_routes_and_cached_availability_are_read_only_and_fail_closed() -> Resul
     fs::write(rig.state.join("config.toml"), config)?;
     let cache = rig.state.join("routing/availability");
     fs::create_dir_all(&cache)?;
-    let record = serde_json::json!({"schema_version":1,"adapter":"codex","executable":"/fixture/codex","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v1","account_key":"opaque-account","observed_models":["exact"],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
+    let record = serde_json::json!({"schema_version":1,"adapter":"codex","executable":"/fixture/codex","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v2","account_key":"opaque-account","observed_models":["exact"],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
     let bytes = serde_json::to_vec(&record)?;
     fs::write(cache.join("codex.json"), &bytes)?;
     let listed = call(&rig, &["route", "list", "--adapter", "codex"], 0)?;
@@ -432,7 +311,7 @@ fn large_cached_observation_sets_have_a_compact_bounded_projection() -> Result {
     let cache = rig.state.join("routing/availability");
     fs::create_dir_all(&cache)?;
     for adapter in ["codex", "claude", "cursor", "agy", "opencode"] {
-        let record = serde_json::json!({"schema_version":1,"adapter":adapter,"executable":"/fixture/provider","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v1","account_key":"opaque-account","observed_models":vec!["\"".repeat(512); 256],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
+        let record = serde_json::json!({"schema_version":1,"adapter":adapter,"executable":"/fixture/provider","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v2","account_key":"opaque-account","observed_models":vec!["\"".repeat(512); 256],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
         fs::write(
             cache.join(format!("{adapter}.json")),
             serde_json::to_vec(&record)?,

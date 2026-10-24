@@ -26,7 +26,7 @@ pub mod test_support;
 mod tests;
 
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
-pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
+pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config, edit_config_document};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
@@ -76,6 +76,8 @@ pub enum ConfigError {
         #[source]
         source: SectionError,
     },
+    #[error("config edit refused: {reason}")]
+    Edit { reason: &'static str },
     #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
     UnknownKnob { name: String, close: Vec<String> },
     #[error("invalid value for knob {name} ({rule})")]
