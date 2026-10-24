@@ -32,8 +32,18 @@ pub struct TaskRequest {
     pub fallback: Vec<RouteRecord>,
     /// Digest of the verified confinement/authority plan supplied by the edge.
     pub authority_digest: Digest,
+    #[serde(default)]
+    pub writer: Option<WriterRequest>,
     pub provider_timeout_seconds: u64,
     pub delivery_id: Option<DeliveryId>,
+}
+
+/// Canonical repository and linked worktree selected at the submission edge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterRequest {
+    pub project: std::path::PathBuf,
+    pub worktree: std::path::PathBuf,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

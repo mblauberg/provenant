@@ -175,6 +175,7 @@ impl RunStore {
                     route: prior.requested_route.clone(),
                     fallback: vec![],
                     authority_digest: prior.authority_digest,
+                    writer: task.writer.clone(),
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
                 }],
@@ -218,9 +219,16 @@ impl RunStore {
             let rows = query.query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
             Ok(rows.collect::<std::result::Result<_, _>>()?)
         })?;
-        ids.iter()
+        let mut runs = ids
+            .iter()
             .map(|id| RunId::parse(id).map_err(|_| RunError::Validation("run index ID")))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        for fence in self.writer_fences()? {
+            if !runs.contains(&fence.scope.run) && runs.len() < limit as usize {
+                runs.push(fence.scope.run);
+            }
+        }
+        Ok(runs)
     }
 
     /// Check every nonterminal attempt of `run` against supervisor custody.
@@ -232,7 +240,7 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        let ids: Vec<String> = call.retry(|| {
+        let mut ids: Vec<String> = call.retry(|| {
             let mut query = self.db.prepare(
                 "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
             )?;
@@ -242,6 +250,11 @@ impl RunStore {
             )?;
             Ok(rows.collect::<std::result::Result<_, _>>()?)
         })?;
+        for fence in self.writer_fences()? {
+            if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
+                ids.push(fence.scope.attempt.to_string());
+            }
+        }
         let mut found = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
@@ -254,6 +267,19 @@ impl RunStore {
         }
         Ok(found)
     }
+    fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
+        let directory = fence.reservation.parent().ok_or(RunError::UnsafePath)?;
+        let recovery = custody::acquire_recovery(
+            provenant_supervisor::fs::Directory::open_anchor(directory)?,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        );
+        Ok(match recovery {
+            Ok(recovery) if recovery.scope() == fence.scope => recovery.withdraw_prepared().is_ok(),
+            _ => false,
+        })
+    }
     fn reconcile_attempt(
         &self,
         id: AttemptId,
@@ -264,7 +290,28 @@ impl RunStore {
         let scope = Self::scope(&record);
         match record.state {
             AttemptState::Queued => return Ok(Reconciled::Queued),
-            AttemptState::Terminal { .. } => return Ok(Reconciled::Finished),
+            AttemptState::Terminal { .. } => {
+                let retained = self
+                    .writer_fences()?
+                    .into_iter()
+                    .find(|fence| fence.scope == scope);
+                return Ok(match retained {
+                    Some(fence)
+                        if record.provider_launched == Some(false)
+                            && record.exit_evidence.is_none()
+                            && self.withdraw_prepared_writer(&fence, call)? =>
+                    {
+                        Reconciled::Withdrawn
+                    }
+                    Some(fence) => Reconciled::Uncertain {
+                        reason: format!(
+                            "writer reservation retained after terminal commit: {}; chair recovery required",
+                            fence.reservation.display()
+                        ),
+                    },
+                    None => Reconciled::Finished,
+                });
+            }
             _ => {}
         }
         let uncertain = |error: &dyn std::fmt::Display| Reconciled::Uncertain {
@@ -293,6 +340,31 @@ impl RunStore {
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
                 if record.state != AttemptState::Starting {
                     return Ok(uncertain(&"running attempt has no launch summary"));
+                }
+                if let Some(fence) = self
+                    .writer_fences()?
+                    .into_iter()
+                    .find(|fence| fence.scope == scope)
+                {
+                    if self.withdraw_prepared_writer(&fence, call)? {
+                        let now = call
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?;
+                        self.withdraw(
+                            id,
+                            AttemptState::Starting,
+                            Outcome::Rejected,
+                            "writer preparation never reached a guardian",
+                            now,
+                            call,
+                        )?;
+                        return Ok(Reconciled::Withdrawn);
+                    }
+                    return Ok(uncertain(&format!(
+                        "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
+                        fence.reservation.display()
+                    )));
                 }
                 // The submitter died before reserving: the held lease proves no
                 // handoff began and keeps a late reservation out.

@@ -9,7 +9,7 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
-use provenant_providers::{OutcomeStatus, ProviderError, ProviderEvent, REGISTRY};
+use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
 use provenant_run as run;
@@ -21,6 +21,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+mod provider;
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -55,6 +57,8 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use run::RunError as E;
         let (status, code) = match &error {
+            E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
+            E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
             E::Validation(_) | E::TooLarge { .. } => (Status::Invalid, "INVALID"),
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
@@ -107,10 +111,14 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
 }
 
 /// Production provider seam. Routing resolves the requested route and its
-/// fallback; the first activated candidate is prepared. Until providers
-/// expose launch specifications every adapter refuses here, task-locally.
+/// fallback; the first eligible provider launch specification is prepared.
+#[derive(Default)]
 pub struct Registry<'a> {
     pub roots: Option<&'a Roots>,
+    pub home: Option<&'a Path>,
+    pub cwd: Option<&'a Path>,
+    pub state_root: Option<&'a Path>,
+    pub project_id: Option<provenant_core::ProjectId>,
 }
 impl Registry<'_> {
     /// Whether providers can continue an exact prior session. None can yet,
@@ -123,42 +131,12 @@ impl run::Providers for Registry<'_> {
     fn prepare(
         &self,
         task: &run::TaskRequest,
-        _prompt: &str,
+        prompt: &str,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        if resume.is_some() {
-            return Err(
-                "continuation needs a provider session; providers do not expose sessions yet"
-                    .into(),
-            );
-        }
-        let roots = self.roots.ok_or("routing context is unavailable")?;
-        let resolved = crate::route::resolve(&route_request(task)?, roots)?;
-        let candidates = std::iter::once((resolved.adapter.as_str(), resolved.model.as_str()))
-            .chain(
-                resolved
-                    .alternatives
-                    .as_slice()
-                    .iter()
-                    .map(|a| (a.adapter.as_str(), a.model.as_str())),
-            );
-        let reasons: Vec<String> = candidates
-            .map(|(adapter, model)| {
-                let model = format!("{adapter}/{model}");
-                match REGISTRY.iter().find(|r| r.adapter.id() == adapter) {
-                    None => format!("{model}: unknown adapter"),
-                    Some(r) if !r.adapter.execution_enabled() => format!(
-                        "{model}: {}",
-                        ProviderError::Disabled {
-                            adapter: r.adapter.id()
-                        }
-                    ),
-                    Some(_) => format!("{model}: provider launch specification is not wired"),
-                }
-            })
-            .collect();
-        Err(reasons.join("; "))
+        provider::prepare(self, task, prompt, resume)
     }
+
     fn decode(
         &self,
         route: &run::RouteRecord,
@@ -437,9 +415,9 @@ fn scan(prompt: &str) -> Result<(), Fail> {
         )
     })
 }
-/// Worktree access is explicit. A missing local worktree is named first; a
-/// worktree with read-only access is refused, never run read-only.
-pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Result<(), Fail> {
+/// Worktree access is explicit. Submission resolves and verifies the path;
+/// a worktree with read-only access is refused, never run read-only.
+pub fn worktree_access(writer: bool, worktree: Option<&Path>, _cwd: &Path) -> Result<(), Fail> {
     match worktree {
         None if !writer => Ok(()),
         None => Err(Fail::new(
@@ -447,24 +425,12 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>, cwd: &Path) -> Res
             "WORKTREE_REQUIRED",
             "worktree-write access needs --worktree",
         )),
-        Some(path) if !cwd.join(path).is_dir() => Err(Fail::new(
-            Status::Invalid,
-            "WORKTREE_MISSING",
-            format!(
-                "local worktree {} does not exist; create it with `provenant worktree create <name>`",
-                path.display()
-            ),
-        )),
         Some(_) if !writer => Err(Fail::new(
             Status::Invalid,
             "WORKTREE_NOT_APPLICABLE",
             "--worktree requires --mode worktree-write",
         )),
-        Some(_) => Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "worktree-write dispatch is not available in this build",
-        )),
+        Some(_) => Ok(()),
     }
 }
 
@@ -476,13 +442,14 @@ pub struct Submitted {
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
+    pub worktree: Option<PathBuf>,
 }
 pub struct Submission {
     pub operation_id: OperationId,
     pub tasks: Vec<Submitted>,
     pub concurrency: u64,
 }
-/// Scan, record and launch read-only work: the one path the CLI and Fabric
+/// Scan, record and launch work: the one path the CLI and Fabric
 /// share. Replaying an operation returns its run and launches nothing new.
 pub fn submit(
     session: &Session,
@@ -490,32 +457,35 @@ pub fn submit(
     submission: Submission,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
-    #[derive(Serialize)]
-    struct Authority<'a> {
-        mode: &'static str,
-        network: bool,
-        cwd: &'a Path,
-    }
-    let authority = CanonicalV1::record_digest(
-        "run-authority",
-        1,
-        &Authority {
-            mode: "read_only",
-            network: false,
-            cwd: edge.cwd,
-        },
-    )
-    .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
     for task in submission.tasks {
         scan(&task.prompt)?;
+        let writer = task
+            .worktree
+            .as_ref()
+            .map(|path| {
+                let writer =
+                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?;
+                run::prepare_writer(
+                    &writer,
+                    session.context.state_root.as_path(),
+                    session.context.project_id,
+                )?;
+                Ok::<_, run::RunError>(writer)
+            })
+            .transpose()?;
+        let authority =
+            CanonicalV1::record_digest("run-authority", 1, &(writer.as_ref(), edge.cwd, false))
+                .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+
         requests.push(run::TaskRequest {
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
             route: task.route,
             fallback: fallback(&task.fallback)?,
             authority_digest: authority,
+            writer,
             provider_timeout_seconds: task.provider_timeout,
             delivery_id: task.delivery_id,
         });
@@ -686,6 +656,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
                 fallback,
                 provider_timeout: command.provider_timeout,
                 delivery_id,
+                worktree: access.worktree.clone(),
             },
         )
         .collect();
@@ -729,6 +700,10 @@ pub fn launch(
     };
     let registry = Registry {
         roots: Some(edge.roots),
+        home: Some(edge.home),
+        cwd: Some(edge.cwd),
+        state_root: Some(session.context.state_root.as_path()),
+        project_id: Some(session.context.project_id),
     };
     Ok(session.store.start(run, &registry, &holder, call)?)
 }
@@ -1145,7 +1120,7 @@ pub fn continue_attempt(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
-    if !(Registry { roots: None }).continues_sessions() {
+    if !(Registry::default()).continues_sessions() {
         return Err(Fail::new(
             Status::Refused,
             "UNSUPPORTED",
@@ -1243,6 +1218,10 @@ fn reconcile_inner(
     };
     let registry = Registry {
         roots: Some(edge.roots),
+        home: Some(edge.home),
+        cwd: Some(edge.cwd),
+        state_root: Some(session.context.state_root.as_path()),
+        project_id: Some(session.context.project_id),
     };
     let mut rows = Vec::new();
     let mut human = String::new();
@@ -1302,7 +1281,11 @@ fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    Ok((json!({ "runs": rows, "truncated": truncated }), human))
+    let reservations = session.store.writer_fences()?;
+    Ok((
+        json!({ "runs": rows, "truncated": truncated, "writer_reservations": reservations }),
+        human,
+    ))
 }
 
 /// Usage and cost over this project's terminal attempts, priced from the

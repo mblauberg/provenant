@@ -276,6 +276,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             request: CanonicalRequest {
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    writer: None,
                     task_id: task,
                     prompt_digest: CanonicalV1::file_digest(b"prompt"),
                     route: RequestedRoute::Model {

@@ -233,13 +233,15 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 .iter()
                 .map(|fd| std::ffi::OsString::from(fd.to_string()))
                 .collect();
-            let registry = provenant_cli::run::Registry { roots: None };
+            let registry = provenant_cli::run::Registry::default();
             let holder = provenant_run::RunHolder {
                 providers: &registry,
                 resources: &provenant_run::SystemResources,
             };
             let hooks = provenant_supervisor::GuardianHooks {
                 holder: Some(&holder),
+                #[cfg(test)]
+                observer: Some(&provenant_supervisor::fixture::RecordedBootObserver),
                 ..Default::default()
             };
             match provenant_supervisor::supervise(&descriptors, hooks) {
@@ -421,10 +423,21 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
     }
 }
 fn main() -> ExitCode {
+    #[cfg(test)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--writer-provider")) {
+        return match worktree_tests::provider(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "writer provider: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // The integration target compiles this command edge unchanged apart from
     // native worker observations. Its children re-enter the normal parser.
     #[cfg(test)]
-    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--state-dir")) {
+    if !matches!(std::env::args_os().nth(1).as_deref(), Some(arg) if arg == "--state-dir" || arg == "internal")
+    {
         return match worktree_tests::suite(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

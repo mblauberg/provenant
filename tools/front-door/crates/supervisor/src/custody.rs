@@ -257,6 +257,14 @@ impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// A preparation failure before handoff has no child to fence. Explicit
+    /// withdrawal keeps crashes conservative: dropping a lease never clears it.
+    pub fn withdraw_unlaunched(self) -> Result<()> {
+        if self.launched || self.lease.is_none() {
+            return Err(CustodyError::Fenced);
+        }
+        clear_reservation(&self.directory, self.scope())
+    }
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = crate::clock::SystemClock::new();
@@ -386,6 +394,13 @@ pub(crate) fn acquire_writer_with_observer(
         omitted_descendants: 0,
     };
     reservation.validate()?;
+    // Publish the fence first: owner death cannot leave an invisible ownership gap.
+    require_durable(write_record(
+        &directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::NoReplace,
+    )?)?;
     require_durable(write_record(
         &directory,
         "ownership.json",
@@ -395,12 +410,6 @@ pub(crate) fn acquire_writer_with_observer(
             binding: reservation.binding.clone(),
         },
         PublishMode::Replace,
-    )?)?;
-    require_durable(write_record(
-        &directory,
-        "reservation.json",
-        &reservation,
-        PublishMode::NoReplace,
     )?)?;
     Ok(CustodyLease {
         directory,
@@ -1316,6 +1325,20 @@ pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<(
     Ok(())
 }
 impl Recovery {
+    /// Prepared is durable before handoff. Writer exclusion and this state
+    /// prove no guardian or provider launched, even without attempt binding.
+    pub fn withdraw_prepared(self) -> Result<()> {
+        if self.reservation.launch_state != LaunchState::Prepared
+            || self.reservation.guardian.is_some()
+            || self.reservation.provider.is_some()
+            || self.reservation.attempt_device.is_some()
+            || self.reservation.attempt_inode.is_some()
+            || !self.reservation.descendants.is_empty()
+        {
+            return Err(CustodyError::Fenced);
+        }
+        clear_reservation(&self.directory, self.scope())
+    }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
         let metadata = attempt.metadata()?;
         if self.reservation.attempt_device != Some(metadata.device)

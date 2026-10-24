@@ -98,6 +98,24 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
             .links
             == 1
     );
+    // A lost submitter never handed this Prepared reservation to a guardian.
+    // Explicit recovery can clear it without fabricating an exit receipt.
+    acquire_recovery(
+        Directory::open_anchor(&path)?,
+        WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+        &token,
+        &clock,
+    )?
+    .withdraw_prepared()?;
+    assert!(!path.join("reservation.json").exists());
+    let lease = fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        scope(),
+        WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+        &token,
+        &clock,
+    )?;
+    lease.withdraw_unlaunched()?;
     Ok(())
 }
 struct Decoder;

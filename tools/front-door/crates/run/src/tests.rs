@@ -48,6 +48,7 @@ pub(super) fn input() -> PreparedRun {
         request: CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
+                writer: None,
                 task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {

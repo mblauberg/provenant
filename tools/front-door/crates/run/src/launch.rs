@@ -18,6 +18,7 @@ pub struct PreparedLaunch {
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
+    pub confinement: Option<crate::LaunchConfinement>,
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
@@ -82,6 +83,37 @@ impl RunStore {
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
+        self.start_with_writer_lease(
+            run,
+            providers,
+            context,
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            call,
+        )
+    }
+    /// Native observation seam for integration fixtures. The ordinary start
+    /// path always uses supervisor's system observer and nonblocking lease.
+    pub fn start_with_writer_lease(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
         let request = self.request(run, call)?;
         let resume = request
             .parent
@@ -141,37 +173,44 @@ impl RunStore {
                 Err(RunError::Conflict) => continue,
                 Err(error) => return Err(error),
             };
-            started.push(match self.hand_off(task, plan, context, &record, call) {
-                Ok(()) => Started::Launched(id),
-                // Nothing reached a guardian: the attempt ends here.
-                Err(HandOff::Local(error)) => {
-                    let reason = format!("launch preparation failed: {error}");
-                    self.withdraw(
-                        id,
-                        AttemptState::Starting,
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
-                        call,
-                    )?;
-                    Started::Refused {
-                        attempt: id,
-                        reason,
+            started.push(
+                match self.hand_off(task, plan, context, acquire_writer, &record, call) {
+                    Ok(()) => Started::Launched(id),
+                    // Nothing reached a guardian: the attempt ends here.
+                    Err(HandOff::Local(error)) => {
+                        let reason = format!("launch preparation failed: {error}");
+                        self.withdraw(
+                            id,
+                            AttemptState::Starting,
+                            Outcome::Rejected,
+                            &reason,
+                            now()?,
+                            call,
+                        )?;
+                        Started::Refused {
+                            attempt: id,
+                            reason,
+                        }
                     }
-                }
-                Err(HandOff::Uncertain(error)) => {
-                    self.launch_unknown(run, call)?;
-                    Started::Unknown { attempt: id, error }
-                }
-            });
+                    Err(HandOff::Uncertain(error)) => {
+                        self.launch_unknown(run, call)?;
+                        Started::Unknown { attempt: id, error }
+                    }
+                },
+            );
         }
         Ok(started)
     }
     fn hand_off(
         &self,
         task: &TaskRequest,
-        plan: PreparedLaunch,
+        mut plan: PreparedLaunch,
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
@@ -186,18 +225,56 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        let mut lease =
-            custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
-                .map_err(|e| local(&e))?;
-        // Reconcile may have withdrawn this attempt before the lease existed.
-        match self.record(id, call) {
-            Ok(now) if now.revision == record.revision => {}
-            Ok(_) => return Err(local(&"attempt changed before handoff")),
-            Err(error) => return Err(local(&error)),
-        }
+        let holder_context = context(record).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
+        let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
+        if task.writer.as_ref().map(|w| w.worktree.as_path())
+            != writer.as_ref().map(|w| w.worktree.path())
+        {
+            return Err(local(&"writer confinement does not match the task"));
+        }
+        let mut lease = match writer {
+            Some(writer) => {
+                let (directory, binding) = writer
+                    .custody
+                    .take()
+                    .ok_or_else(|| local(&"writer custody missing"))?;
+                acquire_writer(directory, scope, binding)
+            }
+            None => {
+                custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
+            }
+        }
+        .map_err(|e| local(&e))?;
+        // Reconcile may have withdrawn this attempt before the lease existed.
+        match self.record(id, call) {
+            Ok(now) if now.revision == record.revision => {}
+            Ok(_) => {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&"attempt changed before handoff"));
+            }
+            Err(error) => {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
+        }
+        if let Some(confinement) = &plan.confinement {
+            match confinement.command(&plan.argv, call.cancel) {
+                Ok(argv) => plan.argv = argv,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(local(&error));
+                }
+            }
+        }
         let route = format!(
             "{}/{}",
             plan.route.provider.as_deref().unwrap_or_default(),
@@ -214,7 +291,7 @@ impl RunStore {
             environment: plan.environment,
             cwd: plan.cwd,
             stdin: plan.stdin,
-            holder_context: context(record).map_err(|e| local(&e))?,
+            holder_context,
         };
         let capture = CapturePlan {
             wall_ms: task.provider_timeout_seconds.saturating_mul(1000),

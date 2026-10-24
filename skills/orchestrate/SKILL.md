@@ -10,7 +10,8 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
 2. Call `fabric_submit` with its `submission` operation; its tool schema documents the task list and typed route. Use `provenant route list --adapter <id>` to list live model ids.
 3. For a graph workflow, use `fabric_graph` with `op: run|status|cancel|resume`; pass the project-local graph document path to `run` and `resume`, and its `id` to `status` and `cancel`.
-4. For writers, pass `access: "worktree_write"` and the registered `worktree`,
+4. For writers, pass `access: "worktree_write"` and the registered `worktree`
+   as an absolute path or relative to the selected repository's primary root,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before submission, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
@@ -18,7 +19,9 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
    repeat `--path PATH` for a path set); keep its generation/token proof, renew
    it while work continues and release it when
    finished. Do not submit against a conflicting live claim; submission does not
-   enforce claims.
+   enforce claims. One supervisor writer lease excludes a second writer;
+   terminal Git sequencer state fails the lane. If custody is lost, keep the
+   worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
 7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task. Named sessions are retired.

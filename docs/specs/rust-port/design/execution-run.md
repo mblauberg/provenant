@@ -728,18 +728,30 @@ scheduler daemon. Within that, the lane decided:
   A wall-deadline stop becomes `timed_out` and an explicit cancellation becomes
   `cancelled`, unless the provider had already succeeded. Redaction is
   deferred: no secret reaches the provider environment yet.
-- **Worktree-write dispatch is refused** in this slice, because instruction
-  snapshots and quarantine are not composed yet. Confinement's
-  `writer_custody` already exists for that follow-up. Network, capability,
-  read-root and remote-host requests are refused as unsupported too.
+- **Worktree-write dispatch** accepts an absolute path or a path relative to
+  the selected repository's primary root. The edge verifies a linked worktree
+  of that project and its active Provenant registration, then records the
+  canonical writer scope in the immutable task request. Run acquires the
+  worktree's supervisor reservation and exclusive lease before compiling the
+  confinement plan, and transfers custody to the guardian. A second writer is
+  refused. The guardian releases the reservation after terminal publication
+  and settlement. Network, capability, read-root and remote-host requests
+  remain unsupported.
+- **Writer terminal checks** reverify the recorded worktree and call
+  `check_writer_terminal` before committing an outcome, including recovery
+  through reconcile. An unfinished cherry-pick, revert, rebase, merge or
+  sequencer operation produces `failed` with the worktree and reason, even
+  when the provider returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
   alternatives. Runtime fallback on rate, quota or model-unavailable is
   deferred, because no decoder emits those events yet.
 - **The provider seam is minimal**: `Providers::prepare` returns argv,
   allow-listed environment, stdin, cwd and applied route, and `decode` maps a
   sealed capture to an outcome. It is shaped for the providers crate's launch
-  specification. Until providers activate, production `prepare` refuses each
-  candidate as disabled, so live dispatch is blocked on provider activation.
+  specification. The composition edge prepares activated Codex launch specs;
+  Claude still needs a credential-authority binding. Provider execution does
+  not waive the existing terminal requirement for an observed route: Codex
+  streams without an answering-model observation cannot establish success.
 - **The guardian re-resolves the state root** from a `RootSeed` in the holder
   context, because its environment is cleared.
 
@@ -774,13 +786,19 @@ scheduler daemon. Within that, the lane decided:
   whose reservation is provably absent and which has no exit, is withdrawn as
   `rejected`; queued work is started; everything else stays fenced and is
   reported as held or uncertain. Accepting lost custody
-  (`--abandon-uncertain`) is refused as unsupported until its evidence rules
-  are designed. Reader fences on terminal attempts stay, because attempt
-  directories are never reused. A guardian that dies after the terminal
-  commit but before publishing its release leaves that settlement
-  unpublished: reconcile scans nonterminal attempts only, and the attempt
-  directory is never reused, so nothing waits on it. A release sweep is a
-  follow-up if supervisor ever needs it. A per-attempt or per-run error is reported in
+  (`--abandon-uncertain`) remains unavailable at the CLI. Writer reservations
+  survive owner death, including death after terminal commit, and reconcile
+  includes their run IDs and exact reservation paths in `writer_reservations`.
+  A starting writer with a never-handed-off `Prepared` reservation is safely
+  withdrawn under its worktree lock. Reconcile also clears that preparation
+  fence after a terminal withdrawal that proves no provider launched and has
+  no exit evidence. Other reservations without a launch
+  summary stay uncertain; absence of an attempt-local reader reservation
+  cannot withdraw them. A retained
+  reservation after a provider's terminal commit also stays uncertain. The chair recovery
+  procedure is in [worktrees](../../../worktrees.md#writer-custody-recovery).
+  Reader fences on terminal attempts stay, because attempt directories are
+  never reused. A per-attempt or per-run error is reported in
   place and the scan continues; anything left uncertain, unlaunched or in
   error fails the command. The scan covers the 320 oldest open runs and says
   when more exist; `--id` reaches the rest.
@@ -799,14 +817,15 @@ scheduler daemon. Within that, the lane decided:
 - **Reservation race.** Reconcile withdraws a start without a launch summary
   only while holding the writer lock: either supervisor's `prove_unreserved`
   (no reservation, launch or exit) or the recovery lease. The launcher
-  re-reads the attempt after taking reader custody and stays local if it
+  re-reads the attempt after taking custody and stays local if it
   changed, so a withdrawn attempt never reaches a guardian.
 - **Input scan.** `dispatch`, `resume` and Fabric submissions scan each prompt
   against confinement's secret patterns before any record is written and
   refuse with `SECRET_INPUT`, without echoing the match.
 - **Worktrees.** A missing local worktree is `WORKTREE_MISSING` (Fabric
   `worktree_missing`, #1309); a writer without a worktree or a reader with
-  one is invalid (#1310). Worktree-write dispatch itself stays unsupported.
+  one is invalid (#1310). Writer scope is persisted and reverified at launch
+  and terminal publication; primary, foreign and unregistered trees refuse.
 - **Fabric's facade** calls the CLI's shared `submit`, `continue_attempt`,
   cancel and output paths, so Fabric submissions, graph nodes and the CLI
   admit, record and launch identically. Output fetch accepts only the

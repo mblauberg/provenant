@@ -191,6 +191,29 @@ impl RunStore {
                 _ => {}
             }
         }
+        let request = self.request(record.run_id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::Validation("terminal task missing from request"))?;
+        if let Some(writer) = &task.writer {
+            let check =
+                crate::prepare_writer(writer, self.context.state_root.as_path(), record.project_id)
+                    .and_then(|writer| {
+                        provenant_confinement::worktrees::check_writer_terminal(
+                            writer.worktree.repo(),
+                        )
+                        .map_err(RunError::Writer)
+                    });
+            if let Err(error) = check {
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some(format!(
+                    "writer terminal check failed for {}: {error}",
+                    writer.worktree.display()
+                ));
+            }
+        }
         if decoded.result.len() as u64 > RESULT_LIMIT {
             let mut end = RESULT_LIMIT as usize;
             while !decoded.result.is_char_boundary(end) {
