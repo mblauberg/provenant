@@ -15,7 +15,7 @@ pub use admission::{
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use holder::{HolderContext, RootSeed, RunHolder};
-pub use launch::{Decoded, PreparedLaunch, Providers, Started};
+pub use launch::{Decoded, PreparedLaunch, Providers, Started, capture_plan, concurrency};
 pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
 
 pub use db::{ExecutionContext, Request, RunStore};

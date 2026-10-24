@@ -401,6 +401,7 @@ fn writer_run(
         request: provenant_run::CanonicalRequest {
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
+                profile: provenant_run::HarnessProfile::default(),
                 task_id: task,
                 prompt_digest,
                 route: provenant_run::RequestedRoute::Model {
