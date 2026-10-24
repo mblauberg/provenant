@@ -168,7 +168,7 @@ below abbreviate `Result<T, ProviderError>`; failures are always typed.
 | --- | --- |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account readiness only. Run stores its `PermitRecord` projection and consumes the validated permit for the exact attempt with its own resource reservation; no second admission ledger. |
-| providers / run | `prepare(ResolvedRoute, ConfinedPlan, Prompt, Continuation) -> AdapterLaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
+| providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
 | providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
 | routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |
 
@@ -199,8 +199,9 @@ one provider module, one registry entry and one bundled TOML row with its
 fixture/activation requirements. Config validates policy; registration cannot
 bypass it. Quota owns scheduling/admission, not adapter wire decoding.
 
-`AdapterLaunchSpec` holds executable identity, OsString argv/cwd, env delta,
-stdin mode, decoder and safe home preparation/finalisation recipe in memory.
+`LaunchSpec` holds OsString argv (canonical executable first), cwd, the complete
+child environment, stdin, setup steps, the provider confinement profile and the
+decoder state, in memory.
 Persist only a redacted launch summary. Bound argv prompts to 64 KiB; prompt
 retention is run's confined artifact contract. `Continuation` binds exact
 adapter/session/account/host/model and sent controls; reject incompatible grants
@@ -259,20 +260,70 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex | `codex exec [resume ID] --json --skip-git-repo-check -c service_tier="default" -c approval_policy="never" [-m MODEL] [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Permission profile/config isolation and fresh/resume acceptance must be recorded. No fast/priority tier or context-ceiling override. |
-| Claude | `claude -p --safe-mode\|--bare --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose [--resume ID\|--session-id ID] [--model MODEL] [--effort EFFORT]`; prompt on stdin. Auth mode and confined tool/system-prompt/add-dir arguments are explicit in each recording. No endpoint profile. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL` only; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to `~/.codex/auth.json`. Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` only; default config directory and keychain login. No shell tool. No endpoint profile. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 | `opencode run --standalone --format json --auto --print-logs --log-level error [-s ID] [--model PROVIDER/MODEL#VARIANT] PROMPT`; argv prompt, stdin null, cwd selects project. Verify `OPENCODE_CONFIG_CONTENT` permissions/MCP isolation; no v1/shared-server fallback. |
 
-Before build step 1, land a **recording PR** using only redacted event/result
-streams already on disk under `.agent-run/runs/*/dispatch/tasks/*/attempt-*/`
-and `tests/fixtures/fabric-context/*.jsonl`. Read sources without changing them;
-inspect selected bounded streams, redact in memory, and store sanitised fixtures
-at `tools/front-door/tests/fixtures/providers/<adapter>/`. Do not run a live
-provider or read auth stores to fill gaps. An adapter without a qualifying
-on-disk recording stays disabled until one exists; this also applies to heavily
-used Codex/Agy (about 800/250 tasks). Usage counts do not prove a wire form.
+### Live activation
+
+`providers::prepare` returns a `LaunchSpec`: exact argv (`argv[0]` the canonical
+executable), the complete child environment, stdin, cwd, setup steps (a 0700
+directory or one symbolic link) and the provider confinement profile. The
+launcher performs setup, holds `required_anchors(plan, profile, worktree)`,
+compiles the plan with the profile and runs `ConfinedLaunch::command(argv)`.
+A mode runs only when `tests/fixtures/providers/activation.json` enables it;
+each adapter's `confinement.json` holds the probed observations per access mode.
+
+`cargo run -p provenant-providers --features recording --example record --
+ADAPTER read_only|worktree_write --model M --root EMPTY_DIR [--write]` builds a
+probe repository (and a worktree for writers), runs the CLI fresh then resume
+under the compiled profile with a clean environment, then probes every claimed
+observation under the same rules: declared and undeclared reads and writes,
+secret and protected paths, provider endpoint versus other network, declared
+and undeclared exec, fork, authentication and runtime reads, state writes and,
+for writers, worktree, index, HEAD, objects, selected ref, config and other-ref
+writes. Writers must also create a file through the model's own edit tool.
+`--write` stores redacted streams as `<adapter>/live-<access>-<session>.jsonl`,
+their manifest entries in `<adapter>/recordings.json` and the observations in
+`confinement.json`. Session ids, paths under `HOME` or the root, emails,
+identifiers and token-shaped strings are substituted. Credentials are opened
+only by the CLIs; probes read zero bytes. A test fails if an enabled mode cites
+evidence from another access or session mode, so read-only evidence never
+enables a writer.
+
+Decisions recorded with the first activation (Codex 0.159.0, Claude 2.1.310,
+macOS 27.0.1 arm64, 2026-10-24):
+
+- Confinement carries a fixed runtime baseline (global metadata reads,
+  preferences, trust, DNS and directory services, `/dev` nodes, zoneinfo).
+  Secret and protected denials still override it.
+- Codex: refreshing its token rewrites `~/.codex/auth.json` in place through
+  the link, so its authentication profile carries that one exact write. Its
+  shell tool may run programs under the system directories and the install
+  prefix. Residual risk: that tool can read Codex's own `auth.json`. It cannot
+  read other credentials: the login keychain file is not readable, and a probe
+  showed `security` finds nothing in a keychain the profile cannot read.
+- Claude: the CLI reads its keychain login through `/usr/bin/security`, so the
+  model gets no shell, only file tools. `~/.claude.json` is not readable (it
+  can hold MCP secrets and the launch does not need it). The only writable
+  state is this session's transcript under `~/.claude/projects`. The launch
+  needs `USER` for the keychain lookup.
+- Expired Claude sign-in (#1260): refreshing would write the login keychain,
+  which no profile grants, because the model's edit tools could then corrupt
+  it. Not reproduced on 2026-10-24 (the token was valid). A failed sign-in
+  decodes as `authentication_failed`, so the outcome is `Refused`
+  (`claude/live-auth-required.jsonl`) and the user signs in again outside the
+  sandbox.
+- Codex continuation needs no model evidence because its exec stream carries
+  none; the resume argv pins the same `-m`. Adapters that report a model must
+  have reported the requested one.
+- Provider endpoints are `*:443`: Seatbelt cannot filter by host name.
+- Agy, Cursor and OpenCode keep refusing (`launch::unrecorded`) until they have
+  a launch form and recordings. Preflight and availability records are still
+  unimplemented, so routing reports enabled adapters as `UnknownAvailability`
+  until the run lane supplies them.
 
 Each capture manifest records source provenance, CLI version/platform, redacted
 argv, fresh/resume and access mode, exit and redaction rules. It must prove the
