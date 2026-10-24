@@ -47,17 +47,23 @@ impl Providers for Fake {
         }
         unreachable!("these tests never hand off to a guardian")
     }
-    fn decode(&self, applied: &RouteRecord, stdout: &[u8], _: &ExitObservation) -> Decoded {
+    fn decode(
+        &self,
+        applied: &RouteRecord,
+        stdout: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
-        Decoded {
+        Ok(Decoded {
             outcome: Outcome::Succeeded,
             result: String::from_utf8_lossy(stdout).into_owned(),
             complete: true,
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             reason: None,
-        }
+        })
     }
 }
 fn two_tasks(concurrency: u64) -> PreparedRun {

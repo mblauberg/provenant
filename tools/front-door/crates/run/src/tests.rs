@@ -79,6 +79,7 @@ pub(super) fn route() -> RouteRecord {
         model: Some("fixture/model".into()),
         effort: Some("high".into()),
         account_label: None,
+        ..Default::default()
     }
 }
 fn publication() -> TerminalPublication<'static> {

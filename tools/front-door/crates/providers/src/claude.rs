@@ -6,7 +6,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -104,6 +104,76 @@ pub fn keychain_suffix(config_dir: &[u8]) -> String {
     hex.get(..8).unwrap_or(hex).to_owned()
 }
 
+/// Task-scoped non-secret authority, derived from a validated registration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialSource {
+    File { path: std::path::PathBuf },
+    Keychain { service: String, account: String },
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct CredentialAuthority {
+    pub actor: String,
+    pub source: CredentialSource,
+    pub purpose: String,
+    pub expires_unix_ms: u64,
+}
+impl CredentialAuthority {
+    pub fn for_dispatch(
+        actor: String,
+        login: &Login<'_>,
+        expires_unix_ms: u64,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            actor,
+            source: credential_source(login)?,
+            purpose: "lane dispatch".into(),
+            expires_unix_ms,
+        })
+    }
+    fn check(&self, source: &CredentialSource, now: u64) -> Result<(), ProviderError> {
+        if self.actor.is_empty()
+            || self.purpose != "lane dispatch"
+            || self.expires_unix_ms <= now
+            || &self.source != source
+        {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        Ok(())
+    }
+}
+fn credential_source(login: &Login<'_>) -> Result<CredentialSource, ProviderError> {
+    let path = login.config_dir.join(".credentials.json");
+    let directory = provenant_supervisor::fs::Directory::open_anchor(login.config_dir)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    match directory.metadata_at(OsStr::new(".credentials.json"), false) {
+        Ok(meta) if meta.kind == provenant_supervisor::fs::FileKind::Regular && meta.links == 1 => {
+            return Ok(CredentialSource::File { path });
+        }
+        Ok(_) => return Err(ProviderError::CredentialUnavailable),
+        Err(error) if error.is_not_found() => {}
+        Err(_) => return Err(ProviderError::CredentialUnavailable),
+    }
+    if !cfg!(target_os = "macos") {
+        return Ok(CredentialSource::File { path });
+    }
+    Ok(keychain_source(login))
+}
+fn keychain_source(login: &Login<'_>) -> CredentialSource {
+    let service = if login.config_dir == login.home.join(".claude") {
+        KEYCHAIN_SERVICE.into()
+    } else {
+        format!(
+            "{KEYCHAIN_SERVICE}-{}",
+            keychain_suffix(login.config_dir.as_os_str().as_bytes())
+        )
+    };
+    CredentialSource::Keychain {
+        service,
+        account: login.user.to_string_lossy().into_owned(),
+    }
+}
+
 /// Reads one identity's login token outside the sandbox. When it expires
 /// within the refresh window, runs the CLI once at zero cost to refresh it,
 /// then reads again and accepts a token with at least a minute left. The
@@ -116,7 +186,16 @@ pub fn refresh_if_expiring(
     login: &Login<'_>,
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    let source = if authority.is_some() {
+        credential_source(login)?
+    } else {
+        keychain_source(login)
+    };
+    if let Some(authority) = authority {
+        authority.check(&source, now_ms())?;
+    }
     let budget = |cap: Duration| -> Result<Duration, ProviderError> {
         match deadline_ms.saturating_sub(now_ms()) {
             0 => Err(ProviderError::CredentialUnavailable),
@@ -136,6 +215,23 @@ pub fn refresh_if_expiring(
         env.push(("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()));
     }
     let read = || -> Result<OauthToken, ProviderError> {
+        if authority.is_some() && credential_source(login)? != source {
+            return Err(ProviderError::CredentialUnavailable);
+        }
+        if let Some(authority) = authority {
+            authority.check(&source, now_ms())?;
+        }
+        if let CredentialSource::File { path } = &source {
+            let directory = provenant_supervisor::fs::Directory::open_anchor(
+                path.parent().ok_or(ProviderError::CredentialUnavailable)?,
+            )
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+            let bytes = directory
+                .read_bounded(OsStr::new(".credentials.json"), 65536)
+                .map_err(|_| ProviderError::CredentialUnavailable)?;
+            return OauthToken::parse(&bytes, now_ms())
+                .map_err(|_| ProviderError::CredentialUnavailable);
+        }
         let argv: Vec<OsString> = [
             "/usr/bin/security".as_ref(),
             "find-generic-password".as_ref(),
@@ -163,6 +259,12 @@ pub fn refresh_if_expiring(
     match read() {
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(_) => {}
+    }
+    if authority.is_some() && credential_source(login)? != source {
+        return Err(ProviderError::CredentialUnavailable);
+    }
+    if let Some(authority) = authority {
+        authority.check(&source, now_ms())?;
     }
     let argv: Vec<OsString> = [
         login.executable.as_os_str(),
@@ -206,6 +308,34 @@ pub fn refresh_for_account(
     account: &crate::identity::RegisteredAccount,
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
+) -> Result<OauthToken, ProviderError> {
+    refresh_account(executor, login, account, now_ms, deadline_ms, None)
+}
+pub fn refresh_for_account_authorised(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: &CredentialAuthority,
+) -> Result<OauthToken, ProviderError> {
+    authority.check(&credential_source(login)?, now_ms())?;
+    refresh_account(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        Some(authority),
+    )
+}
+fn refresh_account(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
     if account.adapter() != "claude" || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
@@ -264,7 +394,7 @@ pub fn refresh_for_account(
         Ok(())
     };
     check()?;
-    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms)?;
+    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?;
     check()?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)

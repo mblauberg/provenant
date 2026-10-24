@@ -537,6 +537,9 @@ pub(crate) fn verified_route(
                 && a.provider == o.provider
                 && r.model == a.model
                 && a.model == o.model
+                && a.effort
+                    .as_ref()
+                    .is_none_or(|effort| Some(effort) == o.effort.as_ref())
         }
         _ => false,
     }

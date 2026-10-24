@@ -195,6 +195,7 @@ fn candidate(
     // An unknown exact ID is retained as unverified. Even a catalogue row cannot
     // replace an exact observation in current preflight evidence.
     if reason.is_none()
+        && entry.is_none()
         && availability.is_none_or(|a| !a.observed_models.iter().any(|m| m == model.model()))
     {
         reason = Some(RouteExclusionReason::UnverifiedModel);

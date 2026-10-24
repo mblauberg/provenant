@@ -32,6 +32,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("provider evidence could not be committed: {0}")]
+    ProviderEvidence(String),
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {0}")]

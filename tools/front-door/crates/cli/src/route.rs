@@ -3,13 +3,14 @@ use crate::{Adapter, Globals, RenderMode};
 use clap::{Args, Subcommand};
 use provenant_core::{Roots, WallTime};
 use provenant_providers::{AvailabilityRecord, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Limits, Outcome};
+use provenant_records::{CommandError, CommandResult, Limits, Outcome, RouteReadiness};
 use provenant_routing::{
-    BoundedModels, Catalogue, Fallback, ModelId, RouteChoice, RoutingContext, RoutingError,
+    AccessContext, BoundedModels, Catalogue, Fallback, ModelId, QuotaObservation, RouteChoice,
+    RoutingContext, RoutingError,
 };
 use provenant_supervisor::fs::{Directory, FsError, LocalFs};
 use serde::Serialize;
-use std::{ffi::OsStr, io, str::FromStr};
+use std::{collections::BTreeSet, ffi::OsStr, io, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
@@ -79,6 +80,10 @@ enum EdgeError {
     Decode(#[from] provenant_records::DecodeError),
     #[error("invalid current time")]
     Time(#[from] provenant_core::TimeError),
+    #[error(transparent)]
+    QuotaCache(#[from] crate::quota::EdgeError),
+    #[error(transparent)]
+    Quota(#[from] provenant_quota::QuotaError),
 }
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -112,43 +117,199 @@ fn cached(roots: &Roots) -> Result<Vec<AvailabilityRecord>, EdgeError> {
     }
     Ok(records)
 }
+fn quota_observations(
+    catalogue: &Catalogue,
+    availability: &[AvailabilityRecord],
+    records: &[provenant_quota::AccountRecord],
+) -> Result<Vec<QuotaObservation>, EdgeError> {
+    let mut observations = Vec::new();
+    for available in availability {
+        let Some(account_key) = available.account_key.as_deref() else {
+            continue;
+        };
+        let Some(record) = records.iter().find(|record| {
+            record.account.adapter == available.adapter && record.account.account_key == account_key
+        }) else {
+            continue;
+        };
+        let Some(snapshot) = record.snapshot.as_ref() else {
+            continue;
+        };
+        let Some(ttl) = provenant_quota::schedule::interval(
+            &available.adapter,
+            provenant_quota::schedule::Trigger::Timer,
+            provenant_quota::schedule::Power::Ac,
+        ) else {
+            continue;
+        };
+        let expires_unix_seconds = snapshot
+            .observed_unix_seconds
+            .checked_add(i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?)
+            .ok_or(provenant_quota::QuotaError::TimeRange)?;
+        let mut models: BTreeSet<ModelId> = catalogue
+            .models()
+            .iter()
+            .filter(|entry| entry.model.adapter() == available.adapter)
+            .map(|entry| entry.model.clone())
+            .collect();
+        for observed_model in &available.observed_models {
+            models.insert(ModelId::parse(&format!(
+                "{}/{}",
+                available.adapter, observed_model
+            ))?);
+        }
+        if observations.len().saturating_add(models.len()) > 256 {
+            return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
+        }
+        for model in models {
+            observations.push(QuotaObservation {
+                model,
+                snapshot: snapshot.clone(),
+                expires_unix_seconds,
+            });
+        }
+    }
+    Ok(observations)
+}
 fn with_context<T>(
     roots: &Roots,
-    action: impl FnOnce(&RoutingContext<'_>) -> Result<T, EdgeError>,
+    supplied_availability: Option<&[AvailabilityRecord]>,
+    access: &[AccessContext<'_>],
+    host: &str,
+    action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)?
         .domains
         .routing;
     let catalogue = Catalogue::bundled()?;
-    let availability = cached(roots)?;
+    let cached_availability;
+    let availability = match supplied_availability {
+        Some(records) => records,
+        None => {
+            cached_availability = cached(roots)?;
+            &cached_availability
+        }
+    };
+    for record in availability {
+        provenant_routing::validate_availability(record, &record.adapter)?;
+    }
+    let quota_records = crate::quota::read_cache(roots)?;
+    let quota = quota_observations(&catalogue, availability, &quota_records)?;
     let timestamp = jiff::Timestamp::now();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
-    action(&RoutingContext {
-        catalogue: &catalogue,
-        config: &config,
-        registry: REGISTRY,
-        availability: &availability,
-        quota: &[],
-        access: &[],
-        now,
-        host: "local-preview",
-    })
+    action(
+        &RoutingContext {
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability,
+            quota: &quota,
+            access,
+            now,
+            host,
+        },
+        &quota_records,
+    )
 }
-/// Resolve one dispatch route against the same context as `route resolve`.
-pub(crate) fn resolve(
+/// Resolve one production dispatch against fresh provider facts and validated
+/// task access. Account aliases must already have been mapped to registered keys.
+pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
     account: Option<&str>,
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
 ) -> Result<provenant_records::ResolvedRoute, String> {
-    with_context(roots, |context| {
-        Ok(provenant_routing::resolve_for_account(
-            request, context, account,
-        )?)
-    })
+    with_context(
+        roots,
+        Some(availability),
+        access,
+        host,
+        |context, records| {
+            let resolved = provenant_routing::resolve_for_account(request, context, account)?;
+            if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
+                let pools =
+                    if resolved.adapter == "opencode" && context.catalogue.is_free_model(&model) {
+                        vec!["opencode-free".to_owned()]
+                    } else {
+                        Vec::new()
+                    };
+                let now_unix_seconds = context.now.as_timestamp().as_second();
+                let admission = provenant_quota::Admission {
+                    now_unix_seconds,
+                    records,
+                    refusals: &[],
+                    pools: &pools,
+                };
+                if let Err(error) = admission.check(&resolved) {
+                    let can_skip_free = request.allow_free
+                        && matches!(&request.choice, RouteChoice::NamedRoute(_))
+                        && !pools.is_empty();
+                    if can_skip_free {
+                        let mut without_free = request.clone();
+                        without_free.allow_free = false;
+                        if let Ok(alternative) =
+                            provenant_routing::resolve_for_account(&without_free, context, account)
+                            && (alternative.adapter != resolved.adapter
+                                || alternative.model != resolved.model)
+                            && matches!(&alternative.readiness, RouteReadiness::Ready { .. })
+                        {
+                            let alternative_model = ModelId::parse(&format!(
+                                "{}/{}",
+                                alternative.adapter, alternative.model
+                            ))?;
+                            let alternative_pools = if alternative.adapter == "opencode"
+                                && context.catalogue.is_free_model(&alternative_model)
+                            {
+                                vec!["opencode-free".to_owned()]
+                            } else {
+                                Vec::new()
+                            };
+                            provenant_quota::Admission {
+                                now_unix_seconds,
+                                records,
+                                refusals: &[],
+                                pools: &alternative_pools,
+                            }
+                            .check(&alternative)?;
+                            return Ok(alternative);
+                        }
+                    }
+                    return Err(error.into());
+                }
+            }
+            Ok(resolved)
+        },
+    )
     .map_err(|error| error.to_string())
 }
+/// Recheck each selected fallback against the latest persisted refusals.
+pub(crate) fn check_dispatch_candidate(
+    roots: &Roots,
+    route: &provenant_records::ResolvedRoute,
+) -> Result<(), String> {
+    let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
+    let model =
+        ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
+    let pools = if catalogue.is_free_model(&model) {
+        vec!["opencode-free".into()]
+    } else {
+        Vec::new()
+    };
+    provenant_quota::Admission {
+        now_unix_seconds: jiff::Timestamp::now().as_second(),
+        records: &crate::quota::read_cache(roots).map_err(|e| e.to_string())?,
+        refusals: &[],
+        pools: &pools,
+    }
+    .check(route)
+    .map_err(|e| e.to_string())
+}
+
 fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
-    with_context(roots, |context| {
+    with_context(roots, None, &[], "local-preview", |context, _| {
         Ok(match command {
             Route::List(query) => Data::List(provenant_routing::list(
                 &provenant_routing::RouteListQuery {
@@ -177,6 +338,9 @@ pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {
                 }
                 EdgeError::Routing(RoutingError::Availability) | EdgeError::Decode(_) => {
                     (Outcome::Invalid, "AVAILABILITY")
+                }
+                EdgeError::QuotaCache(crate::quota::EdgeError::Quota(_)) | EdgeError::Quota(_) => {
+                    (Outcome::Invalid, "QUOTA")
                 }
                 EdgeError::Routing(_) => (Outcome::Invalid, "INVALID"),
                 EdgeError::Config(_) => (Outcome::Invalid, "CONFIG"),

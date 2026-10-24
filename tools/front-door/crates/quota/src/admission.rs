@@ -34,11 +34,36 @@ pub struct Admission<'a> {
     pub pools: &'a [String],
 }
 impl Admission<'_> {
+    /// Check provider readiness, current allowance and persisted refusals
+    /// without creating an operation-scoped permit.
+    pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
+        self.checked_route(route).map(|_| ())
+    }
+
     pub fn admit(
         &self,
         route: &ResolvedRoute,
         operation: &OperationId,
     ) -> Result<AdmissionPermit, QuotaError> {
+        let (expiry, key, snapshot_revision) = self.checked_route(route)?;
+        Ok(AdmissionPermit {
+            operation_id: operation.clone(),
+            adapter: route.adapter.clone(),
+            model: route.model.clone(),
+            account_key: key,
+            snapshot_revision,
+            expires_unix_seconds: expiry.min(
+                self.now_unix_seconds
+                    .checked_add(55)
+                    .ok_or(QuotaError::TimeRange)?,
+            ),
+        })
+    }
+
+    fn checked_route(
+        &self,
+        route: &ResolvedRoute,
+    ) -> Result<(i64, String, Option<u64>), QuotaError> {
         let expiry = match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
@@ -96,9 +121,9 @@ impl Admission<'_> {
                 r.account.adapter == route.adapter
                     && r.account.account_key == *key
                     && (r.model == route.model
-                        || (route.adapter == "opencode"
-                            && r.pool.as_deref() == Some("opencode-free")
-                            && self.pools.iter().any(|pool| pool == "opencode-free")))
+                        || r.pool
+                            .as_ref()
+                            .is_some_and(|pool| self.pools.contains(pool)))
             })
         {
             let expires = refusal.resets_unix_seconds.unwrap_or(
@@ -132,27 +157,78 @@ impl Admission<'_> {
                 });
             if expires > self.now_unix_seconds
                 && !comparable_newer
-                && ((route.adapter == "opencode"
-                    && refusal.pool.as_deref() == Some("opencode-free")
-                    && refusal.model == route.model)
-                    || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
+                && (refusal.model == route.model
+                    || refusal
+                        .pool
+                        .as_ref()
+                        .is_some_and(|pool| self.pools.contains(pool)))
             {
-                return Err(QuotaError::Refused("scoped provider refusal"));
+                return Err(QuotaError::Refused(
+                    if refusal.pool.as_deref() == Some("opencode-free") {
+                        "free tier exhausted; use a paid route or wait for its allowance reset"
+                    } else {
+                        "scoped provider refusal"
+                    },
+                ));
             }
         }
-        Ok(AdmissionPermit {
-            operation_id: operation.clone(),
-            adapter: route.adapter.clone(),
-            model: route.model.clone(),
-            account_key: key.clone(),
-            snapshot_revision: snapshot.map(|s| s.revision),
-            expires_unix_seconds: expiry.min(
-                self.now_unix_seconds
-                    .checked_add(55)
-                    .ok_or(QuotaError::TimeRange)?,
-            ),
-        })
+        Ok((expiry, key.clone(), snapshot.map(|s| s.revision)))
     }
+}
+
+/// Build a compare-and-swap update for structured provider quota evidence.
+/// The provider message is intentionally excluded from durable quota state.
+pub fn record_refusal(
+    current: Option<&AccountRecord>,
+    account: &AccountScope,
+    model: &str,
+    pool: &str,
+    now_unix_seconds: i64,
+) -> Result<UpdateIntent, QuotaError> {
+    account.validate()?;
+    let prefix = format!("{}/", account.adapter);
+    if !model.starts_with(&prefix)
+        || model.len() > 512
+        || model.chars().any(char::is_control)
+        || pool.is_empty()
+        || pool.len() > 256
+        || pool.chars().any(char::is_control)
+    {
+        return Err(QuotaError::Invalid("provider refusal"));
+    }
+    let model = model
+        .strip_prefix(&prefix)
+        .ok_or(QuotaError::Invalid("provider refusal model"))?;
+    if current.is_some_and(|record| record.account != *account) {
+        return Err(QuotaError::Conflict);
+    }
+    let mut record = current
+        .cloned()
+        .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.validate()?;
+    record.revision = record
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    record
+        .refusals
+        .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != Some(pool));
+    if record.refusals.len() >= MAX_WINDOWS {
+        return Err(QuotaError::Invalid("provider refusal bound"));
+    }
+    record.refusals.push(Refusal {
+        account: account.clone(),
+        model: model.into(),
+        pool: Some(pool.into()),
+        observed_unix_seconds: now_unix_seconds,
+        resets_unix_seconds: None,
+    });
+    record.validate()?;
+    Ok(UpdateIntent {
+        account: account.clone(),
+        expected: current.cloned(),
+        replacement: Some(record),
+    })
 }
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
