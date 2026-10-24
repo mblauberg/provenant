@@ -52,11 +52,6 @@ fn prepare_with(
         let _ = fixture_token;
         None
     };
-    if resume.is_some() {
-        return Err(
-            "continuation needs a provider session; providers do not expose sessions yet".into(),
-        );
-    }
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let state_root = registry.state_root.ok_or("state root is unavailable")?;
@@ -197,9 +192,14 @@ fn prepare_with(
         }
         run::RequestedRoute::Named { .. } => None,
     };
+    // A continuation keeps the prior attempt's account, never a fresh pick.
+    let prior_account = resume
+        .and_then(|prior| prior.applied_route.as_ref())
+        .and_then(|route| route.account_key.as_deref());
     let selected = task
         .account
         .as_deref()
+        .filter(|_| prior_account.is_none())
         .map(|label| {
             let mut matching = entries.iter().filter(|e| {
                 (e.label == label || e.key == label)
@@ -215,7 +215,8 @@ fn prepare_with(
             }
             Ok(entry.key.as_str())
         })
-        .transpose()?;
+        .transpose()?
+        .or(prior_account);
     let host = provenant_config::bind_host(roots, &provenant_supervisor::fs::LocalFs)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -303,6 +304,22 @@ fn prepare_with(
             reasons.push(format!("{label}: {error}"));
             continue;
         }
+        let continuation = match resume {
+            Some(prior) => match continuation_for(
+                prior,
+                &route,
+                &task.authority_digest.to_string(),
+                state_root,
+                &private_state,
+            ) {
+                Ok(continuation) => Some(continuation),
+                Err(error) => {
+                    reasons.push(format!("{label}: {error}"));
+                    continue;
+                }
+            },
+            None => None,
+        };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
         let child_state = state_root
             .join("children")
@@ -376,7 +393,7 @@ fn prepare_with(
             route: &provider_route,
             confined: &plan,
             prompt: &prompt,
-            continuation: None,
+            continuation: continuation.as_ref(),
             grant_digest: &grant_digest,
             executable: &executable,
             home: &home,
@@ -441,6 +458,102 @@ fn prepare_with(
         });
     }
     Err(reasons.join("; "))
+}
+
+/// The continuation of `prior` on this candidate route. It must be the very
+/// provider, model and account the prior attempt ran with. The prior attempt's
+/// retained private state is copied into the new attempt's own, so the new
+/// attempt never writes into settled history.
+fn continuation_for(
+    prior: &run::AttemptRecord,
+    route: &ResolvedRoute,
+    grant_digest: &str,
+    state_root: &Path,
+    private_state: &Path,
+) -> Result<provenant_providers::Continuation, String> {
+    let session = prior
+        .session
+        .as_deref()
+        .ok_or("the prior attempt recorded no provider session")?;
+    let applied = prior
+        .applied_route
+        .as_ref()
+        .ok_or("the prior attempt recorded no applied route")?;
+    if applied.provider.as_deref() != Some(route.adapter.as_str())
+        || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
+        || applied.account_key != route.account_key
+    {
+        return Err("route differs from the prior attempt's provider, model or account".into());
+    }
+    let continuation =
+        provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)
+            .map_err(|error| error.to_string())?;
+    let prior_state = state_root
+        .join("runs")
+        .join(prior.run_id.to_string())
+        .join("attempts")
+        .join(prior.attempt_id.to_string())
+        .join("provider-state");
+    match find_session_state(&prior_state, session) {
+        Some(retained) => copy_state(&retained, private_state)?,
+        // Claude keeps non-writer transcripts in the account directory, not here.
+        None if route.adapter == "claude" => {}
+        None => return Err("the prior attempt's retained provider state is missing".into()),
+    }
+    Ok(continuation)
+}
+
+/// The `candidate-N` directory of `provider_state` holding a file or directory
+/// named for `session`, searched to a bounded depth and size.
+fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
+    fn holds(dir: &Path, session: &str, depth: u32, budget: &mut u32) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            *budget = budget.saturating_sub(1);
+            if *budget == 0 {
+                return false;
+            }
+            if entry.file_name().to_string_lossy().contains(session) {
+                return true;
+            }
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if is_dir && depth > 0 && holds(&entry.path(), session, depth - 1, budget) {
+                return true;
+            }
+        }
+        false
+    }
+    std::fs::read_dir(provider_state)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("candidate-")
+        })
+        .map(|entry| entry.path())
+        .find(|path| holds(path, session, 8, &mut 100_000))
+}
+
+/// Copy regular files and directories. Symlinks are skipped: setup recreates
+/// the ones a provider needs, and a copy never follows one out of the state.
+fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
+    let error = |error: std::io::Error| format!("copying retained provider state: {error}");
+    std::fs::create_dir_all(to).map_err(error)?;
+    for entry in std::fs::read_dir(from).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().map_err(error)?;
+        if kind.is_dir() {
+            copy_state(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target).map_err(error)?;
+        }
+    }
+    Ok(())
 }
 
 /// Host context for fresh account identity and version probes.

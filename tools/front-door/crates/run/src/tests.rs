@@ -99,6 +99,7 @@ pub(super) fn publication() -> TerminalPublication<'static> {
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
+        session: None,
     }
 }
 pub(super) fn exit() -> ExitObservation {

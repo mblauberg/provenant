@@ -1937,3 +1937,43 @@ fn homebrew_node_tools_grant_toolchain_directories_but_not_etc_or_var() {
     );
     assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
 }
+
+#[test]
+fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let account_dir = std::path::Path::new("/fixture/identities/opaque");
+    for (id, session, flag) in [
+        ("claude", "5e55-claude-session", "--resume"),
+        ("codex", "5e55-codex-thread", "resume"),
+    ] {
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .expect("provider")
+            .adapter;
+        let route = route(id, "fixture-model");
+        let continuation = Continuation::retained(id, session, &route, "fixture")?;
+        let account = identity::RegisteredAccount::new(id, "opaque-account", account_dir.into())?;
+        let token =
+            (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
+        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), true);
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            token.as_ref(),
+        );
+        input.account = Some(&account);
+        input.continuation = Some(&continuation);
+        let launch = adapter.prepare(input)?;
+        let argv: Vec<_> = launch
+            .argv
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        let at = argv.iter().position(|arg| arg == flag).expect(flag);
+        assert_eq!(argv[at + 1], session, "{id}");
+    }
+    Ok(())
+}

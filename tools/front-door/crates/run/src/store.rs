@@ -38,6 +38,8 @@ pub struct TerminalPublication<'a> {
     pub applied_route: Option<RouteRecord>,
     pub observed_route: Option<RouteRecord>,
     pub usage: UsageRecord,
+    /// Provider session handle, kept so the attempt can be continued.
+    pub session: Option<String>,
 }
 impl RunStore {
     /// A result-only orphan predates durable terminal intent. The trusted
@@ -117,6 +119,7 @@ impl RunStore {
             applied_route: pending.applied_route.clone(),
             observed_route: pending.observed_route.clone(),
             usage: pending.usage.clone(),
+            session: pending.session.clone(),
         };
         self.publish_terminal(
             id,
@@ -442,6 +445,7 @@ impl RunStore {
             applied_route: None,
             observed_route: None,
             usage: UsageRecord::default(),
+            session: None,
         };
         self.commit_terminal(old, revision, &publication, None, None, false, call)
             .map(Some)
@@ -491,6 +495,7 @@ impl RunStore {
         next.applied_route = publication.applied_route.clone();
         next.observed_route = publication.observed_route.clone();
         next.usage = publication.usage.clone();
+        next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
             path: artifact_path(id, "result.md")?,
             digest: CanonicalV1::file_digest(publication.result.as_bytes()),

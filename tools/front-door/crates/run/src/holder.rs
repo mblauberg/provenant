@@ -267,6 +267,7 @@ impl RunStore {
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
+                session: None,
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -280,6 +281,7 @@ impl RunStore {
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
+                session: None,
                 reason: Some(
                     exit.warnings
                         .first()
@@ -446,6 +448,7 @@ impl RunStore {
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
             usage: decoded.usage,
+            session: decoded.session,
         };
         // A result sealed without intent predates a crash: keep its bytes.
         if result_orphan {

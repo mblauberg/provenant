@@ -211,6 +211,7 @@ impl Providers for Fake {
             complete: true,
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
+            session: None,
             reason: None,
         })
     }
@@ -483,6 +484,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
+        session: None,
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(!terminal_tmp.exists());

@@ -9,7 +9,9 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
-use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
+use provenant_providers::{
+    Access, OutcomeStatus, ProviderEvent, REGISTRY, Session as ProviderSession, mode_enabled,
+};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
 use provenant_run as run;
@@ -130,10 +132,39 @@ pub struct Registry<'a> {
     pub host: Option<&'a run::HostLaunchContext>,
 }
 impl Registry<'_> {
-    /// Whether providers can continue an exact prior session. None can yet,
-    /// so `resume` refuses before it spends the attempt's one continuation.
-    pub const fn continues_sessions(&self) -> bool {
-        false
+    /// Whether any adapter has a recorded resume recipe. Each attempt must
+    /// still carry a session handle; `continue_attempt` checks that first.
+    pub fn continues_sessions(&self) -> bool {
+        REGISTRY.iter().any(|registration| {
+            [Access::ReadOnly, Access::WorktreeWrite]
+                .into_iter()
+                .any(|access| {
+                    mode_enabled(registration.adapter.id(), access, ProviderSession::Resume)
+                })
+        })
+    }
+    /// Refuse before the attempt's one continuation is spent.
+    fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
+        let unsupported = |message: String| Fail::new(Status::Refused, "UNSUPPORTED", message);
+        let adapter = prior
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.provider.as_deref())
+            .ok_or_else(|| unsupported("the attempt launched no provider to resume".into()))?;
+        if ![Access::ReadOnly, Access::WorktreeWrite]
+            .into_iter()
+            .any(|access| mode_enabled(adapter, access, ProviderSession::Resume))
+        {
+            return Err(unsupported(format!(
+                "{adapter} has no enabled resume recipe; dispatch a new lane with the prior result as context"
+            )));
+        }
+        if prior.session.is_none() {
+            return Err(unsupported(
+                "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
+            ));
+        }
+        Ok(())
     }
 }
 impl run::Providers for Registry<'_> {
@@ -174,6 +205,7 @@ impl run::Providers for Registry<'_> {
             complete: false,
             observed_route: None,
             usage: run::UsageRecord::default(),
+            session: None,
             reason: Some(reason.into()),
         };
         let Some(adapter) = REGISTRY
@@ -245,6 +277,7 @@ impl run::Providers for Registry<'_> {
                 pool_selection: None,
             }),
             usage: run::UsageRecord::default(),
+            session: outcome.session().map(str::to_owned),
             reason: None,
         };
         for event in &events {
@@ -1753,13 +1786,7 @@ pub fn continue_attempt(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
-    if !(Registry::default()).continues_sessions() {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "resume needs provider sessions, which providers do not expose yet",
-        ));
-    }
+    (Registry::default()).check_continuable(&session.store.record(prior, call)?)?;
     let run = session.store.resume(
         &run::Resume {
             prior,
@@ -2210,9 +2237,8 @@ mod tests {
         assert!(reason.ends_with('☀'));
     }
 
-    #[test]
-    fn codex_rollout_error_reaches_the_decoded_reason() {
-        let exit = ExitObservation {
+    fn clean_exit() -> ExitObservation {
+        ExitObservation {
             publication: PublicationState::Durable,
             scope: Scope {
                 run: RunId::from_bytes([1; 16]),
@@ -2234,7 +2260,12 @@ mod tests {
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn codex_rollout_error_reaches_the_decoded_reason() {
+        let exit = clean_exit();
         let route = run::RouteRecord {
             provider: Some("codex".into()),
             model: Some("codex/gpt-6-luna".into()),
@@ -2260,10 +2291,36 @@ mod tests {
             .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(
+            decoded.session.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
         assert!(decoded.observed_route.is_none());
         assert_eq!(
             decoded.reason.as_deref(),
             Some("Codex rollout identity: provider continuation identity is unknown")
+        );
+    }
+
+    #[test]
+    fn claude_session_reaches_the_decoded_attempt() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = include_str!("../../../tests/fixtures/providers/claude/fresh.jsonl");
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(
+            decoded.session.as_deref(),
+            Some("FIXTURE_SESSION_IDENTIFIER_003")
         );
     }
 }
