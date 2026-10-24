@@ -738,10 +738,18 @@ scheduler daemon. Within that, the lane decided:
   and settlement. Network, capability, read-root and remote-host requests
   remain unsupported.
 - **Writer terminal checks** reverify the recorded worktree and call
-  `check_writer_terminal` before committing an outcome, including recovery
-  through reconcile. An unfinished cherry-pick, revert, rebase, merge or
-  sequencer operation produces `failed` with the worktree and reason, even
-  when the provider returned a complete success and Git reports a clean tree.
+  confinement's instruction snapshot before launch. The sealed baseline lives
+  in the provider-inaccessible quarantine archive and can be reopened only for
+  matching custody, base and archive identity. After quiescence, quarantine
+  archives protected disk/index/HEAD changes before terminal publication.
+  Review-required changes produce `failed`; incomplete quarantine remains
+  retryable. A crash after evidence publication requires review rather than
+  replaying a partial restore. The release manifest names the real evidence
+  and result digests. Both the guardian and reconcile require the recorded
+  base to remain an ancestor of the branch tip and call `check_writer_terminal`.
+  An unfinished cherry-pick, revert, rebase, merge or sequencer operation
+  produces `failed` with the worktree and reason, even when the provider
+  returned a complete success and Git reports a clean tree.
 - **Route fallback is applied at prepare time** across the resolved route's
   alternatives. Runtime fallback on rate, quota or model-unavailable is
   deferred, because no decoder emits those events yet.
@@ -752,6 +760,21 @@ scheduler daemon. Within that, the lane decided:
   Claude still needs a credential-authority binding. Provider execution does
   not waive the existing terminal requirement for an observed route: Codex
   streams without an answering-model observation cannot establish success.
+  This is confirmed for installed Codex CLI 0.159.0: its
+  [exec event schema](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/exec_events.rs)
+  has no answering-model field, and its
+  [JSON event processor](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
+  emits only the thread ID from `SessionConfiguredEvent`. A resolved model
+  pinned in argv remains recorded separately; it cannot satisfy the present
+  observed-route gate. Claude requires an authority record binding actor,
+  exact credential source, purpose and expiry before the host token loader
+  can run. The task request currently carries no such record.
+- **Launch storage** is allocated once per attempt before route fallback, under
+  its canonical `scratch/` and `provider-state/` paths. No candidate creates
+  random `tmp/` trees. Settlement removes empty scratch; provider history and
+  unclassified contents remain retained. Supervisor owns reservation listing:
+  malformed entries are reported and remain fenced while valid entries can
+  reconcile. Such diagnostics make the reconcile command non-successful.
 - **The guardian re-resolves the state root** from a `RootSeed` in the holder
   context, because its environment is cleared.
 

@@ -50,7 +50,7 @@ pub enum Reconciled {
 }
 
 impl RunStore {
-    fn scope(record: &AttemptRecord) -> Scope {
+    pub(crate) fn scope(record: &AttemptRecord) -> Scope {
         Scope {
             run: record.run_id,
             attempt: record.attempt_id,

@@ -8,7 +8,6 @@ use std::{
     ffi::OsString,
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -39,6 +38,8 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
+            "writer_production_plan_denies_outside_writes",
+            "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
@@ -53,6 +54,12 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "writer_terminal_refuses_sequencer_state" => {
                     writer_terminal_refuses_sequencer_state()
+                }
+                "writer_production_plan_denies_outside_writes" => {
+                    writer_production_plan_denies_outside_writes()
+                }
+                "writer_reconcile_refuses_unfinished_cherry_pick_and_releases" => {
+                    writer_reconcile_refuses_unfinished_cherry_pick_and_releases()
                 }
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
@@ -93,7 +100,17 @@ fn repository() -> Result<TestRig> {
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
     git(&rig, &["checkout", "-q", "-b", "main"])?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n")?;
-    git(&rig, &["add", ".gitignore"])?;
+    for name in [
+        "AGENTS.md",
+        "nested/AGENTS.md",
+        ".claude/settings.json",
+        ".github/workflows/check.yml",
+    ] {
+        let path = rig.project.join(name);
+        fs::create_dir_all(path.parent().ok_or("fixture parent")?)?;
+        fs::write(path, b"baseline instruction")?;
+    }
+    git(&rig, &["add", "."])?;
     git(&rig, &["commit", "-qm", "Initial"])?;
     Ok(rig)
 }
@@ -243,8 +260,8 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     )?;
     assert!(matches!(
         started.as_slice(),
-        [provenant_run::Started::Refused { attempt, reason }]
-            if *attempt == second_attempt && reason.contains("writer")
+        [provenant_run::Started::Refused { attempt, kind: provenant_run::RefusalKind::WorktreeBusy, .. }]
+            if *attempt == second_attempt
     ));
 
     fs::write(&release, b"release")?;
@@ -296,7 +313,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
         project: context.project_id,
-        mode: "edit",
+        mode: "control",
     };
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
@@ -315,7 +332,248 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
             .is_some_and(|text| text.contains("writer terminal check"))
     );
     assert!(path.join(".git").is_file());
+    let quarantine = context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(record.run_id.to_string())
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("quarantine");
+    let manifest: Value = serde_json::from_slice(&fs::read(quarantine.join("manifest.json"))?)?;
+    assert_eq!(manifest["review_required"], true);
+    let evidence: Value = serde_json::from_slice(&fs::read(quarantine.join("evidence.json"))?)?;
+    assert_eq!(evidence["review_required"], true);
     wait_for_writer_release(&store)?;
+
+    // The same terminal boundary must refuse a rewind of the recorded base.
+    fs::remove_file(
+        writer
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD"),
+    )?;
+    let path_text = path.to_str().ok_or("fixture worktree encoding")?;
+    git(&rig, &["-C", path_text, "reset", "--hard", "HEAD"])?;
+    fs::write(path.join("source-base"), b"new base")?;
+    git(&rig, &["-C", path_text, "add", "source-base"])?;
+    git(&rig, &["-C", path_text, "commit", "-qm", "Writer base"])?;
+    let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let prepared = writer_run(
+        request,
+        "writer-rewind",
+        91,
+        "hold while the base is rewritten",
+    )?;
+    let attempt = prepared.attempts[0].attempt_id;
+    let record = store.create(&prepared, &call)?;
+    let release = path.join(".writer-fixture-release");
+    let _release_on_drop = ReleaseOnDrop(release.clone());
+    let provider = WriterProvider {
+        state: context.state_root.as_path().to_owned(),
+        project: context.project_id,
+        mode: "hold",
+    };
+    let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
+        "{started:?}"
+    );
+    wait_for_path(&path.join(".writer-fixture-ready"), Duration::from_secs(8))?;
+    git(&rig, &["-C", path_text, "reset", "--mixed", "HEAD^"])?;
+    fs::write(release, b"release")?;
+    let terminal = await_terminal(&store, attempt, &call)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
+    assert!(
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("no longer descends from its recorded base"))
+    );
+    wait_for_writer_release(&store)?;
+    cleanup.disarm();
+    Ok(())
+}
+
+fn writer_production_plan_denies_outside_writes() -> Result {
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    let rig = repository()?;
+    for name in ["writer", "sibling"] {
+        ok(
+            &rig,
+            &["worktree", "create", name, "--base", "HEAD", "--json"],
+        )?;
+    }
+    let path = rig.project.join(".worktrees/writer");
+    std::os::unix::fs::symlink(&rig.project, path.join("escape"))?;
+    let (roots, context) = writer_context(&rig)?;
+    let cleanup = writer_process_cleanup(&context);
+    let store = open_writer_store(&context)?;
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let prepared = writer_run(
+        request,
+        "writer-negative",
+        71,
+        "probe the production write boundary",
+    )?;
+    let attempt = prepared.attempts[0].attempt_id;
+    let record = store.create(&prepared, &call)?;
+    let provider = WriterProvider {
+        state: context.state_root.as_path().to_owned(),
+        project: context.project_id,
+        mode: "negative",
+    };
+    let started = start_writer(
+        &store,
+        record.run_id,
+        &provider,
+        &holder_context(&rig, &roots, &context),
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
+        "{started:?}"
+    );
+    assert_terminal_outcome(
+        &await_terminal(&store, attempt, &call)?,
+        provenant_run::Outcome::Succeeded,
+    )?;
+    for target in [
+        rig.project.join("negative-write"),
+        rig.project.join(".worktrees/sibling/negative-write"),
+        rig.project.join(".git/hooks/negative-hook"),
+    ] {
+        assert!(!target.exists(), "{}", target.display());
+    }
+    wait_for_writer_release(&store)?;
+    cleanup.disarm();
+    Ok(())
+}
+
+/// Crash only this fixture guardian after durable exit, before Run publication.
+pub(crate) struct FixtureHolder<'a>(pub provenant_run::RunHolder<'a>);
+impl provenant_supervisor::Holder for FixtureHolder<'_> {
+    fn admit(
+        &self,
+        context: &[u8],
+        attempt: &provenant_supervisor::fs::Directory,
+    ) -> provenant_supervisor::custody::Result<()> {
+        self.0.admit(context, attempt)
+    }
+    fn terminal(
+        &self,
+        context: &[u8],
+        attempt: &provenant_supervisor::fs::Directory,
+        exit: &provenant_supervisor::custody::ExitObservation,
+        recovery: &provenant_supervisor::custody::Recovery,
+    ) -> provenant_supervisor::custody::Result<()> {
+        let parsed: provenant_run::HolderContext = serde_json::from_slice(context)
+            .map_err(|_| provenant_supervisor::custody::CustodyError::InvalidRecord)?;
+        if parsed
+            .roots
+            .checkout
+            .join(".fixture-crash-terminal")
+            .exists()
+        {
+            std::process::exit(70);
+        }
+        self.0.terminal(context, attempt, exit, recovery)
+    }
+}
+
+fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    let rig = repository()?;
+    ok(
+        &rig,
+        &["worktree", "create", "writer", "--base", "HEAD", "--json"],
+    )?;
+    fs::write(
+        rig.project.join(".fixture-crash-terminal"),
+        b"crash after exit",
+    )?;
+    let path = rig.project.join(".worktrees/writer");
+    let (roots, context) = writer_context(&rig)?;
+    let cleanup = writer_process_cleanup(&context);
+    let store = open_writer_store(&context)?;
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    let prepared = writer_run(request, "writer-recovered", 81, "recover an exited writer")?;
+    let attempt = prepared.attempts[0].attempt_id;
+    let record = store.create(&prepared, &call)?;
+    let provider = WriterProvider {
+        state: context.state_root.as_path().to_owned(),
+        project: context.project_id,
+        mode: "edit",
+    };
+    let started = start_writer(
+        &store,
+        record.run_id,
+        &provider,
+        &holder_context(&rig, &roots, &context),
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
+        "{started:?}"
+    );
+    let attempt_path = context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(record.run_id.to_string())
+        .join("attempts")
+        .join(attempt.to_string());
+    wait_for_path(
+        &attempt_path.join("process-exit.json"),
+        Duration::from_secs(8),
+    )?;
+    assert!(!matches!(
+        store.record(attempt, &call)?.state,
+        provenant_run::AttemptState::Terminal { .. }
+    ));
+    // Incomplete quarantine must leave the attempt retryable, not seal a
+    // terminal record whose missing manifest can never be released.
+    let snapshot_path = attempt_path.join("quarantine/snapshot.json");
+    let baseline = fs::read(&snapshot_path)?;
+    fs::write(&snapshot_path, b"{}")?;
+    let uncertain = store.reconcile(record.run_id, &provider, &call)?;
+    assert!(
+        matches!(uncertain.as_slice(), [(id, provenant_run::Reconciled::Uncertain { .. })] if *id == attempt)
+    );
+    assert!(!matches!(
+        store.record(attempt, &call)?.state,
+        provenant_run::AttemptState::Terminal { .. }
+    ));
+    assert!(!attempt_path.join("quarantine/manifest.json").exists());
+    fs::write(snapshot_path, baseline)?;
+    // The operation remains unfinished when the durable exit is recovered.
+    fs::write(
+        writer
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD"),
+        b"unfinished cherry-pick",
+    )?;
+    let found = store.reconcile(record.run_id, &provider, &call)?;
+    assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
+    let terminal = store.record(attempt, &call)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
+    assert!(
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("in-progress Git operation"))
+    );
+    assert!(attempt_path.join("release.json").is_file());
+    assert!(store.writer_fences()?.is_empty());
     cleanup.disarm();
     Ok(())
 }
@@ -449,6 +707,7 @@ impl provenant_run::Providers for WriterProvider {
         &self,
         task: &provenant_run::TaskRequest,
         _prompt: &str,
+        paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
     ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
         if resume.is_some() {
@@ -456,10 +715,6 @@ impl provenant_run::Providers for WriterProvider {
         }
         let request = task.writer.as_ref().ok_or("writer request missing")?;
         let writer = provenant_run::prepare_writer(request, &self.state, self.project)
-            .map_err(|error| error.to_string())?;
-        let scratch = self.state.join("writer-fixture-scratch");
-        fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
-        fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))
             .map_err(|error| error.to_string())?;
         let executable =
             fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
@@ -470,34 +725,24 @@ impl provenant_run::Providers for WriterProvider {
             OsString::from(self.mode),
             writer.worktree.path().as_os_str().to_owned(),
         ];
-        let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
-            scope: provenant_core::WorkScope::Project(self.project),
-            permissions: provenant_confinement::permissions::PlanPermissions {
-                mode: provenant_confinement::permissions::AccessMode::WorktreeWrite(Box::new(
-                    provenant_confinement::permissions::WorktreeWriteAuthority::for_worktree(
-                        &writer.worktree,
-                        &writer.branch,
-                    )
-                    .map_err(|error| error.to_string())?,
-                )),
-                scratch: path_grant(&scratch),
-                private_state: None,
-                read_roots: Vec::new(),
-                protected_roots: Vec::new(),
-                secret_roots: Vec::new(),
-                selected_authentication: None,
-                include_continuation: false,
-                network: Vec::new(),
-                capabilities: Vec::new(),
-                nested_confinement: false,
-            },
-            codex: provenant_confinement::CodexPolicy::Clean,
-            extensions: provenant_confinement::ExtensionPolicy::Deny,
-            agy_state: None,
-        })
-        .map_err(|error| error.to_string())?;
+        let plan = provenant_cli::run::writer_fixture_plan(
+            self.project,
+            writer.worktree.path(),
+            paths,
+            &writer,
+        )?;
         let profile = provenant_confinement::permissions::ProviderProfile {
             spec: provenant_confinement::permissions::ProviderProfileSpec {
+                authentication: vec![provenant_confinement::permissions::AuthenticationProfile {
+                    mechanism: "login".into(),
+                    // A public executable stands in for a login file; no live
+                    // credential is read and this adds no write permission.
+                    roots: vec![provenant_confinement::permissions::PathGrant {
+                        path: executable.clone(),
+                        scope: provenant_confinement::permissions::PathScope::Exact,
+                    }],
+                    in_place_writes: Vec::new(),
+                }],
                 process_executables: vec![provenant_confinement::permissions::PathGrant {
                     path: executable,
                     scope: provenant_confinement::permissions::PathScope::Exact,
@@ -556,6 +801,8 @@ fn writer_observations() -> BTreeMap<
         (Operation::ProtectedWrite, Outcome::Denied),
         (Operation::OtherNetwork, Outcome::Denied),
         (Operation::RuntimeRead, Outcome::Allowed),
+        (Operation::AuthenticationRead, Outcome::Allowed),
+        (Operation::ProtectedInstructionRead, Outcome::Allowed),
         (Operation::DeclaredProcessExec, Outcome::Allowed),
         (Operation::UndeclaredProcessExec, Outcome::Denied),
         (Operation::ProcessFork, Outcome::Denied),
@@ -568,13 +815,6 @@ fn writer_observations() -> BTreeMap<
         (Operation::OtherRefWrite, Outcome::Denied),
     ]
     .into()
-}
-
-fn path_grant(path: &Path) -> provenant_confinement::permissions::PathGrant {
-    provenant_confinement::permissions::PathGrant {
-        path: path.to_owned(),
-        scope: provenant_confinement::permissions::PathScope::Subtree,
-    }
 }
 
 fn holder_context<'a>(
@@ -675,6 +915,38 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
         .ok_or("writer provider worktree missing")?;
     match mode {
         "edit" => {}
+        "control" => {
+            for name in [
+                "nested/AGENTS.md",
+                ".claude/settings.json",
+                ".github/workflows/check.yml",
+            ] {
+                fs::write(worktree.join(name), b"changed control")?;
+            }
+        }
+        "negative" => {
+            let primary = worktree
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("fixture primary")?;
+            for target in [
+                primary.join("negative-write"),
+                primary.join(".worktrees/sibling/negative-write"),
+                worktree.join("escape/negative-write"),
+                primary.join(".git/config"),
+                primary.join(".git/hooks/negative-hook"),
+            ] {
+                let error = fs::write(&target, b"forbidden").err().ok_or_else(|| {
+                    format!("write escaped production plan: {}", target.display())
+                })?;
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "{}: {error}",
+                    target.display()
+                );
+            }
+        }
         "hold" => {
             let ready = worktree.join(".writer-fixture-ready");
             let release = worktree.join(".writer-fixture-release");

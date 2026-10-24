@@ -1089,7 +1089,6 @@ impl RunOwner for BinaryRunOwner<'_> {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 task.worktree.as_deref().map(Path::new),
-                &self.factory.cwd,
             )
             .map_err(fail_error)?;
             if !task.inputs.is_empty() {

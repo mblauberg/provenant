@@ -46,6 +46,11 @@ pub struct Decoded {
     pub usage: UsageRecord,
     pub reason: Option<String>,
 }
+/// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
+pub struct LaunchPaths {
+    pub scratch: PathBuf,
+    pub provider_state: PathBuf,
+}
 pub trait Providers {
     /// Prepare one task, trying its fallback routes in order. An error is a
     /// task-local refusal reason; siblings still launch. `resume` is the prior
@@ -55,6 +60,7 @@ pub trait Providers {
         &self,
         task: &TaskRequest,
         prompt: &str,
+        paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
     /// Decode the sealed stdout capture of a provider that exited.
@@ -63,6 +69,7 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
+    Busy,
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -72,12 +79,18 @@ pub enum Started {
     Refused {
         attempt: AttemptId,
         reason: String,
+        kind: RefusalKind,
     },
     /// Handoff did not confirm; the attempt stays fenced for `reconcile`.
     Unknown {
         attempt: AttemptId,
         error: String,
     },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalKind {
+    Preparation,
+    WorktreeBusy,
 }
 
 impl RunStore {
@@ -100,7 +113,7 @@ impl RunStore {
         context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        self.start_with_writer_lease(
+        self.start_inner(
             run,
             providers,
             context,
@@ -119,7 +132,22 @@ impl RunStore {
     }
     /// Native observation seam for integration fixtures. The ordinary start
     /// path always uses supervisor's system observer and nonblocking lease.
+    #[cfg(feature = "fixture")]
     pub fn start_with_writer_lease(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        acquire_writer: &dyn Fn(
+            provenant_supervisor::fs::Directory,
+            Scope,
+            custody::WriterBinding,
+        ) -> custody::Result<custody::CustodyLease>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(run, providers, context, acquire_writer, call)
+    }
+    fn start_inner(
         &self,
         run: RunId,
         providers: &dyn Providers,
@@ -166,9 +194,25 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let plan = match providers.prepare(task, &prompt, resume.as_ref()) {
+            let attempt = self.attempt_dir(record.run_id, id, false)?;
+            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
+            let base = self
+                .context
+                .state_root
+                .as_path()
+                .join("runs")
+                .join(record.run_id.to_string())
+                .join("attempts")
+                .join(id.to_string());
+            let paths = LaunchPaths {
+                scratch: base.join("scratch"),
+                provider_state: base.join("provider-state"),
+            };
+            let plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
+                    crate::writer::settle_launch_staging(&attempt)?;
                     self.withdraw(
                         id,
                         AttemptState::Queued,
@@ -180,6 +224,7 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
+                        kind: RefusalKind::Preparation,
                     });
                     continue;
                 }
@@ -194,8 +239,15 @@ impl RunStore {
                 match self.hand_off(task, plan, context, acquire_writer, &record, call) {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
-                    Err(HandOff::Local(error)) => {
-                        let reason = format!("launch preparation failed: {error}");
+                    Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
+                        let (reason, kind) = match error {
+                            HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
+                            HandOff::Local(error) => (
+                                format!("launch preparation failed: {error}"),
+                                RefusalKind::Preparation,
+                            ),
+                            _ => unreachable!(),
+                        };
                         self.withdraw(
                             id,
                             AttemptState::Starting,
@@ -207,6 +259,7 @@ impl RunStore {
                         Started::Refused {
                             attempt: id,
                             reason,
+                            kind,
                         }
                     }
                     Err(HandOff::Uncertain(error)) => {
@@ -264,7 +317,13 @@ impl RunStore {
                 custody::acquire_reader(directory()?, scope, call.budget, call.cancel, call.clock)
             }
         }
-        .map_err(|e| local(&e))?;
+        .map_err(|e| {
+            if matches!(e, custody::CustodyError::Busy) {
+                HandOff::Busy
+            } else {
+                local(&e)
+            }
+        })?;
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
             Ok(now) if now.revision == record.revision => {}
@@ -282,6 +341,15 @@ impl RunStore {
             }
         }
         if let Some(confinement) = &plan.confinement {
+            if let Some(writer) = &confinement.writer
+                && let Err(error) =
+                    writer.snapshot(self.context.state_root.as_path(), &directory()?, scope)
+            {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
             match confinement.command(&plan.argv, call.cancel) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {

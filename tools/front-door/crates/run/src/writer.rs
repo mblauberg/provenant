@@ -80,6 +80,7 @@ pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterReq
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
+    pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
 }
 /// Reopen the persisted scope and match its active Provenant registration.
@@ -142,6 +143,7 @@ pub fn prepare_writer(
     Ok(WriterLaunch {
         worktree,
         branch,
+        base,
         custody: Some((directory, binding)),
     })
 }
@@ -182,15 +184,15 @@ impl LaunchConfinement {
     }
 }
 
-/// A retained reservation, including one whose terminal record was committed
-/// just before its guardian died. The exact path supports chair recovery.
-#[derive(serde::Serialize)]
-pub struct WriterFence {
-    pub scope: provenant_supervisor::custody::Scope,
-    pub reservation: std::path::PathBuf,
-}
+/// A retained reservation, including an exact path for chair recovery.
+pub use provenant_supervisor::custody::WriterReservation as WriterFence;
 impl crate::RunStore {
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
+        Ok(self.writer_fence_listing()?.reservations)
+    }
+    pub fn writer_fence_listing(
+        &self,
+    ) -> Result<provenant_supervisor::custody::ReservationListing> {
         let path = self
             .context
             .state_root
@@ -199,41 +201,162 @@ impl crate::RunStore {
             .join(self.context.project_id.to_string());
         let directory = match Directory::open_anchor(&path) {
             Ok(directory) => directory,
-            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) if error.is_not_found() => return Ok(Default::default()),
             Err(error) => return Err(error.into()),
         };
-        let mut fences = Vec::new();
-        for (index, name) in directory.entries()?.enumerate() {
-            if index >= 10_000 {
-                return Err(RunError::TooLarge { limit: 10_000 });
-            }
-            let name = name?;
-            if directory.metadata_at(&name, false)?.kind
-                != provenant_supervisor::fs::FileKind::Directory
-            {
-                continue;
-            }
-            let child = directory.open_verified_directory(&name)?;
-            let bytes =
-                match child.read_bounded(OsStr::new("reservation.json"), crate::RECORD_LIMIT) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.is_not_found() => continue,
-                    Err(error) => return Err(error.into()),
-                };
-            #[derive(serde::Deserialize)]
-            struct Reservation {
-                schema_version: u64,
-                scope: provenant_supervisor::custody::Scope,
-            }
-            let reservation: Reservation = crate::db::decode(&bytes)?;
-            if reservation.schema_version != 1 || reservation.scope.generation == 0 {
-                return Err(RunError::Validation("writer reservation version or scope"));
-            }
-            fences.push(WriterFence {
-                scope: reservation.scope,
-                reservation: path.join(name).join("reservation.json"),
-            });
+        let mut listing =
+            provenant_supervisor::custody::list_writer_reservations(&directory).map_err(error)?;
+        for reservation in &mut listing.reservations {
+            reservation.reservation = path.join(&reservation.reservation);
         }
-        Ok(fences)
+        for issue in &mut listing.issues {
+            issue.reservation = path.join(&issue.reservation);
+        }
+        Ok(listing)
     }
+}
+
+impl WriterLaunch {
+    pub(crate) fn snapshot(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<()> {
+        let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
+        let utility = runtime(state)?;
+        let executor = SystemExecutor::new(1).map_err(error)?;
+        let cancel = CancelToken::new();
+        let git = provenant_confinement::Git::new(
+            &executor,
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        );
+        let paths = git.writer_instruction_paths().map_err(error)?;
+        let snapshot = git
+            .snapshot_instructions(scope, &paths, &archive)
+            .map_err(error)?;
+        if snapshot.head() != self.base {
+            return Err(RunError::Validation("writer base changed before launch"));
+        }
+        snapshot.persist(&archive).map_err(error)
+    }
+    pub(crate) fn terminal(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        custody: &provenant_supervisor::custody::Recovery,
+    ) -> Result<bool> {
+        let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), false)?;
+        let base = custody
+            .writer_base(
+                self.worktree.repo().root_dir(),
+                self.worktree.repo().private_dir(),
+                self.branch.as_str(),
+            )
+            .map_err(error)?;
+        let utility = runtime(state)?;
+        let executor = SystemExecutor::new(1).map_err(error)?;
+        let cancel = CancelToken::new();
+        let git = provenant_confinement::Git::new(
+            &executor,
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        );
+        let snapshot = git
+            .recover_instruction_snapshot(custody, base, &archive)
+            .map_err(error)?;
+        let outcome = git
+            .quarantine_instructions(custody, &snapshot, &archive)
+            .map_err(error)?;
+        let (evidence, review) = match outcome {
+            provenant_confinement::quarantine::QuarantineOutcome::Restored {
+                evidence_digest,
+                ..
+            } => (evidence_digest, false),
+            provenant_confinement::quarantine::QuarantineOutcome::ReviewRequired {
+                evidence_digest,
+            } => (evidence_digest, true),
+        };
+        let result =
+            archive.read_bounded(OsStr::new("quarantine-result.json"), crate::RECORD_LIMIT)?;
+        crate::artifacts::seal(
+            &archive,
+            "manifest.json",
+            &crate::db::bytes(&WriterManifest {
+                schema_version: 1,
+                scope: custody.scope(),
+                kind: "quarantine_manifest",
+                evidence_digest: evidence,
+                result_digest: provenant_records::CanonicalV1::file_digest(&result),
+                review_required: review,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
+        let tip = provenant_confinement::run_utility(
+            &executor,
+            provenant_confinement::GitRead::ResolveRef {
+                name: self.branch.clone(),
+            },
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        )
+        .map_err(error)?;
+        let tip = GitOid::parse(
+            std::str::from_utf8(&tip.stdout.bytes)
+                .map_err(error)?
+                .trim(),
+        )
+        .map_err(error)?;
+        let ancestry = provenant_confinement::run_utility(
+            &executor,
+            provenant_confinement::GitRead::MergeBaseIsAncestor {
+                ancestor: base,
+                tip,
+            },
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        )
+        .map_err(error)?;
+        if ancestry.termination != provenant_supervisor::exec::Termination::Exit(0) {
+            return Err(RunError::Validation(
+                "writer branch no longer descends from its recorded base",
+            ));
+        }
+        worktrees::check_writer_terminal(self.worktree.repo())?;
+        Ok(review)
+    }
+}
+#[derive(serde::Serialize)]
+struct WriterManifest {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+    kind: &'static str,
+    evidence_digest: provenant_records::FileDigest,
+    result_digest: provenant_records::FileDigest,
+    review_required: bool,
+}
+
+/// Remove the empty generated staging directory under attempt exclusion.
+/// Provider state/history and unclassified contents remain retained.
+pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
+    let name = OsStr::new("scratch");
+    let scratch = match attempt.open_verified_directory(name) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if scratch.entries()?.next().transpose()?.is_none() {
+        attempt.rmdir(name)?;
+        attempt.sync()?;
+    }
+    Ok(())
 }

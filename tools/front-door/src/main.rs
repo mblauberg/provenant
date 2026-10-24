@@ -238,6 +238,8 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 providers: &registry,
                 resources: &provenant_run::SystemResources,
             };
+            #[cfg(test)]
+            let holder = worktree_tests::FixtureHolder(holder);
             let hooks = provenant_supervisor::GuardianHooks {
                 holder: Some(&holder),
                 #[cfg(test)]

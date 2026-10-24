@@ -7,7 +7,7 @@ use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
 use provenant_supervisor::fs::{FsError, Metadata, SafeDir};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
@@ -48,7 +48,7 @@ pub enum GitEvidenceError {
 }
 
 /// A byte-preserving fingerprint of a tracked working-tree file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackedFingerprint {
     pub path: PathWire,
@@ -107,7 +107,7 @@ impl<'a> Git<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct IndexFingerprint {
     pub device: u64,

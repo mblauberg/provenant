@@ -110,18 +110,21 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         context: &[u8],
         attempt: &Directory,
         exit: &ExitObservation,
+        recovery: &custody::Recovery,
     ) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         let cancel = CancelToken::new();
         store
-            .finish(
+            .finish_in_custody(
                 context.attempt_id,
                 attempt,
                 exit,
+                Some(recovery),
                 self.providers,
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
             )
             .map_err(custody_error)?;
+        crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
         custody::publish_release(attempt, exit.scope)
     }
 }
@@ -138,6 +141,64 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let record = self.record(id, call)?;
+        let request = self.request(record.run_id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::Validation("terminal task missing"))?;
+        let recovery = if let Some(writer) = &task.writer {
+            let mut writer = crate::prepare_writer(
+                writer,
+                self.context.state_root.as_path(),
+                record.project_id,
+            )?;
+            let (directory, _) = writer.custody.take().ok_or(RunError::UnsafePath)?;
+            if matches!(record.state, AttemptState::Terminal { .. }) {
+                match directory.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
+                    Err(error) if error.is_not_found() => return Ok(record),
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
+                }
+            }
+            Some(
+                custody::acquire_recovery(directory, call.budget, call.cancel, call.clock)
+                    .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?,
+            )
+        } else {
+            None
+        };
+        let record =
+            self.finish_in_custody(id, attempt, exit, recovery.as_ref(), providers, call)?;
+        crate::writer::settle_launch_staging(attempt)?;
+        if let Some(recovery) = recovery {
+            custody::publish_release(attempt, exit.scope)
+                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+            let commit = recovery
+                .verify_settlement(attempt)
+                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+            let mut scratch = provenant_supervisor::scratch::Scratch::new(attempt.try_clone()?)?;
+            recovery
+                .settle(commit, &mut scratch)
+                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        Ok(record)
+    }
+    fn finish_in_custody(
+        &self,
+        id: AttemptId,
+        attempt: &Directory,
+        exit: &ExitObservation,
+        recovery: Option<&custody::Recovery>,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let record = self.record(id, call)?;
+        if exit.scope != Self::scope(&record)
+            || recovery.is_some_and(|recovery| recovery.scope() != exit.scope)
+        {
+            return Err(RunError::Validation("terminal custody scope mismatch"));
+        }
         if matches!(record.state, AttemptState::Terminal { .. }) {
             return Ok(record);
         }
@@ -201,18 +262,61 @@ impl RunStore {
             let check =
                 crate::prepare_writer(writer, self.context.state_root.as_path(), record.project_id)
                     .and_then(|writer| {
-                        provenant_confinement::worktrees::check_writer_terminal(
-                            writer.worktree.repo(),
+                        writer.terminal(
+                            self.context.state_root.as_path(),
+                            attempt,
+                            recovery
+                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
                         )
-                        .map_err(RunError::Writer)
                     });
-            if let Err(error) = check {
-                decoded.outcome = Outcome::Failed;
-                decoded.reason = Some(format!(
-                    "writer terminal check failed for {}: {error}",
-                    writer.worktree.display()
-                ));
+            match check {
+                Ok(false) => {}
+                Ok(true) => {
+                    decoded.outcome = Outcome::Failed;
+                    decoded.reason = Some(format!(
+                        "writer terminal check failed for {}: protected changes require review",
+                        writer.worktree.display()
+                    ));
+                }
+                Err(error) => {
+                    // Incomplete quarantine is retryable, never a terminal
+                    // intent that permanently prevents a later archive commit.
+                    let archive = crate::artifacts::subdir(
+                        attempt,
+                        std::ffi::OsStr::new("quarantine"),
+                        false,
+                    )?;
+                    if read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_none() {
+                        return Err(error);
+                    }
+                    decoded.outcome = Outcome::Failed;
+                    decoded.reason = Some(format!(
+                        "writer terminal check failed for {}: {error}",
+                        writer.worktree.display()
+                    ));
+                }
             }
+        } else {
+            let archive =
+                crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+            #[derive(Serialize)]
+            struct ReadOnlyManifest {
+                schema_version: u64,
+                scope: custody::Scope,
+                kind: &'static str,
+                disposition: &'static str,
+            }
+            crate::artifacts::seal(
+                &archive,
+                "manifest.json",
+                &crate::db::bytes(&ReadOnlyManifest {
+                    schema_version: 1,
+                    scope: exit.scope,
+                    kind: "quarantine_manifest",
+                    disposition: "read_only",
+                })?,
+                RECORD_LIMIT,
+            )?;
         }
         if decoded.result.len() as u64 > RESULT_LIMIT {
             let mut end = RESULT_LIMIT as usize;

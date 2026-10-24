@@ -23,6 +23,8 @@ use std::{
 };
 
 mod provider;
+#[cfg(feature = "fixture")]
+pub use provider::writer_fixture_plan;
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -132,9 +134,10 @@ impl run::Providers for Registry<'_> {
         &self,
         task: &run::TaskRequest,
         prompt: &str,
+        paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        provider::prepare(self, task, prompt, resume)
+        provider::prepare(self, task, prompt, paths, resume)
     }
 
     fn decode(
@@ -417,7 +420,7 @@ fn scan(prompt: &str) -> Result<(), Fail> {
 }
 /// Worktree access is explicit. Submission resolves and verifies the path;
 /// a worktree with read-only access is refused, never run read-only.
-pub fn worktree_access(writer: bool, worktree: Option<&Path>, _cwd: &Path) -> Result<(), Fail> {
+pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail> {
     match worktree {
         None if !writer => Ok(()),
         None => Err(Fail::new(
@@ -490,9 +493,22 @@ pub fn submit(
                 Ok::<_, run::RunError>(writer)
             })
             .transpose()?;
-        let authority =
-            CanonicalV1::record_digest("run-authority", 1, &(writer.as_ref(), edge.cwd, false))
-                .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        #[derive(serde::Serialize)]
+        struct RunAuthority<'a> {
+            writer: Option<&'a run::WriterRequest>,
+            cwd: &'a Path,
+            network: bool,
+        }
+        let authority = CanonicalV1::record_digest(
+            "run-authority",
+            2,
+            &RunAuthority {
+                writer: writer.as_ref(),
+                cwd: edge.cwd,
+                network: false,
+            },
+        )
+        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
 
         requests.push(run::TaskRequest {
             profile: profile(task.task_class.as_deref())?,
@@ -543,7 +559,6 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     worktree_access(
         matches!(access.mode, Mode::WorktreeWrite),
         access.worktree.as_deref(),
-        edge.cwd,
     )?;
     if matches!(access.network, Switch::On)
         || !access.capability.is_empty()
@@ -1299,9 +1314,17 @@ fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    let reservations = session.store.writer_fences()?;
+    let reservations = session.store.writer_fence_listing()?;
+    *fenced |= !reservations.issues.is_empty();
+    for issue in &reservations.issues {
+        human.push_str(&format!(
+            "writer reservation unreadable: {}: {}\n",
+            issue.reservation.display(),
+            issue.reason
+        ));
+    }
     Ok((
-        json!({ "runs": rows, "truncated": truncated, "writer_reservations": reservations }),
+        json!({ "runs": rows, "truncated": truncated, "writer_reservations": reservations.reservations, "writer_reservation_errors": reservations.issues }),
         human,
     ))
 }

@@ -10,13 +10,13 @@ use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{Directory, entropy_128};
 use run::RouteRecord;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 pub(super) fn prepare(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
     prompt_text: &str,
+    paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
 ) -> Result<run::PreparedLaunch, String> {
     if resume.is_some() {
@@ -88,15 +88,16 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        let (scratch, private_state) = private_launch_dirs(state_root)?;
-        let plan =
-            match confinement_plan(project_id, &cwd, &scratch, &private_state, writer.as_ref()) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    reasons.push(format!("{label}: {error}"));
-                    continue;
-                }
-            };
+        let scratch = &paths.scratch;
+        let private_state = &paths.provider_state;
+        let plan = match confinement_plan(project_id, &cwd, scratch, private_state, writer.as_ref())
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                reasons.push(format!("{label}: {error}"));
+                continue;
+            }
+        };
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
@@ -118,7 +119,7 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        if let Err(error) = apply_setup(&spec.setup, &private_state) {
+        if let Err(error) = apply_setup(&spec.setup, private_state) {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
@@ -250,65 +251,6 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
     provenant_supervisor::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-fn private_launch_dirs(state_root: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let root = Directory::open_anchor(state_root).map_err(|error| error.to_string())?;
-    check_private_directory(&root)?;
-    let temporary = private_child(&root, OsStr::new("tmp"))?;
-    for _ in 0..4 {
-        let bytes = entropy_128().map_err(|error| error.to_string())?;
-        let name = hex_name(&bytes);
-        match temporary.mkdir(OsStr::new(&name), 0o700) {
-            Ok(()) => {
-                temporary.sync().map_err(|error| error.to_string())?;
-                let attempt = temporary
-                    .open_verified_directory(OsStr::new(&name))
-                    .map_err(|error| error.to_string())?;
-                check_private_directory(&attempt)?;
-                private_child(&attempt, OsStr::new("scratch"))?;
-                private_child(&attempt, OsStr::new("provider-state"))?;
-                return Ok((
-                    state_root.join("tmp").join(&name).join("scratch"),
-                    state_root.join("tmp").join(&name).join("provider-state"),
-                ));
-            }
-            Err(error) if error.is_exists() => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("could not allocate a private provider directory".into())
-}
-
-fn private_child(parent: &Directory, name: &OsStr) -> Result<Directory, String> {
-    match parent.mkdir(name, 0o700) {
-        Ok(()) => parent.sync().map_err(|error| error.to_string())?,
-        Err(error) if error.is_exists() => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    let child = parent
-        .open_verified_directory(name)
-        .map_err(|error| error.to_string())?;
-    check_private_directory(&child)?;
-    Ok(child)
-}
-
-fn check_private_directory(directory: &Directory) -> Result<(), String> {
-    let metadata = directory.metadata().map_err(|error| error.to_string())?;
-    if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o077 != 0 {
-        return Err("provider state directory is not private to this user".into());
-    }
-    Ok(())
-}
-
-fn hex_name(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        name.push(char::from(HEX[usize::from(byte >> 4)]));
-        name.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    name
-}
-
 fn apply_setup(steps: &[SetupStep], private_state: &Path) -> Result<(), String> {
     for step in steps {
         match step {
@@ -332,4 +274,21 @@ fn apply_setup(steps: &[SetupStep], private_state: &Path) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// Fixture access to the production plan builder; installed builds omit it.
+#[cfg(feature = "fixture")]
+pub fn writer_fixture_plan(
+    project: ProjectId,
+    cwd: &Path,
+    paths: &run::LaunchPaths,
+    writer: &run::WriterLaunch,
+) -> Result<ConfinedPlan, String> {
+    confinement_plan(
+        project,
+        cwd,
+        &paths.scratch,
+        &paths.provider_state,
+        Some(writer),
+    )
 }

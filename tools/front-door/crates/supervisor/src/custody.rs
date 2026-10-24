@@ -23,6 +23,8 @@ pub struct Scope {
 }
 #[derive(Debug, Error)]
 pub enum CustodyError {
+    #[error("worktree is busy")]
+    Busy,
     #[error("writer reservation requires recovery")]
     Fenced,
     #[error("custody identity is unknown")]
@@ -288,6 +290,7 @@ impl CustodyLease {
             directory: self.directory,
             lease: self.lease.ok_or(CustodyError::Fenced)?,
             reservation,
+            guardian_quiescent: false,
         })
     }
 }
@@ -340,15 +343,32 @@ pub(crate) fn acquire_writer_with_observer(
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
 ) -> Result<CustodyLease> {
-    let lease = directory.lock(
-        OsStr::new("writer.lock"),
-        LockMode::Exclusive,
-        budget,
-        cancel,
-        clock,
-    )?;
+    let lease = directory
+        .lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => CustodyError::Busy,
+            other => other.into(),
+        })?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Err(CustodyError::Fenced),
+        Ok(_) => {
+            let reservation: Reservation =
+                read_record(&directory, "reservation.json", RECORD_LIMIT)
+                    .map_err(|_| CustodyError::Fenced)?;
+            validate_anchor(&directory, &reservation).map_err(|_| CustodyError::Fenced)?;
+            return Err(
+                if classify_reservation(&reservation, observer) == RecoveryState::Reattached {
+                    CustodyError::Busy
+                } else {
+                    CustodyError::Fenced
+                },
+            );
+        }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
@@ -1070,6 +1090,8 @@ pub struct Recovery {
     pub(crate) directory: Directory,
     pub(crate) lease: LockGuard,
     pub(crate) reservation: Reservation,
+    // Only the guardian can mint this after its durable exit and cleanup.
+    pub(crate) guardian_quiescent: bool,
 }
 pub fn acquire_recovery(
     directory: Directory,
@@ -1090,6 +1112,7 @@ pub fn acquire_recovery(
         directory,
         lease,
         reservation,
+        guardian_quiescent: false,
     })
 }
 /// Writer exclusion over an attempt directory that holds no reservation, launch
@@ -1133,6 +1156,62 @@ fn validate_anchor(directory: &Directory, reservation: &Reservation) -> Result<(
     }
     Ok(())
 }
+
+#[derive(Debug, Serialize)]
+pub struct WriterReservation {
+    pub scope: Scope,
+    pub reservation: PathBuf,
+}
+#[derive(Debug, Serialize)]
+pub struct ReservationIssue {
+    pub reservation: PathBuf,
+    pub reason: String,
+}
+#[derive(Debug, Default, Serialize)]
+pub struct ReservationListing {
+    pub reservations: Vec<WriterReservation>,
+    pub issues: Vec<ReservationIssue>,
+}
+/// Malformed or inaccessible entries remain fenced, but cannot hide other
+/// reservations. Only supervisor interprets its private reservation format.
+pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationListing> {
+    let mut listing = ReservationListing::default();
+    for (index, name) in directory.entries()?.enumerate() {
+        if index >= 10_000 {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let name = name?;
+        let path = PathBuf::from(&name).join("reservation.json");
+        let entry = || -> Result<Option<WriterReservation>> {
+            if directory.metadata_at(&name, false)?.kind != crate::fs::FileKind::Directory {
+                return Ok(None);
+            }
+            let child = directory.open_verified_directory(&name)?;
+            let reservation: Reservation =
+                match read_record(&child, "reservation.json", RECORD_LIMIT) {
+                    Ok(reservation) => reservation,
+                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+            validate_anchor(&child, &reservation)?;
+            Ok(Some(WriterReservation {
+                scope: reservation.scope,
+                reservation: path.clone(),
+            }))
+        };
+        match entry() {
+            Ok(Some(reservation)) => listing.reservations.push(reservation),
+            Ok(None) => {}
+            Err(error) => listing.issues.push(ReservationIssue {
+                reservation: path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    Ok(listing)
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecoveryState {
     Reattached,
@@ -1147,7 +1226,39 @@ impl Recovery {
         self.observe_with(&SystemProcessObserver)
     }
     pub(crate) fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
+        if self.guardian_quiescent {
+            return RecoveryState::Absent;
+        }
         classify_reservation(&self.reservation, observer)
+    }
+    /// Match held worktree/Git identities and branch to the recorded launch
+    /// binding. The returned base was pinned before launch, never re-resolved.
+    pub fn writer_base(
+        &self,
+        worktree: &dyn SafeDir,
+        git: &dyn SafeDir,
+        branch: &str,
+    ) -> Result<GitOid> {
+        let root = worktree.metadata()?;
+        let git = git.metadata()?;
+        match &self.reservation.binding {
+            StoredWriterBinding::Worktree {
+                worktree_device,
+                worktree_inode,
+                git_device,
+                git_inode,
+                branch: recorded,
+                base,
+            } if root.device == *worktree_device
+                && root.inode == *worktree_inode
+                && git.device == *git_device
+                && git.inode == *git_inode
+                && recorded == branch =>
+            {
+                Ok(*base)
+            }
+            _ => Err(CustodyError::InvalidRecord),
+        }
     }
 }
 
@@ -1204,7 +1315,6 @@ struct ReleaseReceipt {
     quarantine_digest: provenant_records::FileDigest,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SettlementArtifact {
     schema_version: u64,
     scope: Scope,
@@ -1303,11 +1413,6 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
         scope,
         kind: SettlementKind::CanonicalTerminal,
     })?;
-    let manifest = encode(&SettlementArtifact {
-        schema_version: 1,
-        scope,
-        kind: SettlementKind::QuarantineManifest,
-    })?;
     match attempt.mkdir(OsStr::new("quarantine"), 0o700) {
         Ok(()) => attempt.sync()?,
         Err(error) if error.is_exists() => {}
@@ -1315,7 +1420,15 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
     }
     let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
     seal(attempt, "terminal-commit.json", &terminal)?;
-    seal(&quarantine, "manifest.json", &manifest)?;
+    let manifest = quarantine.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?;
+    let header: SettlementArtifact =
+        decode_v1(manifest.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
+    if header.schema_version != 1
+        || header.scope != scope
+        || !matches!(header.kind, SettlementKind::QuarantineManifest)
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
     let release = encode(&ReleaseReceipt {
         schema_version: 1,
         scope,
@@ -1351,6 +1464,18 @@ impl Recovery {
         {
             return Err(CustodyError::Fenced);
         }
+        // A crash may have published the new fence but left the previous
+        // generation's owner behind. Settlement must describe this reservation.
+        require_durable(write_record(
+            &self.directory,
+            "ownership.json",
+            &OwnershipJournal {
+                schema_version: 1,
+                scope: self.scope(),
+                binding: self.reservation.binding.clone(),
+            },
+            PublishMode::Replace,
+        )?)?;
         clear_reservation(&self.directory, self.scope())
     }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
