@@ -311,12 +311,16 @@ pub enum Hook {
 }
 #[derive(Debug, Subcommand)]
 pub enum ClaudeHook {
+    #[command(name = crate::hooks::PRE_TOOL_USE)]
     PreToolUse,
+    #[command(name = crate::hooks::PRE_COMPACT)]
     PreCompact,
+    #[command(name = crate::hooks::COMPACT)]
     Compact,
 }
 #[derive(Debug, Subcommand)]
 pub enum GitHook {
+    #[command(name = crate::hooks::PRE_PUSH)]
     PrePush { remote: String, location: String },
 }
 #[derive(Debug, Subcommand)]

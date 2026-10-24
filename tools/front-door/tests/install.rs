@@ -303,3 +303,169 @@ fn assert_legacy_git_hook_location(custom_hooks: bool) -> Result {
     );
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let legacy = rig.home.join("Repos/provenant");
+    fs::create_dir_all(legacy.join(".git/hooks"))?;
+    let init = rig.execute(
+        Path::new("/usr/bin/git"),
+        &["init", "-q", legacy.to_str().ok_or("legacy path")?],
+        None,
+    )?;
+    assert_eq!(code(&init), 0);
+    std::os::unix::fs::symlink(
+        legacy.join("scripts/hooks/pre-push"),
+        legacy.join(".git/hooks/pre-push"),
+    )?;
+    std::os::unix::fs::symlink(
+        legacy.join("scripts/hooks/post-merge"),
+        legacy.join(".git/hooks/post-merge"),
+    )?;
+    let settings = rig.root.join("claude/settings.json");
+    let fixture = include_str!("fixtures/external/hooks/claude/legacy-settings.json")
+        .replace("{home}", rig.home.to_str().ok_or("home")?)
+        .replace("{legacy}", legacy.to_str().ok_or("legacy")?);
+    fs::write(&settings, &fixture)?;
+    let herdr_before: serde_json::Value = serde_json::from_str(&fixture)?;
+    let arguments = [
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--legacy-checkout",
+        legacy.to_str().ok_or("legacy")?,
+        "--dry-run",
+        "--json",
+    ];
+    let output = rig.command(&arguments)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let preview = String::from_utf8(output.stderr.bytes)?;
+    assert!(preview.contains("hook") && preview.contains("compact"));
+    assert!(preview.contains("utility_output_hook.py"));
+    assert_eq!(fs::read_to_string(&settings)?, fixture);
+    assert!(!rig.state.exists());
+    // Apply only to this disposable home, then check order and foreign bytes.
+    let apply: Vec<_> = arguments
+        .into_iter()
+        .filter(|a| *a != "--dry-run")
+        .collect();
+    let output = rig.command(&apply)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let git_hook = fs::read_to_string(legacy.join(".git/hooks/pre-push"))?;
+    assert!(
+        git_hook.starts_with("#!/bin/sh\nexec '")
+            && git_hook.contains("'hook' 'git' 'pre-push' \"$@\"")
+    );
+    assert!(!legacy.join(".git/hooks/post-merge").exists());
+    let installed = fs::read_to_string(&settings)?;
+    let value: serde_json::Value = serde_json::from_str(&installed)?;
+    assert_eq!(
+        value["hooks"]["SessionStart"][0],
+        herdr_before["hooks"]["SessionStart"][0]
+    );
+    assert_eq!(value["hooks"]["SessionStart"][1]["matcher"], "compact");
+    assert!(
+        value["hooks"]["SessionStart"][1]["hooks"][0]["command"]
+            .as_str()
+            .ok_or("command")?
+            .contains("'hook' 'claude' 'compact'")
+    );
+    assert_eq!(value["hooks"]["PreCompact"][0]["hooks"][0]["timeout"], 5);
+    assert!(
+        value["hooks"]["PostToolUse"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    let reapplied = rig.command(&apply)?;
+    assert_eq!(
+        code(&reapplied),
+        0,
+        "{}",
+        String::from_utf8_lossy(&reapplied.stdout.bytes)
+    );
+    let data: serde_json::Value = serde_json::from_slice(&reapplied.stdout.bytes)?;
+    assert_eq!(data["data"]["outcome"]["actions"], serde_json::json!([]));
+    let checked = rig.command(&["check", "install", "--json"])?;
+    assert_eq!(
+        code(&checked),
+        0,
+        "{}",
+        String::from_utf8_lossy(&checked.stdout.bytes)
+    );
+    let removed = rig.command(&["uninstall", "--harness", "claude", "--json"])?;
+    assert_eq!(
+        code(&removed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&removed.stdout.bytes)
+    );
+    assert!(!legacy.join(".git/hooks/pre-push").exists());
+    let retained: serde_json::Value = serde_json::from_slice(&fs::read(&settings)?)?;
+    assert_eq!(
+        retained["hooks"]["SessionStart"][0],
+        herdr_before["hooks"]["SessionStart"][0]
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn repository_hooks_path_cannot_authorise_writes_outside_the_selected_checkout() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let legacy = rig.root.join("legacy");
+    let outside = rig.root.join("outside");
+    fs::create_dir(&outside)?;
+    let init = rig.execute(
+        Path::new("/usr/bin/git"),
+        &["init", "-q", legacy.to_str().ok_or("legacy")?],
+        None,
+    )?;
+    assert_eq!(code(&init), 0);
+    let config = rig.execute(
+        Path::new("/usr/bin/git"),
+        &[
+            "-C",
+            legacy.to_str().ok_or("legacy")?,
+            "config",
+            "core.hooksPath",
+            outside.to_str().ok_or("outside")?,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&config), 0);
+    let target = legacy.join("scripts/hooks/pre-push");
+    let foreign = outside.join("pre-push");
+    std::os::unix::fs::symlink(&target, &foreign)?;
+    let output = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--legacy-checkout",
+        legacy.to_str().ok_or("legacy")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&output), 0);
+    assert_eq!(fs::read_link(&foreign)?, target);
+    assert!(!rig.state.exists());
+    rig.assert_legacy_unchanged()
+}

@@ -98,6 +98,9 @@ fn get_for(bytes: &[u8], sel: &str, harness: Harness) -> Result<Option<Json>, In
     get_with_limits(bytes, sel, limits(harness))
 }
 fn get_with_limits(bytes: &[u8], sel: &str, limits: Limits) -> Result<Option<Json>, InstallError> {
+    if sel.starts_with("hook:") {
+        return crate::hooks::get(bytes, sel);
+    }
     if let Some(expected) = sel.strip_prefix("array:") {
         let value = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
         let Some(array) = value.as_ref().and_then(Json::as_array) else {
@@ -144,6 +147,9 @@ fn set_with_limits(
     value: Option<&Json>,
     limits: Limits,
 ) -> Result<Vec<u8>, InstallError> {
+    if sel.starts_with("hook:") {
+        return crate::hooks::set(bytes, sel, value);
+    }
     if let Some(expected) = sel.strip_prefix("array:") {
         let array = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
         if let Some(index) = array
@@ -417,30 +423,50 @@ pub(crate) fn capture(
             selector: sel.into(),
             expected: OwnedValue::Selector { value: want },
         });
-        if let Some(checkout) = checkout.as_deref()
-            && let Some(hook) = &target.hook_file
+        if let Some(hook) = &target.hook_file
+            && (checkout.is_some() || (targets.hooks && target.harness == Harness::Claude))
         {
             let hook_snapshot = capture_one(hook, entries, fs)?;
-            if hook_snapshot.is_some() {
-                let (old, hook_mode) = file(&hook_snapshot, hook)?;
-                let (updated, changes, unresolved) =
-                    crate::legacy::clean_hooks(&old, target.harness, checkout)?;
+            let (old, hook_mode) = file(&hook_snapshot, hook)?;
+            let (mut updated, mut changes, owned) =
+                if targets.hooks && target.harness == Harness::Claude {
+                    crate::hooks::register(&old, targets)?
+                } else {
+                    (old.clone(), Vec::new(), Vec::new())
+                };
+            if let Some(checkout) = checkout.as_deref() {
+                let (cleaned, removals, unresolved) = crate::legacy::clean_hooks_at_home(
+                    &updated,
+                    target.harness,
+                    checkout,
+                    Some(&targets.home),
+                )?;
+                updated = cleaned;
+                changes.extend(removals);
                 if !unresolved.is_empty() {
-                    plan.findings.push(managed::InstallFinding {
-                        rule: "legacy_entry".into(),
-                        path: AbsolutePath::new(hook)?,
-                    });
+                    add_finding(&mut plan.findings, "legacy_entry", hook)?;
                 }
-                if updated != old {
-                    plan.files.insert(
-                        hook.clone(),
-                        Value::File {
-                            bytes: updated,
-                            mode: hook_mode,
-                        },
-                    );
-                    plan.changes.insert(hook.clone(), changes);
-                }
+            }
+            for (selector, value) in owned {
+                plan.owned.push(OwnedEntry {
+                    path: AbsolutePath::new(hook)?,
+                    harness: Some(target.harness),
+                    selector,
+                    expected: OwnedValue::Selector { value },
+                });
+            }
+            if updated != old {
+                plan.files.insert(
+                    hook.clone(),
+                    Value::File {
+                        bytes: updated,
+                        mode: hook_mode,
+                    },
+                );
+                plan.changes
+                    .entry(hook.clone())
+                    .or_default()
+                    .extend(changes);
             }
         }
         if target.harness == Harness::Opencode {
@@ -506,6 +532,11 @@ pub(crate) fn permitted_selector(
     entry: &OwnedEntry,
     target: &ResolvedHarnessTarget,
 ) -> Result<bool, InstallError> {
+    if entry.selector.starts_with("hook:") {
+        return Ok(
+            target.harness == Harness::Claude && target.hook_file.as_ref() == Some(&entry.path)
+        );
+    }
     if entry.path != target.mcp_file {
         return Ok(false);
     }
@@ -994,13 +1025,68 @@ fn legacy_links(
                         ..
                     }) if actual == link.target => {
                         if link.retained {
-                            add_finding(&mut plan.findings, "legacy_entry", &path)?;
+                            if targets.hooks {
+                                if let Some(spec) = targets
+                                    .hook_specs
+                                    .iter()
+                                    .find(|spec| spec.harness.is_none() && spec.event == link.name)
+                                {
+                                    if !plan.files.contains_key(&path) {
+                                        let bytes = format!(
+                                            "#!/bin/sh\nexec {} \"$@\"\n",
+                                            crate::hooks::command(spec, targets)?
+                                        )
+                                        .into_bytes();
+                                        let value = Value::File { bytes, mode: 0o755 };
+                                        plan.owned.push(OwnedEntry {
+                                            path: AbsolutePath::new(&path)?,
+                                            harness: None,
+                                            selector: format!("git-hook:{}", link.name),
+                                            expected: managed::owned(&value)?,
+                                        });
+                                        plan.authorised.insert(path.clone());
+                                        plan.files.insert(path.clone(), value);
+                                    }
+                                } else {
+                                    return Err(InstallError::HooksUnavailable);
+                                }
+                            } else {
+                                add_finding(&mut plan.findings, "legacy_entry", &path)?;
+                            }
                         } else {
                             plan.authorised.insert(path.clone());
                             plan.removals.insert(path);
                         }
                     }
-                    Some(_) => add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?,
+                    Some(snapshot) => {
+                        if targets.hooks && link.retained {
+                            let spec = targets
+                                .hook_specs
+                                .iter()
+                                .find(|spec| spec.harness.is_none() && spec.event == link.name)
+                                .ok_or(InstallError::HooksUnavailable)?;
+                            let desired = Value::File {
+                                bytes: format!(
+                                    "#!/bin/sh\nexec {} \"$@\"\n",
+                                    crate::hooks::command(spec, targets)?
+                                )
+                                .into_bytes(),
+                                mode: 0o755,
+                            };
+                            if snapshot.value == desired {
+                                plan.owned.push(OwnedEntry {
+                                    path: AbsolutePath::new(&path)?,
+                                    harness: None,
+                                    selector: format!("git-hook:{}", link.name),
+                                    expected: managed::owned(&desired)?,
+                                });
+                            } else {
+                                add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?;
+                            }
+                        } else {
+                            add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?;
+                        }
+                    }
                     None => {}
                 }
                 continue;
@@ -1141,7 +1227,12 @@ pub(crate) fn check_legacy(
             let current = managed::snapshot_inspected(path, fs, Some(evidence))?;
             if current.is_some() {
                 let (bytes, _) = file(&current, path)?;
-                match crate::legacy::clean_hooks(&bytes, target.harness, &checkout) {
+                match crate::legacy::clean_hooks_at_home(
+                    &bytes,
+                    target.harness,
+                    &checkout,
+                    Some(&home),
+                ) {
                     Ok((new, _, unresolved)) if new != bytes || !unresolved.is_empty() => {
                         add_finding(findings, "legacy_entry", path)?;
                     }
@@ -1167,8 +1258,15 @@ pub(crate) fn check_legacy(
                 }) if actual == link.target => {
                     add_finding(findings, "legacy_entry", &path)?;
                 }
-                Some(_) => add_finding(findings, "legacy_hook_conflict", &path)?,
-                None => {}
+                Some(current)
+                    if !receipt.entries.iter().any(|entry| {
+                        entry.path.to_path_buf().is_ok_and(|p| p == path)
+                            && managed::matches_owned(&current.value, &entry.expected)
+                    }) =>
+                {
+                    add_finding(findings, "legacy_hook_conflict", &path)?;
+                }
+                _ => {}
             }
         }
     }

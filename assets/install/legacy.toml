@@ -1,5 +1,5 @@
 schema_version = 1
-utility_hook_interpreters = []
+utility_hook_interpreters = ["{home}/Repos/provenant/.venv/bin/python"]
 
 # Finite source entries. Each source is relative to the explicitly supplied
 # legacy checkout. Every skill entry applies to all listed harnesses.
@@ -323,7 +323,7 @@ binary_magic_hex = ["7f454c46", "cffaedfe", "feedfacf", "cafebabe", "bebafeca", 
 disposition = "replace"
 
 # The absolute interpreter used by utility_output_hook.py is host-specific.
-# No literal is accepted without a recorded fixture, so the root list remains empty.
+# The captured home is substituted into this finite recorded interpreter form.
 
 # Claude hooks are exact event, matcher, command, and command-leaf fixtures.
 [[hooks]]

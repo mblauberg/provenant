@@ -15,7 +15,6 @@ import pytest
 from tests.support.modules import load_script
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "clean.py"
-HOOK = SCRIPT.parent / "hooks" / "post-merge"
 
 
 def cleaner():
@@ -807,104 +806,6 @@ def test_prune_merged_branch_targets_only_named_branch(tmp_path):
     assert "lane-other" not in result.stdout
     assert not targets["selected"].exists()
     assert targets["other"].exists()
-
-
-def test_post_merge_hook_skips_other_branches(tmp_path):
-    root = repo(tmp_path)
-    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
-    subprocess.run(["git", "-C", str(root), "switch", "-q", "-c", "feature"], check=True)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    marker = tmp_path / "called"
-    stub = bin_dir / "provenant"
-    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\nexit 1\n')
-    stub.chmod(0o755)
-    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-
-    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
-                            text=True, capture_output=True, check=False)
-
-    assert result.returncode == 0
-    assert not marker.exists()
-
-    linked = tmp_path / "linked"
-    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", str(linked), "main"], check=True)
-    linked_result = subprocess.run([str(HOOK)], cwd=linked, env=environment,
-                                   text=True, capture_output=True, check=False)
-    assert linked_result.returncode == 0
-    assert not marker.exists()
-
-
-def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
-    root = repo(tmp_path)
-    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
-    subprocess.run(["git", "-C", str(root), "update-ref", "ORIG_HEAD", "HEAD"], check=True)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    marker = tmp_path / "called"
-    env_marker = tmp_path / "git-env"
-    product = tmp_path / "product"
-    (product / "scripts").mkdir(parents=True)
-    front = bin_dir / "provenant"
-    front.write_text(f'#!/bin/sh\n[ "$1" = root ] || exit 2\nprintf "%s\\n" "{product}"\n')
-    front.chmod(0o755)
-    stub = product / "scripts/clean.py"
-    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n'
-                    f'printf "%s|%s\\n" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" > "{env_marker}"\nexit 1\n')
-    stub.chmod(0o755)
-    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                   "GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root)}
-
-    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
-                            text=True, capture_output=True, check=False)
-
-    assert result.returncode == 0
-    assert marker.read_text() == f"--prune-merged --merged-since ORIG_HEAD --repo {root}\n"
-    assert env_marker.read_text() == "unset|unset\n"
-    assert "cleanup failed" in result.stderr
-
-
-def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
-    root = repo(tmp_path)
-    subprocess.run(["git", "-C", str(root), "branch", "-M", "master"], check=True)
-    subprocess.run(["git", "-C", str(root), "update-ref", "ORIG_HEAD", "HEAD"], check=True)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    marker = tmp_path / "called"
-    product = tmp_path / "product"
-    (product / "scripts").mkdir(parents=True)
-    front = bin_dir / "provenant"
-    front.write_text(f'#!/bin/sh\n[ "$1" = root ] || exit 2\nprintf "%s\\n" "{product}"\n')
-    front.chmod(0o755)
-    stub = product / "scripts/clean.py"
-    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n')
-    stub.chmod(0o755)
-    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-
-    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
-                            text=True, capture_output=True, check=False)
-
-    assert result.returncode == 0, result.stderr
-    assert marker.read_text() == f"--prune-merged --merged-since ORIG_HEAD --repo {root}\n"
-
-
-def test_post_merge_hook_skips_quietly_without_orig_head(tmp_path):
-    root = repo(tmp_path)
-    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    marker = tmp_path / "called"
-    stub = bin_dir / "provenant"
-    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n')
-    stub.chmod(0o755)
-    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-
-    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
-                            text=True, capture_output=True, check=False)
-
-    assert result.returncode == 0
-    assert result.stdout == result.stderr == ""
-    assert not marker.exists()
 
 
 def test_prune_merged_uses_origin_default_branch(tmp_path):
