@@ -3529,6 +3529,13 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "access": {
+                    "enum": [
+                      "read_only",
+                      "worktree_write"
+                    ],
+                    "type": "string"
+                  },
                   "delivery_id": {
                     "anyOf": [
                       {
@@ -3561,6 +3568,20 @@
                     "maximum": 14400000,
                     "minimum": 1000,
                     "type": "integer"
+                  },
+                  "worktree": {
+                    "anyOf": [
+                      {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "type": "string",
+                        "x-provenant-maxUtf8Bytes": 4096
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -4136,6 +4157,496 @@
       "type": "object"
     },
     "name": "fabric_run"
+  },
+  {
+    "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
+    "inputSchema": {
+      "$defs": {
+        "Artifact": {
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "additionalProperties": false,
+              "properties": {
+                "encoding": {
+                  "enum": [
+                    "utf8",
+                    "native_bytes"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 4096
+                }
+              },
+              "required": [
+                "encoding",
+                "path"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "digest",
+            "path"
+          ],
+          "type": "object"
+        },
+        "AttemptTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "$ref": "#/$defs/Id"
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attempt"
+          ],
+          "type": "object"
+        },
+        "ClaimProof": {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "$ref": "#/$defs/Id"
+            },
+            "token": {
+              "items": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 16,
+              "minItems": 16,
+              "type": "array"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "token"
+          ],
+          "type": "object"
+        },
+        "GitOid": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "Id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "LandingProof": {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "$ref": "#/$defs/Id"
+            },
+            "reference": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "type": "string",
+              "x-provenant-maxUtf8Bytes": 1024
+            },
+            "token": {
+              "items": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 16,
+              "minItems": 16,
+              "type": "array"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "reference",
+            "token"
+          ],
+          "type": "object"
+        },
+        "MessageRef": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reference": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "maxLength": 1024,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "type": "string",
+                      "x-provenant-maxUtf8Bytes": 1024
+                    },
+                    "project": {
+                      "maxLength": 1024,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "type": "string",
+                      "x-provenant-maxUtf8Bytes": 1024
+                    },
+                    "source": {
+                      "maxLength": 1024,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "type": "string",
+                      "x-provenant-maxUtf8Bytes": 1024
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "project",
+                    "source"
+                  ],
+                  "type": "object"
+                },
+                "scope": {
+                  "const": "legacy"
+                }
+              },
+              "required": [
+                "reference",
+                "scope"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "scope": {
+                  "const": "local"
+                }
+              },
+              "required": [
+                "id",
+                "scope"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "$ref": "#/$defs/Id"
+                },
+                "id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "scope": {
+                  "const": "remote"
+                }
+              },
+              "required": [
+                "host",
+                "id",
+                "scope"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "OperationId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        },
+        "Route": {
+          "additionalProperties": false,
+          "properties": {
+            "adapter": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "task_class": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "Scope": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 1024
+                },
+                "kind": {
+                  "const": "issue"
+                }
+              },
+              "required": [
+                "key",
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "paths"
+                },
+                "paths": {
+                  "items": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "pattern": "^[^\\u0000]*$",
+                    "type": "string",
+                    "x-provenant-maxUtf8Bytes": 4096
+                  },
+                  "maxItems": 100,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "paths"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "worktree"
+                },
+                "path": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "type": "string",
+                  "x-provenant-maxUtf8Bytes": 4096
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TaskProof": {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "task": {
+              "$ref": "#/$defs/Id"
+            },
+            "token": {
+              "items": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 16,
+              "minItems": 16,
+              "type": "array"
+            }
+          },
+          "required": [
+            "generation",
+            "task",
+            "token"
+          ],
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            },
+            "op": {
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "id",
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "document": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "type": "string",
+              "x-provenant-maxUtf8Bytes": 4096
+            },
+            "op": {
+              "const": "resume"
+            }
+          },
+          "required": [
+            "document",
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "document": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "type": "string",
+              "x-provenant-maxUtf8Bytes": 4096
+            },
+            "op": {
+              "const": "run"
+            }
+          },
+          "required": [
+            "document",
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            },
+            "op": {
+              "const": "status"
+            }
+          },
+          "required": [
+            "id",
+            "op"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "object"
+    },
+    "name": "fabric_graph"
   },
   {
     "description": "Read bounded output or fetch a manifest artefact.",

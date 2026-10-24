@@ -21,7 +21,10 @@ use std::{
 pub(super) struct Context {
     pub roots: Roots,
     pub identity: Identity,
-    config: FabricConfig,
+    pub(super) config: FabricConfig,
+    pub(super) executor: SystemExecutor,
+    pub(super) home: PathBuf,
+    pub(super) cwd: PathBuf,
 }
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_supervisor::fs::canonicalize(path)?)
@@ -118,18 +121,10 @@ impl Context {
             roots,
             identity,
             config,
+            executor,
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
         })
-    }
-    pub fn require_local_home(&self) -> Result<(), EdgeError> {
-        if let Some(project) = &self.identity.federation {
-            let key = serde_json::to_value(&project.key)?;
-            if let Some(host) = key.as_str().and_then(|key| self.config.home_hosts.get(key))
-                && *host != self.identity.host
-            {
-                return Err(EdgeError::HomeUnavailable);
-            }
-        }
-        Ok(())
     }
     pub fn text(&self, text: &str) -> Result<(), EdgeError> {
         if text.len() as u64 > self.config.limits.body_bytes {

@@ -51,6 +51,13 @@ pub trait Factory: Send + Sync + 'static {
     where
         Self: 'a;
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;
+    fn input_limits(&self) -> provenant_records::Limits {
+        provenant_records::Limits {
+            max_bytes: MAX_FRAME as u64,
+            max_depth: 64,
+            max_members: 100_000,
+        }
+    }
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -69,13 +76,24 @@ pub enum Error {
     #[error("MCP result cannot be encoded")]
     Encode(#[from] serde_json::Error),
 }
-#[derive(Default)]
 pub struct Framer {
     bytes: Vec<u8>,
+    limit: usize,
+}
+impl Default for Framer {
+    fn default() -> Self {
+        Self::with_limit(MAX_FRAME)
+    }
 }
 impl Framer {
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit: limit.min(MAX_FRAME),
+        }
+    }
     pub fn remaining(&self) -> usize {
-        MAX_FRAME + 1 - self.bytes.len()
+        self.limit + 1 - self.bytes.len()
     }
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if bytes.len() > self.remaining() {
@@ -86,14 +104,14 @@ impl Framer {
     }
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
         if let Some(end) = self.bytes.iter().position(|byte| *byte == b'\n') {
-            if end > MAX_FRAME {
+            if end > self.limit {
                 return Err(Error::Oversize);
             }
             let mut frame: Vec<_> = self.bytes.drain(..=end).collect();
             frame.pop();
             return Ok(Some(frame));
         }
-        if self.bytes.len() > MAX_FRAME {
+        if self.bytes.len() > self.limit {
             return Err(Error::Oversize);
         }
         Ok(None)
@@ -194,9 +212,10 @@ fn read_input(
     events: &SyncSender<Event>,
     stop: &AtomicBool,
     timeouts: Timeouts,
+    limit: usize,
 ) {
     let mut buffer = [0_u8; 8192];
-    let mut framer = Framer::default();
+    let mut framer = Framer::with_limit(limit);
     while !stop.load(Ordering::Acquire) {
         let capacity = framer.remaining().min(buffer.len());
         match input.read(
@@ -266,6 +285,7 @@ fn serve_with_timeouts(
     factory: impl Factory,
     timeouts: Timeouts,
 ) -> Result<(), Error> {
+    let limits = factory.input_limits();
     let factory = Arc::new(factory);
     let (jobs, receive) = mpsc::sync_channel::<Job>(QUEUE);
     let receive = Arc::new(Mutex::new(receive));
@@ -307,8 +327,18 @@ fn serve_with_timeouts(
     let stop_reader = AtomicBool::new(false);
     let mut live = BTreeMap::<Id, CancelToken>::new();
     let run_result = thread::scope(|scope| {
-        let reader = scope.spawn(|| read_input(input, &reader_events, &stop_reader, timeouts));
-        let run = serve_loop(&events, &jobs, output, &mut live, &workers, timeouts);
+        let reader = scope.spawn(|| {
+            read_input(
+                input,
+                &reader_events,
+                &stop_reader,
+                timeouts,
+                usize::try_from(limits.max_bytes).unwrap_or(MAX_FRAME),
+            )
+        });
+        let run = serve_loop(
+            &events, &jobs, output, &mut live, &workers, timeouts, limits,
+        );
         stop_reader.store(true, Ordering::Release);
         drop(jobs);
         let output_failed = matches!(&run, Err(Error::Output(_) | Error::OversizeReply));
@@ -351,11 +381,12 @@ fn serve_loop(
     live: &mut BTreeMap<Id, CancelToken>,
     workers: &[thread::JoinHandle<()>],
     timeouts: Timeouts,
+    limits: provenant_records::Limits,
 ) -> Result<(), Error> {
     let mut protocol = Protocol::default();
     loop {
         match events.recv_timeout(timeouts.event) {
-            Ok(Event::Frame(frame)) => match protocol.receive(&frame) {
+            Ok(Event::Frame(frame)) => match protocol.receive_with_limits(&frame, limits) {
                 Action::Ignore => {}
                 Action::Cancel(id) => {
                     if let Some(cancel) = live.get(&id) {

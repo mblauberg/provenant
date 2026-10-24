@@ -6,14 +6,21 @@ use provenant_records::RecordHeader;
 use provenant_supervisor::fs::{LockGuard, LockMode};
 use std::ffi::OsStr;
 
-/// Holds the lock returned by `lock_landing`. Store validation proves only
-/// that the lock directory matches; it does not prove that a lock is held on
-/// a particular file. F7 must re-verify the file binding before Git operations.
+/// Holds a safely acquired lock on a persistent private file. Store checks
+/// the bound lock directory; no owner unlinks or replaces its lock files.
 pub struct LandingGuard {
     _lock: LockGuard,
     project: ProjectId,
     reference: String,
     directory: (u64, u64),
+}
+impl LandingGuard {
+    pub fn project(&self) -> ProjectId {
+        self.project
+    }
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +90,7 @@ pub struct PushRequest {
     pub reference: String,
     pub expected: GitOid,
     pub candidate: GitOid,
+    pub remote: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -384,8 +392,22 @@ impl Store {
         guard: &LandingGuard,
         fence: &ClaimFence,
         id: &OperationId,
+        remote: &str,
         request: &Request<'_>,
     ) -> Result<PushOperation> {
+        if remote.is_empty()
+            || remote.len() > 4096
+            || remote.starts_with('-')
+            || remote.bytes().any(|b| b.is_ascii_control())
+            || remote.contains(['?', '#'])
+            || remote.split_once("://").is_some_and(|(_, tail)| {
+                tail.split('/')
+                    .next()
+                    .is_some_and(|authority| authority.contains('@'))
+            })
+        {
+            return Err(Error::Invalid("push remote"));
+        }
         self.write(request, |tx| {
             let at = request.clock.wall_now()?;
             let mut landing = self.landing_fence(tx, guard, fence, Some(at))?;
@@ -401,6 +423,7 @@ impl Store {
                 reference: landing.reference.clone(),
                 expected: landing.expected,
                 candidate: landing.candidate,
+                remote: remote.into(),
             };
             let digest = CanonicalV1::record_digest("fabric-push", 1, &frozen)?;
             match load_operation(tx, guard.project, id) {

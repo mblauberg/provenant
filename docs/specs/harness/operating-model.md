@@ -104,7 +104,7 @@ web research until R9 gives it a working network path.
    `skills/session/references/chair-state.md` already defines for hookless
    hosts.
 4. A soft gate checks spawns before execution: the Claude PreToolUse hook on
-   the Agent tool and `fabric_dispatch`, and the Fabric dispatch path for
+   the Agent tool and `fabric_submit`, and the Fabric dispatch path for
    every chair. It bounces once, with the reason, a spawn that names neither
    a tier nor a model, puts a principal model on a non-principal role, or
    breaks pacing. A reissue carrying `principal: <why>` passes and is logged.
