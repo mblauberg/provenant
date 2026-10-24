@@ -1028,6 +1028,8 @@ impl BinaryRunOwner<'_> {
                     limit: 100,
                     after: 0,
                     newest_first: false,
+                    owner: None,
+                    unseen_after: None,
                 },
                 call,
             )
@@ -1619,6 +1621,8 @@ impl BinaryRunOwner<'_> {
                             limit: u64::from(limit),
                             after: after_sequence,
                             newest_first: false,
+                            owner: None,
+                            unseen_after: None,
                         },
                         &call,
                     )
