@@ -420,7 +420,12 @@ fn output_install(
 
 fn install_target(path: &Path) -> &'static str {
     let path = path.to_string_lossy();
-    if path.contains("/.claude/") || path.ends_with("/.claude") || path.ends_with("/.claude.json") {
+    if path.contains("/.claude-") {
+        "Claude account"
+    } else if path.contains("/.claude/")
+        || path.ends_with("/.claude")
+        || path.ends_with("/.claude.json")
+    {
         "Claude"
     } else if path.contains("/.codex/") || path.ends_with("/.codex") {
         "Codex"

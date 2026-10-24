@@ -22,6 +22,9 @@ pub struct Registration {
     pub adapter: String,
     pub label: String,
     pub key: String,
+    /// Organisation recorded at first validation; absent on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_fingerprint: Option<String>,
     pub directory: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
@@ -43,6 +46,18 @@ pub struct Limits {
     pub weekly_anchor: Option<String>,
 }
 impl Registration {
+    /// Compares the probed organisation with the recorded one. Both present and
+    /// different refuses; an absent probe never refuses. `Ok(Some(org))` is a
+    /// legacy record to upgrade with the probed organisation (trust on first use).
+    pub fn check_org(&self, probed: Option<&str>) -> Result<Option<String>, ProviderError> {
+        match (&self.org_fingerprint, probed) {
+            (Some(stored), Some(probed)) if stored != probed => {
+                Err(ProviderError::IdentityMismatch)
+            }
+            (None, Some(probed)) => Ok(Some(probed.to_owned())),
+            _ => Ok(None),
+        }
+    }
     pub fn registered(&self) -> Result<RegisteredAccount, ProviderError> {
         RegisteredAccount::new(&self.adapter, &self.key, self.directory.clone())
     }
@@ -109,13 +124,27 @@ pub fn detect(
     directory: &Path,
     cwd: &Path,
 ) -> Result<String, ProviderError> {
+    detect_with_org(executor, adapter, executable, home, user, directory, cwd).map(|(key, _)| key)
+}
+/// The account key and, for Claude, the organisation fingerprint when exposed.
+pub fn detect_with_org(
+    executor: &dyn Executor,
+    adapter: &str,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    directory: &Path,
+    cwd: &Path,
+) -> Result<(String, Option<String>), ProviderError> {
     if adapter == "codex" {
         let bytes = read_following(
             &directory.join("auth.json"),
             ReadOptions { limit: 1024 * 1024 },
         )
         .map_err(|_| ProviderError::UnknownIdentity)?;
-        return crate::identity::codex_account(&bytes).ok_or(ProviderError::UnknownIdentity);
+        return crate::identity::codex_account(&bytes)
+            .map(|key| (key, None))
+            .ok_or(ProviderError::UnknownIdentity);
     }
     if adapter != "claude" || directory == home.join(".claude") {
         return Err(ProviderError::UnknownIdentity);
@@ -155,11 +184,20 @@ pub fn detect(
         #[serde(rename = "loggedIn")]
         logged_in: bool,
         email: String,
+        #[serde(rename = "orgId", default)]
+        org_id: Option<String>,
     }
     let status: Status =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;
     if !status.logged_in {
         return Err(ProviderError::UnknownIdentity);
     }
-    crate::identity::fingerprint(&status.email).ok_or(ProviderError::UnknownIdentity)
+    let key = crate::identity::fingerprint(&status.email).ok_or(ProviderError::UnknownIdentity)?;
+    Ok((
+        key,
+        status
+            .org_id
+            .as_deref()
+            .and_then(crate::identity::org_fingerprint),
+    ))
 }

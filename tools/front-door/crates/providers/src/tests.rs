@@ -2005,3 +2005,44 @@ fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
     }
     Ok(())
 }
+
+#[test]
+fn package_root_never_grants_a_hidden_home_tool_tree() {
+    use crate::launch::package_root;
+    let direct = Path::new("/home/u/.cargo/bin/codex");
+    assert_eq!(
+        package_root(direct).unwrap(),
+        Path::new("/home/u/.cargo/bin")
+    );
+    let versioned = Path::new("/home/u/.local/share/claude/versions/2.1.310");
+    assert_eq!(
+        package_root(versioned).unwrap(),
+        Path::new("/home/u/.local/share/claude/versions")
+    );
+    let cask = Path::new("/opt/homebrew/Caskroom/codex/0.159.0/bin/codex");
+    assert_eq!(
+        package_root(cask).unwrap(),
+        Path::new("/opt/homebrew/Caskroom/codex/0.159.0")
+    );
+}
+
+#[test]
+fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
+    let mut entry = accounts::Registration {
+        adapter: "claude".into(),
+        label: "pro".into(),
+        key: "k".into(),
+        org_fingerprint: None,
+        directory: "/home/u/.claude-pro".into(),
+        plan: None,
+        priority: None,
+        billing_anchor: None,
+        limits: None,
+    };
+    assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    entry.org_fingerprint = Some("a".into());
+    assert_eq!(entry.check_org(Some("a")).unwrap(), None);
+    assert_eq!(entry.check_org(None).unwrap(), None);
+    assert!(entry.check_org(Some("b")).is_err());
+}

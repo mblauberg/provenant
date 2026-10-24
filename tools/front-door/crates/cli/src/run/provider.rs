@@ -114,6 +114,7 @@ fn prepare_with(
                 adapter: "codex".into(),
                 label: "default".into(),
                 key,
+                org_fingerprint: None,
                 directory,
                 plan: None,
                 priority: None,
@@ -129,6 +130,7 @@ fn prepare_with(
             adapter: "opencode".into(),
             label: "keyless".into(),
             key: "keyless".into(),
+            org_fingerprint: None,
             directory: paths.provider_state.clone(),
             plan: None,
             priority: None,
@@ -141,6 +143,7 @@ fn prepare_with(
     let mut availability = Vec::new();
     let mut reasons = Vec::new();
     let probe = Probe {
+        roots: registry.roots,
         executor: &executor,
         home: &home,
         user: &user,
@@ -558,6 +561,7 @@ fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
 
 /// Host context for fresh account identity and version probes.
 struct Probe<'a> {
+    roots: Option<&'a provenant_core::Roots>,
     executor: &'a provenant_supervisor::exec::SystemExecutor,
     home: &'a Path,
     user: &'a std::ffi::OsStr,
@@ -603,6 +607,7 @@ fn observe_account(
     timestamp: i64,
 ) -> Result<provenant_providers::AvailabilityRecord, String> {
     let Probe {
+        roots,
         executor,
         home,
         user,
@@ -617,10 +622,10 @@ fn observe_account(
             entry.adapter, entry.label
         ));
     }
-    let detected = if entry.adapter == "opencode" {
-        entry.key.clone()
+    let (detected, org) = if entry.adapter == "opencode" {
+        (entry.key.clone(), None)
     } else {
-        provenant_providers::accounts::detect(
+        provenant_providers::accounts::detect_with_org(
             executor,
             &entry.adapter,
             executable,
@@ -641,6 +646,20 @@ fn observe_account(
             "{} account {} changed identity; re-register it",
             entry.adapter, entry.label
         ));
+    }
+    match entry.check_org(org.as_deref()) {
+        Err(_) => {
+            return Err(format!(
+                "{} account {} changed identity; re-register it",
+                entry.adapter, entry.label
+            ));
+        }
+        Ok(Some(org)) => {
+            if let Some(roots) = roots {
+                let _ = crate::accounts::record_org(roots, &entry.adapter, &entry.label, &org);
+            }
+        }
+        Ok(None) => {}
     }
     let argv = [executable.as_os_str().to_owned(), "--version".into()];
     let mut options = provenant_supervisor::exec::ExecOptions::new(
