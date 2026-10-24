@@ -783,8 +783,38 @@ scheduler daemon. Within that, the lane decided:
 - **Telemetry stats** reads this project's terminal attempt facts and prices
   them from the reviewed `config/telemetry-prices.toml` product asset.
   Cross-project totals are out of scope for this slice.
-- **Fabric's facade** binds to these leaves after the Fabric binding lands;
-  the run-directory cut already landed with the Python removal.
+- **Publication order.** A terminal commit seals `result.md` first and then
+  `terminal-pending.json`, so a sealed intent always names a sealed result. A
+  result without intent goes through `recover_result_only`; a differing
+  intent or result is refused as needing recovery. A withdrawal interrupted
+  after sealing its intent resumes that intent's outcome, time and reason, so
+  a retry never writes a second set of facts.
+- **Replay.** A crash before an operation is accepted leaves it prepared under
+  its first IDs. A replay with the same request digest adopts those IDs
+  instead of reporting a conflict.
+- **Reservation race.** Reconcile withdraws a start without a launch summary
+  only while holding the writer lock: either supervisor's `prove_unreserved`
+  (no reservation, launch or exit) or the recovery lease. The launcher
+  re-reads the attempt after taking reader custody and stays local if it
+  changed, so a withdrawn attempt never reaches a guardian.
+- **Input scan.** `dispatch`, `resume` and Fabric submissions scan each prompt
+  against confinement's secret patterns before any record is written and
+  refuse with `SECRET_INPUT`, without echoing the match.
+- **Worktrees.** A missing local worktree is `WORKTREE_MISSING` (Fabric
+  `worktree_missing`, #1309); a writer without a worktree or a reader with
+  one is invalid (#1310). Worktree-write dispatch itself stays unsupported.
+- **Fabric's facade** calls the CLI's shared `submit`, `continue_attempt`,
+  cancel and output paths, so Fabric submissions, graph nodes and the CLI
+  admit, record and launch identically. Output fetch accepts only the
+  attempt's bound result digest. Remote runs forward to the owning host. Run
+  listing stays `owner_unavailable`. A graph route refused before launch
+  (`rejected`, never launched) maps to `adapter_unavailable`, so the graph
+  tries the next route.
+- **Provider launch specs.** Lane P's `LaunchSpec` (#1411) is consumed behind
+  `Providers::prepare -> PreparedLaunch` once it merges: confinement compiles
+  the plan, wraps the sandbox and the result maps to argv, env, stdin and cwd.
+  Main's adapter launch type is still uninhabited, so this branch keeps the
+  seam compiling against main and the consumer lands as a follow-up.
 
 Supervisor/confinement must accept the holder and writer-reservation protocol
 before step 2; Fabric must accept event reconciliation and continuation before

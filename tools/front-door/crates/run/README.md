@@ -13,8 +13,8 @@ only ends that call. The crate has no process-launch or signalling path.
 then seals canonical `request.json` and exact UTF-8 prompts through supervisor's
 held-directory filesystem API before marking the operation accepted. Replay
 compares the canonical request digest, including prompt digests, route choice,
-authority-plan digest and execution controls. A prepared operation can retry
-publication with its original IDs. It also queues one admission ticket per
+authority-plan digest and execution controls. A prepared operation retries
+publication with its original IDs, even when the replay brings fresh ones. It also queues one admission ticket per
 attempt and refuses a submission that would exceed the host queue.
 
 `publish_terminal` requires a scoped, durably published supervisor exit record
@@ -25,15 +25,14 @@ errors. Retrying the same publication is idempotent; a different terminal
 record is refused. It neither releases supervisor custody nor publishes a
 settlement attestation; the guardian holder below does both.
 
-Before sealing `result.md`, publication now seals the intended terminal record
-as `terminal-pending.json`. If a restarted publisher computes different text or
+Publication seals `result.md`, then the intended terminal record as
+`terminal-pending.json`. If a restarted publisher computes different text or
 metadata, it receives `TerminalRecoveryRequired`. `recover_terminal` uses that
 immutable intent, the original sealed result and fresh matching supervisor exit
 evidence to retry the transaction. It never certifies replacement result text.
-If the result was not yet sealed, the publisher must retry with the original
-facts and result. A real SQLite `SQLITE_FULL` test verifies that admission,
+A real SQLite `SQLITE_FULL` test verifies that admission,
 events and run closure roll back together, then recover from sealed evidence.
-For a result-only orphan created before terminal intent was persisted,
+For a result-only orphan left by a crash before the intent was sealed,
 `recover_result_only` accepts revalidated terminal facts from the trusted
 provider/confinement edge and uses the original sealed UTF-8 result bytes.
 It still requires matching durable supervisor exit/cleanup evidence and all
