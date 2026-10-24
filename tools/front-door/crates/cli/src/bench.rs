@@ -101,6 +101,12 @@ hidden_test_command = "cargo test"
 split = "held-out"
 "#,
         );
-        assert!(matches!(task, Ok(Task { split: Split::HeldOut, .. })));
+        assert!(matches!(
+            task,
+            Ok(Task {
+                split: Split::HeldOut,
+                ..
+            })
+        ));
     }
 }
