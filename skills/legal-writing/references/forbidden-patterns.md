@@ -6,7 +6,7 @@ It lists only the filing-facing hard bans, affidavit-specific overreach, quotati
 legal-register carve-outs the hub's general list would otherwise misclassify as tells (`reasonably arguable`,
 formal connectives, correct passives).
 
-The deterministic lint in `scripts/lint_legal_style.py` enforces only a subset
+The deterministic `provenant check writing <paths> --rules legal` enforces only a subset
 of this list as hard failures, including em dashes, US legalese, internal
 markers, internal-path leaks and unsupported safety-instrument overstatement.
 It flags style and affidavit risks as warnings. Treat this reference as the

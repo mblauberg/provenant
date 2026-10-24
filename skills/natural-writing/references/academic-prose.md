@@ -307,7 +307,7 @@ The study evaluates the primary and comparator methods on two datasets. Comparis
 For local files, use the checker as a review prompt, not proof:
 
 ```sh
-python3 "$(provenant root)/skills/natural-writing/scripts/check_academic_style.py" path/to/file.tex
+provenant check writing path/to/file.tex --rules academic
 ```
 
 Its silence is necessary, not sufficient: it scans fixed patterns and cannot see

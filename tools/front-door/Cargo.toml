@@ -56,7 +56,6 @@ ignored = [
   "provenant-routing",
   "provenant-run",
   "provenant-telemetry",
-  "provenant-workflow",
 ]
 
 [workspace.lints.rust]
@@ -84,6 +83,7 @@ publish = false
 license.workspace = true
 
 [dependencies]
+provenant-workflow = { workspace = true }
 provenant-cli = { workspace = true }
 provenant-core = { workspace = true }
 serde = { workspace = true }
