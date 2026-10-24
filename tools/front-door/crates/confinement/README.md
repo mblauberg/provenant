@@ -8,6 +8,15 @@ directly rather than a second confinement filesystem API.
 Permission compilation consumes typed provider specifications and enforcement
 observations constructed by the providers owner. Git write grants derive from a
 held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
+`WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
+single `Library/Caches/provenant-cargo-target-<worktree-dir-name>` cache.
+Before collecting `required_anchors`, call `prepare_writer_directories` under
+writer custody; pass the same independently resolved home in `Anchors.home`.
+This prepares missing nested ref/reflog parents and the exact cache without
+allowing sibling refs or caches. Common config, remote tracking and packed
+refs stay immutable: host fetch/upstream composition remains required under
+the accepted supervisor design (#1255). Child-created symlinks are denied.
+
 No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.
 

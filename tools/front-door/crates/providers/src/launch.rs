@@ -97,6 +97,8 @@ struct Mode {
     access_mode: Access,
     session_mode: Session,
     enabled: bool,
+    #[serde(default)]
+    shell_enabled: bool,
 }
 
 const ACTIVATION: &str = include_str!(concat!(
@@ -122,6 +124,20 @@ pub fn mode_enabled(adapter: &str, access: Access, session: Session) -> bool {
             && mode.session_mode == session
             && mode.enabled
     })
+}
+
+/// Shell activation needs its own writer proof. The recorder alone can
+/// prepare the candidate before that evidence has been accepted.
+pub(crate) fn shell_enabled(adapter: &str, access: Access, session: Session) -> bool {
+    access == Access::WorktreeWrite
+        && (cfg!(feature = "recording")
+            || modes().iter().any(|mode| {
+                mode.adapter == adapter
+                    && mode.access_mode == access
+                    && mode.session_mode == session
+                    && mode.enabled
+                    && mode.shell_enabled
+            }))
 }
 
 pub(crate) fn any_mode_enabled(adapter: &str) -> bool {

@@ -238,6 +238,30 @@ and protected instructions immutable. The task's network policy never blocks the
 selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads
 and private scratch. Browser/Postgres IPC is explicitly granted.
 
+Writer setup also derives exactly
+`$HOME/Library/Caches/provenant-cargo-target-<worktree-dir-name>` from host
+launch facts. `WorktreeWriteAuthority::for_worktree` takes the host home;
+`Anchors.home` independently binds that home at compilation. The authority's
+digest covers the cache as well as Git grants. Before collecting anchors, the
+host calls `prepare_writer_directories` under writer custody. It creates only
+missing derived directories, including nested branch/reflog parents and the
+single cache, by no-follow traversal. The cache gets read/write authority,
+with the same overlap and hard-link checks as provider state. No parent
+`Caches` or sibling cache grant is added. Child-created symlinks are denied
+with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
+
+For #1255 the design's other-ref/config restriction takes precedence over the
+issue's proposed shared-file grants: changing `packed-refs` can change every
+packed branch, and common `config`/`config.lock` cannot be narrowed to one
+`branch.<name>` section. Remote-tracking refs, packed refs and common config
+therefore remain host-owned. The launch composition must fetch on the host
+before dispatch, let the lane push an explicit `HEAD:<branch>`, then fetch
+and set `branch.<name>.remote`/`merge` on the host after confirmed lane exit;
+verify `git status -sb` reports the upstream. The directory preparation and
+cache grants are implemented in confinement; the full fetch/push/upstream
+conformance row and runtime composition remain outstanding. A lane's
+`git push -u` may push successfully but fail to persist upstream locally.
+
 The providers owner loads and verifies profile fixtures, then constructs the typed
 profile data consumed by confinement. Provider profiles contain fixture-proven
 runtime-state/authentication exceptions;

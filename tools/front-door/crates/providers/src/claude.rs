@@ -1,6 +1,6 @@
 use crate::launch::{
     Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
-    subtree, uuid_v4,
+    shell_enabled, subtree, uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
@@ -197,9 +197,9 @@ pub fn refresh_if_expiring(
 
 /// Claude uses the default config directory. The host reads its login token
 /// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
-/// unreadable and the CLI execs nothing. The model still gets no shell: file
-/// tools only, and edit tools only for writers. The one writable state is this
-/// session's transcript.
+/// unreadable. Recorded writer-shell activation additionally denies keychain
+/// services and the security executable, and uses a private config directory.
+/// Until that proof is accepted, writers retain file tools only.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -236,8 +236,10 @@ fn prepare(
         Session::Resume => "--resume".into(),
     });
     argv.push(session_id.clone().into());
+    let shell = shell_enabled("claude", access, session);
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
+        Access::WorktreeWrite if shell => ("bypassPermissions", "Read,Grep,Glob,Edit,Write,Bash"),
         Access::WorktreeWrite => ("acceptEdits", "Read,Grep,Glob,Edit,Write"),
     };
     argv.extend(
@@ -272,23 +274,52 @@ fn prepare(
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
+    let mut setup = if shell {
+        Vec::new()
+    } else {
+        vec![SetupStep::CreateDir(transcript_dir.clone())]
+    };
+    if shell {
+        let config = plan
+            .private_state
+            .as_ref()
+            .ok_or(ProviderError::UnsupportedPolicy)?
+            .path
+            .join("claude-config");
+        env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
+        setup.push(SetupStep::CreateDir(config));
+    }
     Ok(LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
         cwd: input.cwd.to_owned(),
-        setup: vec![SetupStep::CreateDir(transcript_dir.clone())],
+        setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
+                deny_keychain_access: shell,
+                tool_exec_roots: if shell {
+                    vec![
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
+                        subtree("/usr/libexec"),
+                    ]
+                } else {
+                    Vec::new()
+                },
                 // Not `~/.claude.json`: it can hold MCP server secrets and the
                 // launch never needs it.
                 runtime_reads: vec![subtree(package)],
-                state_writes: vec![
-                    exact(project.join(format!("{session_id}.jsonl"))),
-                    subtree(transcript_dir),
-                ],
+                state_writes: if shell {
+                    Vec::new()
+                } else {
+                    vec![
+                        exact(project.join(format!("{session_id}.jsonl"))),
+                        subtree(transcript_dir),
+                    ]
+                },
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
