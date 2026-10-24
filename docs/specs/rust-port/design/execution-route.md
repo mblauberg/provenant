@@ -542,7 +542,9 @@ credential access. Writers also get exact write access to the linked worktree's
 private `COMMIT_EDITMSG`, `AUTO_MERGE`, `AUTO_MERGE.lock`, `MERGE_HEAD`,
 `MERGE_MSG`, `MERGE_MODE`, `MERGE_RR` (and lock), `ORIG_HEAD` and `ORIG_HEAD.lock`, so `git commit` and a
 local `git merge` complete; the common `.git` stays read-only apart from the
-listed ref grants, so fetches stay host-side. When a Homebrew prefix
+listed ref grants and the exact `packed-refs.lock` that any ref deletion takes
+(`packed-refs` itself stays read-only, so the lock can never replace it), so
+fetches stay host-side. When a Homebrew prefix
 (`/opt/homebrew`, else `/usr/local`) has `bin/node`, shell-capable lanes also
 read and exec its `bin`, `Cellar`, `opt` and `lib`, and its `bin` ends `PATH`;
 the prefix's `etc/` and `var/` stay unreadable and nothing under it is

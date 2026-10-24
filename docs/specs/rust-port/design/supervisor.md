@@ -265,7 +265,7 @@ Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
 read roots, network policy and named capabilities. Hold verified path anchors;
 reject traversal, symlinked state/lock leaves, credential roots and broad home
 or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE/merge state/ORIG_HEAD,
-objects and exactly their branch/ref lock/reflog. Keep `.git`, `commondir`,
+objects, exactly their branch/ref lock/reflog and the common `packed-refs.lock`. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
 and protected instructions immutable. The task's network policy never blocks the
 selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads

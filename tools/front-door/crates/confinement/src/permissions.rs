@@ -670,6 +670,10 @@ struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
+    /// Deleting any ref, even an unpacked pseudoref such as AUTO_MERGE, takes
+    /// this lock. `packed-refs` itself stays read-only, so the lock can never be
+    /// committed over it.
+    packed_refs_lock: PathGrant,
     head: [PathGrant; 14],
     objects: PathGrant,
     selected_ref: [PathGrant; 4],
@@ -696,6 +700,7 @@ impl WorktreeWriteGrants {
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
             next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
             common_exclude: exact(common.join("info/exclude")),
+            packed_refs_lock: exact(common.join("packed-refs.lock")),
             // `git commit` writes its message buffer and clears AUTO_MERGE here;
             // a local `git merge` records its state and ORIG_HEAD here too.
             head: [
@@ -732,7 +737,7 @@ impl WorktreeWriteGrants {
             .chain([&self.private_git_dir, &self.common_git_dir])
             .chain(self.index.iter())
             .chain(std::iter::once(&self.next_index))
-            .chain(std::iter::once(&self.common_exclude))
+            .chain([&self.common_exclude, &self.packed_refs_lock])
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
@@ -740,7 +745,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v6\0");
+        digest.update(b"provenant-worktree-git-grants-v7\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1928,6 +1933,7 @@ fn push_worktree_rule(
     for grant in grants
         .index
         .iter()
+        .chain(std::iter::once(&grants.packed_refs_lock))
         .chain(&grants.head)
         .chain(&grants.selected_ref)
     {
@@ -3120,11 +3126,15 @@ mod tests {
             "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
         )));
         assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
+        // Ref deletion takes the packed-refs lock; packed-refs itself stays read-only.
+        assert!(source.contains(&format!(
+            "\"{}\"",
+            common.join("packed-refs.lock").display()
+        )));
         for relative in [
             "config",
             "config.lock",
             "packed-refs",
-            "packed-refs.lock",
             "refs/heads/main",
             "refs/remotes/origin",
             "refs/remotes/upstream",
