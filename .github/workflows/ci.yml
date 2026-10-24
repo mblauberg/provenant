@@ -40,6 +40,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check shell syntax
+        run: git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts

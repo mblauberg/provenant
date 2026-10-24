@@ -51,26 +51,26 @@ trains_on_prompts = false
 model = "claude/claude-haiku-5-5"
 efforts = ["low"]
 family = "anthropic"
-evidence_ref = "config/model-routing.json"
+evidence_ref = "migrated from the former instance routing catalogue"
 trains_on_prompts = false
 
 [[models]]
 model = "codex/gpt-6-luna"
 efforts = []
 family = "openai"
-evidence_ref = "config/model-routing.json"
+evidence_ref = "migrated from the former instance routing catalogue"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 efforts = []
-evidence_ref = "config/model-routing.json"
+evidence_ref = "migrated from the former instance routing catalogue"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
 efforts = []
-evidence_ref = "config/model-routing.json"
+evidence_ref = "migrated from the former instance routing catalogue"
 trains_on_prompts = false
 
 [pools]

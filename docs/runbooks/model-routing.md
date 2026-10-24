@@ -12,9 +12,8 @@ and fallbacks. Free pool members require `--allow-free` (default false), even
 when they do not train. It uses exact routing, with no classifier or synonyms.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
-is authoritative for this pool. No Rust owner reads `config/model-routing.json`;
-that legacy file is awaiting removal in the docs lane. Fabric currently accepts
-route preferences but its unavailable submission owner does not resolve them;
+is authoritative for this pool. Fabric currently accepts route preferences
+but its unavailable submission owner does not resolve them;
 there is no Fabric `confidential` preference in this slice.
 
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.

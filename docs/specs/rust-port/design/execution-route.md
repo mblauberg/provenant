@@ -122,6 +122,62 @@ never emails, token substrings or raw auth paths. Quota scopes readings by the
 providers-supplied identity; config neither detects nor pins accounts.
 Account detection failures remain unknown/auth-required, never guessed identities.
 
+### Account identity and placement (IDENT)
+
+The provider identity owner shares quota-live's Claude fingerprint: the first
+16 hex digits of SHA-256 over the trimmed, lowercase email. A rotating
+`~/.claude` is identified by that fingerprint, never by the directory name.
+Codex hashes `tokens.account_id` from its existing `auth.json` sign-in data;
+Cursor hashes the subject claim from `cursorAuth/accessToken` in its existing
+read-only `state.vscdb`. These opaque IDs retain case. Their keys have `codex-`
+and `cursor-` prefixes. Neither tokens nor token fragments are fingerprinted.
+An unreadable identity produces `unknown`, including explicitly configured
+default entries. Quota capture checks the identity before and after the probe
+and refuses a changed attribution. Configured names remain display aliases.
+
+`providers::identity::Accounts` registers detected keys at canonical config
+directories. Routing normally selects the account from provider availability.
+The optional per-task `account` field in a dispatch manifest or Fabric submission
+is an override, not a new command-line flag or a named-route account pin. It
+filters the requested model's adapter, or the named pool's adapters, before
+quota/readiness resolution, preserving other adapters' explicit fallbacks. It
+never switches accounts because of quota; #1115 remains separate.
+
+Provider preparation validates the selected registration against the resolved
+route. Claude's `refresh_for_account` brackets credential loading with status
+probes and binds the returned token to that fingerprint and directory. A token
+from another registration is refused, as is a bound token without its
+registration. Keyed Claude/Codex routes require a registration.
+`CLAUDE_CONFIG_DIR` selects the directory;
+only that session's transcript paths receive write grants. Codex retains clean,
+attempt-private `CODEX_HOME`, linking only the selected registration's
+`auth.json`, with exact read/refresh-write grants to that file. It does not grant
+the whole config directory. These narrower grants and private Codex state follow
+the execution/confinement design over #1114's broader directory wording.
+Lane rows expose the applied account, or `unknown` when none was applied.
+
+Current acceptance boundary: production `cli::run::Registry::prepare` still
+refuses launches at the existing unwired launch-specification seam. The typed
+registration/preparation APIs and concurrent Codex stubs are covered, but durable
+registration discovery, launch-time Codex identity revalidation and end-to-end
+production placement are not complete. The concurrency test asserts generated
+grants and uses unconfined stubs; it does not establish OS-enforced isolation.
+#1114 stays open until that composition work and its confinement acceptance run.
+
+#1062 also remains open. Static inspection of the official Agy 1.4.7 macOS
+binary and matching call sites in the installed executable found Keychain
+service `gemini` and product-constant account arguments (`antigravity`, with a
+`jetski-cli` alternative). Those attributes do not establish a signed-in Google
+identity. The normal backend's complete caller chain was not established; no
+live Keychain or secret was read. A metadata-derived per-user fingerprint has
+therefore not been implemented. Existing `google-<12 hex>` log attribution
+remains in quota-live; a supported non-secret provider identity source is needed
+before closing the cooldown/routing work. Evidence: `LoadStoredToken` at
+`0x101aaf580`, `NewCLITokenStorage` at `0x102692520`, and `Daemon.SeedToken` at
+`0x102c2e400` in the inspected darwin-arm64 build. The service string is at file
+offset `0x33aa5e5`. These are static executable observations, not a claim that
+runtime account switching was tested.
+
 Stored snapshots are typed, versioned serde records. Edge-built
 `VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
 `Serialize` only. Persist separate `AvailabilityRecord`, `FamilyEvidenceRecord`
@@ -269,8 +325,8 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL` only, `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to `~/.codex/auth.json`. Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only; default config directory, with the access token read by the host. No shell tool, no keychain access, no exec beyond the CLI. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL` only, `PATH=/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only, plus `CLAUDE_CONFIG_DIR` when an account is selected; the access token is read and bound to that selected identity by the host. No shell tool, no keychain access, no exec beyond the CLI. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |

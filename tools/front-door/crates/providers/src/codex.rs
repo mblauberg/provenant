@@ -21,7 +21,8 @@ const OBSERVATIONS: &str = include_str!(concat!(
 ));
 
 /// Codex runs with a private `CODEX_HOME` (the attempt's private state) that
-/// links only `auth.json` from the user's home. Its own seatbelt cannot nest
+/// links only `auth.json` from the selected registered identity (the default
+/// login source when no account was selected). Its own seatbelt cannot nest
 /// inside ours, so it runs unsandboxed inside the outer profile, which is the
 /// real boundary. Its shell tool may run system and install-prefix programs.
 fn prepare(
@@ -41,7 +42,10 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
-    let credential = input.home.join(".codex/auth.json");
+    let credential = input.account.map_or_else(
+        || input.home.join(".codex/auth.json"),
+        |account| account.directory().join("auth.json"),
+    );
     let mut argv: Vec<OsString> = vec![input.executable.into(), "exec".into()];
     if session == Session::Resume {
         let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
