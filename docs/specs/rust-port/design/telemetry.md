@@ -162,7 +162,7 @@ atomic in run's store; fabric-runtime owns identity and federation routing.
 it from decoded, validated stored records. Its fields are task, attempt number,
 operation, project, terminal state, exit, `queued_at`/`started_at`/`finished_at`,
 `provider_ms`, resolved route (provider, model, effort, account label), usage
-counts (`u64`), output paths, reviewer and `delivery_id`. Usage categories are optional, disjoint
+counts (`u64`), reviewer and `delivery_id`. Usage categories are optional, disjoint
 uncached input, cache read, cache write, output excluding reasoning, and
 reasoning counts; unknown values stay unknown. `StatsReport` is `Serialize`-only.
 

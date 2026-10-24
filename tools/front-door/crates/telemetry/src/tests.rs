@@ -53,7 +53,6 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
             output_excluding_reasoning: Some(0),
             reasoning: Some(0),
         },
-        output_paths: vec![],
         reviewer: None,
         delivery_id: None,
         subject: None,

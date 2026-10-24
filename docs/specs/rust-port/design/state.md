@@ -489,7 +489,7 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 `AttemptFact` lives in records and derives `Serialize` only. Run constructs
 it from its store: task, attempt number, operation, project, terminal state,
 exit, started_at/finished_at, resolved route (provider, model, effort, account
-label), usage counts (`u64`), output paths, reviewer and `delivery_id`.
+label), usage counts (`u64`), reviewer and `delivery_id`.
 Terminal records are immutable; highest attempt number selects the latest
 attempt. Telemetry's `stats(facts, &PriceTable, window) -> Stats` accepts any
 iterator of `AttemptFact`, filtering on `finished_at`, without revision dedupe.

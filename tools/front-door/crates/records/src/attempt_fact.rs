@@ -61,7 +61,6 @@ pub struct ReviewerFact {
     pub actor_id: ActorId,
     pub family: Option<String>,
     pub model: Option<String>,
-    pub outcome: Option<String>,
 }
 
 /// A contained output reference and the digest of its exact published bytes.
@@ -89,7 +88,6 @@ pub struct AttemptFact {
     pub finished_at: WallTime,
     pub resolved_route: Option<RouteFact>,
     pub usage: Usage,
-    pub output_paths: Vec<PathWire>,
     pub reviewer: Option<ReviewerFact>,
     pub delivery_id: Option<DeliveryId>,
     pub subject: Option<GitOid>,
