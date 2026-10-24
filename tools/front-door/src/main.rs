@@ -1,5 +1,6 @@
 // The process edge composes typed owners and owns ordinary result delivery.
 mod checks;
+mod hosts;
 mod install;
 mod overflow;
 mod roots;
@@ -87,6 +88,46 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
         globals,
     )
 }
+fn show_config(globals: &provenant_cli::Globals) -> u8 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let assets = roots::product_root()?;
+        let project = roots::selected_project(globals.project.as_deref(), false)?;
+        let roots = roots::roots(globals, &assets, &project)?;
+        Ok(provenant_config::config_show(
+            &roots,
+            &provenant_supervisor::fs::LocalFs,
+            &provenant_cli::domains::SECTIONS,
+        )?)
+    })();
+    match result {
+        Ok(config) => match serde_json::to_string_pretty(&config) {
+            Ok(text) => emit(
+                &CommandResult::new("config show", Outcome::Ok, config),
+                globals,
+                &format!("{text}\n"),
+                true,
+            ),
+            Err(_) => fail(
+                "config show",
+                Outcome::Error,
+                "ENCODE",
+                "cannot encode config",
+                globals,
+            ),
+        },
+        Err(error) => {
+            let status = match error.downcast_ref::<provenant_config::ConfigError>() {
+                Some(
+                    provenant_config::ConfigError::Read { .. }
+                    | provenant_config::ConfigError::ProjectBindingFilesystem(_),
+                )
+                | None => Outcome::Error,
+                Some(_) => Outcome::Invalid,
+            };
+            fail("config show", status, "CONFIG", &error.to_string(), globals)
+        }
+    }
+}
 fn run(inv: provenant_cli::Invocation) -> u8 {
     let globals = &inv.globals;
     if let Err(error) = roots::validate_globals(globals) {
@@ -100,6 +141,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match inv.command {
+        Command::Hosts(command) => hosts::run(command, globals),
         Command::Root => {
             #[derive(Serialize)]
             struct RootInfo {
@@ -163,9 +205,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
-        Command::Config(provenant_cli::Config::Show) => {
-            unavailable("config show", "config", globals)
-        }
+        Command::Config(provenant_cli::Config::Show) => show_config(globals),
         Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
             unavailable("fabric mcp", "fabric", globals)
         }

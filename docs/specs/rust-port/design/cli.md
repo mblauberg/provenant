@@ -633,3 +633,27 @@ supervisor's worktree flags. Step 1 freezes the parser from that table.
    the isolated end-to-end suite passes on both Macs. Every build PR reports
    Python/TS/Rust `Net lines:` and explains growth. Lanes do not merge or arm
    auto-merge.
+
+## Lane D command bindings (2026-10-24)
+
+`config show` now uses the landed config owner and complete domain registry.
+It reports effective values and origins, applies secret redaction, creates no
+state and refuses malformed configuration rather than returning defaults.
+
+The cut-over request restores the narrow `hosts doctor [SSH_ALIAS]` spelling
+for Claude sign-in diagnosis. This supersedes the earlier removal of that
+spelling for this diagnostic only. Without an alias, inspect the default
+Claude identity and each `.claude-<label>` directory; each CLI status probe gets
+that exact `CLAUDE_CONFIG_DIR`. With an alias, use bounded, noninteractive SSH
+to the installed remote Rust front door. Do not silently fall back to local
+results when a remote host cannot answer.
+
+Doctor runs `claude auth status --json`, never a prompt. It emits only identity
+labels and typed states: `signed_in`, `signed_out`,
+`token_present_unrefreshable`, `keychain_unavailable`, or `unknown`. A negative
+login bit alone cannot establish sign-out: credential-file metadata or a
+password-free keychain item-existence probe distinguishes a present identity
+from an absent one. Keychain failure stays indeterminate. No token or raw
+account/status output is persisted or printed. Every state carries
+`token_validity = "unverified"`; local status cannot prove a token is accepted
+by the provider or that quota and subscription information were refreshed.

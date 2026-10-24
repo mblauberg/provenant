@@ -252,3 +252,102 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
     assert_eq!(code(&internal), 3); // Reaches supervisor's typed invalid-handshake error.
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -> Result {
+    let rig = TestRig::new()?;
+    let defaults = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&defaults), 0);
+    let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
+    assert_eq!(value["data"]["profile"], "balanced");
+    assert!(value["data"]["domains"]["quota"].is_object());
+    assert!(!rig.state.exists());
+    std::fs::create_dir_all(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\nprofile='economy'\n",
+    )?;
+    let selected = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&selected), 0);
+    let value: serde_json::Value = serde_json::from_slice(&selected.stdout.bytes)?;
+    assert_eq!(value["data"]["profile"], "economy");
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\nunknown='private-marker'\n",
+    )?;
+    let invalid = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&invalid), 2);
+    assert!(!String::from_utf8_lossy(&invalid.stdout.bytes).contains("private-marker"));
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("status-bin");
+    fs::create_dir(&bin)?;
+    let claude = bin.join("claude");
+    fs::write(&claude, b"#!/bin/sh\n[ \"$1 $2 $3\" = 'auth status --json' ] || exit 90\ncase \"$CLAUDE_CONFIG_DIR\" in\n  */.claude-pro) printf '{\"loggedIn\":false}'; exit 1;;\n  *) printf '{\"loggedIn\":true,\"email\":\"private-marker\"}';;\nesac\n")?;
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
+    let identity = rig.home.join(".claude-pro");
+    fs::create_dir(&identity)?;
+    // A directory at this path proves only presence. Doctor must not open it.
+    fs::create_dir(identity.join(".credentials.json"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push(("PATH".into(), bin.into_os_string()));
+    let out = rig.command(&["hosts", "doctor", "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = value["data"]["claude"]
+        .as_array()
+        .ok_or("missing identities")?;
+    assert!(
+        rows.iter()
+            .any(|r| r["label"] == "pro" && r["signin"]["state"] == "token_present_unrefreshable")
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-marker"));
+    assert!(!rig.state.exists());
+    assert_eq!(
+        code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
+        2
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("ssh-bin");
+    fs::create_dir(&bin)?;
+    let ssh = bin.join("ssh");
+    fs::write(&ssh, b"#!/bin/sh\n[ \"$6\" = -- ] && [ \"$7\" = workshop ] && [ \"$8\" = 'exec ~/.local/bin/provenant hosts doctor --json' ] || exit 91\nprintf '{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[{\"label\":\"pro\",\"signin\":{\"state\":\"keychain_unavailable\",\"token_validity\":\"unverified\"}}]}}'\n")?;
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push(("PATH".into(), bin.into_os_string()));
+    let out = rig.command(&["hosts", "doctor", "workshop", "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["claude"][0]["signin"]["state"],
+        "keychain_unavailable"
+    );
+    fs::write(&ssh, b"#!/bin/sh\nprintf '{\"command\":\"hosts doctor\"'\n")?;
+    assert_eq!(
+        code(&rig.command(&["hosts", "doctor", "workshop", "--json"])?),
+        4
+    );
+    assert!(!rig.state.exists());
+    rig.assert_legacy_unchanged()
+}
