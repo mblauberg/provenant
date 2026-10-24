@@ -326,6 +326,8 @@ optimizer = "optimizer"
 
 [type.jsonl.extend-identifiers]
 initialize = "initialize"
+# Claude's rate-limit event field in byte-exact live recordings.
+utilization = "utilization"
 
 [type.port-graph.extend-identifiers]
 # Original identifiers in migration evidence retain their source spelling.

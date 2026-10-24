@@ -734,6 +734,7 @@ fn main() -> Result<()> {
         safe_fs: &safe_fs,
         executor: &executor,
         cancel: &cancel,
+        #[cfg(target_os = "macos")]
         env: &[],
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
