@@ -1451,12 +1451,30 @@ impl BinaryRunOwner<'_> {
                             .iter()
                             .map(|(_, target)| target.clone())
                             .collect::<Vec<_>>();
-                        let result = self.peer(
+                        let result = match self.peer(
                             *host,
                             PeerAction::RunStatuses { targets: requested },
                             budget,
                             cancel,
-                        )?;
+                        ) {
+                            Ok(result) => result,
+                            // A poll cut short by the wait's own deadline is a
+                            // timed-out wait, not an unavailable peer.
+                            Err(error) => {
+                                let expired =
+                                    budget.remaining(self.factory.clock.mono_now()).as_micros()
+                                        == 0;
+                                return match last_attempts {
+                                    Some(attempts) if expired => Ok(RunResult::Wait {
+                                        condition,
+                                        attempts,
+                                        satisfied: false,
+                                        timed_out: true,
+                                    }),
+                                    _ => Err(error),
+                                };
+                            }
+                        };
                         let PeerResult::RunStatuses(records) = result else {
                             return Err(FacadeError::StateCorrupt);
                         };

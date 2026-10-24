@@ -193,8 +193,11 @@ For nested submission, the Run root is the submitting attempt's dedicated
 `<parent-run-state>/children/<AttemptId>/` store. Its database and layout above
 are separate from the parent's database and attempt custody. The lane MCP seals
 queued requests there; a host-side worker in its parent guardian launches them
-through the shared Run owner. The worker derives depth from the parent's sealed
-request and rejects mismatched parent/depth proposals before provider setup.
+through the shared Run owner. The worker launches only runs whose operation is
+accepted: `create` commits the queued rows before it seals `request.json` and
+the prompts, and a prepared run is not yet launchable. The worker derives depth
+from the parent's sealed request and rejects mismatched parent/depth proposals
+before provider setup.
 
 The MCP retains shared Fabric identity/config on the original state root. Its
 explicit `PROVENANT_RUN_STATE_DIR` environment selects the child store for

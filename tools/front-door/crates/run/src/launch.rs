@@ -6,7 +6,7 @@ use provenant_core::{AttemptId, OperationId, RunId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::{ffi::OsString, path::PathBuf};
 
 /// An explicit dispatch argument wins over the effective profile default.
@@ -202,7 +202,27 @@ impl RunStore {
                 runs.insert(record.run_id);
             }
         }
-        Ok(runs.into_iter().collect())
+        // `create` commits the queued attempts before it seals `request.json`
+        // and the prompts; the operation is only accepted once they exist.
+        let mut ready = Vec::new();
+        for run in runs {
+            let raw: Option<Vec<u8>> = call.retry(|| {
+                Ok(self
+                    .db
+                    .query_row(
+                        "SELECT record FROM operations WHERE project=?1 AND run=?2",
+                        params![self.context.project_id.to_string(), run.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?)
+            })?;
+            let Some(raw) = raw else { continue };
+            let operation: OperationRecord = decode(&raw)?;
+            if operation.state != OperationState::Prepared {
+                ready.push(run);
+            }
+        }
+        Ok(ready)
     }
 
     pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {

@@ -625,11 +625,18 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             assert!(store.attempt(id, &call).is_ok());
         }
+        if phase == "reserved" {
+            // Queued rows exist, but request.json is unsealed: not launchable.
+            assert!(store.queued_runs(&call)?.is_empty());
+        }
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
         replay.run_id = RunId::from_bytes([9; 16]);
         replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
         assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
+        if phase == "reserved" {
+            assert_eq!(store.queued_runs(&call)?, vec![input.run_id]);
+        }
         seal_exit_fixture(&store, &input)?;
         if matches!(phase, "sealed" | "transaction") {
             assert_eq!(admission_count(&store)?, 1);

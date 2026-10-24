@@ -349,7 +349,17 @@ fn worker_panic_completes_its_request_and_other_workers_remain_available() {
 fn all_workers_dead_is_fatal() {
     let gate = Arc::new(Gate::default());
     gate.panic_next(WORKERS);
-    let server = Server::start(FakeFactory::new(gate), false);
+    // Production polls for dead workers once per event interval and joins the
+    // reader after one input interval, which alone nears TEST_WAIT under load.
+    let server = Server::start_with_timeouts(
+        FakeFactory::new(gate),
+        false,
+        Timeouts {
+            input_read: Duration::from_millis(40),
+            event: Duration::from_millis(2),
+            ..TIMEOUTS
+        },
+    );
     server.send(&initialize());
     server.send(&notification("notifications/initialized", json!({})));
     let mut calls = Vec::new();
@@ -361,7 +371,7 @@ fn all_workers_dead_is_fatal() {
         )));
     }
     server.send_bytes(&calls);
-    let result = server.wait_result(TEST_WAIT);
+    let result = server.wait_result(Duration::from_secs(30));
     assert!(matches!(result, Err(Error::Worker)), "result: {result:?}");
 }
 

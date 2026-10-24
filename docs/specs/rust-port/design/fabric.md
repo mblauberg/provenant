@@ -509,6 +509,8 @@ Landing `wait` observes a supplied generation and returns on release or holder/
 generation change; it never acquires the lease. Apply the same CLI/MCP bounds.
 Long CLI waits loop bounded owner/peer reads under one monotonic deadline,
 refreshing events between reads; a peer RPC never holds the full CLI budget.
+A peer read cut short by the wait's own deadline after a completed poll returns
+the last attempts as `timed_out`, not an unavailable peer.
 
 ### MCP protocol and SDK decision
 
