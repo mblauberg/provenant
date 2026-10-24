@@ -152,6 +152,13 @@ pub enum GitObjectKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
+    RemoteHead {
+        remote: String,
+    },
+    PushPatch {
+        base: Option<GitOid>,
+        head: GitOid,
+    },
     Status,
     StatusIncludingIgnored,
     RevParseHead,
@@ -778,6 +785,42 @@ fn git_args(
             tip.to_string().into(),
             "--".into(),
         ],
+        GitRead::RemoteHead { remote } => {
+            if remote.is_empty()
+                || remote.len() > 128
+                || !remote
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+                || remote.starts_with('-')
+                || remote.contains("..")
+            {
+                return Err(UtilityError::InvalidOperationValue);
+            }
+            vec![
+                "symbolic-ref".into(),
+                "--quiet".into(),
+                format!("refs/remotes/{remote}/HEAD").into(),
+            ]
+        }
+        GitRead::PushPatch { base, head } => {
+            let mut args = vec![
+                "log".into(),
+                "--format=".into(),
+                "-m".into(),
+                "-p".into(),
+                "-U0".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                head.to_string().into(),
+            ];
+            if let Some(base) = base {
+                args.push(format!("^{base}").into());
+            } else {
+                args.extend(["--not".into(), "--remotes".into()]);
+            }
+            args.push("--".into());
+            args
+        }
         GitRead::WorktreeList => vec![
             "worktree".into(),
             "list".into(),
