@@ -455,12 +455,9 @@ Codex or establish live nested-provider execution acceptance.
 
 The CLI production `Registry::prepare` now calls `provider::prepare`, and Run
 passes attempt scratch and provider-state paths into that preparation for both
-read-only and writer launches. Codex still cannot compile its profile: the
-current fixture has no `state_write` confinement observation for Fabric state.
-The recorder's `--skip-live` probe was attempted in this confined lane and
-returned `BackendNotAvailable(ProbeFailed)`; the existing observation gate is
-retained until host-side evidence is recorded. Live lane acceptance remains
-pending that observation and the exact-head checks. The earlier blanket
+read-only and writer launches. Host-side Codex recordings for `read_only` and
+`worktree_write` observe `state_write: allowed` for Fabric state, so Codex
+compiles its profile under the same observation gate. The earlier blanket
 no-customisation launch policy is superseded by this explicit user decision.
 
 Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
