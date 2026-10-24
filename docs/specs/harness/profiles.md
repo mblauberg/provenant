@@ -38,7 +38,7 @@ and the owning prose or constant still holds today's value until it is wired.
 | Reviewers above the ladder | `HARNESS.md` Review ladder; `skills/code-review/SKILL.md` step 5; `references/multi-agent-review.md` (one reviewer at substantial, councils 2–4) | ladder minimum | Reviewer lanes against defect coverage | `review.extra_reviewers`, wired (skill) |
 | Cross-family requirement | `HARNESS.md` ladder: substantial falls back to same-family with another lens | prefer | Decorrelation against waiting on quota | `review.cross_family`, wired (skill) |
 | Re-review after repair | `skills/implement/SKILL.md` step 5 | repair delta only | Interaction defects against a second full review | `review.rereview_scope`, wired (skill) |
-| Repair cycle stop | `skills/deliver/scripts/delivery_validation_common.py` `REPAIR_BUDGETS` | 2 / 4 / 5 / 5 by tier | User attention against repair spend | `repair.max_cycles`, advisory; the validator ceiling is fixed |
+| Repair cycle stop | `skills/deliver/references/contract.md` | 2 / 4 / 5 / 5 by tier | User attention against repair spend | `repair.max_cycles`, advisory; the ceiling is fixed |
 | Council juniors per part | `skills/orchestrate/references/tiered-council.md` | 3 | Lens passes against family spread | `council.junior_size`, advisory |
 | Pool pick mode | `scripts/model_route_pools.py` `pick` (`top`, `rotate`, `council`) | top weight | Consistency against quota spread | `routing.pool_mode`, wired |
 | Final voice pass on prose | `skills/engineering-writing/SKILL.md` step 6 | optional | One writing lane against voice | `writing.final_polish`, advisory |
@@ -46,10 +46,9 @@ and the owning prose or constant still holds today's value until it is wired.
 | Quota pacing tolerance | `scripts/provider_quota.py` `PACE_TOLERANCE` | 4 points | Early pacing against bursts | `quota.pace_tolerance`, advisory |
 | Pool membership and weights | `config/model-routing.json` `routes.*` | per pool | Model cost against quality | not a knob: edit the catalogue or `~/.agents/config/model-routing.json` overlay |
 | Task-class model affinity | `~/.agents/config/model-preferences.json` | per user | Family and model choice | not a knob: already user configuration |
-| Stochastic repetitions | `config/delivery-profiles.json` `minimum_repetitions` | 2 or 3 | Evaluation confidence against runs | not a knob: evidence contract |
-| Review ladder minimums | `HARNESS.md`; `skills/_shared/review_ladder.py` | routine 0, substantial 1, crucial 2 (two families), terminal +adversarial | Safety | fixed |
+| Review ladder minimums | `HARNESS.md`; `crates/workflow` coverage | routine 0, substantial 1, crucial 2 (two families), terminal +adversarial | Safety | fixed |
 | Task-class routing and effort-shift minimums | `config/model-routing.json` `task_class_routes` | per class | Routing | configurable; `effort.shift` never steps below `minimum_effort` |
-| Repair validator ceiling | `REPAIR_BUDGETS` | 2 / 4 / 5 / 5 | Safety | fixed |
+| Repair validator ceiling | `skills/deliver/references/contract.md` | 2 / 4 / 5 / 5 | Safety | fixed |
 | Credential and path rules, CI merge gating | `HARNESS.md`, `AGENTS.md` | as written | Safety | fixed |
 | Local verification depth | user `CLAUDE.md`: heavy checks in CI | targeted checks locally | User policy | fixed |
 | Lane preface | `skills/orchestrate/scripts/provider_exec.py` | about 70 tokens | Attribution guard | fixed |
@@ -96,7 +95,7 @@ must be empty.
 
 ## Resolution
 
-One module, [`skills/_shared/harness_profile.py`](../../../skills/_shared/harness_profile.py),
+One module, `scripts/harness_profile.py`,
 resolves profiles for every Python reader and for the CLI. Fabric's
 TypeScript runtime does not resolve profiles; it reaches them through the
 Python owners it delegates to.

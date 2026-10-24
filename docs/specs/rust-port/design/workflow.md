@@ -881,3 +881,25 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 | fabric-store / fabric-runtime | Own the only read-only one-shot cut-over import: open/blocked tasks plus unacknowledged requests from the last 14 days. Map project/identity without importing authority; workflow points agents to it. Product identity env is `PROVENANT_AGENT_LABEL`, replacing `AGENT_FABRIC_LABEL`. |
 | fabric-mcp | No workflow asks, tools or dependency edge. CLI JSON, top-level run `lanes` and Fabric tasks suffice. |
 | Native host | Supply session ID in hook events; SessionStart injects actual key/save command. Retain observed launch identity when available, otherwise explicit ChairAttested native provenance under the limits above. |
+
+## Close-out decisions (lanes G, I, J-prep)
+
+- Review facts are bound at the cli edge from run's `AttemptFact` plus a chair
+  `ReviewClaim` (lens, verdict, findings, tier). Routing publishes no tiers, so
+  the claim supplies them; the observed reviewer family comes from the attempt,
+  and chair-attested families never count as verified. A PR subject requires
+  the attempt head to equal the subject head. A Document subject relies on the
+  claim and output digest.
+- `LegBlocker` and `user_approval` are chair-supplied evidence references the
+  CLI records but does not verify.
+- Accepting needs an existing receipt (revision 1 or later); the first save is
+  pending. Accepting runs coverage and is refused with `REVIEW_INCOMPLETE`
+  unless it passes. Reviews supplied on a pending save are still bound.
+- Coverage uses compiled `ReviewPolicy` and `RiskPolicy` defaults, with no
+  config wiring. `config/risk-policy.json` stays for `harness_profile.py`.
+- `run_gates.rs` and the Python-oracle harness were dropped with the validator
+  cone. All of `skills/_shared` was deleted, including `harness_profile.py` and
+  `roots.py`; scripts that still import them belong to lanes D and F.
+- `scripts/check-retired-names` is the retired-name CI gate. Its temporary
+  exemptions for `scripts/`, `tests/` and `skills/orchestrate/scripts` go when
+  D and F land (lane J).

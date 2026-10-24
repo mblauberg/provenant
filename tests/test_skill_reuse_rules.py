@@ -35,19 +35,3 @@ def test_skill_promotion_uses_structural_form_and_routing_fixture():
     assert rationale["type"] == "textarea"
     assert rationale["validations"]["required"] is True
     assert not (ROOT / "skills/skill-craft/scripts/promotion_readiness.py").exists()
-
-
-def test_document_profile_classifies_interactive_html_and_its_conditional_evidence():
-    registry = json.loads(read("config/delivery-profiles.json"))
-    document = registry["profiles"]["document"]
-    surfaces = registry["artifact_type_surfaces"]
-    assert {"html", "interactive-document"} <= set(document["artifact_types"])
-    assert surfaces["html"] == ["generated-artifact"]
-    assert surfaces["interactive-document"] == ["generated-artifact", "source"]
-    assert document["conditional_evidence"] == {
-        "html": {"deterministic": ["link-integrity"], "judgement": []},
-        "interactive-document": {
-            "deterministic": ["link-integrity", "interaction-smoke"],
-            "judgement": [],
-        },
-    }

@@ -232,21 +232,3 @@ def test_pipe_wait_rule_conservatively_covers_bindings_and_branches(tmp_path):
 
     assert len(findings) == len(fixtures)
     assert {Path(finding["path"]).name for finding in findings} == set(fixtures)
-
-
-def test_pipe_wait_rule_is_clean_across_current_execution_sites():
-    module = load_script(SCRIPT, "static_security_check")
-    sites = (
-        ROOT / "skills" / "_shared" / "bounded_process.py",
-        ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt_process.py",
-    )
-
-    assert all(site.is_file() for site in sites)
-    findings = [
-        finding
-        for site in sites
-        for finding in module.scan_file(site)
-        if finding["rule"] == "subprocess-pipe-wait-before-drain"
-    ]
-
-    assert findings == []

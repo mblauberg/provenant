@@ -227,6 +227,7 @@ jobs:
             | xargs -0 -r node --test
           .venv/bin/python scripts/static-security-check.py
           .venv/bin/python scripts/lint-timebomb-fixtures.py
+          scripts/check-retired-names
 
   python-tests:
     name: Python tests (${{ matrix.shard }})

@@ -14,9 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # invocation gets. Each probe's whole assertion is about the import root the
 # caller names, so the caller's `sys.path` is the subject under test inside a
 # quoted `-c` snippet, not a bootstrap in the test module itself.
-EXEMPT = {
-    "tests/test_shared_library_bootstrap.py",
-}
+EXEMPT: set[str] = set()
 
 
 def _sources(directory: str):
@@ -57,7 +55,6 @@ def test_no_sys_path_mutation(directory):
 
 
 def test_declared_import_roots_make_the_helpers_importable():
-    import _shared.review_ladder  # noqa: F401  (skills/ root)
     from scripts.lib import roots  # noqa: F401  (product root)
 
     assert roots.product_root() == ROOT

@@ -24,7 +24,7 @@ package = false
 
 [tool.pytest.ini_options]
 # The one declared import path for the suite (issue #755). Tests and the
-# modules they load import `scripts.*`, `skills.*`, `_shared.*` and the
+# modules they load import `scripts.*`, `skills.*` and the
 # top-level script modules from here, so no test and no script has to
 # repair `sys.path` itself.
 pythonpath = [".", "scripts", "skills"]

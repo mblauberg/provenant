@@ -162,21 +162,12 @@ stream of micro-approvals.
 
 ## Neutral delivery kernel
 
-`deliver` is the cross-domain lifecycle front door and `delivery-run` schema v1
-is its portable receipt. It selects one profile from
-`config/delivery-profiles.json`: software, research, analysis, document or
-agent product. The high-stakes overlay adds source-authority, privacy,
-qualified-review and explicit user-action controls without multiplying the
-base profiles.
-
-`RUN.json` is a flat record, not a state machine. It holds what the run did:
-the approved intent and design, the authority envelope, the declared artifacts
-and their digests, the evidence, the reviews, the security and observation
-contracts, and the human gates. `skills/deliver/scripts/delivery_run_shape.py`
-declares the field set and its types, and both the producer
-(`delivery_receipt.py`) and the reader (`validate_delivery.py`) check every
-receipt against it, so a receipt cannot be written in a shape the reader
-rejects.
+`deliver` is the cross-domain lifecycle front door. The delivery receipt is a
+revisioned Rust record (`provenant-workflow`, `provenant-records`) written with
+`provenant workflow receipt save`. Review facts are bound from run attempt
+custody by `provenant workflow review`, which checks coverage against the risk
+tier. The high-stakes overlay adds source-authority, privacy, qualified-review
+and explicit user-action controls.
 
 Ordering is not certified, because a receipt cannot certify its own history:
 the agent that writes the transitions writes the receipt in the same turn. What
@@ -289,10 +280,8 @@ flowchart TB
 ```
 
 Solid legs carry required coverage; dashed legs supply additional advice.
-`validate_delivery.py` also requires each review row to declare
-`independent_of_authorship: true`, but does not bind the certifier's agent
-identity to authorship or decision custody. Validator success therefore proves
-declared topology and family separation, not actor-level independence. Policy
+Workflow coverage excludes authors and decision makers, never counts unknown
+provenance and takes the reviewer family from the observed attempt. Policy
 still disqualifies the chair and authoring subagents from certifying their own
 work. Herdr sits outside the decision path entirely.
 

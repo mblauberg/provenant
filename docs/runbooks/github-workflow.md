@@ -198,15 +198,8 @@ gh project field-list 2 --owner mblauberg --format json \
 
 ### Merge
 
-Before queueing merge for a substantial software change, validate its one
-canonical `delivery-run` receipt and retain the entire ignored run directory.
-Do not remove the worktree or discard that directory after GitHub merges it.
-The flat receipt records gates; it has no authoritative acceptance state
-transition. This is a receipt-continuity gate, not user acceptance or promotion
-authority. When post-merge GitHub binding is in scope, its already approved
-Authority V2 envelope must allowlist `api.github.com` tool egress and grant
-use-without-disclosure of the `github-cli-auth` secret reference; the binder
-never infers those grants from the operator's login.
+Before queueing merge for a substantial software change, confirm its delivery receipt (`provenant workflow receipt show <id>`) is current. The pull request is the evidence: exact-head CI, required review and the repository merge.
+
 
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
@@ -306,37 +299,9 @@ reports green; that gate is the whole review pressure for these PRs.
 
 Afterwards:
 
-1. For a software delivery, sync the primary checkout; the run already lives under its
-   workspace-relative `.agent-run/runs/<run-dir>/` location.
-   After the merge commit's main-branch `ci-status` succeeds, bind the exact
-   merge, PR and review evidence before human acceptance is recorded:
-
-   ```sh
-   skills/implement/scripts/bind_merged_delivery.py \
-     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" \
-     --repository owner/repository --pr-number <number> \
-     --review-artifact <targeted-review.json> \
-     --review-artifact <other-primary-review.json>
-   skills/deliver/scripts/validate_delivery.py \
-     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" --verify-hashes
-   ```
-
-   The binder reads the merged PR and exact merge-commit `ci-status` from the
-   authenticated GitHub API; it does not accept caller-authored success flags.
-   Review arguments are pre-existing typed exact-head artifacts, not verdicts
-   created by the binder. It holds an exclusive receipt lock, stages the whole
-   update and fails if the reviewed and merged trees differ. The source artifact
-   records the exact full-width native Git commit and resolved tree without a
-   second archive or per-file hash. Git evidence reads discard inherited
-   repository, object and config routing, replacements and grafts, and never
-   lazy-fetch missing promisor objects; local PR, CI and review JSON remain
-   SHA-256 verified. Do not
-   request any required user acceptance or promotion authority until validation
-   passes. The current receipt code still requires explicit user acceptance
-   to record `human_gates.acceptance` on this receipt. Release
-   records its separate gate against the same exact artifact identity and never
-   reconstructs it. This code constraint is listed in the
-   [issue #1025](https://github.com/mblauberg/provenant/issues/1025); do not fabricate approval.
+1. For a software delivery, sync the primary checkout. After the merge
+   commit's main-branch `ci-status` succeeds, record the accepted receipt
+   with `provenant workflow receipt save`. Do not fabricate user approval.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not
@@ -344,10 +309,6 @@ Afterwards:
    the standing authority, the method-specific proof gates and the deletion
    commands; run the complete repository, branch and merge gate first, and do
    not run the merge-commit and squash-merge paths as one sequence.
-
-   One repository-specific retention rule overrides this: a substantial software
-   change's canonical `delivery-run` receipt directory must survive the merge
-   (see [Merge](#merge)). Satisfy that first.
 
 4. The user-authorised repository setting `delete_branch_on_merge=true`
    (enabled 2026-07-19) automatically deletes a merged pull request's remote
