@@ -138,7 +138,10 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
             note(
                 "blocking_review",
                 field,
-                format!("{} blocking finding(s) outstanding", fact.blocking_findings.len()),
+                format!(
+                    "{} blocking finding(s) outstanding",
+                    fact.blocking_findings.len()
+                ),
                 "repair the findings, then obtain a fresh review",
             );
         } else if excluded.contains(&fact.reviewer_id) {
@@ -242,11 +245,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
             "obtain an observed other-family review or record the unavailability with its evidence",
         );
     }
-    if terminal
-        && !picked
-            .iter()
-            .any(|c| lens_key(&c.fact.lens) == adversarial)
-    {
+    if terminal && !picked.iter().any(|c| lens_key(&c.fact.lens) == adversarial) {
         note(
             "missing_adversarial_lens",
             "reviews".into(),
@@ -372,7 +371,12 @@ mod tests {
             run(RiskTier::Routine, &authors, &[], &[]).status,
             Status::Passed
         );
-        let mut bad = review(2, observed(ModelTier::Senior, "openai"), Some("openai"), "x");
+        let mut bad = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "x",
+        );
         bad.verdict = ReviewVerdict::RequestChanges;
         bad.blocking_findings = vec!["bug".into()];
         let report = run(RiskTier::Routine, &authors, &[bad], &[]);
@@ -383,7 +387,12 @@ mod tests {
     #[test]
     fn substantial_passes_with_an_observed_other_family_review() {
         let authors = [author(attested(ModelTier::Senior))];
-        let good = review(2, observed(ModelTier::Senior, "openai"), Some("openai"), "correctness");
+        let good = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "correctness",
+        );
         let report = run(RiskTier::Substantial, &authors, &[good], &[]);
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.counted.len(), 1);
@@ -393,10 +402,20 @@ mod tests {
     fn attested_reviewer_never_fills_a_cross_family_leg_without_a_blocker() {
         let authors = [author(attested(ModelTier::Senior))];
         let same = review(2, attested(ModelTier::Senior), None, "correctness");
-        let report = run(RiskTier::Substantial, &authors, &[same.clone()], &[]);
+        let report = run(
+            RiskTier::Substantial,
+            &authors,
+            std::slice::from_ref(&same),
+            &[],
+        );
         assert_eq!(report.status, Status::Incomplete);
         assert_eq!(codes(&report), ["missing_cross_family_leg"]);
-        let waived = run(RiskTier::Substantial, &authors, &[same.clone()], &[blocker(2_000)]);
+        let waived = run(
+            RiskTier::Substantial,
+            &authors,
+            std::slice::from_ref(&same),
+            &[blocker(2_000)],
+        );
         assert_eq!(waived.status, Status::Passed);
         let expired = run(RiskTier::Substantial, &authors, &[same], &[blocker(1_000)]);
         assert_eq!(expired.status, Status::Incomplete);
@@ -405,9 +424,24 @@ mod tests {
     #[test]
     fn authors_decision_makers_repeats_and_low_tiers_do_not_count() {
         let authors = [author(attested(ModelTier::Principal))];
-        let as_author = review(1, observed(ModelTier::Principal, "openai"), Some("openai"), "a");
-        let as_chair = review(99, observed(ModelTier::Principal, "openai"), Some("openai"), "b");
-        let junior = review(3, observed(ModelTier::Junior, "openai"), Some("openai"), "c");
+        let as_author = review(
+            1,
+            observed(ModelTier::Principal, "openai"),
+            Some("openai"),
+            "a",
+        );
+        let as_chair = review(
+            99,
+            observed(ModelTier::Principal, "openai"),
+            Some("openai"),
+            "b",
+        );
+        let junior = review(
+            3,
+            observed(ModelTier::Junior, "openai"),
+            Some("openai"),
+            "c",
+        );
         let unknown = review(4, RouteProvenance::Unknown {}, None, "d");
         let report = run(
             RiskTier::Substantial,
@@ -427,7 +461,12 @@ mod tests {
                 "reviewer_route_unknown",
             ]
         );
-        let first = review(2, observed(ModelTier::Principal, "openai"), Some("openai"), "a");
+        let first = review(
+            2,
+            observed(ModelTier::Principal, "openai"),
+            Some("openai"),
+            "a",
+        );
         let mut again = first.clone();
         again.attempt_id = AttemptId::from_bytes([5; 16]);
         let report = run(RiskTier::Crucial, &authors, &[first, again], &[]);
@@ -437,7 +476,12 @@ mod tests {
     #[test]
     fn unknown_author_tier_blocks_substantial_coverage() {
         let authors = [author(RouteProvenance::Unknown {})];
-        let good = review(2, observed(ModelTier::Principal, "openai"), Some("openai"), "a");
+        let good = review(
+            2,
+            observed(ModelTier::Principal, "openai"),
+            Some("openai"),
+            "a",
+        );
         let report = run(RiskTier::Substantial, &authors, &[good], &[]);
         assert_eq!(report.status, Status::Incomplete);
         assert!(codes(&report).contains(&"author_tier_unknown"));
@@ -446,16 +490,36 @@ mod tests {
     #[test]
     fn crucial_needs_two_distinct_lenses_and_terminal_an_adversarial_one() {
         let authors = [author(attested(ModelTier::Senior))];
-        let a = review(2, observed(ModelTier::Senior, "openai"), Some("openai"), "correctness");
-        let b = review(3, observed(ModelTier::Senior, "google"), Some("google"), "security");
-        let same_lens = review(4, observed(ModelTier::Senior, "xai"), Some("xai"), "correctness");
+        let a = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "correctness",
+        );
+        let b = review(
+            3,
+            observed(ModelTier::Senior, "google"),
+            Some("google"),
+            "security",
+        );
+        let same_lens = review(
+            4,
+            observed(ModelTier::Senior, "xai"),
+            Some("xai"),
+            "correctness",
+        );
         let report = run(RiskTier::Crucial, &authors, &[a.clone(), same_lens], &[]);
         assert!(codes(&report).contains(&"missing_reviews"));
         let report = run(RiskTier::Crucial, &authors, &[a.clone(), b.clone()], &[]);
         assert_eq!(report.status, Status::Passed);
         let report = run(RiskTier::Terminal, &authors, &[a.clone(), b], &[]);
         assert_eq!(codes(&report), ["missing_adversarial_lens"]);
-        let adv = review(5, observed(ModelTier::Senior, "google"), Some("google"), "adversarial");
+        let adv = review(
+            5,
+            observed(ModelTier::Senior, "google"),
+            Some("google"),
+            "adversarial",
+        );
         let report = run(RiskTier::Terminal, &authors, &[a, adv], &[]);
         assert_eq!(report.status, Status::Passed);
     }
@@ -463,7 +527,12 @@ mod tests {
     #[test]
     fn a_review_of_another_subject_never_counts() {
         let authors = [author(attested(ModelTier::Senior))];
-        let mut stale = review(2, observed(ModelTier::Senior, "openai"), Some("openai"), "a");
+        let mut stale = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "a",
+        );
         stale.subject = Subject::Document {
             path: evidence().path,
             digest: Digest::from_bytes([7; 32]),
