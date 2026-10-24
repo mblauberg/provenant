@@ -29,6 +29,12 @@ fn fixture() -> Result<TestRig> {
     }
     fs::write(rig.home.join(".rustup/settings.toml"), b"")?;
     fs::write(rig.home.join(".codex/auth.json"), b"fixture only")?;
+    // Existing global configuration stays unreadable to the lane. Git must
+    // use the provider's pinned config environment to run normally.
+    fs::write(
+        rig.home.join(".gitconfig"),
+        b"[include]\npath = /host-config-must-not-load\n",
+    )?;
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     fs::copy(std::env::current_exe()?, bin.join("codex"))?;
@@ -177,11 +183,7 @@ pub(crate) fn provider() -> Result {
         .map(OsString::from)
         .collect();
         use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor};
-        let mut env: Vec<_> = std::env::vars_os().collect();
-        env.extend([
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ]);
+        let env: Vec<_> = std::env::vars_os().collect();
         let mut options = ExecOptions::new(&args, &cwd, std::time::Duration::from_secs(3));
         options.env = Some(&env);
         assert_eq!(code(&SystemExecutor::new(1)?.execute(options)?), 0);

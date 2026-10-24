@@ -325,7 +325,7 @@ adds only its verified permission/config arguments; no raw caller argv.
 
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
-| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL`, plus `CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR`; `PATH=~/.cargo/bin:/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
+| Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CODEX_HOME SHELL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM`, plus `CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR`; `PATH=~/.cargo/bin:/usr/bin:/bin`; `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
 | Claude (enabled) | `claude -p --safe-mode --strict-mcp-config --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` only, plus `CLAUDE_CONFIG_DIR` when an account is selected; the access token is read and bound to that selected identity by the host. No shell tool, no keychain access, no exec beyond the CLI. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
@@ -340,7 +340,10 @@ temporary directory.
 `RUSTUP_HOME` selects the existing toolchains. No read or write of
 `~/.cargo/credentials*`, no whole-Cargo-home grant, and no toolchain writes are
 added. These recipes require the named toolchain/cache directories to exist;
-missing required anchors refuse prelaunch.
+missing required anchors refuse prelaunch. Codex also pins
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so shell Git commands
+can use the repository's readable config without loading the user's global
+hooks, includes or credential helpers or failing on a denied global-config read.
 
 Writer `CARGO_TARGET_DIR` and `CARGO_HOME` select `target/` and `cargo-home/`
 inside the exact cache bound by `WorktreeWriteAuthority`. The host prepares

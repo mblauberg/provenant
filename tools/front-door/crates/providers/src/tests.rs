@@ -718,6 +718,8 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 "CARGO_HOME",
                 "RUSTUP_HOME",
                 "CARGO_TARGET_DIR",
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_NOSYSTEM",
                 "CODEX_HOME",
                 "SHELL",
             ],

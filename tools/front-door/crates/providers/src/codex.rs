@@ -133,6 +133,12 @@ fn prepare(
             ]);
         }
     }
+    // Git may inspect global config even for status. Keep host hooks,
+    // includes and credential helpers outside the lane's environment.
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
     Ok(LaunchSpec {
