@@ -1,9 +1,8 @@
 #!/bin/sh
 # Fail when a tracked file still names a retired workflow module, config or
 # template. History lives in design docs, ADRs, research and the installer's
-# legacy list, so those paths are exempt. The scripts/, tests/ and
-# skills/orchestrate/scripts exemptions are temporary: lanes D and F delete the
-# remaining Python there, and the closure lane (J) removes these exclusions.
+# legacy list, so those paths are exempt. The scripts/ and tests/ exemptions
+# are temporary until the last Python there is deleted.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 names='delivery_receipt
@@ -30,7 +29,7 @@ skills/_shared'
 hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
   ':(exclude)docs/specs/rust-port/design' ':(exclude)docs/adr' \
   ':(exclude)docs/research' ':(exclude)assets/install/legacy.toml' \
-  ':(exclude)scripts' ':(exclude)tests' ':(exclude)skills/orchestrate/scripts' \
+  ':(exclude)scripts' ':(exclude)tests' \
   ':(exclude)docs/specs/rust-port/README.md' ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
 if [ -n "$hits" ]; then
   printf '%s\n' "$hits"

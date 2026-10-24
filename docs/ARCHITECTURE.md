@@ -242,7 +242,7 @@ independence are separate things: ordinary dispatch records that it makes no
 independence claim, and the Fabric MCP execution tools reject an assurance
 selector as a typed input error, so a review leg that must carry an
 independence claim runs the assurance path in
-`skills/orchestrate/scripts/cf_dispatch.py` ([ADR
+`provenant dispatch` ([ADR
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 
@@ -298,8 +298,8 @@ quality are deliberately accepted.
 The router separates policy from execution:
 
 - `config/model-routing.json` describes families, aliases and fallbacks;
-- `scripts/model-route` resolves a role from runtime capabilities;
-- adapter scripts execute the resolved route;
+- `provenant route resolve` resolves a route from Rust routing policy;
+- Rust providers executes the resolved route;
 - receipts record requested and actual identity, effort and substitutions.
 
 `principal`, `senior` and `junior` are capability aliases, not permanent jobs

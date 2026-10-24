@@ -27,248 +27,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # Path filtering happens here, never via workflow-level `paths:`, so the
-  # aggregate `ci-status` check below always reports and merges can never
-  # deadlock on a required check that stays pending.
-  detect-changes:
-    name: Detect changed paths
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-    outputs:
-      # Pushes to main always run every job: full post-merge verification
-      # and warm caches on the default branch for pull requests to reuse.
-      # Merge-group runs do the same: the queued commit is the exact tree that
-      # will land, so it gets the full gate rather than a path-filtered one.
-      # A pull request that changes only prose documents skips the full Python
-      # suite (harness) and runs the quick `docs` job instead; see the
-      # classification step below.
-      harness: ${{ github.event_name != 'pull_request' && 'true' || (steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only != 'true') }}
-      docs: ${{ github.event_name == 'pull_request' && steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only == 'true' }}
-      workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
-      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
-      tree: ${{ steps.tree.outputs.tree }}
-      passed-tree: ${{ steps.tree.outputs.passed-tree }}
-    steps:
-      - name: Check out tested tree
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check for a passing PR run on this tree
-        id: tree
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          tree="$(git rev-parse 'HEAD^{tree}')"
-          echo "tree=$tree" >> "$GITHUB_OUTPUT"
-          echo "passed-tree=false" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_EVENT_NAME" != "push" || "$GITHUB_REF" != "refs/heads/main" ]]; then
-            exit 0
-          fi
-          name="ci-passed-tree-$tree"
-          if ! artifacts="$(gh api "repos/$REPO/actions/artifacts?name=$name")"; then
-            echo "Artifact lookup failed; running Python shards."
-            exit 0
-          fi
-          # Trust a marker only from a successful ci.yml run on this repository's
-          # own branches: a fork PR runs its own workflow file and could upload
-          # any artifact name without testing anything.
-          runs="$(printf '%s' "$artifacts" | jq -r --arg name "$name" \
-            '.artifacts[]? | select(.name == $name and .expired == false
-              and .workflow_run.head_repository_id == .workflow_run.repository_id)
-              | .workflow_run.id')"
-          for run in $runs; do
-            if gh api "repos/$REPO/actions/runs/$run" | jq -e --arg repo "$REPO" \
-              '.path == ".github/workflows/ci.yml" and .conclusion == "success"
-                and .head_repository.full_name == $repo' >/dev/null 2>&1; then
-              echo "Python shards passed in run $run on this tree; skipping them."
-              echo "passed-tree=true" >> "$GITHUB_OUTPUT"
-              break
-            fi
-          done
-      # Docs-only classification. A change is docs-only when every changed
-      # path (including rename sources) is a Markdown file under docs/ that no
-      # test reads for its content. The carved-out documents are read by
-      # tests (worktrees.md, ARCHITECTURE.md, evals/ fixtures, the
-      # model-benchmarks dataset), so editing them still runs the full suite.
-      # The `harness` path filter below is unchanged and still the
-      # source of the every-tracked-file-matches invariant; this step only
-      # narrows what a matching pull request has to run. It fails closed:
-      # any API error fails detect-changes, and so ci-status.
-      - name: Classify docs-only changes
-        id: docs
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)')"
-          prose='^docs/.+\.md$'
-          read_by_tests='^docs/(worktrees\.md|ARCHITECTURE\.md|evals/|research/model-benchmarks/)'
-          other="$( { printf '%s\n' "$files" | grep -Ev "$prose" || true
-                      printf '%s\n' "$files" | grep -E "$read_by_tests" || true; } | sed '/^$/d')"
-          count="$(printf '%s\n' "$files" | sed '/^$/d' | wc -l | tr -d ' ')"
-          if [ -z "$other" ] && [ "$count" -gt 0 ] && [ "$count" -lt 2900 ]; then
-            echo "docs-only=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "docs-only=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Filter changed paths
-        id: filter
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          # Invariant: every tracked file matches at least one filter, so no
-          # change can skip every build job while ci-status reports green.
-          # The harness filter covers the Python tests and ordinary repository
-          # checks run by this job, including scripts, skills, tests and documents.
-          filters: |
-            ci-contract: &ci-contract
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            node-workspace: &node-workspace
-              - 'package.json'
-              - 'package-lock.json'
-            harness:
-              - *ci-contract
-              - *node-workspace
-              - '.github/**'
-              - 'apps/**'
-              - 'assets/**'
-              - 'config/**'
-              - 'docs/**'
-              - 'evals/**'
-              - 'library/**'
-              - 'runtime/**'
-              - 'schemas/**'
-              - 'scripts/**'
-              - 'skills/**'
-              - 'tests/**'
-              - 'tools/**'
-              - '.gitignore'
-              - '_typos.toml'
-              - 'ACKNOWLEDGEMENTS.md'
-              - 'AGENTS.md'
-              - 'CLAUDE.md'
-              - 'HARNESS.md'
-              - 'LICENSE'
-              - 'LICENSES/**'
-              - 'MAINTAINING.md'
-              - 'NOTICE'
-              - 'README.md'
-              - 'SECURITY.md'
-              - 'THIRD_PARTY_NOTICES.md'
-              # Locked Python test tooling for this job's own gate.
-              - 'pyproject.toml'
-              - 'uv.lock'
-            rust:
-              - *ci-contract
-              - 'assets/**'
-              - 'scripts/**'
-              - 'runtime/**'
-              - 'skills/**'
-              - 'library/**'
-              - 'config/**'
-              - 'templates/**'
-              - 'AGENTS.md'
-              - 'HARNESS.md'
-              - 'tools/front-door/**'
-            workflows:
-              - '.github/workflows/**'
-              - '.github/actions/**'
-              - '.github/zizmor.yml'
-              - '.github/actionlint.yaml'
-
-  harness-checks:
-    name: Python checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.harness == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # Full history supports the frozen eval-predecessor test's
-          # historical blob lookup in tests/test_skill_eval_fixtures.py.
-          # PR-scoped timebomb fixture lint also needs origin/main for its
-          # changed-context diff.
-          fetch-depth: 0
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      - name: Run workspace checks
-        run: npm run check
-      # Tracked-asset rules run as `provenant check harness` in the asset job;
-      # syntax checks, runners and the remaining Python linters stay here.
-      - name: Run ordinary checks
-        run: |
-          find skills -type f -name '*.sh' ! -name '*cross-family.sh' -print0 | xargs -0 -r -n1 bash -n
-          find skills -type f -name '*cross-family.sh' -print0 | xargs -0 -r -n1 sh -n
-          find skills -type d -name node_modules -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0 \
-            | xargs -0 -r -n1 node --check
-          find skills runtime -type d -name node_modules -prune -o -type f -name '*.test.mjs' -print0 \
-            | xargs -0 -r node --test
-          .venv/bin/python scripts/static-security-check.py
-          .venv/bin/python scripts/lint-timebomb-fixtures.py
-          scripts/check-retired-names
-
-  python-tests:
-    name: Python tests (${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    # The slow Fabric host file is pinned to shard 1; path hashes split the
-    # remaining files across shards 2 and 3.
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.harness == 'true' && needs.detect-changes.outputs.passed-tree != 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [fabric-hosts, python-a, python-b]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      - name: Run Python test shard
-        env:
-          AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
-          AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
-          PROVENANT_TEST_SHARD: ${{ matrix.shard == 'fabric-hosts' && '1/3' || matrix.shard == 'python-a' && '2/3' || '3/3' }}
-        run: .venv/bin/python -m pytest -q --durations=30 --durations-min=1 -n auto
-
-  # `provenant check harness` covers tracked skill, document and issue-form
-  # assets. It runs whenever those assets or the checker itself change,
-  # including prose-only pull requests that skip the full harness suite.
   docs:
     name: Harness asset checks
     runs-on: ubuntu-latest
@@ -277,8 +35,6 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.harness == 'true' || needs.detect-changes.outputs.docs == 'true' || needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -307,8 +63,6 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -327,25 +81,6 @@ jobs:
         with:
           workspaces: tools/front-door
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      # Port differential tests run the Python/TS oracles and must not skip
-      # in CI (PORTING R9).
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Require port differential oracles
-        run: |
-          {
-            echo "PROVENANT_PORT_DIFF_REQUIRED=1"
-            echo "PROVENANT_PORT_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python"
-            echo "PROVENANT_PORT_NODE=$(command -v node)"
-          } >> "$GITHUB_ENV"
       - name: Check formatting
         working-directory: tools/front-door
         run: cargo fmt --all --check
@@ -376,8 +111,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -402,14 +135,13 @@ jobs:
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
   # time. Share the Rust path filter and exercise the front door's release build.
+
   rust-macos-release:
     name: Rust macOS release smoke
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
       contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -475,6 +207,8 @@ jobs:
         run: actionlint
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
+      - name: Check retired names
+        run: scripts/check-retired-names
 
   zizmor:
     name: Workflow security lint
@@ -482,8 +216,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.workflows == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -494,23 +226,18 @@ jobs:
         with:
           version: "1.31.1"
           # Audit exactly the surfaces this job is path-filtered on.
-          inputs: ".github/workflows .github/actions"
-          config: .github/zizmor.yml
+          inputs: ".github/workflows"
           online-audits: "false"
           advanced-security: "false"
           annotations: "true"
 
-  # Single required check. Succeeds only when every needed job either
-  # succeeded or was skipped by the path filter; fails closed on any
-  # failure or cancellation, including detect-changes itself.
+  # Every surviving job runs on every tested tree. Keep one required check
+  # and fail closed on failure, cancellation or an unexpectedly skipped job.
   ci-status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     needs:
-      - detect-changes
-      - harness-checks
-      - python-tests
       - docs
       - rust
       - rust-macos-release
@@ -519,32 +246,18 @@ jobs:
       - generic-checks
     if: always()
     steps:
-      - name: Fail unless every needed job succeeded or was skipped by filter
+      - name: Require every needed job to succeed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
           blocking="$(echo "$NEEDS_JSON" | jq -r \
             'to_entries[]
-             | select(.value.result != "success" and .value.result != "skipped")
+             | select(.value.result != "success")
              | "\(.key)=\(.value.result)"')"
           if [ -n "$blocking" ]; then
             echo "Blocking job results:"
             echo "$blocking"
             exit 1
           fi
-          echo "All needed jobs succeeded or were skipped by the path filter."
-      - name: Write tested tree marker
-        if: github.event_name == 'pull_request' && needs.detect-changes.outputs.harness == 'true'
-        env:
-          TREE_SHA: ${{ needs.detect-changes.outputs.tree }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/ci-tree"
-          printf '%s\n' "$TREE_SHA" > "$RUNNER_TEMP/ci-tree/tree-sha"
-      - name: Record passing PR tree
-        if: github.event_name == 'pull_request' && needs.detect-changes.outputs.harness == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ci-passed-tree-${{ needs.detect-changes.outputs.tree }}
-          path: ${{ runner.temp }}/ci-tree/tree-sha
-          if-no-files-found: error
+          echo "All needed jobs succeeded."

@@ -1,5 +1,9 @@
 # ADR 0013 — Thin `provenant` CLI for command discovery
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../specs/rust-port/design/README.md) for owners.
+
 **Status:** Accepted 2026-07-18 (user, [issue
 #266](https://github.com/mblauberg/provenant/issues/266)); amended by [ADR
 0020](0020-retire-the-daemon-fabric.md) on 2026-08-02; amended by [ADR

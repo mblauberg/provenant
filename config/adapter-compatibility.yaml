@@ -263,7 +263,7 @@ adapters:
 # is instance-owned (ADR 0019) and must never carry these policy facts.
 #
 # dispatch:  implemented — the dispatcher has an executing arm in
-#            cf_dispatch.py and Fabric may stage runs for it.
+#            Rust dispatch and Fabric may stage runs for it.
 #            dormant — declared for routing; the dispatcher refuses with a
 #            typed dormant status until an arm and a safety boundary exist.
 #            unsupported — routing-only; no dispatcher arm is planned.
