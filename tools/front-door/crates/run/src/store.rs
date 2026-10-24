@@ -115,7 +115,7 @@ impl RunStore {
                 let attempt = AttemptRecord {
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: 1, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
-                    queued_at: input.created_at, started_at: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
+                    queued_at: input.created_at, started_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,1,1,0,?5)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), bytes(&attempt)?])?;
@@ -213,6 +213,7 @@ impl RunStore {
         let mut next = old.clone();
         next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
         next.started_at = publication.started_at;
+        next.provider_launched = Some(!exit.never_spawned);
         next.provider_ms = publication.provider_ms;
         next.resolved_route = publication.resolved_route.clone();
         next.applied_route = publication.applied_route.clone();

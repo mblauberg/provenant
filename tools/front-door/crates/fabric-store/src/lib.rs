@@ -4,6 +4,7 @@
 mod claims;
 mod db;
 mod events;
+mod federation;
 mod import;
 mod landing;
 mod messages;
@@ -13,6 +14,7 @@ mod tasks;
 pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;
+pub use federation::*;
 pub use import::*;
 pub use landing::*;
 pub use messages::*;

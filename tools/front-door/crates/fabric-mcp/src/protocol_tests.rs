@@ -268,3 +268,25 @@ fn modern_results_include_server_info_and_preserve_other_metadata() {
         value
     );
 }
+
+#[test]
+fn configured_json_depth_is_checked_before_protocol_dispatch() {
+    let mut protocol = Protocol::default();
+    let request=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":LEGACY,"capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).unwrap();
+    let Action::Reply(reply) = protocol.receive_with_limits(
+        &request,
+        provenant_records::Limits {
+            max_bytes: MAX_FRAME as u64,
+            max_depth: 2,
+            max_members: 100_000,
+        },
+    ) else {
+        panic!("depth must refuse before dispatch")
+    };
+    assert_eq!(reply["error"]["code"], -32700);
+    assert!(!protocol.modern());
+    let Action::Reply(reply) = protocol.receive(&request) else {
+        panic!("bounded request remains valid at default depth")
+    };
+    assert_eq!(reply["result"]["protocolVersion"], LEGACY);
+}

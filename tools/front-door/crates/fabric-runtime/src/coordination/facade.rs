@@ -36,6 +36,10 @@ pub struct RoutePreference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(default)]
+    pub access: crate::graph::AccessMode,
+    #[serde(default)]
+    pub worktree: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub inputs: Vec<ArtifactRef>,
@@ -58,6 +62,15 @@ bounded_input! {
             tasks: Vec<SubmittedTask>,
             concurrency: u16,
         },
+    }
+}
+
+bounded_input! {
+    pub enum GraphInput as WireGraphInput {
+        Run { document: std::path::PathBuf },
+        Status { id: String },
+        Cancel { id: String },
+        Resume { document: std::path::PathBuf },
     }
 }
 
@@ -127,6 +140,8 @@ bounded_input! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FacadeError {
+    #[error("run execution owner is unavailable")]
+    OwnerUnavailable,
     #[error("invalid input")]
     InvalidInput,
     #[error("record not found")]
@@ -162,6 +177,7 @@ pub enum FacadeError {
 impl FacadeError {
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput => "invalid_input",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
@@ -187,7 +203,19 @@ impl FacadeError {
 /// an observation must never stop a launched run; only explicit run cancel may.
 /// The shared records do not yet expose run requests, so F3 consumes these
 /// contracts directly until those owner types land.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct EventCoverage {
+    pub unknown_hosts: Vec<HostId>,
+    pub more_events: bool,
+}
 pub trait F3Facade {
+    fn refresh_events(
+        &mut self,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<EventCoverage, FacadeError> {
+        Ok(EventCoverage::default())
+    }
     type Identity: Serialize;
     type Submit: Serialize;
     type Run: Serialize;
@@ -211,6 +239,14 @@ pub trait F3Facade {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Self::Run, FacadeError>;
+    fn graph(
+        &mut self,
+        _input: GraphInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<crate::graph::GraphRun, FacadeError> {
+        Err(FacadeError::OwnerUnavailable)
+    }
     fn output(
         &mut self,
         input: OutputInput,
@@ -226,7 +262,7 @@ pub trait F3Facade {
 }
 
 /// Output payload encoding is explicit and lossless across MCP JSON.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "data", rename_all = "snake_case")]
 pub enum OutputBytes {
     Utf8(String),
@@ -243,7 +279,7 @@ impl OutputBytes {
 }
 
 /// Typed, bounded output response produced by F3's run facade.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputResult {
     Chunk {

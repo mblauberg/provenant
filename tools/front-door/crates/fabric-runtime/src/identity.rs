@@ -2,7 +2,7 @@
 use provenant_config::ProjectBinding;
 use provenant_core::{ActorId, HostId, ProjectId};
 use provenant_records::AbsolutePath;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::path::{Component, Path};
 use thiserror::Error;
@@ -31,10 +31,13 @@ pub fn validate_label(label: &str) -> Result<(), IdentityError> {
 
 /// A separate federation namespace, never a host-local ProjectId. The source
 /// is config's canonical common directory (or canonical non-Git directory).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CrossHostProjectKey(String);
 impl CrossHostProjectKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub fn from_home(home: &Path, common_dir: &Path) -> Result<Self, IdentityError> {
         if !home.is_absolute()
             || !common_dir.is_absolute()
@@ -98,7 +101,7 @@ impl Address {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Identity {
     pub project: ProjectId,
     pub host: HostId,

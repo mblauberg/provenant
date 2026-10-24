@@ -1,5 +1,6 @@
 // The process edge composes typed owners and owns ordinary result delivery.
 mod checks;
+mod fabric;
 mod hooks;
 mod hosts;
 mod install;
@@ -211,9 +212,18 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             globals,
         ),
         Command::Config(provenant_cli::Config::Show) => show_config(globals),
-        Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
-            unavailable("fabric mcp", "fabric", globals)
-        }
+        Command::Fabric(provenant_cli::Fabric::Mcp { client }) => fabric::mcp(client, globals),
+        Command::Fabric(provenant_cli::Fabric::Peer) => fabric::peer(globals),
+        Command::Fabric(provenant_cli::Fabric::Host(_)) => fabric::hosts(globals),
+        Command::Fabric(provenant_cli::Fabric::Events(provenant_cli::fabric::Events::Read {
+            page,
+            wait,
+        })) => fabric::events(page, wait, globals),
+        Command::Fabric(provenant_cli::Fabric::Graph(graph)) => fabric::graph(graph, globals),
+        Command::Fabric(provenant_cli::Fabric::Landing(
+            landing @ (provenant_cli::fabric::Landing::Push { .. }
+            | provenant_cli::fabric::Landing::Reconcile { .. }),
+        )) => fabric::landing(landing, globals),
         Command::Fabric(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;

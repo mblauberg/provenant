@@ -31,8 +31,14 @@ pub struct Limits {
     pub result_bytes: u64,
     pub lease_seconds: u64,
     pub peer_seconds: u64,
+    #[serde(default = "default_graph_timeout_ms")]
+    pub graph_timeout_ms: u64,
     pub bundle_bytes: u64,
 }
+fn default_graph_timeout_ms() -> u64 {
+    14_400_000
+}
+
 impl DomainConfig for FabricConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
@@ -95,6 +101,9 @@ impl DomainConfig for FabricConfig {
             if value == 0 || value > cap {
                 reject(format!("limits.{field}"));
             }
+        }
+        if l.graph_timeout_ms < 1000 || l.graph_timeout_ms > 14_400_000 {
+            reject("limits.graph_timeout_ms".into());
         }
         errors
     }

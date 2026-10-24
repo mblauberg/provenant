@@ -10,7 +10,8 @@ Build Fabric as three libraries behind the single `provenant` executable:
 `fabric-store` owns transactions, `fabric-runtime` owns coordination and the
 execution facade, and `fabric-mcp` owns stdio MCP. Both CLI and MCP call the same
 typed service. Keep durable messages, tasks, fenced ownership, detached runs
-and explicit SSH peers. Remove named sessions, graphs, interpreter bridges,
+and explicit SSH peers. Keep bounded graph execution with ordered route fallback.
+Remove named sessions, interpreter bridges,
 parallel status engines, permissive input repair and duplicated routing policy.
 
 The [binding cross-area decisions](https://github.com/mblauberg/provenant/blob/docs/rust-port-slices/docs/specs/rust-port/design/README.md#cross-area-decisions)
@@ -72,7 +73,7 @@ lifecycle tests that wrote to the live root; they are not product adoption.
 | Landing activity | 1,386 acquires/releases; 1,355 acquires in sealle-app | Keep bounded landing wait |
 | Run observations / qualified remote observations | 8,252 / 3,338; 2,011 distinct remote IDs, including 786 workshop IDs | Keep federation and owning-host status |
 | Sessions / session events | 2 / 13 | Cut named sessions; `resume` covers continuation |
-| Graphs / attempts / reservations | 3 / 11 / 0; two stopped, all created 22–23 October while building the runner | Cut graphs entirely |
+| Graphs / attempts / reservations | 3 / 11 / 0; two stopped, all created 22–23 October while building the runner | Retain a bounded DAG owner after the 24 October cut-over trial required ordered route fallback |
 
 Counts establish recorded activity, not current liveness. Reproduce with
 `mode=ro`, a read transaction, the predicate above and `count(*)` over the named
@@ -110,12 +111,12 @@ requires caller edits in the same replacement lane, not an alias layer.
 | Local/remote fetch | Keep | Explicit verified copy of an allowlisted run artefact set | No whole-directory copy |
 | Single dispatch and batch | Merge | One submission containing a task list; run owns submission and admission limits | Scalar dispatch form removed |
 | Routing pools, councils, rotation and fallbacks in TS | Merge | `routing` resolves typed selections once; Fabric forwards the result | No Fabric-specific precedence |
-| Provider catalogue and cooldown reset | Cut from Fabric | `provenant route list --adapter <id>` replaces live-ID discovery; routing/quota own administration | `fabric_adapters` removed |
+| Provider catalogue and cooldown reset | Cut from Fabric | `provenant route list --adapter <id>` replaces live-ID discovery; routing/quota own administration | `provenant route list` removed |
 | Dispatch route and authority validation | Merge | `run`, `routing` and `confinement` own it; Fabric validates envelope and project only | Strict typed inputs |
 | Native-seat provider bans | Cut | No family inferred from a seat; shared run policy controls permitted dispatch | Same-provider dispatch possible |
 | Named sessions | Cut | Only 2 sessions / 13 events ever recorded; native continuation stays in `resume` | Remove session table/tool/flags and F4 |
 | Ad-hoc handoff prompt assembly | Cut | Chair submits an explicit new task with artefact inputs | `handoff` removed |
-| Bounded graph execution | Cut | Only 3 graphs, created 22–23 October while building the runner; 2 stopped | Remove graph/node/edge tables, tool, owner and F5 |
+| Bounded graph execution | Keep | One bounded DAG owner delegates attempts to run and checkpoints every attempt | Single `route` or ordered `routes`; terminal availability failures try the next route |
 | Graph shell gates, gate workers, auto task mirroring | Cut | Verification is an ordinary authorised task or chair action | Gate document fields removed |
 | SSH hosts and diagnostics | Keep | Explicit trusted host list and one fixed peer command | Versioned new peer envelope |
 | Host auto-placement and local fallback | Cut | Default is local; remote placement always explicit | Placement defaults removed |
@@ -129,6 +130,99 @@ requires caller edits in the same replacement lane, not an alias layer.
 | Numeric coercion, synonym repair, fuzzy command hints | Cut | Refuse invalid fields with a stable error code and field path | Inputs become strict |
 | Python/Node discovery, subprocess RPC and package provisioning | Cut | In-process libraries and one executable | No runtime interpreters |
 | Old MCP judges and Rust differential tests | Cut | Rust-native contract fixtures test the new design | Old transcripts retired |
+
+## Cut-over decisions, 24 October 2026
+
+Lane C is attributed to `codex/gpt-6.1-sol@high`. The user authorised
+cross-crate API changes needed by the retained Fabric surfaces. CLI subtree
+bindings are included in that scope; the binary and CLI use the same runtime
+home router. Python `fabric_*` deletions belong to the separate python-cut lane.
+
+Peer ingress is the fixed `provenant fabric peer` command over system SSH.
+Requests carry version, target/source host, agent label and a home-relative
+canonical common-directory locator bound to the cross-host key. Ingress checks
+configured source hosts and resolves its own local project ID. It never forwards
+another peer request. Outbound mutation bytes and digest are durably prepared,
+marked sent before transport and recorded committed or unknown afterwards.
+Repeating an uncertain operation asks only for the home's atomic receipt; it
+never repeats the mutation or falls back locally. Coordination receipts retain
+the original actor. Run-event ingestion commits host-qualified deduplication and
+cursor advancement together. Ingress only ingests its local run events and
+reports other configured hosts as unknown; it never recursively fans out. Peer
+failures remain explicit observations.
+
+Landing push records bind the resolved origin URL as well as the ref and OIDs.
+URLs containing passwords or query/fragment credentials are refused before
+persistence; validated SSH account names remain supported. The lock directory is private and lock files persist: supervisor
+verifies inode identity on acquisition and the store verifies the directory
+binding. This avoids adding an alternate lock implementation in Fabric.
+
+The MCP binary uses the existing four-worker transport. Its OS stdin reader
+owns a one-slot bounded queue; the transport-facing reader observes deadlines.
+Stdout uses supervisor's nonblocking deadline writer. A blocked OS stdin reader
+ends with the MCP process and has no provider custody. Disconnect and observation
+cancellation never become run cancellation.
+
+### Bounded graphs and route fallback
+
+A graph document has `schema_version: 1`, `graph_id` and `nodes`. Each node has
+`id`, `prompt`, optional `depends_on` and exactly one of `route` or `routes`.
+The single-route form stays valid. A route retains `adapter`, exactly one of
+`model` or `alias`, and optional `effort`. `routes` is ordered, with at most eight
+entries; the owner never invents a model or route receipt. Graphs have at most
+64 nodes and 256 edges, with 64 KiB per prompt and 256 KiB total prompt bytes.
+
+The graph owner writes a starting checkpoint before invoking run with a stable
+key for graph, node and route index. Pending and unknown observations reuse that
+key. Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
+result consumes the next route. Task failure, input requirements and uncertain
+launches do not trigger fallback. Every tried route and its terminal outcome
+remains in the checkpoint. Dependants start after successful prerequisites and
+become blocked after a failed prerequisite. Canonical plan/checkpoint digests,
+a per-project, per-graph lock and atomic publication under new state make ticks restartable.
+No shell gates or named sessions return.
+
+The run API remains the owner of launch, custody, status, output and controls.
+If its dispatch/control service has not landed when F3 binds, the binary uses the
+minimal typed Fabric trait and reports `owner_unavailable` for unsupported owner
+operations. That binding is an explicit integration TODO, never a successful
+launch receipt. Existing run records remain authoritative for supported reads.
+The binary binds status, frozen-target waits and run events to the scoped run
+store. Input-required wakes either wait condition; observation timeout does not
+cancel work. Submit, full active-run listing, cancel, resume and exported output
+remain `owner_unavailable` until Lane B supplies their owner APIs. Graph tick
+persists its starting key before reporting that missing dispatch binding; graph
+status can read the checkpoint. Aliases retain the facade's named-role
+preference rather than fabricating an explicit model.
+
+CLI `fabric host list`, hidden `fabric peer`, `fabric graph run/status/cancel/resume`, and
+`fabric landing push/reconcile` bind in `src/`. CLI and MCP event reads lazily
+pull bounded run-event pages into the home store. `unknown_hosts` reports
+coverage gaps and `run_events_pending` reports another available page. Polling
+holds no write transaction while waiting or contacting a peer. Host availability
+and execution capability are separate observations.
+
+The existing config installer already emits the explicit installed-binary
+`fabric mcp --client <label>` registration arguments for all six harnesses;
+Fabric consumes those arguments without another registration descriptor copy.
+F9 cleanup removes the unused Rust subprocess, policy, lane-reader and execution
+mirrors in the same change. Python deletion and shared skill/hook caller rewrites
+remain with their authorised owners, outside this lane's write scope.
+
+F10 adds native command-process tests for interpreter-free MCP negotiation and
+mail, ingress refusal, exact mutation replay, graph starting checkpoints,
+project-scoped run status/wait, and replay-safe lazy run-event ingestion. Git
+fault tests use real temporary repositories and substitute a lost reply only
+after the real push succeeds; the successor stays fenced beyond expiry and
+remote reconciliation commits the receipt. Loaded local/worktree URL rewrites
+are refused. These checks do not establish two-host or installed-candidate
+acceptance: exact-head CI and the chair's authorised host smoke remain required.
+
+Committed Git bundles and digest-checked chunk fetches have typed runtime owners.
+Attaching transfer to a dispatched remote writer still belongs at Lane B's run
+binding, where the writer lease and attempt result can be supplied together.
+Fabric does not create a second writer registry or reconstruct a launch.
+
 
 ## Libraries and core records
 
@@ -219,6 +313,11 @@ installer consumes that table. Guard hooks deny unreadable or unbounded input.
 Fabric defaults: body 64 KiB; input frame 1 MiB; JSON nesting 64; page 100 rows;
 output tails 500 lines/64 KiB per read; result envelope 1 MiB; lease 1–3,600 s;
 peer RPC deadline 30 s; Git bundle 64 MiB. Config may lower hard limits, never raise them.
+The MCP composition applies lower input frame and JSON depth limits before
+protocol dispatch through the existing bounded records decoder. Body, page,
+lease and output requests are checked before owner calls. Oversized read
+responses return `result_too_large`; committed mutation receipts retain the
+transport hard ceiling so a configured read limit cannot hide their receipt.
 Every wait takes an explicit budget: CLI up to 14400 s, MCP up to 55 s.
 Run owns submission, concurrency, queue and active-attempt caps in
 [r7-execution-run (#1356)](https://github.com/mblauberg/provenant/pull/1356).
@@ -331,23 +430,42 @@ no scalar/list union. A single task is a one-item list. Resume is a separate
 `ResumeRequest { target: AttemptRef, prompt, expected_generation }`; it cannot
 change route, account or authority.
 
-Expose 10 tools instead of today's 20. Each tool's tagged input enum rejects
+Expose 11 tools instead of today's 20. Each tool's tagged input enum rejects
 unknown fields; generate its checked JSON schema from an explicit shared field
 catalogue without another schema crate. Snapshot/schema tests bind the catalogue
 to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion.
 
-| Tool | Typed operations | Replaces |
-|---|---|---|
-| `fabric_identity` | inspect | whoami |
-| `fabric_mail` | send, read, mark-read | send, inbox, acknowledge |
-| `fabric_task` | create, list, claim, update, finish, release | task |
-| `fabric_events` | read, note | events, note, activity |
-| `fabric_claim` | acquire, renew, verify, release, list | work_claim |
-| `fabric_landing` | acquire, renew, verify, release, wait | landing_lease; no push tool |
-| `fabric_submit` | submission | dispatch, including batch |
-| `fabric_run` | list, status, wait, cancel, resume | runs, status, cancel |
-| `fabric_output` | read, fetch | output, fetch |
-| `fabric_hosts` | list | hosts |
+All inputs use `op` to select one typed operation.
+
+| Tool | Operations |
+|---|---|
+| `fabric_identity` | inspect |
+| `fabric_mail` | send, read, mark_read |
+| `fabric_task` | create, list, claim, update, finish, release |
+| `fabric_events` | read, note |
+| `fabric_claim` | acquire, renew, verify, release, list |
+| `fabric_landing` | acquire, renew, verify, release, wait |
+| `fabric_submit` | submission |
+| `fabric_run` | list, status, wait, cancel, resume |
+| `fabric_graph` | run, status, cancel, resume |
+| `fabric_output` | read, fetch |
+| `fabric_hosts` | list |
+
+For `fabric_graph`, `run` and `resume` take a project-local graph document path;
+`status` and `cancel` take its `id`. The document declares each node's `access`
+as `read_only` or `worktree_write`; a writer also names its absolute `worktree`.
+The run owner must enforce those permissions before launching a provider.
+A graph attempt may use its next route after an auth refusal, usage limit or
+unavailable adapter when no provider launched. After launch, only read-only
+nodes may fall back. A failed writer retains its worktree in the checkpoint for
+the chair. Missing launch evidence counts as launched. Graph attempts use
+`limits.graph_timeout_ms` from the Fabric configuration.
+
+Cancellation persists the admission fence before asking the run owner to cancel
+accepted attempts. An unavailable owner returns its typed error; the fence still
+prevents new graph work. Resume checks the same document digest and reuses each
+attempt key. Until the dispatch/control owner is bound, execution returns
+`owner_unavailable`; graph status and the admission fence remain available.
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
 exact route if known, and next cursor/artefact references. Do not repeat result
@@ -355,7 +473,8 @@ tails in every status call. Output bytes are UTF-8 text when valid; otherwise an
 explicit byte-array encoding, never lossy text. Fetch copies only run-exported
 regular files, refuses symlinks/traversal and enforces total byte/file caps. It
 verifies a manifest digest before atomic publication below `fetch/<host>/<run>/`.
-No tool accepts an arbitrary source or destination filesystem path.
+Output tools accept no arbitrary source or destination filesystem path. Graph
+document paths resolve within the authenticated working directory.
 
 CLI `lanes --wait` uses `WaitCondition { Any, All }`: Any returns on a
 terminal target; All returns when all selected targets are terminal; either
@@ -927,9 +1046,8 @@ elapsed time. Installation and merging follow the repository workflow.
 
 Caller closure is part of F9/F10: edit skills and hook helpers to the new APIs,
 replace front-door help/routes, installer registrations, CI npm/gate invocations,
-MCP runbook and Fabric/hosts docs. Replace the `fabric_adapters` live-model
-callers with the routing-owned `provenant route list --adapter <id>`
-command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
+MCP runbook and Fabric/hosts docs. Live-model callers use the routing-owned
+`provenant route list --adapter <id>` command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
 `tests/test_runtime_architecture.py`, `tests/test_stale.py`, schema/layering tests,
 `tests/conftest.py` and mixed dispatch/provider/host identity tests lose only
 Fabric assertions whose callers disappear; their other owners retain them.
