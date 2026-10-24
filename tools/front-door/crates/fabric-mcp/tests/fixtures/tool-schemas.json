@@ -3613,9 +3613,28 @@
           "additionalProperties": false,
           "properties": {
             "concurrency": {
-              "maximum": 100,
-              "minimum": 1,
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 8,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "knobs": {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "type": "string",
+                "x-provenant-maxUtf8Bytes": 256
+              },
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
             },
             "op": {
               "const": "submission"
@@ -3695,7 +3714,6 @@
             }
           },
           "required": [
-            "concurrency",
             "op",
             "operation_id",
             "tasks"

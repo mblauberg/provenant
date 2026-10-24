@@ -377,13 +377,22 @@ impl ValidateInput for SubmitInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Submission {
-                tasks, concurrency, ..
+                tasks,
+                concurrency,
+                knobs,
+                ..
             } => {
                 if tasks.is_empty() || tasks.len() > 100 {
                     return Err(field("tasks"));
                 }
-                if *concurrency == 0 || usize::from(*concurrency) > tasks.len() {
+                if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
                     return Err(field("concurrency"));
+                }
+                if knobs.len() > 64 {
+                    return Err(field("knobs"));
+                }
+                for (index, knob) in knobs.iter().enumerate() {
+                    bounded_text(knob, &format!("knobs[{index}]"), 256)?;
                 }
                 for (index, task) in tasks.iter().enumerate() {
                     let path = format!("tasks[{index}]");

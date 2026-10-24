@@ -521,12 +521,18 @@ impl StreamMode {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePlan {
+    #[serde(default = "default_silence_ms")]
+    pub silence_ms: u64,
     pub stdout: StreamMode,
     pub stderr: StreamMode,
     pub wall_ms: u64,
     pub terminal_ms: u64,
     pub descendant_grace_ms: u64,
     pub root_flush_ms: u64,
+}
+// Registry default for lanes.silence_seconds, expressed in milliseconds.
+fn default_silence_ms() -> u64 {
+    300_000
 }
 impl Default for CapturePlan {
     fn default() -> Self {
@@ -541,13 +547,21 @@ impl Default for CapturePlan {
             terminal_ms: 500,
             descendant_grace_ms: 500,
             root_flush_ms: 2000,
+            silence_ms: default_silence_ms(),
         }
     }
 }
 impl CapturePlan {
+    /// Silence is an observation only and never authorises a stop.
+    pub fn silent(&self, now_ms: u64, last_progress_ms: Option<u64>) -> bool {
+        now_ms.saturating_sub(last_progress_ms.unwrap_or(0)) >= self.silence_ms
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.stdout.limit() > 64 * 1024 * 1024
             || self.stderr.limit() > 64 * 1024 * 1024
+            || self.silence_ms == 0
+            || self.silence_ms > 3_600_000
             || self.wall_ms == 0
             || self.wall_ms > 86400000
             || self.terminal_ms > 60000

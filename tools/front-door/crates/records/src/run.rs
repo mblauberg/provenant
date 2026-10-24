@@ -23,9 +23,28 @@ impl CanonicalRequest {
         CanonicalV1::record_digest("run-request", 1, self)
     }
 }
+/// Effective dispatch policy, sealed with the request and copied to each attempt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessProfile {
+    pub name: String,
+    pub task_class: Option<String>,
+    pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
+    pub overrides: Vec<String>,
+}
+impl HarnessProfile {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+    pub fn knob_u64(&self, name: &str) -> Option<u64> {
+        self.knobs.get(name).and_then(serde_json::Value::as_u64)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
+    pub profile: HarnessProfile,
     pub task_id: TaskId,
     pub prompt_digest: FileDigest,
     pub route: RequestedRoute,
@@ -226,6 +245,8 @@ pub struct ArtifactRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
+    #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
+    pub profile: HarnessProfile,
     pub schema_version: u64,
     pub attempt_id: AttemptId,
     pub run_id: RunId,
