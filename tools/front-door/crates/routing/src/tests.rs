@@ -634,11 +634,24 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
         }
         error => panic!("unexpected pool error: {error}"),
     }
+    // OpenCode is not activated in the bundled registry, so opting in moves the
+    // free member past the free gate to the activation gate, never to fallback.
     query.allow_free = true;
-    assert_eq!(
-        resolve(&query, &ctx)?.model,
-        "opencode/deepseek-v4.1-flash-free"
-    );
+    match resolve(&query, &ctx).unwrap_err() {
+        RoutingError::NoEligiblePoolMember { exclusions } => {
+            assert!(
+                !exclusions
+                    .iter()
+                    .any(|reason| reason == "free model disabled")
+            );
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason == "opencode/opencode/deepseek-v4.1-flash-free: disabled")
+            );
+        }
+        error => panic!("unexpected pool error: {error}"),
+    }
     Ok(())
 }
 
