@@ -353,6 +353,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         confidentiality: provenant_records::RouteConfidentiality {
             evidence_ref: "fixture-policy".into(),
         },
+        pool_selection: None,
     }
 }
 #[test]
@@ -743,7 +744,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             ],
             _ => &[],
         };
-        let expected: Vec<_> = [
+        let mut expected: Vec<_> = [
             "HOME",
             "USER",
             "PATH",
@@ -759,6 +760,17 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         .chain(extra)
         .copied()
         .collect();
+        if cfg!(target_os = "macos")
+            && id == "codex"
+            && Path::new("/Library/Developer/CommandLineTools").is_dir()
+        {
+            let index = expected
+                .iter()
+                .position(|key| *key == "CARGO_TARGET_DIR")
+                .expect("cargo env")
+                + 1;
+            expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
+        }
         assert_eq!(keys, expected, "{id}");
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
@@ -1000,8 +1012,6 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
         session_mode: Session,
         enabled: bool,
         capture_refs: Vec<String>,
-        #[serde(default)]
-        shell_enabled: bool,
     }
     let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
     for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
@@ -1016,13 +1026,13 @@ fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
             assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
             assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
             assert!(capture.activation_eligible, "{reference}");
-            if mode.shell_enabled {
-                assert_eq!(mode.access_mode, Access::WorktreeWrite);
+            // Historical file-tool captures do not claim shell proof. The
+            // writer shell knob is policy; fresh live proof stays a host gate.
+            if capture.keychain_ipc_proof {
                 assert!(capture.writer_shell_proof, "{reference}");
-                assert!(
-                    capture.keychain_ipc_proof,
-                    "{reference}: keychain IPC not probed"
-                );
+            }
+            if capture.writer_shell_proof {
+                assert_eq!(mode.access_mode, Access::WorktreeWrite);
                 assert!(
                     capture
                         .argv
@@ -1694,9 +1704,8 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
     Ok(())
 }
 
-#[cfg(feature = "recording")]
 #[test]
-fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
+fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
 -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut route = route("claude", "fixture-model");
@@ -1718,6 +1727,39 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
     );
     assert!(launch.profile.spec.deny_keychain_access);
     assert!(launch.profile.spec.authentication.is_empty());
+    for (key, value) in [
+        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
+        (
+            "CARGO_HOME",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
+        ),
+        (
+            "CARGO_TARGET_DIR",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+        ),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+    ] {
+        assert!(
+            launch.env.iter().any(|(k, v)| k == key && v == value),
+            "{key}"
+        );
+    }
+    for path in [
+        "/fixture/home/.cargo/bin",
+        "/fixture/home/.rustup/toolchains",
+        "/fixture/home/Library/Caches/provenant-lane-cargo/fixture",
+    ] {
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .any(|g| g.path == Path::new(path)),
+            "{path}"
+        );
+    }
     // Only lane grants are writable: never the private config or the user's home.
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
         !grant.path.starts_with("/fixture/state/claude-config")
@@ -1736,32 +1778,6 @@ fn claude_writer_shell_candidate_has_private_config_and_no_keychain_grant()
             .iter()
             .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == FIXTURE_TOKEN)
     );
-    Ok(())
-}
-
-#[cfg(not(feature = "recording"))]
-#[test]
-fn claude_writer_defaults_to_file_tools_without_shell_authority() -> Result<(), ProviderError> {
-    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let mut route = route("claude", "fixture-model");
-    route.account_key = None;
-    let prompt = Prompt::new("fixture prompt".into());
-    let token = fixture_token();
-    let launch = claude::Claude.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        Some(&token),
-    ))?;
-    let tools = launch
-        .argv
-        .iter()
-        .position(|arg| arg == "--tools")
-        .expect("tools");
-    assert_eq!(launch.argv[tools + 1], "Read,Grep,Glob,Edit,Write");
-    assert!(!launch.profile.spec.deny_keychain_access);
-    assert!(launch.profile.spec.tool_exec_roots.is_empty());
     Ok(())
 }
 

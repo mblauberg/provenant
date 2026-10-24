@@ -292,6 +292,7 @@ mod admission_tests {
             confidentiality: provenant_records::RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         }
     }
     fn record(status: QuotaStatus) -> AccountRecord {
@@ -580,6 +581,7 @@ mod refusal_scope_tests {
             confidentiality: provenant_records::RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let account = AccountScope {
             adapter: "claude".into(),

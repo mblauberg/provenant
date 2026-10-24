@@ -30,19 +30,6 @@ const PATH_VALUE: &str = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/opt/lo
 const BUNDLE_DIR_MODE: u32 = 0o700;
 const LANDING_REMOTE: &str = "origin";
 
-pub fn discover_git_executable() -> Option<PathBuf> {
-    [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| provenant_supervisor::sys::is_executable(path))
-}
-
 #[derive(Debug, Error)]
 pub enum GitTransportError {
     #[error("invalid Git transport input: {0}")]
@@ -274,7 +261,8 @@ impl<'a> GitTransport<'a> {
         if bundle_bytes == 0 || bundle_bytes > MAX_BUNDLE_BYTES as u64 {
             return Err(GitTransportError::Invalid("Git bundle limit"));
         }
-        let git = discover_git_executable().ok_or(GitTransportError::GitUnavailable)?;
+        let git =
+            provenant_supervisor::git::git_executable().ok_or(GitTransportError::GitUnavailable)?;
         let ssh = crate::hosts::discover_ssh_executable(ssh_executable).map_err(|_| {
             if ssh_executable.is_some() {
                 GitTransportError::Invalid("SSH executable")

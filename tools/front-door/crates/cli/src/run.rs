@@ -241,6 +241,7 @@ impl run::Providers for Registry<'_> {
                     }
                     .into(),
                 ),
+                pool_selection: None,
             }),
             usage: run::UsageRecord::default(),
             reason: None,
@@ -1017,7 +1018,7 @@ fn launch_on_host(
                         .map(|path| (name.into(), path))
                 })
                 .collect(),
-            git: crate::git::git_binary()
+            git: provenant_supervisor::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             #[cfg(feature = "fixture")]
@@ -1118,6 +1119,7 @@ fn lane_query(targets: &[Target], all: bool, limit: u64, after: u64) -> run::Lan
         all,
         limit,
         after,
+        newest_first: false,
     }
 }
 fn artifact(edge: &Edge<'_>, record: &run::AttemptRecord, name: &str) -> PathBuf {
@@ -1196,6 +1198,7 @@ fn render_lanes(
                 "queued_at": lane.queued_at,
                 "started_at": lane.started_at,
                 "finished_at": finished_at,
+                "last_output_at": lane.last_output_at,
                 "delivery_id": lane.delivery_id,
                 "result_path": result,
             })
@@ -1305,11 +1308,54 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                     .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid cursor"))?,
                 None => 0,
             };
-            let page = session.store.lanes(
-                &lane_query(&command.id, command.all, command.limit, after),
-                &call,
-            )?;
-            let (data, human) = render_lanes(&page.lanes, page.next, edge);
+            let mut query = lane_query(&command.id, command.all, command.limit, after);
+            let filtered = !command.states.is_empty() || command.since.is_some();
+            query.newest_first = filtered;
+            let threshold = command
+                .since
+                .map(|since| WallTime::from_micros(since.as_microsecond()))
+                .transpose()
+                .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+            let (lanes, next) = if filtered {
+                query.limit = 100;
+                let mut matches = Vec::new();
+                let mut next = None;
+                loop {
+                    let page = session.store.lanes(&query, &call)?;
+                    for lane in page.lanes {
+                        let state_matches = command.states.is_empty()
+                            || command
+                                .states
+                                .iter()
+                                .any(|state| state.as_str() == state_name(&lane.state));
+                        let since_matches = threshold.is_none_or(|since| lane.queued_at >= since);
+                        if state_matches && since_matches {
+                            matches.push(lane);
+                        }
+                        if matches.len() > command.limit as usize {
+                            let last =
+                                matches.get(command.limit as usize - 1).ok_or_else(|| {
+                                    Fail::new(Status::Error, "INTERNAL", "lane page invariant")
+                                })?;
+                            next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
+                            matches.truncate(command.limit as usize);
+                            break;
+                        }
+                    }
+                    if next.is_some() {
+                        break;
+                    }
+                    match page.next {
+                        Some(cursor) => query.after = cursor,
+                        None => break,
+                    }
+                }
+                (matches, next)
+            } else {
+                let page = session.store.lanes(&query, &call)?;
+                (page.lanes, page.next)
+            };
+            let (data, human) = render_lanes(&lanes, next, edge);
             Ok((data, human, false))
         })(),
     )
@@ -1753,6 +1799,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
                 all: false,
                 limit: 100,
                 after,
+                newest_first: false,
             },
             &call,
         )?;

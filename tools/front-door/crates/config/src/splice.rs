@@ -38,6 +38,127 @@ pub(crate) fn set(
     set_with_limits(source, path, replacement, Limits::CONFIG)
 }
 
+/// Reformat a validated JSON settings document while retaining its source key
+/// order.
+pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut index = 0;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < source.len() {
+        let byte = source[index];
+        if in_string {
+            output.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            output.push(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && source.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while source.get(index).is_some_and(|value| *value != b'\n') {
+                index += 1;
+            }
+            continue;
+        }
+        if byte == b'/' && source.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while source.get(index..index + 2) != Some(b"*/") {
+                if index + 1 >= source.len() {
+                    return Err(InstallError::InvalidConfig("invalid settings JSON"));
+                }
+                index += 1;
+            }
+            index += 2;
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'{' | b'[' => {
+                output.push(byte);
+                depth += 1;
+                let next = next_json_byte(source, index + 1)?;
+                if next == Some(if byte == b'{' { b'}' } else { b']' }) {
+                    let close = if byte == b'{' { b'}' } else { b']' };
+                    output.push(close);
+                    index += 1;
+                    while source.get(index).is_some_and(u8::is_ascii_whitespace) {
+                        index += 1;
+                    }
+                    if source.get(index) != Some(&close) {
+                        return Err(InstallError::InvalidConfig("invalid settings JSON"));
+                    }
+                    index += 1;
+                    depth -= 1;
+                    continue;
+                }
+                output.push(b'\n');
+                output.extend(std::iter::repeat_n(b' ', depth * 2));
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                output.push(b'\n');
+                output.extend(std::iter::repeat_n(b' ', depth * 2));
+                output.push(byte);
+            }
+            b',' => {
+                if !matches!(next_json_byte(source, index + 1)?, Some(b'}' | b']')) {
+                    output.push(byte);
+                    output.push(b'\n');
+                    output.extend(std::iter::repeat_n(b' ', depth * 2));
+                }
+            }
+            b':' => {
+                output.extend_from_slice(b": ");
+            }
+            _ => output.push(byte),
+        }
+        index += 1;
+    }
+    output.push(b'\n');
+    Ok(output)
+}
+
+fn next_json_byte(source: &[u8], mut index: usize) -> Result<Option<u8>, InstallError> {
+    while let Some(byte) = source.get(index).copied() {
+        if byte.is_ascii_whitespace() {
+            index += 1;
+        } else if byte == b'/' && source.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while source.get(index).is_some_and(|value| *value != b'\n') {
+                index += 1;
+            }
+        } else if byte == b'/' && source.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while source.get(index..index + 2) != Some(b"*/") {
+                if index + 1 >= source.len() {
+                    return Err(InstallError::InvalidConfig("invalid settings JSON"));
+                }
+                index += 1;
+            }
+            index += 2;
+        } else {
+            return Ok(Some(byte));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn set_with_limits(
     source: &[u8],
     path: &[&str],
@@ -945,6 +1066,17 @@ mod tests {
             std::str::from_utf8(&appended)
                 .expect("valid UTF-8")
                 .contains("/* retain */")
+        );
+    }
+
+    #[test]
+    fn pretty_json_normalises_spacing_and_keeps_fixture_key_order() {
+        let source = br#"{"z": {"one":1,"two":2}, "a": [ {"x":true,"y":false} ]}"#;
+        let pretty = super::pretty_json(source).expect("fixture formats");
+        let text = std::str::from_utf8(&pretty).expect("UTF-8 output");
+        assert_eq!(
+            text,
+            "{\n  \"z\": {\n    \"one\": 1,\n    \"two\": 2\n  },\n  \"a\": [\n    {\n      \"x\": true,\n      \"y\": false\n    }\n  ]\n}\n"
         );
     }
 

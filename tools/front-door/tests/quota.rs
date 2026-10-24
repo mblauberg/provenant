@@ -462,6 +462,7 @@ fn signed_in_accounts_have_distinct_quota_keys_and_unknown_is_not_default() -> R
             confidentiality: RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let operation = provenant_core::OperationId::parse("fixture")?;
         for (account, allowed) in [(&known[0], false), (&known[1], true), (&known[0], false)] {

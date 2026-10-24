@@ -36,6 +36,11 @@ slice, never hidden in the refactor.
 
 ## Method
 
+Use structural search when code shape matters more than spelling. `ast-grep`
+can locate syntax patterns across formatting and identifier changes; for
+example, `sg -p '$A.unwrap()'` finds unwrap calls and
+`sg -p 'Command::new($BIN)'` finds process construction sites.
+
 1. Establish a seam while green. Do not start by deleting the old path.
 2. Move one independently reviewable responsibility at a time. Preserve the
    public contract or use an approved compatibility adapter with an expiry.

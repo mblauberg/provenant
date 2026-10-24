@@ -239,6 +239,7 @@ fn account_placement() -> Result {
             confidentiality: RouteConfidentiality {
                 evidence_ref: "fixture".into(),
             },
+            pool_selection: None,
         };
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
@@ -258,7 +259,7 @@ fn account_placement() -> Result {
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
                 git: &std::fs::canonicalize(
-                    provenant_cli::git::git_binary().ok_or("Git unavailable")?,
+                    provenant_supervisor::git::git_executable().ok_or("Git unavailable")?,
                 )?,
                 state: &rig.state,
                 child_state: &rig.state.join(format!("children/{key}")),

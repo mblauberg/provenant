@@ -2,7 +2,7 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{AttemptId, RunId};
+use provenant_core::{AttemptId, OperationId, RunId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
@@ -49,6 +49,8 @@ pub struct Decoded {
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
+    pub operation_id: OperationId,
+    pub task_index: u64,
     pub lane_depth: u64,
     pub run_id: RunId,
     pub deadline_unix_ms: u64,
@@ -261,11 +263,14 @@ impl RunStore {
             if record.state != AttemptState::Queued {
                 continue;
             }
-            let task = request
+            let (task_index, task) = request
                 .tasks
                 .iter()
-                .find(|t| t.task_id == record.task_id)
+                .enumerate()
+                .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
+            let task_index = u64::try_from(task_index)
+                .map_err(|_| RunError::Validation("attempt task index"))?;
             let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
             let prompt = String::from_utf8(prompt)
                 .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
@@ -300,6 +305,8 @@ impl RunStore {
                 .join(id.to_string());
             let paths = LaunchPaths {
                 attempt_id: id,
+                operation_id: record.operation_id.clone(),
+                task_index,
                 lane_depth: request.lane_depth.unwrap_or(1),
                 run_id: record.run_id,
                 deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)

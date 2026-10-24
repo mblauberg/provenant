@@ -92,49 +92,17 @@ fn prepare(
     }];
     let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
-    input.provenant.environment(&mut env);
-    {
-        let cargo = input.home.join(".cargo");
-        let rustup = input.home.join(".rustup");
-        let cache = match &plan.mode {
-            provenant_confinement::permissions::AccessMode::ReadOnly => &plan.scratch.path,
-            provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
-                &authority.cargo_cache().path
-            }
-        };
-        let cargo_home = cache.join("cargo-home");
-        let target = cache.join("target");
-        // The host prepares the writer cache itself under custody. Cargo
-        // creates target/ and cargo-home/ after launch, so anchor the cache.
-        tool_exec_roots.push(subtree(if access == Access::ReadOnly {
-            &target
-        } else {
-            cache
-        }));
-        for directory in [cargo.join("bin"), rustup.join("toolchains")] {
-            runtime_reads.push(subtree(&directory));
-            tool_exec_roots.push(subtree(directory));
-        }
-        runtime_reads.extend([
-            subtree(cargo.join("registry")),
-            exact(rustup.join("settings.toml")),
-        ]);
-        env.extend([
-            ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
-            ("RUSTUP_HOME".into(), rustup.into_os_string()),
-            ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
-        ]);
-        if access == Access::ReadOnly {
-            setup.extend([
-                SetupStep::CreateDir(cargo_home.clone()),
-                SetupStep::CreateDir(target),
-                SetupStep::Symlink {
-                    link: cargo_home.join("registry"),
-                    target: cargo.join("registry"),
-                },
-            ]);
-        }
-    }
+    input
+        .provenant
+        .environment(&plan.scratch.path, &mut env, &mut setup)?;
+    crate::launch::rust_tools(
+        input,
+        access,
+        &mut runtime_reads,
+        &mut tool_exec_roots,
+        &mut env,
+        &mut setup,
+    );
     // Git may inspect global config even for status. Keep host hooks,
     // includes and credential helpers outside the lane's environment.
     env.extend([

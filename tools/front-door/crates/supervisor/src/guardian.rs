@@ -11,7 +11,7 @@ use crate::machine::{
     self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
     Tick,
 };
-use provenant_core::CancelToken;
+use provenant_core::{CancelToken, WallTime};
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -19,7 +19,15 @@ use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn wall_now() -> Option<WallTime> {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_micros();
+    WallTime::from_micros(i64::try_from(micros).ok()?).ok()
+}
 
 /// Advisory identity snapshot only; confinement does not yet supply an executable pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +562,8 @@ impl Driver<'_> {
         let mut last_stdout_bytes = 0_u64;
         let mut last_stderr_bytes = 0_u64;
         let mut last_output_ms = None;
+        let mut last_output_checkpoint_ms = None;
+        let mut last_output_at: Option<WallTime> = None;
         let mut provider_cpu_micros = None;
         let mut previous_cpu_micros = None;
         let mut last_cpu_progress_ms = None;
@@ -598,6 +608,10 @@ impl Driver<'_> {
                 stdout_bytes > last_stdout_bytes || stderr_bytes > last_stderr_bytes;
             if output_progress {
                 last_output_ms = Some(now);
+                if last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000) {
+                    last_output_at = wall_now();
+                    last_output_checkpoint_ms = Some(now);
+                }
             }
             last_stdout_bytes = stdout_bytes;
             last_stderr_bytes = stderr_bytes;
@@ -852,6 +866,7 @@ impl Driver<'_> {
                     stdout_bytes: u64,
                     stderr_bytes: u64,
                     last_output_ms: Option<u64>,
+                    last_output_at: Option<WallTime>,
                     last_progress_ms: Option<u64>,
                     silent: bool,
                     provider_cpu_micros: Option<u64>,
@@ -867,6 +882,7 @@ impl Driver<'_> {
                     stdout_bytes: out.outcome().total_bytes,
                     stderr_bytes: err.outcome().total_bytes,
                     last_output_ms,
+                    last_output_at,
                     last_progress_ms: state.last_progress_ms(),
                     silent: plan.silent(now, state.last_progress_ms()),
                     provider_cpu_micros,

@@ -241,6 +241,50 @@ pub enum Condition {
     Any,
     All,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum LaneState {
+    Queued,
+    Starting,
+    Running,
+    Settling,
+    Succeeded,
+    Failed,
+    Rejected,
+    TimedOut,
+    RateLimited,
+    QuotaLimited,
+    AuthRequired,
+    ModelUnavailable,
+    PermissionDenied,
+    Quarantined,
+    Lost,
+    Cancelled,
+    InputRequired,
+}
+impl LaneState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Settling => "settling",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::RateLimited => "rate_limited",
+            Self::QuotaLimited => "quota_limited",
+            Self::AuthRequired => "auth_required",
+            Self::ModelUnavailable => "model_unavailable",
+            Self::PermissionDenied => "permission_denied",
+            Self::Quarantined => "quarantined",
+            Self::Lost => "lost",
+            Self::Cancelled => "cancelled",
+            Self::InputRequired => "input_required",
+        }
+    }
+}
 #[derive(Debug, Args)]
 pub struct Lanes {
     #[arg(long, conflicts_with = "all")]
@@ -255,6 +299,12 @@ pub struct Lanes {
     pub wait: Option<u64>,
     #[arg(long, default_value = "any", requires = "wait", value_enum)]
     pub condition: Condition,
+    /// Keep lanes in any of these states.
+    #[arg(long = "state", conflicts_with = "wait")]
+    pub states: Vec<LaneState>,
+    /// Keep lanes queued since a duration (such as `24h`) or RFC3339 time.
+    #[arg(long, value_parser = lanes_since, conflicts_with = "wait")]
+    pub since: Option<jiff::Timestamp>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Part {
@@ -436,4 +486,30 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
     value
         .parse()
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
+}
+fn lanes_since(value: &str) -> Result<jiff::Timestamp, String> {
+    if let Some((amount, unit)) = value.split_at_checked(value.len().saturating_sub(1))
+        && matches!(unit, "s" | "m" | "h" | "d")
+        && amount.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        let amount = amount
+            .parse::<i64>()
+            .map_err(|_| "invalid duration".to_owned())?;
+        if amount <= 0 {
+            return Err("duration must be positive".into());
+        }
+        let seconds = amount
+            .checked_mul(match unit {
+                "s" => 1,
+                "m" => 60,
+                "h" => 3_600,
+                "d" => 86_400,
+                _ => return Err("duration must use s, m, h or d".into()),
+            })
+            .ok_or_else(|| "duration is too large".to_owned())?;
+        return jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_secs(seconds))
+            .map_err(|error| error.to_string());
+    }
+    timestamp(value).map_err(str::to_owned)
 }

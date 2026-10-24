@@ -123,4 +123,5 @@ pub struct RouteRequest {
 #[serde(deny_unknown_fields)]
 pub struct RouteListQuery {
     pub adapter: Option<String>,
+    pub pool: Option<String>,
 }
