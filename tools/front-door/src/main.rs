@@ -1,6 +1,7 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
 mod checks;
+mod hooks;
 mod install;
 mod overflow;
 mod roots;
@@ -86,6 +87,10 @@ fn unavailable(command: &str, owner: &'static str, globals: &provenant_cli::Glob
 }
 fn run(inv: provenant_cli::Invocation) -> u8 {
     let globals = &inv.globals;
+    let command = match inv.command {
+        Command::Hook(hook) => return hooks::run(hook, globals),
+        command => command,
+    };
     if let Err(error) = roots::validate_globals(globals) {
         // A bad selected root is a usage fault; the environment is not.
         let (status, code) = match error {
@@ -96,7 +101,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         };
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
-    match inv.command {
+    match command {
         Command::Root => {
             #[derive(Serialize)]
             struct RootInfo {
@@ -243,22 +248,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             }
         },
         Command::Check(check) => checks::run(check, globals),
-        Command::Hook(hook) => match hook {
-            provenant_cli::Hook::Claude(hook) => match hook {
-                provenant_cli::ClaudeHook::PreToolUse => {
-                    unavailable("hook claude pre-tool-use", "confinement hook", globals)
-                }
-                provenant_cli::ClaudeHook::PreCompact => {
-                    unavailable("hook claude pre-compact", "workflow hook", globals)
-                }
-                provenant_cli::ClaudeHook::Compact => {
-                    unavailable("hook claude compact", "workflow hook", globals)
-                }
-            },
-            provenant_cli::Hook::Git(provenant_cli::GitHook::PrePush { .. }) => {
-                unavailable("hook git pre-push", "confinement hook", globals)
-            }
-        },
+        Command::Hook(hook) => hooks::run(hook, globals),
     }
 }
 fn main() -> ExitCode {

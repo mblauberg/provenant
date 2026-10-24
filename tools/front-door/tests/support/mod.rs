@@ -25,6 +25,9 @@ impl TestRig {
         Self::in_directory(Path::new("/tmp"))
     }
     pub fn in_directory(parent: &Path) -> Result<Self> {
+        Self::with_object_format(parent, "sha1")
+    }
+    pub fn with_object_format(parent: &Path, format: &str) -> Result<Self> {
         let temp = tempfile::tempdir_in(parent)?;
         let root = fs::canonicalize(temp.path())?;
         let home = root.join("home");
@@ -82,7 +85,11 @@ impl TestRig {
             fs::create_dir_all(path.parent().ok_or("missing sentinel parent")?)?;
             fs::write(path, b"legacy sentinel\0unchanged")?;
         }
-        let output = rig.execute(Path::new("/usr/bin/git"), &["init", "-q"], None)?;
+        let output = rig.execute(
+            Path::new("/usr/bin/git"),
+            &["init", "-q", &format!("--object-format={format}")],
+            None,
+        )?;
         if output.termination != provenant_supervisor::exec::Termination::Exit(0) {
             return Err("git init failed".into());
         }

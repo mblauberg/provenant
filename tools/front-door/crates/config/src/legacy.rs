@@ -525,10 +525,19 @@ fn expand_home(template: &str, home: &Path) -> Result<String, InstallError> {
 /// registrations in this registry.
 type HookCleanup = (Vec<u8>, Vec<SelectorChange>, Vec<String>);
 
+#[cfg(test)]
 pub(crate) fn clean_hooks(
     bytes: &[u8],
     harness: Harness,
     checkout: &Path,
+) -> Result<HookCleanup, InstallError> {
+    clean_hooks_at_home(bytes, harness, checkout, Some(Path::new("/Users/fixture")))
+}
+pub(crate) fn clean_hooks_at_home(
+    bytes: &[u8],
+    harness: Harness,
+    checkout: &Path,
+    home: Option<&Path>,
 ) -> Result<HookCleanup, InstallError> {
     if harness != Harness::Claude {
         return Ok((bytes.to_vec(), Vec::new(), Vec::new()));
@@ -548,6 +557,16 @@ pub(crate) fn clean_hooks(
         ));
     };
     let registry = manifest()?;
+    let interpreters = registry
+        .utility_hook_interpreters
+        .iter()
+        .map(|s| match home {
+            Some(home) => home.to_str().map(|home| s.replace("{home}", home)).ok_or(
+                InstallError::InvalidConfig("legacy home path must be UTF-8"),
+            ),
+            None => Ok(s.clone()),
+        })
+        .collect::<Result<Vec<_>, InstallError>>()?;
     let entries: Vec<_> = registry
         .hooks
         .iter()
@@ -596,10 +615,12 @@ pub(crate) fn clean_hooks(
                 }
                 for entry in &expected_for_group {
                     let mut found = false;
-                    let commands =
-                        hook_commands(entry, checkout, &registry.utility_hook_interpreters)?;
-                    if commands.is_empty()
-                        && matches!(&entry.command_form, CommandForm::RecordedInterpreter)
+                    let commands = hook_commands(entry, checkout, &interpreters)?;
+                    if matches!(&entry.command_form, CommandForm::RecordedInterpreter)
+                        && !commands.iter().any(|command| {
+                            hook_value.get("command").and_then(Value::as_str)
+                                == Some(command.as_str())
+                        })
                         && hook_mentions_source(hook_value, entry, checkout)?
                     {
                         return Err(InstallError::LegacyUnresolved(
@@ -609,7 +630,7 @@ pub(crate) fn clean_hooks(
                     for command in commands {
                         let expected = hook_value_for(entry, command);
                         if hook_value.get("command") == expected.get("command")
-                            && hook_value != &expected
+                            && !same_hook(hook_value, &expected)
                         {
                             if entry.disposition.retained() {
                                 unresolved
@@ -620,7 +641,7 @@ pub(crate) fn clean_hooks(
                                 ));
                             }
                         }
-                        if hook_value == &expected {
+                        if same_hook(hook_value, &expected) {
                             if entry.disposition.retained() {
                                 unresolved
                                     .insert(format!("hooks.{event}[{group_index}] ({})", entry.id));
@@ -794,6 +815,50 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn same_hook(actual: &Value, expected: &Value) -> bool {
+    let (Some(actual), Some(expected)) = (actual.as_object(), expected.as_object()) else {
+        return false;
+    };
+    actual.get("type") == expected.get("type")
+        && actual.get("command") == expected.get("command")
+        && actual
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "command" | "timeout"))
+        && actual.get("timeout").is_none_or(|v| v.as_u64().is_some())
+}
+
+pub(crate) fn replace_hook_matches(
+    leaf: &Value,
+    spec: &crate::HookRegistration,
+    checkout: &Path,
+    home: &Path,
+) -> Result<bool, InstallError> {
+    let registry = manifest()?;
+    let interpreters =
+        registry
+            .utility_hook_interpreters
+            .iter()
+            .map(|s| {
+                home.to_str().map(|home| s.replace("{home}", home)).ok_or(
+                    InstallError::InvalidConfig("legacy home path must be UTF-8"),
+                )
+            })
+            .collect::<Result<Vec<_>, InstallError>>()?;
+    for entry in registry.hooks.iter().filter(|entry| {
+        entry.disposition.retained()
+            && Some(entry.harness) == spec.harness
+            && entry.event == spec.event
+            && entry.matcher.as_deref() == spec.matcher
+    }) {
+        for command in hook_commands(entry, checkout, &interpreters)? {
+            if same_hook(leaf, &hook_value_for(entry, command)) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn hook_value_for(entry: &HookEntry, command: String) -> Value {
     let mut object = Map::from_iter([
         ("type".to_owned(), Value::String("command".to_owned())),
@@ -927,9 +992,12 @@ mod tests {
     }
 
     #[test]
-    fn hook_command_rows_match_recorded_forms_and_utility_has_no_guessed_interpreter() {
+    fn hook_command_rows_match_recorded_forms_including_the_recorded_interpreter() {
         let registry = manifest().expect("compiled registry parses");
-        assert!(registry.utility_hook_interpreters.is_empty());
+        assert_eq!(
+            registry.utility_hook_interpreters,
+            ["{home}/Repos/provenant/.venv/bin/python"]
+        );
         assert_eq!(registry.hooks.len(), 6);
         let checkout = Path::new("/tmp/old checkout");
         let expected = [
@@ -953,7 +1021,12 @@ mod tests {
                 "routing_context_pre_tool",
                 Some("python3 '/tmp/old checkout/scripts/routing_context_hook.py' --pre-tool"),
             ),
-            ("utility_output", None),
+            (
+                "utility_output",
+                Some(
+                    "/Users/fixture/Repos/provenant/.venv/bin/python '/tmp/old checkout/scripts/utility_output_hook.py'",
+                ),
+            ),
         ];
         for (id, command) in expected {
             let entry = registry
@@ -961,8 +1034,13 @@ mod tests {
                 .iter()
                 .find(|entry| entry.id == id)
                 .expect("hook row");
-            let actual = hook_commands(entry, checkout, &registry.utility_hook_interpreters)
-                .expect("hook command is well formed");
+            let interpreters = registry
+                .utility_hook_interpreters
+                .iter()
+                .map(|s| s.replace("{home}", "/Users/fixture"))
+                .collect::<Vec<_>>();
+            let actual =
+                hook_commands(entry, checkout, &interpreters).expect("hook command is well formed");
             match command {
                 Some(expected) => assert_eq!(actual, vec![expected.to_owned()], "{id}"),
                 None => assert!(

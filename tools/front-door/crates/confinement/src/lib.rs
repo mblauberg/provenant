@@ -20,3 +20,5 @@ pub use permissions::ConfinementBackend;
 pub use redact::Redactor;
 pub use repo::{ReadOnlyRepo, VerifiedRepo, VerifiedWorktree, verify_worktree};
 pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility};
+pub mod push;
+pub mod shell_command;

@@ -174,6 +174,14 @@ fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
     if !path.is_absolute() {
         return Err(EdgeError::Git);
     }
+    // core.hooksPath is repository-controlled evidence, not authority to
+    // write another directory. Bind aliases before enforcing the selected root.
+    let checkout = std::fs::canonicalize(checkout).map_err(|_| EdgeError::Git)?;
+    let path = provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, &path)
+        .map_err(|_| EdgeError::Git)?;
+    if !path.starts_with(&checkout) {
+        return Err(EdgeError::Git);
+    }
     Ok(path)
 }
 

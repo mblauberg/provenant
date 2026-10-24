@@ -9,19 +9,14 @@ false report. Paste the first section into every lane and reviewer brief.
   and any test suite, build, browser walk or process that starts a database or
   server in a shared checkout. Before trusting a review, check no suite ran;
   cancel and redispatch a lane that started one.
-- Never pattern-kill processes host-wide: no `pkill`, `killall`, `kill $(pgrep …)`,
-  `kill -- -<pgid>` or other non-numeric kill target, bare or behind `sudo`,
-  `env`, `xargs`, `timeout` or `bash -c`. Stop explicit PIDs you started with
-  `scripts/reap.py <pid>… [--tree] [--grace S] [--started-before TIME]`; it
-  prints each process's age, parent, cwd and command first, and
-  `--started-before` refuses a PID that was reused after your process began.
-- Enforcement is opt-in. The lane-safety hook body is
-  `scripts/lane_safety_guard.py`; the pre-push guard is
-  `scripts/hooks/pre-push`. Harness hook registration belongs to the Rust
-  harness cut-over (state slice 4); the retired installer cannot register them.
-  The pre-push guard refuses pushes to the default branch from a linked
-  worktree, non-fast-forward updates and deletion of it, and pushed conflict
-  markers.
+- Direct process control is refused. Use `provenant cancel TARGET` for owned
+  work. The optional Bash hook is `provenant hook claude pre-tool-use`;
+  confinement and owned process handles enforce the underlying policy.
+- `provenant hook git pre-push` refuses default-branch deletion,
+  non-fast-forward pushes, default-branch pushes from linked worktrees and
+  conflict markers in pushed commits. `install --hooks on` registers only
+  the fixture-backed hooks in the Rust registry. The primary checkout keeps
+  its legacy copies until the authorised cut-over.
 - A lane has no inbox: it hears new instructions only through `resume` or a new
   dispatch.
 
