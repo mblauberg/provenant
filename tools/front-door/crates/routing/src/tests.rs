@@ -290,6 +290,41 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
     ));
     Ok(())
 }
+#[test]
+fn pool_skips_a_member_without_the_requested_effort() -> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let mut members = Vec::new();
+    for (name, efforts) in [
+        ("fixture-low", vec!["low"]),
+        ("fixture-high", vec!["low", "high"]),
+    ] {
+        let model = ModelId::parse(&format!("codex/{name}"))?;
+        catalogue.models.push(ModelEntry {
+            model: model.clone(),
+            efforts: efforts.into_iter().map(Into::into).collect(),
+            evidence_ref: "synthetic-controls".into(),
+            family: None,
+            trains_on_prompts: None,
+        });
+        members.push(RoutePoolMember {
+            model,
+            effort: None,
+            free: false,
+        });
+    }
+    catalogue.pools.insert("mixed".into(), members);
+    let config = RoutingConfig::default();
+    let query = RouteRequest {
+        choice: RouteChoice::NamedRoute("mixed".into()),
+        effort: Some("high".into()),
+        confidential: false,
+        allow_free: false,
+        fallback: Fallback::None,
+    };
+    let route = resolve(&query, &context(&catalogue, &config, now()?))?;
+    assert_eq!(route.model, "fixture-high");
+    Ok(())
+}
 fn availability() -> AvailabilityRecord {
     AvailabilityRecord {
         schema_version: 1,

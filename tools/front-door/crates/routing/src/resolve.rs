@@ -336,7 +336,15 @@ pub fn resolve(
                         continue;
                     }
                     let effort = request.effort.as_deref().or(member.effort.as_deref());
-                    let option = candidate(&member.model, effort, context)?;
+                    // One unusable member is excluded; the rest of the pool still competes.
+                    let option = match candidate(&member.model, effort, context) {
+                        Ok(option) => option,
+                        Err(RoutingError::UnsupportedEffort) => {
+                            exclusions.push("unsupported effort".into());
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if matches!(&option.readiness, RouteReadiness::Ready { .. }) {
                         selected = Some((&member.model, effort, option));
                         break;
