@@ -1,3 +1,5 @@
+// The worktree integration target includes main.rs with its own test harness.
+#![allow(dead_code)]
 use super::*;
 use provenant_core::{PathResolver, RootInputs};
 use std::path::PathBuf;
