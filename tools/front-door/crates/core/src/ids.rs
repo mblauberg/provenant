@@ -54,7 +54,17 @@ macro_rules! ids {
     )+};
 }
 ids!(
-    HostId, ProjectId, RepoId, ActorId, RunId, TaskId, ClaimId, MessageId, AttemptId, DeliveryId,
+    HostId,
+    ProjectId,
+    WorkspaceId,
+    RepoId,
+    ActorId,
+    RunId,
+    TaskId,
+    ClaimId,
+    MessageId,
+    AttemptId,
+    DeliveryId,
 );
 
 /// Caller-selected idempotency key, as specified by execution-run.
