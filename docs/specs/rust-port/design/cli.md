@@ -633,3 +633,49 @@ supervisor's worktree flags. Step 1 freezes the parser from that table.
    the isolated end-to-end suite passes on both Macs. Every build PR reports
    Python/TS/Rust `Net lines:` and explains growth. Lanes do not merge or arm
    auto-merge.
+
+## Final legacy cut (Lane F)
+
+The cut-over chair authorises deletion of the entire Python orchestrator before
+parallel run/dispatch replacement lands. Rust run/supervisor/confinement owns
+custody and publication; no Python bridge or differential oracle survives.
+The historical inventories above describe the source baseline, not files to
+invoke. Current command grammar lives in `crates/cli/src`.
+
+Decisions taken for the chair:
+
+- Remove Node workspace bootstrap, package manifests/lock, test tooling and CI
+  because no Node/TypeScript workspace remains. Remove the Python-only CI jobs,
+  their shards, path filters and cached-tree markers. Every surviving Rust,
+  harness asset and generic job runs on each tested tree; `ci-status` requires
+  every one to succeed.
+- Retire the old JSON record schemas and synthetic fixtures with their Python
+  judge. Typed Rust records and owner boundary tests define current contracts.
+- Keep the Git pre-push script: `provenant hook git pre-push` parses, but its
+  binary handler still returns unavailable. Delete the adapter when the Rust
+  confinement hook is runnable. Keep the small post-merge Git adapter because
+  there is no Rust post-merge leaf. It resolves integration/range OIDs and calls `provenant worktree remove
+  --merged --integration OID --since OID`, without a Python cleanup engine.
+- Delete `lease.py`: the run-directory driver lease is explicitly retired by
+  execution-run. Rust custody is separate from `provenant fabric landing`.
+  Delete `fabric_policy.py` with its Python differential test; the Rust
+  fabric-runtime policy owner retains direct behaviour tests.
+- Keep the three state/config Python helpers and the delivery/shared Python
+  files assigned to lanes D/E. Their deletion is outside this lane's scope.
+  [Remaining Python inventory](../remaining-python.md) lists every file and
+  its owner. No TypeScript or JavaScript implementation remains.
+
+Route attribution for this cut: `codex/gpt-6.1-sol@medium` via Fabric.
+The author does not infer any other model identity. Chair review and green
+exact-head CI remain merge gates; this lane does not merge.
+
+Merge dependency: lane E must replace the delivery validator that imports
+`scripts/git_evidence.py` and the deleted orchestrator helpers. These are
+explicitly authorised parallel deletions, not an assertion that the retained
+Python delivery implementation remains runnable. No shim is added.
+
+The Claude pre-tool-use hook is also a cut-over dependency on the CLI/confinement
+lane: its grammar exists but the current binary handler returns unavailable.
+Do not register that leaf until its Rust handler and fixture checks pass.
+Local `check harness` on this Mac is blocked before scanning by the existing
+pinned-Git selector choosing a Homebrew symlink; CLI owns that selector.

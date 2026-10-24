@@ -74,8 +74,8 @@ After dispatch, use one `provenant lanes --wait N` to wait up to N seconds
 for any selected lane. Add `--condition all` to wait for the whole selection;
 `--all` selects all lanes. Re-arm after each result. Use `--limit N` to bound
 the report and `provenant output RUN/TASK/ATTEMPT --tail N` to read a result
-tail. For CI, `scripts/provenant-pr checks <pr> --wait` exits 0 green, 1 failed,
-4 when the required set is unreadable, and 124 on timeout. Do not start one
+tail. For CI, inspect the exact PR head with `gh pr checks <pr>`; the chair waits
+for the required `ci-status` check before merging. Do not start one
 wait per lane. `provenant lanes` is the source of truth after compaction or
 restart; page further results with its cursor. Read retained events with
 `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.

@@ -1,5 +1,9 @@
 # Spec: Rust lane supervisor and a single Rust front door
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../rust-port/design/README.md) for owners.
+
 Status: **superseded** by PORTING.md version 7 and the accepted Rust area
 designs. The rollout below is historical, not an operator procedure.
 

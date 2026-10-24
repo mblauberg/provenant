@@ -1,9 +1,8 @@
-# Codex capability probing
+# Codex capabilities
 
-Codex model and effort support can change with CLI version and account. `skills/orchestrate/scripts/capabilities.py codex --out .agent-run/scratch/codex-capabilities.json` captures the current CLI capability snapshot. Use it when a direct CLI fallback needs to choose a model or effort. Fabric's catalogue and `fabric_adapters` already expose the applied route on its normal path.
-
-The probe records available model IDs, effort levels and version. A fresh model entry is runtime evidence, while the dated product catalogue supplies alias order and audit context. A requested model absent from the snapshot is a warning or model substitution when a runnable route exists. A requested effort absent from that model's supported set is substituted to the nearest supported value and recorded. Explicit unknown model IDs pass through with a note when the provider accepts them. Do not claim the model was observed unless the provider session or rollout shows it.
-
-Historical resolver statuses such as `capability_discovery_failed`, `capability_snapshot_stale`, `capability_model_unavailable`, `no_candidate_available`, `effort_unsupported` and `no_effort_available` describe the old direct resolver. Fabric v2 reports typed preflight failures only when it cannot run, and otherwise reports the applied model and effort plus warnings. A stale snapshot calls for a new probe, not an invented model ID.
-
-Never put credentials in the capability file or command line. Keep the file under `.agent-run/scratch/` and let `scripts/clean.py` expire it.
+Use `provenant route list --adapter codex` to inspect the current catalogue.
+Resolve an exact `codex/ID` with `provenant route resolve --model codex/ID`
+and an explicit supported effort. Providers owns argv, environment and wire
+capabilities; dispatch returns a typed refusal for unsupported requests.
+Never infer or invent the resolved model name. Copy the attempt receipt route.
+Do not write credentials into capability files, prompts or command lines.

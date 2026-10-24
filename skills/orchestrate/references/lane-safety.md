@@ -11,13 +11,15 @@ false report. Paste the first section into every lane and reviewer brief.
   cancel and redispatch a lane that started one.
 - Never pattern-kill processes host-wide: no `pkill`, `killall`, `kill $(pgrep …)`,
   `kill -- -<pgid>` or other non-numeric kill target, bare or behind `sudo`,
-  `env`, `xargs`, `timeout` or `bash -c`. Stop explicit PIDs you started with
-  `scripts/reap.py <pid>… [--tree] [--grace S] [--started-before TIME]`; it
-  prints each process's age, parent, cwd and command first, and
-  `--started-before` refuses a PID that was reused after your process began.
+  `env`, `xargs`, `timeout` or `bash -c`. Cancel an owned run with
+  `provenant cancel RUN/TASK --operation-id ID` for owned runs. Supervisor
+  validates process identity and keeps custody until settlement.
 - Enforcement is opt-in. The lane-safety hook body is
-  `scripts/lane_safety_guard.py`; the pre-push guard is
-  `scripts/hooks/pre-push`. Harness hook registration belongs to the Rust
+  `provenant hook claude pre-tool-use` after the CLI/confinement lane makes
+  its currently unavailable handler runnable. Do not register the stub. The
+  pre-push guard is
+  `scripts/hooks/pre-push` until the Rust pre-push handler is runnable.
+  Harness hook registration belongs to the Rust
   harness cut-over (state slice 4); the retired installer cannot register them.
   The pre-push guard refuses pushes to the default branch from a linked
   worktree, non-fast-forward updates and deletion of it, and pushed conflict

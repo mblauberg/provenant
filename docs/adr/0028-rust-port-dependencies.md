@@ -1,5 +1,9 @@
 # ADR 0028 - Port the whole project to Rust with a small crate allowlist
 
+> Legacy source references below describe the pre-rewrite implementation.
+> Use `provenant help` for current Rust commands and the accepted
+> [Rust designs](../specs/rust-port/design/README.md) for owners.
+
 **Status:** Accepted 2026-10-23 (user direction in session). Decisions 1, 5's
 PyYAML gate and migration lane, and 7's transition retention are superseded
 by [ADR 0029](0029-rust-rewrite-in-one-pass.md).

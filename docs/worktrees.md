@@ -1,283 +1,44 @@
 # Shared worktree policy
 
-The project constitution (`HARNESS.md`) pre-authorises implementation branches
-and linked worktrees. Creating branches or worktrees and removing clean ones
-needs no extra authority. Dirty worktrees are refused and unmerged branches
-are kept; force removal and deleting an unmerged branch remain separately
-gated. Merge authority is repo-based; see the repository's
-workflow runbook (for this repo, `docs/runbooks/github-workflow.md`).
+The [constitution](../HARNESS.md) pre-authorises implementation branches and
+linked worktrees. Work in a registered linked worktree under the repository's
+`.worktrees/`; keep the primary checkout on the integration branch. The primary
+Provenant checkout is the frozen live install until authorised cut-over.
 
 ## Primary checkout stays on main
 
-The primary checkout is the live harness for every project that uses it:
-installed skills and scripts run from it. Keep it on the default branch and do
-all branch, integration and lane work in linked worktrees. Fast-forward the
-primary checkout only on an approved merge. If a session starts with it on
-another branch, tell the user before working.
+Never switch, pull or reinstall the live primary checkout during the rewrite.
+The chair merges through the [repository workflow](runbooks/github-workflow.md).
 
 ## Canonical location
 
-Every authorised linked worktree is a direct child of the owning repository's
-primary checkout:
-
-```text
-<primary-repository-root>/.worktrees/<branch-with-slashes-as-dashes>
-```
-
-All agent platforms use that same directory. Never place linked worktrees in a
-platform cache, `/tmp`, a home-level pool, the current linked worktree, or an
-artefact `scaffolds/` directory. A nested repository or submodule owns its own
-`.worktrees`. Multi-repository work uses one authorised worktree per repository.
-
-Project instructions may strengthen this invariant. Only a direct user
-instruction may make a one-run location exception.
+`<primary-repository-root>/.worktrees/<branch-with-slashes-as-dashes>` is the
+shared location across agent platforms. Do not create nested worktrees.
 
 ## Helper
 
-Use the checked helper. It validates names and repository context, and refuses
-unsafe or dirty removals. Removing a clean worktree needs no extra authority.
-For an attached branch, it checks ancestry against the primary checkout's
-local integration branch before `git branch -d`; the primary checkout must
-be on that branch. Otherwise it keeps the branch and reports that. This
-prevents a topic branch or configured upstream from counting as a merge into
-the project branch.
-
 ```sh
-scripts/worktree create NAME --detach REV
-scripts/worktree create --new-branch BRANCH \
-  --start-point REV
-scripts/worktree create --existing-branch BRANCH
-scripts/worktree list
-scripts/worktree check
-scripts/worktree validate-context
-scripts/worktree verify-claim
-scripts/worktree remove NAME
+provenant worktree create fix/repo-example --base origin/main
+provenant worktree list
+provenant worktree remove fix-repo-example
 ```
 
-`remove` also refuses a worktree with a live non-terminal writer lane; `--force` overrides.
-
-`validate-context` rejects invalid linked-worktree metadata before a lane
-trusts its own checkout; `verify-claim` enforces claim verification at an
-acceptance boundary.
-Claim verification also runs the instruction range gate from the primary
-checkout's HEAD to the claimed commit: any commit that changes `.agents/` to a
-version the primary does not hold, and that no chair release covers, is
-rejected without deleting or restoring the branch. The gate needs no dispatch
-record, so a worktree that was never dispatched is checked the same way. See
-[the gate and release procedure](specs/fabric-v2.md).
-
-The helper resolves the primary checkout through Git's common directory, checks
-the name and protected root, and refuses unsafe creation/removal. A create
-receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
-and branch/detached state. It does not emit the supplied repo path as
-`repo_root`; record that path and the authority provenance separately when the
-run contract requires them. A removal receipt emits only `status`, `name` and
-`primary_root`.
-For branch worktrees, the default name is the branch with `/` replaced by `-`.
-The helper warns when an explicit name differs, and `scripts/clean.py` sends
-such a worktree to triage rather than guessing its branch.
-
-### npm dependencies
-
-Creating a worktree clones the primary checkout's `node_modules` with
-copy-on-write when its dependency preflight passes and both checkouts have the
-same `package-lock.json`. It also clones existing `runtime/*/node_modules`
-directories when those packages exist.
-macOS uses APFS clone files; Linux requires reflink support. The cloned dependencies stay local to each checkout.
-The measured primary tree was 131 MB; four worktrees took about
-4.3 seconds to create and added about 3.3 MB on disk.
-
-If the lockfiles differ, the primary dependencies are missing or invalid, or
-the filesystem cannot make a copy-on-write clone, creation succeeds and its
-JSON receipt reports `node_modules: "skipped"` with a reason. It never makes a
-full copy or runs npm during creation. Pass `--no-node-modules` to skip the
-attempt explicitly; the receipt reports `"disabled"`.
-
-When `npm run check` starts in a linked worktree and its dependency preflight
-fails, it first tries the same clone when the lockfiles match. If cloning is
-not available or the lockfiles differ, it runs
-`npm ci --prefer-offline --no-audit --no-fund` in that worktree, then the
-normal preflight continues. It prints one line naming the action. In the
-primary checkout, checks retain the existing behaviour and fail with the
-preflight message; they never install automatically.
+Rust confinement validates repository identity and refuses primary, dirty,
+live or unknown writers. No force removal is offered.
 
 ## Ownership and cleanup
 
-Run `scripts/clean.py` from the project for a dry-run classification and plan
-digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
---plan <digest>` delegates eligible removal to `scripts/worktree remove`
-after merge proof. The digest names a saved plan (valid for one day); apply deletes only its rows that are still
-eligible and skips the rest, so live lanes do not void an approval. Clean merged worktrees need no
-additional authority to remove. Run artifacts and retention are described in
-[Fabric v2](specs/fabric-v2.md).
-
-- One stage owner writes a worktree at a time. Sibling agents use separate
-  worktrees or artefact-only scopes.
-- Worktrees share Git objects, configuration and hooks; they are not security
-  sandboxes. Secrets, LFS and submodules need their own deliberate setup.
-- A filesystem copy of a linked worktree keeps its `.git` pointer and can still
-  write the source repository's refs, index and local configuration. For a Git
-  fixture, use a fresh repository or copy the required files without `.git`,
-  then run `git init` in the copy. The harness also rejects symlinked `.git`
-  metadata because it cannot prove which checkout owns the resulting writes.
-- Worktrees do not share ignored dependencies or build output. Before treating
-  a suite failure as a product defect, run the owning repository's declared
-  lockfile bootstrap and build commands in that worktree, then record the exact
-  commands and results. Do not guess the package manager or install mode.
-- Live tooling can point into the primary checkout, so moving its branch breaks
-  things a clean Git status will not reveal. MCP server registrations and
-  `~/.local/bin` symlinks both name paths inside the checkout, and they follow
-  the working tree rather than a branch. Before moving the primary checkout,
-  check for consumers that resolve into it; if any exist, do the work in a
-  linked worktree, or repoint the consumer first and then invoke the installed
-  command to confirm it still resolves. Editing a template in the repository
-  does not update an already installed copy: rebuild and install a release
-  containing the updated asset, then exercise the installed command, because a
-  clean tree is not evidence that anything outside the tree still works.
-- Before removal, confirm a clean status, no live agent/pane and no unconsumed
-  handoff. Use `scripts/worktree remove NAME`, never raw
-  `git worktree remove` and never filesystem deletion: the helper runs the
-  safety checks that removal depends on.
-- Force removal of a dirty worktree, and deletion of an unmerged branch, require
-  separate user authority. Post-merge cleanup does not; see below.
-- `.worktrees/` is protected infrastructure: context cleaners, broad backups
-  and scratch pruning must skip it.
-
-## Post-merge pruning
-
-A merge is the authority-bearing event for cleaning up after itself. Once a
-branch is merged into the integration branch, the agent that observed the merge
-prunes that branch's own artefacts without a further user gate. This is standing
-across every project the harness is loaded into: a merged worktree left behind
-is stale state that later agents mistake for live work, and each one carries its
-own uninherited dependency tree, in this repository roughly 400 MB apiece.
-
-Git hook registration is managed by Provenant. Include
-`--hooks on` in the `provenant install` command described in the
-[front-door runbook](runbooks/front-door.md). The installer resolves hook paths
-from the verified `--legacy-checkout` and uses the compiled manifest to
-identify legacy links. It preserves unmatched or foreign entries and reports
-unresolved manifest entries. Do not link or unlink Git hooks by hand.
-
-For a manual prune after one merge, name each branch that merge brought in:
+One writer owns each worktree. Removing an authorised merged worktree uses
+pinned Git evidence and an explicit branch or merge range:
 
 ```sh
-scripts/clean.py --prune-merged --branch <merged-branch> --repo <primary-root>
+provenant worktree remove --merged --integration OID --branch fix/repo-example
+provenant worktree remove --merged --integration OID --since PRE_MERGE_OID
 ```
 
-`--prune-merged` requires `--branch` (repeatable) or `--merged-since`; it refuses
-an unscoped sweep.
-
-Prune immediately after the merge, in this order:
-
-```sh
-# 1. Establish where you are. Both must match before anything mutates.
-test "$(git -C <primary-root> rev-parse --show-toplevel)" = "<primary-root>"
-test "$(git -C <primary-root> symbolic-ref --quiet --short HEAD)" = "<integration-branch>"
-
-# 2. Sync the integration branch.
-git -C <primary-root> fetch origin
-git -C <primary-root> merge --ff-only origin/<integration-branch>
-```
-
-Then choose the proof that matches how the pull request merged. For a merge
-commit, ancestry is the gate:
-
-```sh
-git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
-```
-
-For a squash merge, the pull request must be merged, its head SHA must equal the
-local branch tip, and its merge commit must be in the integration branch:
-
-```sh
-gh pr list --state merged --head <merged-branch> --json number,headRefOid,mergeCommit
-git -C <primary-root> merge-base --is-ancestor <merge-commit-oid> <integration-branch>
-```
-
-Only after the applicable proof passes, prune that branch's artefacts. The
-helper removes the clean worktree and deletes the local branch after either
-ancestry or squash proof. Force deleting any unproven branch remains separately
-gated:
-
-```sh
-scripts/worktree remove <name> --repo <primary-root>
-git -C <primary-root> worktree prune
-git -C <primary-root> remote prune origin
-```
-
-Constraints that keep this narrow:
-
-- **Establish the repository and branch before mutating.** `merge --ff-only`
-  fast-forwards whatever `<primary-root>` currently has checked out, and the
-  helper acts on its own current repository unless given `--repo`. A prune run
-  from the wrong checkout, or against a detached HEAD, silently moves the wrong
-  ref. Step 1 is not optional.
-- **Prove the merge, not the status, and use the proof that fits the merge.**
-  For a merge commit,
-  `git merge-base --is-ancestor <merged-branch> <integration-branch>` exiting 0
-  is the proof, because it names both refs explicitly and is cheap.
-
-  A **squash merge produces a new commit with no ancestry link**, so that gate
-  refuses a branch that is fully merged. An agent following it either stalls or
-  reaches for the force-delete the policy exists to prevent. When the pull
-  request was squash-merged, prove *content* instead: the pull request
-  reports `MERGED`, and
-
-  ```sh
-  git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
-  ```
-
-  is empty. **Scope it to the paths the branch touched.** An unscoped diff also
-  reports everything the integration branch gained *after* the branch was cut,
-  which reads as divergence: one prune showed 124 deletions that all came from an
-  unrelated later merge, and was empty once scoped to its two files.
-
-  `gh pr view <n> --json state` reporting `MERGED` is not sufficient alone: it
-  says nothing about which repository the pull request belongs to, nor whether
-  its head and base refs are the branches in front of you. Verify `headRefName`
-  and `baseRefName` too. Never infer a merge from a green pull request or a
-  passing suite.
-- **`git cherry` is trustworthy in one direction only.** It compares patch ids,
-  so a leading `-` proves an equivalent patch is already upstream and is sound
-  grounds for closing or dropping that commit. A leading `+` proves only that
-  no patch-identical commit was found, which is not the same as the work being
-  outstanding: upstream work reshaped on the way in, including by a squash
-  merge, still reports `+`. Close on `-`, and settle a `+` by reading the
-  current upstream content and comparing behaviour.
-- **Only that branch's artefacts.** The authority covers the worktree created
-  for the merged branch, that branch's local ref, and stale remote-tracking refs
-  for branches the forge already deleted. It does not extend to any other
-  worktree, branch or checkout.
-- **`git branch -d` is not a merge check.** Git deletes a branch that is merged
-  into *its upstream*, even when it is not merged into HEAD, warning and exiting
-  0. Every pushed implementation branch has an upstream, so this is the common
-  case, not the exotic one. Verified directly:
-
-  ```text
-  warning: deleting branch 'feat' that has been merged to
-           'refs/remotes/origin/feat', but not yet merged to HEAD
-  Deleted branch feat (was 95ef3c3).
-  ```
-
-  It fails the other way too: after a **squash** merge `-d` refuses a branch that
-  is fully merged, because it looks for ancestry that no longer exists. Both
-  directions mislead, which is why step 3 is the safeguard and `-d` is only a
-  second line of defence.
-
-  After a merge commit, use `-d`; if Git refuses despite step 3 passing,
-  something disagrees with your model of the repository, so stop and report.
-  After a squash merge whose content gate in step 3 came back empty, `-D` is the
-  correct command and is covered by this standing authority; the proof has
-  already been made, and `-d` cannot see it. `-D` on a branch whose step-3 gate
-  did *not* pass is still a force-delete needing separate authority.
-  Worktree removal stays unforced either way: a dirty worktree is unconsumed
-  work, not debris.
-- **Retention beats reclamation.** Where a repository requires a run directory,
-  receipt or artefact to survive the merge, that requirement wins; prune only
-  after it is satisfied. Check the repository's own workflow runbook.
-- **The primary checkout stays on the integration branch.** Pruning never leaves
-  it on a deleted or detached ref.
-
-Pruning is not conditional on disk pressure. Do it as the last step of the merge,
-not as a later sweep.
+The integration OID and scope prevent a hook from sweeping unrelated branches.
+`scripts/hooks/post-merge` is the remaining Git adapter: it resolves HEAD and
+ORIG_HEAD, checks the primary integration checkout and invokes this Rust leaf.
+It reports failure without changing the merge result. The old clean/reap
+engines, retention plans and Node dependency cloning are retired. Guardian
+settlement owns classified scratch cleanup; retained history stays on disk.

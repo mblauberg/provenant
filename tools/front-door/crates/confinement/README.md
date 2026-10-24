@@ -52,9 +52,8 @@ owns settlement; this module never removes it. Existing SQLite state requires
 a snapshot mechanism and is refused at preparation. Private WAL, SHM or journal
 state refuses copy-back rather than silently dropping committed context.
 
-The Python `agy_home.py` remains live: `provider_exec.py` imports it and calls
-`needs_ps_shim`, `stage_ps_shim`, `stage_agy_home` and `finish_agy_home`.
-Its tests remain until that caller and the Python ps shim retire.
+The Python home staging, provider caller and ps shim are retired in the
+Lane F cut. Rust confinement and providers own the remaining staging contract.
 
 Merged pruning takes explicit branches and retains candidates whose tip is on
 the integration first-parent chain, including fast-forward merges. Linked trees

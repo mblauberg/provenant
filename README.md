@@ -83,19 +83,16 @@ legacy entries remain visible in the install result and `check install`
 findings. `uninstall --harness NAME` removes unchanged owned entries and keeps
 the state root, release assets and running binary.
 
-For checkout development, install the locked Python and Node tools, then run the
-Rust config checks and Node preflight:
+For checkout development, use the Rust workspace:
 
 ```sh
-uv sync --locked --only-group test
-npm ci
-(cd tools/front-door && cargo test -p provenant-config)
-npm run check
+(cd tools/front-door && cargo check --workspace --all-targets)
+provenant check harness
 ```
 
-`provenant check harness` validates tracked skills, local assets, Markdown
-links and issue forms in the selected project. `npm run check` validates dependencies for that checkout and reports
-missing packages; it never installs or borrows another checkout's tree.
+Run only focused crate tests locally. CI runs workspace tests, Rust lint,
+macOS release checks, spelling, workflow lint and Markdown link checks.
+`provenant check harness` validates tracked skills, assets, links and issue forms.
 
 ## Providers
 

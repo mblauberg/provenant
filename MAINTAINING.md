@@ -48,7 +48,7 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: `tests/test_projection.py` for retained runtime-graph projections;
+- Drift gate: Rust harness asset checks for retained runtime-graph projections;
   other prose is review-checked
 
 ### Merge policy
@@ -72,7 +72,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
 
 1. **Source-owned.** Marked regions in the README and
    `docs/ARCHITECTURE.md` remain maintained documentation.
-   `tests/test_projection.py` binds the architecture regions to
+   Rust harness asset checks binds the architecture regions to
    `config/risk-policy.json` and the delivery lifecycle contract. The README
    skill count is machine-checked; its catalogue prose is review-owned.
 2. **Review-checked.** Runtime schema and migration structure is owned by code
@@ -215,15 +215,13 @@ numerator and denominator, model and harness versions.
 
 Run the checkout gates, or require exact-head `ci-status`:
 
-For a pull request branch, run only the tests covering changed files; the hosted runner runs the gates on the pull request head, and for heavy files such as `tests/test_cf_dispatch.py`, run only the named failing test.
+For a pull request branch, run only focused Rust crate tests. Hosted CI runs the workspace gates on the exact PR head.
 
 ```sh
 provenant check config
 provenant check install
 provenant check harness
 provenant check release
-npm run check
-scripts/static-security-check.py
 git diff --check
 ```
 

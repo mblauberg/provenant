@@ -38,7 +38,7 @@ severity.
 
 At adjudication, the chair records each finding as `confirmed`,
 `false_positive`, `reviewer_bias` or `duplicate` with
-`delivery_receipt.py finding`; duplicate findings also name
+the Rust workflow owner; duplicate findings also name
 `--duplicate-of`.
 
 ## Output
