@@ -376,8 +376,9 @@ list under `--legacy-checkout ABS` includes:
   installer inventory. Preserve Herdr entries in `~/.codex/hooks.json` and
   `~/.claude/settings.json`, every foreign entry and array order.
 
-The installer prints every harness-config change before applying it;
-`install --dry-run` prints the same plan without writes. No directory scan or
+Human install output reports create, replace and remove counts and lists the
+affected paths; JSON emits the action list once in the result envelope.
+`install --dry-run` prints that summary without writes. No directory scan or
 substring match establishes ownership. `check install` verifies managed state;
 `uninstall` removes only still-owned values. Reapply `install` for recovery.
 These are build/cut-over requirements; this design lane never installs.

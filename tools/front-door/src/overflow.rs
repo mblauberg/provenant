@@ -1,11 +1,7 @@
 //! Publish an oversized ordinary result under the fresh state root, atomically.
-use provenant_supervisor::fs::{Directory, Publication, PublishMode};
+use provenant_supervisor::fs::{LocalFs, Publication, PublishMode};
 use serde::Serialize;
-use std::{
-    ffi::OsStr,
-    io,
-    path::{Component, Path},
-};
+use std::{ffi::OsStr, io, path::Path};
 
 pub fn publish<T: Serialize>(
     result: &provenant_records::CommandResult<T>,
@@ -19,20 +15,10 @@ pub fn publish<T: Serialize>(
         let project = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let roots = crate::roots::roots(globals, &assets, &project)?;
         let path = roots.state.as_path().join("tmp/results");
-        let mut dir = Directory::root(true)?;
-        for component in path.components() {
-            if let Component::Normal(name) = component {
-                match dir.mkdir(name, 0o700) {
-                    Ok(()) => dir.sync()?,
-                    Err(error) if error.is_exists() => {}
-                    Err(error) => return Err(error.into()),
-                }
-                dir = dir.open_verified_directory(name)?;
-            }
-        }
+        let dir = provenant_config::private_directory(&path, true, &LocalFs)?;
         let name = provenant_supervisor::fs::temporary_name()?;
         let bytes = serde_json::to_vec(result)?;
-        match dir.atomic_write(&name, ".result-", &bytes, PublishMode::NoReplace)? {
+        match dir.atomic_write(&name, ".result-", &bytes, 0o600, PublishMode::NoReplace)? {
             Publication::Durable => {}
             Publication::VisibleDurabilityUnconfirmed { sync_error } => {
                 return Err(sync_error.into());

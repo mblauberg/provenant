@@ -19,6 +19,8 @@ use std::{
 };
 use thiserror::Error;
 
+const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error(transparent)]
@@ -1295,6 +1297,16 @@ pub(crate) fn directory(
     Ok(dir)
 }
 
+/// Open or create an absolute private directory tree without following path
+/// components. Mount boundaries are re-anchored only after identity checks.
+pub fn private_directory(
+    path: &Path,
+    create: bool,
+    fs: &dyn SafeFs,
+) -> Result<Box<dyn SafeDir>, InstallError> {
+    directory(path, create, fs)
+}
+
 pub(crate) fn directory_scoped(
     path: &Path,
     root: &Path,
@@ -1428,7 +1440,7 @@ fn snapshot_at_inspected(
         evidence.metadata(path, metadata);
     }
     let limit = if name == OsStr::new(".claude.json") {
-        16 * 1024 * 1024
+        CLAUDE_CONFIG_LIMIT
     } else if Path::new(name)
         .extension()
         .is_some_and(|ext| matches!(ext.to_str(), Some("json" | "jsonc" | "toml" | "md")))
@@ -1844,6 +1856,26 @@ fn check_install_inspected(
 /// Removes unchanged selected harness entries, preserves user edits, and
 /// forgets the selected harnesses in the receipt. State and the stable command
 /// remain installed.
+fn not_installed(
+    receipt_path: &Path,
+    reporter: &mut dyn InstallReporter,
+) -> Result<InstallOutcome, InstallError> {
+    reporter.preview(&[]).map_err(InstallError::Preview)?;
+    let findings = vec![InstallFinding {
+        rule: "not_installed".into(),
+        path: AbsolutePath::new(receipt_path)?,
+    }];
+    reporter
+        .findings(&findings)
+        .map_err(InstallError::Preview)?;
+    Ok(InstallOutcome {
+        findings,
+        actions: Vec::new(),
+        manual_includes: Vec::new(),
+        dry_run: false,
+    })
+}
+
 pub fn uninstall(
     targets: &Targets,
     context: &InstallContext<'_>,
@@ -1857,20 +1889,7 @@ pub fn uninstall(
     let receipt_path = state_root.join("install/receipt.json");
     let before_receipt = snapshot(&receipt_path, fs)?;
     let Some(mut receipt) = read_receipt(targets, fs)? else {
-        reporter.preview(&[]).map_err(InstallError::Preview)?;
-        let findings = vec![InstallFinding {
-            rule: "not_installed".into(),
-            path: AbsolutePath::new(&receipt_path)?,
-        }];
-        reporter
-            .findings(&findings)
-            .map_err(InstallError::Preview)?;
-        return Ok(InstallOutcome {
-            findings,
-            actions: Vec::new(),
-            manual_includes: Vec::new(),
-            dry_run: false,
-        });
+        return not_installed(&receipt_path, reporter);
     };
     let requested: BTreeSet<_> = targets
         .harnesses
@@ -1880,20 +1899,7 @@ pub fn uninstall(
     let registered: BTreeSet<_> = receipt.harnesses.iter().copied().collect();
     let selected: BTreeSet<_> = requested.intersection(&registered).copied().collect();
     if selected.is_empty() {
-        reporter.preview(&[]).map_err(InstallError::Preview)?;
-        let findings = vec![InstallFinding {
-            rule: "not_installed".into(),
-            path: AbsolutePath::new(&receipt_path)?,
-        }];
-        reporter
-            .findings(&findings)
-            .map_err(InstallError::Preview)?;
-        return Ok(InstallOutcome {
-            findings,
-            actions: Vec::new(),
-            manual_includes: Vec::new(),
-            dry_run: false,
-        });
+        return not_installed(&receipt_path, reporter);
     }
 
     let mut removals = Vec::new();
