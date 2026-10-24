@@ -1,8 +1,11 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
 pub mod check;
+pub mod domains;
 pub mod fabric;
+pub mod route;
 pub use fabric::Fabric;
+pub use route::Route;
 mod grammar;
 pub mod install;
 mod render;

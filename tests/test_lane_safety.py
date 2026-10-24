@@ -1,4 +1,4 @@
-"""Lane-safety hooks: kill guard tokeniser, reap, pre-push guard and settings merge."""
+"""Lane-safety hooks: kill guard tokeniser, reap, pre-push guard."""
 
 from __future__ import annotations
 

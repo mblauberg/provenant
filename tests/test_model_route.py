@@ -113,7 +113,6 @@ def test_task_classification_is_advisory_and_role_is_only_a_label():
 
 def test_task_classification_uses_configured_rules_from_brief(monkeypatch):
     router = load_router()
-    monkeypatch.setattr(router.task_classifier, "_run_model", lambda *a, **k: None)
     with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": "audit this repository", "PROVENANT_TASK_MODE": "read_only"}):
         result, route = resolve("--adapter", "claude", "--role", "worker")
     assert route["status"] != "task_class_role_mismatch"
@@ -122,7 +121,6 @@ def test_task_classification_uses_configured_rules_from_brief(monkeypatch):
 
 def test_advisory_classification_keeps_an_explicit_alias_route(monkeypatch, capsys):
     router = load_router()
-    monkeypatch.setattr(router.task_classifier, "_run_model", lambda *a, **k: None)
     with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": "audit this", "PROVENANT_TASK_MODE": "read_only"}):
         code = router.main(["resolve", "--adapter", "claude", "--alias", "senior", "--role", "worker"])
     route = json.loads(capsys.readouterr().out)

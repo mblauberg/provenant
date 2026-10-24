@@ -1,0 +1,41 @@
+# Listing/answering evidence only. No row enables execution or proves lineage.
+# No retained recording proves effort controls, so efforts are empty.
+schema_version = 1
+revision = "recordings-20261024-v1"
+
+[[models]]
+model = "claude/claude-haiku-4-5-20251001"
+efforts = []
+family = "anthropic"
+evidence_ref = "providers/claude/direct-model.jsonl"
+
+[[models]]
+model = "claude/claude-sonnet-5"
+efforts = []
+family = "anthropic"
+evidence_ref = "providers/claude/model-mismatch.jsonl"
+
+[[models]]
+model = "cursor/gpt-5.3-codex-low"
+efforts = []
+evidence_ref = "model-listings/cursor-models.txt"
+
+[[models]]
+model = "opencode/opencode-go/beam-free"
+efforts = []
+evidence_ref = "model-listings/opencode-models.txt"
+
+[[models]]
+model = "opencode/opencode-go/claude-haiku-5-5"
+efforts = []
+evidence_ref = "model-listings/opencode-models.txt"
+
+[[models]]
+model = "opencode/openrouter/~anthropic/claude-fable-latest"
+efforts = []
+evidence_ref = "model-listings/opencode-models.txt"
+
+[[models]]
+model = "opencode/openrouter/~anthropic/claude-haiku-latest"
+efforts = []
+evidence_ref = "model-listings/opencode-models.txt"

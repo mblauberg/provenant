@@ -188,10 +188,23 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         }
         Command::Install(args) => install::run_install(args, globals),
         Command::Uninstall(args) => install::run_uninstall(args, globals),
-        Command::Route(route) => match route {
-            provenant_cli::Route::List(_) => unavailable("route list", "routing", globals),
-            provenant_cli::Route::Resolve(_) => unavailable("route resolve", "routing", globals),
-        },
+        Command::Route(command) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                roots::roots(globals, &assets, &project)
+            })();
+            match resolved {
+                Ok(roots) => provenant_cli::route::run(command, globals, &roots),
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Dispatch(_) => unavailable("dispatch", "run", globals),
         Command::Lanes(_) => unavailable("lanes", "run", globals),
         Command::Output(_) => unavailable("output", "run", globals),

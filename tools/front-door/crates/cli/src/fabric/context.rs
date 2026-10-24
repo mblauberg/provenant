@@ -1,5 +1,4 @@
 use super::{EdgeError, Lease};
-use provenant_config::{DomainSection, DomainSections};
 use provenant_core::{CancelToken, Roots};
 use provenant_fabric_runtime::{
     config::FabricConfig,
@@ -10,7 +9,7 @@ use provenant_supervisor::{
     exec::SystemExecutor,
     fs::{Directory, LocalFs, PublishMode},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     ffi::OsStr,
     io,
@@ -18,15 +17,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
-// Composition's aggregate remains typed; config owns no Fabric policy.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Domains {
-    fabric: FabricConfig,
-}
-static ENTRIES: [DomainSection; 1] = [provenant_fabric_runtime::config::SECTION];
-static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 
 pub(super) struct Context {
     pub roots: Roots,
@@ -80,9 +70,10 @@ fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let config = provenant_config::read_with_domains(&roots, &LocalFs, &SECTIONS)?
-            .domains
-            .fabric;
+        let config =
+            provenant_config::read_with_domains(&roots, &LocalFs, &crate::domains::SECTIONS)?
+                .domains
+                .fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;

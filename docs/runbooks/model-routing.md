@@ -8,29 +8,16 @@ pool weights and model choices.
 
 ## Task classification
 
-`task_classification` in the routing config controls the advisory classifier
-chain (`explicit`, `rules`, `model`, `default`), its shadow stages and fallback.
-Rules match mode, role, prompt terms, paths and size. The model stage uses the
-utility classifier with the task summary and configured class names and
-descriptions; it caches results by prompt hash under the agent state directory.
-Errors, timeouts and low confidence fall through. A call can set
-`--classify rules,default`, or use `PROVENANT_TASK_CLASSIFY`, to replace the
-chain. Class names, descriptions and class-to-tier choices live in
-`task_class_routes`.
+Python dispatch uses explicit classes, configured rules and a default.
+Class and size determine tier; role is a label. The installer manages recorded
+hook registrations through the CLI's `HookSpec` policy and fixtures.
 
-Class and size determine tier; role is a label. Missing role uses the worker
-label with a warning. The former Python hook configurator is retired; the
-installer manages recorded hook registrations through the CLI's `HookSpec`
-policy and fixtures.
-
-Retired: `provenant telemetry ingest` and its ledger workflow below;
-[run integration step 2](../specs/rust-port/design/telemetry.md#tests-and-build-sequence) owns caller removal.
-
-To compare classifiers, leave rules and model in `shadow`, then inspect the
-`classified_by`, `classifier_confidence` and `shadow_answers` columns in the
-local `usage` ledger after `provenant telemetry ingest`. Compare agreement and
-outcomes by class before changing the active chain. The report view is not yet
-updated to summarise these fields.
+The Rust command is `provenant route list|resolve`. Resolve takes exactly one
+`--model ADAPTER/ID` or `--route NAME`, optional `--effort` and at most two
+explicit `--fallback` models. It performs no probe or state write. Named routes
+live in the registered `[domains.routing.routes]` section of the fresh state's
+`config.toml`. Availability never enables a form lacking provider activation
+recordings. No model/effort is inferred and an unknown exact ID stays unverified.
 
 ## Account and host scope
 

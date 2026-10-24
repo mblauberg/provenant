@@ -94,6 +94,9 @@ pub struct RouteExclusion {
 pub enum RouteExclusionReason {
     Disabled,
     MissingExecutable,
+    UnknownAvailability,
+    StaleAvailability,
+    UnknownAccount,
     DisclosureDenied,
     ConfinementUnavailable,
     UnsupportedEffort,

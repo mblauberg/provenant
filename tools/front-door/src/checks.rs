@@ -120,7 +120,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<CheckPage, Error> {
             let inspection = provenant_config::inspect_config(
                 &roots,
                 &LocalFs,
-                &provenant_config::DomainSections::<provenant_config::NoDomains>::new(&[]),
+                &provenant_cli::domains::SECTIONS,
             )?;
             Ok(provenant_cli::check::config_page(
                 inspection,

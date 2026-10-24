@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Advisory, configurable task-classification chain."""
+"""Rules used by the remaining Python dispatch callers until their matrix gate."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,10 +11,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config/model-routing.json"
-
-
-def _state_dir() -> Path:
-    return Path(os.environ.get("AGENT_FABRIC_STATE_ROOT", Path.home() / ".local/state/agent-harness/fabric"))
 
 
 def _classes(config: dict) -> dict:
@@ -56,56 +50,8 @@ def _run_rules(config: dict, context: dict) -> dict | None:
     return None
 
 
-def _run_model(config: dict, context: dict, *, utility=None, timeout=None) -> dict | None:
-    options = config.get("task_classification", {}).get("model", {})
-    choices = _classes(config)
-    if not choices or not str(context.get("prompt", "")).strip():
-        return None
-    # Keep the utility request limited to the task summary and class descriptions.
-    payload = {"task": str(context.get("prompt", "")), "classes": list(choices.values())}
-    prompt = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    digest = hashlib.sha256(prompt.encode()).hexdigest()
-    cache = _state_dir() / "task-classifier" / f"{digest}.json"
-    try:
-        if cache.is_file():
-            result = json.loads(cache.read_text(encoding="utf-8"))
-        else:
-            module = None
-            if utility is None:
-                spec = importlib.util.spec_from_file_location("provenant_task_classifier_utility", ROOT / "scripts/utility.py")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = module
-                spec.loader.exec_module(module)
-                utility = module.execute
-            schema = {"type": "object", "properties": {
-                "class": {"type": "string", "enum": list(choices)},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "reason": {"type": "string"}}, "required": ["class", "confidence", "reason"],
-                "additionalProperties": False}
-            routed_provider = None
-            if module is not None:
-                def routed_provider(call_prompt, _route, confidential):
-                    return module.provider_call(call_prompt, options.get("alias", "utility"), confidential,
-                                                timeout_seconds=timeout or options.get("timeout_s", 20))
-            result = utility("extract", prompt, schema=schema,
-                             timeout_seconds=timeout or options.get("timeout_s", 20), retry=False,
-                             provider=routed_provider)
-            if not isinstance(result, dict):
-                return None
-            result = {"class": result.get("class"), "confidence": result.get("confidence"),
-                      "reason": result.get("reason", "utility model")}
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(result), encoding="utf-8")
-        if result.get("class") not in choices or float(result.get("confidence", 0)) < float(options.get("min_confidence", 0.6)):
-            return None
-        return result
-    except Exception as exc:  # classification failures are advisory
-        print(f"task-classifier: model stage unavailable: {exc}", file=sys.stderr)
-        return None
-
-
 def classify(config: dict, context: dict | None = None, *, explicit: str | None = None,
-             override: str | None = None, environ: dict | None = None, utility=None) -> dict:
+             override: str | None = None, environ: dict | None = None) -> dict:
     context = dict(context or {})
     env = os.environ if environ is None else environ
     task = config.get("task_classification", {})
@@ -124,14 +70,12 @@ def classify(config: dict, context: dict | None = None, *, explicit: str | None 
     for key, variable in (("files", "PROVENANT_TASK_SIZE_FILES"), ("lines", "PROVENANT_TASK_SIZE_LINES")):
         if context["size"].get(key) is None and env.get(variable, "").isdigit():
             context["size"][key] = int(env[variable])
-    chain = [part.strip() for part in (override or env.get("PROVENANT_TASK_CLASSIFY") or ",".join(task.get("chain", ["explicit", "rules", "model", "default"]))).split(",") if part.strip()]
+    chain = [part.strip() for part in (override or env.get("PROVENANT_TASK_CLASSIFY") or ",".join(task.get("chain", ["explicit", "rules", "default"]))).split(",") if part.strip()]
     if explicit:
         chain = ["explicit", *(stage for stage in chain if stage != "explicit")]
-    results = {}
     winner = None
     stages = {"explicit": lambda: ({"class": explicit, "confidence": 1.0, "reason": "caller override"} if explicit else None),
-              "rules": lambda: _run_rules(config, context),
-              "model": lambda: _run_model(config, context, utility=utility)}
+              "rules": lambda: _run_rules(config, context)}
     for stage in chain:
         if stage == "default":
             break
@@ -142,26 +86,16 @@ def classify(config: dict, context: dict | None = None, *, explicit: str | None 
         except Exception as exc:
             print(f"task-classifier: {stage} stage unavailable: {exc}", file=sys.stderr)
             result = None
-        results[stage] = result
         if result:
             winner = {**result, "classified_by": stage}
             break
     else:
         winner = None
-    shadow = {}
-    for stage in task.get("shadow", []):
-        if stage in stages and stage not in results:
-            try:
-                results[stage] = stages[stage]()
-            except Exception as exc:
-                results[stage] = None
-                print(f"task-classifier: shadow {stage} unavailable: {exc}", file=sys.stderr)
-        shadow[stage] = results.get(stage)
     if winner is None:
         name = task.get("default", "implementation")
         winner = {"class": name, "confidence": 0.0, "reason": "configured default", "classified_by": "default"}
         print(f"task-classifier: using default class {name}; check the classification", file=sys.stderr)
-    winner["shadow_answers"] = shadow
+    winner["shadow_answers"] = {}
     size = context.get("size") or {}
     bands = task.get("size_tiers", [])
     matched = [band for band in bands if isinstance(band, dict) and
