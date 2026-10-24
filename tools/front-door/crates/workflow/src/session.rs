@@ -1,4 +1,5 @@
 //! Explicit host-keyed Markdown checkpoints. No transcript or latest-file lookup.
+use crate::store::{WaitStop, check_wait};
 use provenant_core::{CancelToken, Clock, ProjectId, StateRoot, UtcMicros, WaitBudget};
 use provenant_supervisor::fs::{Directory, FsError, LockMode, Publication, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,8 @@ pub enum SessionError {
     Durability(#[source] FsError),
     #[error("checkpoint timestamp is outside core's supported range")]
     Time(#[from] provenant_core::TimeError),
+    #[error("checkpoint save deadline expired")]
+    Deadline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -119,12 +122,12 @@ impl SessionStore {
             cancel,
             clock,
         )?;
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled {
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
                 path: self.root.as_path().into(),
-            }
-            .into());
-        }
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
         match dir.atomic_write(
             OsStr::new("checkpoint.md"),
             ".checkpoint.",
@@ -352,6 +355,54 @@ mod tests {
         assert_eq!(selected.read().unwrap().unwrap().markdown, "original");
         // An unrelated key is not held by the first key's lock.
         save(&store(&root, project, "other"), b"independent").unwrap();
+    }
+    #[test]
+    fn deadline_expiring_after_lock_keeps_previous_complete_bytes() {
+        struct ExpiringAfterLock(std::cell::Cell<u32>);
+        impl Clock for ExpiringAfterLock {
+            fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
+                UtcMicros::from_micros(0)
+            }
+            fn mono_now(&self) -> MonoTime {
+                let call = self.0.get();
+                self.0.set(call + 1);
+                // Call 0 is the uncontended lock poll; call 1 is the post-lock check.
+                MonoTime::from_micros(if call < 1 { 0 } else { 1_000_000 })
+            }
+        }
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        save(&selected, b"original").unwrap();
+        let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
+        let clock = ExpiringAfterLock(std::cell::Cell::new(0));
+        assert!(matches!(
+            selected.save(b"late", budget, &CancelToken::new(), &clock),
+            Err(SessionError::Deadline)
+        ));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "original");
+    }
+    #[test]
+    fn unreadable_checkpoint_diagnostic_carries_bounded_cause() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        save(&selected, b"original").unwrap();
+        let directory = path(&root, project, "host-1");
+        let external = root.as_path().join("outside.md");
+        std::fs::write(&external, "private").unwrap();
+        std::fs::remove_file(directory.join("checkpoint.md")).unwrap();
+        symlink(&external, directory.join("checkpoint.md")).unwrap();
+        let input = br#"{"hook_event_name":"SessionStart","session_id":"host-1"}"#;
+        let response = hook_context(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            &input[..],
+            &clock(0),
+            DurationMicros::ZERO,
+        );
+        assert_eq!(response.status, CheckpointStatus::Unavailable);
+        assert!(response.diagnostic.contains("\nCause: filesystem "));
+        assert!(!response.diagnostic.contains(external.to_str().unwrap()));
     }
     const FIXTURES: [(&str, HookEvent); 4] = [
         (

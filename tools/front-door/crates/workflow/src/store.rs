@@ -70,7 +70,7 @@ impl From<FsError> for StoreError {
         }
     }
 }
-fn cause(error: FsError) -> IoCause {
+pub(crate) fn cause(error: FsError) -> IoCause {
     let error = io::Error::from(error);
     IoCause {
         kind: error.kind(),
@@ -194,9 +194,9 @@ impl ReceiptStore {
             )
             .map_err(|error| {
                 if matches!(error, FsError::LockTimeout { .. })
-                    && let Err(wait_error) = check_wait(budget, cancel, clock)
+                    && let Err(stop) = check_wait(budget, cancel, clock)
                 {
-                    return wait_error;
+                    return stop.into();
                 }
                 StoreError::from(error)
             })?;
@@ -269,16 +269,30 @@ impl ReceiptStore {
         }
     }
 }
-fn check_wait(
+/// Why a bounded wait stopped before its publication boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitStop {
+    Cancelled,
+    Deadline,
+}
+impl From<WaitStop> for StoreError {
+    fn from(stop: WaitStop) -> Self {
+        match stop {
+            WaitStop::Cancelled => Self::Cancelled,
+            WaitStop::Deadline => Self::Deadline,
+        }
+    }
+}
+pub(crate) fn check_wait(
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
-) -> Result<(), StoreError> {
+) -> Result<(), WaitStop> {
     if cancel.is_cancelled() {
-        return Err(StoreError::Cancelled);
+        return Err(WaitStop::Cancelled);
     }
     if budget.deadline().is_expired(clock.mono_now()) {
-        return Err(StoreError::Deadline);
+        return Err(WaitStop::Deadline);
     }
     Ok(())
 }
