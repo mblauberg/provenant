@@ -1,0 +1,37 @@
+# Held-out replay bench
+
+The bench freezes small repository changes as replay tasks. Each file in
+`bench/tasks/` names the repository, parent and merge commits, task prompt,
+hidden test command and split. The adjacent `.patch` contains only the tests
+to install after dispatch; it is kept out of the task worktree until the run
+finishes.
+
+## Mine and verify
+
+Run `provenant bench mine [--limit N]` from the repository. It proposes tasks
+from merge commits that changed Rust test files. Review the prompt, test
+command and split, then keep the generated test patch beside the TOML.
+
+Run `provenant bench verify bench/tasks/TASK.toml` before accepting a task.
+Verification applies the hidden test patch to a disposable parent worktree,
+requires the test command to fail there, then runs it on a disposable merge
+worktree and requires success. It writes a content-bound `.verified` receipt
+beside the task; editing the TOML or test patch invalidates that receipt.
+
+## Replay
+
+Run `provenant bench run --route R [--split acceptance] [--limit N]`. The
+default split is `acceptance`; `held-out` tasks are excluded unless that split
+is named explicitly. Each task starts from its parent in a disposable Git
+worktree, receives the prompt through the existing worktree-write dispatch,
+then gets its hidden tests copied in and run. Results append to
+`<state-root>/bench.jsonl` with task, route, model, pass, token count, cost,
+turn count and elapsed seconds. Turns count recorded provider attempts.
+Unknown usage, cost or turns are recorded as `null`.
+
+## Acceptance rule
+
+Only verified tasks enter a run. Use acceptance tasks to select and compare a
+route. Keep held-out tasks frozen and do not run them during route selection;
+use them once to report the final replay score. A pass is the hidden test
+command succeeding after the task prompt is dispatched.

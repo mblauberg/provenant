@@ -1,0 +1,6 @@
+repo = "mblauberg/provenant"
+parent_sha = "6666e256f51a34d1c1ec32439d3dc843043140eb"
+merge_sha = "720df0d78b99bf58c31ddb573a490b82afc95a6a"
+prompt = "Implement the dispatch follow-up behavior from PR #1424, feat/run-follow."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-run --lib prepare_refusal_is_terminal_without_custody"
+split = "search"

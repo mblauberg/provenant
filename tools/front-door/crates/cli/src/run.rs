@@ -1640,7 +1640,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
             store
                 .attempts(
                     run::AttemptFilter {
-                        run_id: None,
+                        run_id: command.run_id,
                         task_id: None,
                     },
                     &call,

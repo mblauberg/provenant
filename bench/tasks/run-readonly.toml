@@ -1,0 +1,6 @@
+repo = "mblauberg/provenant"
+parent_sha = "c9756891e509154f118f09c083e6c4aafddec099"
+merge_sha = "6666e256f51a34d1c1ec32439d3dc843043140eb"
+prompt = "Make read-only run state queries work without write access, as in PR #1431."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-run --lib read_only_open_treats_missing_store_and_schema_as_empty"
+split = "held-out"
