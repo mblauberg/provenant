@@ -3,6 +3,7 @@
 mod release_smoke;
 
 use provenant_core::{CancelToken, PathResolver};
+use provenant_records::{SourceDigest, VersionInfo};
 use provenant_supervisor::fs::LocalFs;
 use std::{
     env,
@@ -51,6 +52,16 @@ fn output_directory(output: &Path) -> io::Result<PathBuf> {
     Ok(output)
 }
 
+fn require_current_source(identity: &VersionInfo, current: &SourceDigest) -> io::Result<()> {
+    if &identity.source_digest == current {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "release binary source digest differs from the current workspace; rebuild it",
+        ))
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let mut output = None;
@@ -87,6 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smoke = release_smoke::SystemSmoke::new(None)?;
     let cancel = CancelToken::new();
     let identity = smoke.identity(&binary, &cancel)?;
+    let current_source = SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?;
+    require_current_source(&identity, &current_source)?;
     // Never overwrite a previous stage. A failed stage has no completion marker;
     // preserve it for inspection and ask the caller to choose a fresh directory.
     fs::create_dir(&output)?;
@@ -112,6 +125,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn packaging_refuses_a_binary_with_an_older_source_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old = VersionInfo {
+            source_digest: SourceDigest::parse(&format!("sha256:{}", "0".repeat(64)))?,
+            asset_digest: SourceDigest::parse(&format!("sha256:{}", "1".repeat(64)))?,
+            target: "test-target".into(),
+            toolchain: "test-toolchain".into(),
+            record_schema_version: 1,
+            config_schema_version: 1,
+        };
+        let current = SourceDigest::parse(&format!("sha256:{}", "2".repeat(64)))?;
+        assert!(require_current_source(&old, &current).is_err());
+        Ok(())
+    }
 
     #[test]
     fn staging_refuses_checkout_aliases_and_existing_outputs()
