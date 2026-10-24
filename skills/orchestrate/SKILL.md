@@ -24,7 +24,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
    worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
-7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting the run or task.
+7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing `expected_generation` and `operation_id`.
 8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
 ## Rules

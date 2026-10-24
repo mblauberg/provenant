@@ -45,10 +45,12 @@ retry limit and escalation path declared by the owning lifecycle.
 
 ## Recovery
 
-If dispatch or capture is interrupted, run `provenant reconcile`, inspect the
-Fabric task and existing output, then use `provenant resume` for the same run.
-Preserve partial results. Retry only missing or failed work within its bound;
-do not relaunch a still-active task because a session lost its context.
+If dispatch or capture is interrupted, run `provenant reconcile --id RUN`,
+inspect the Fabric task and existing output, then use
+`provenant resume RUN/TASK/ATTEMPT --operation-id ID (--prompt-file PATH |
+--prompt-stdin)` for the exact attempt. Preserve partial results. Retry only
+missing or failed work within its bound; do not relaunch a still-active task
+because a session lost its context.
 
 ## Checklist
 

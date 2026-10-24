@@ -34,8 +34,9 @@ rule). Dispatch through Fabric, observe with
 `provenant lanes --all --wait N --condition all`, read retained events with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
 bounded slices with `fabric_output`'s `read` operation, and steer with
-`provenant fabric mail send` or `fabric_run`'s `resume` operation using the run
-target and prompt (`resume` also answers `input_required` lanes).
+`provenant fabric mail send` or `fabric_run`'s `resume` operation using
+`target: { attempt: ATTEMPT }`, `expected_generation`, `operation_id` and the
+prompt (`resume` also answers `input_required` lanes).
 
 Long-running watchable processes go to a background shell with output to a run
 file.

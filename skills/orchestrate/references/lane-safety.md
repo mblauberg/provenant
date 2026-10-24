@@ -71,8 +71,8 @@ false report. Paste the first section into every lane and reviewer brief.
 
 - Reconnecting the Fabric MCP server cancels every lane it hosts. Commit
   writers' work or wait for idle first.
-- Use `fabric_run`'s `cancel` operation with an explicit run or task target and
-  operation ID. A cancel can reap a process another lane depends on.
+- Use `fabric_run`'s `cancel` operation with `target: { attempt: ATTEMPT }` and
+  an operation ID. A cancel can reap a process another lane depends on.
 - Every enabled lane receives Provenant's Fabric MCP configuration and supported
   hooks, including junior lanes. Nested MCP submission admits child records up
   to `lanes.max_depth` (default 2), recording the parent attempt and refusing

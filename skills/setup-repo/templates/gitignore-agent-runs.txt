@@ -1,3 +1,2 @@
-/.agent-run/
 /.worktrees/
 /.work/

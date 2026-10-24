@@ -15,11 +15,13 @@ one run with `provenant dispatch --knob NAME=VALUE`.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values.
 
-The registry marks six knobs `wired`: `lanes.silence_seconds`,
-`lanes.max_concurrency`, `review.extra_reviewers`, `review.cross_family`,
-`review.rereview_scope` and `review.polish`. The other eight are advisory and
-do not alter Rust runtime behaviour. Use `config show` to see each knob's
-status and source. Install registrations with `provenant install --dry-run`
+The registry marks these knobs `wired`: `chair.auto_switch`,
+`chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
+`lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
+`review.cross_family`, `review.rereview_scope` and `review.polish`. The other
+eight are advisory and do not alter Rust runtime behaviour. Use `config show`
+to see each knob's status and source. Install registrations with
+`provenant install --dry-run`
 before applying an authorised install.
 
 ## Routing pools

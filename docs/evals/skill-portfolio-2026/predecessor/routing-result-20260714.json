@@ -50,7 +50,7 @@
     "case_rows": 108,
     "evaluation_id": "skill-portfolio-routing-20260714-fabric-v5",
     "packet_sha256": "sha256:b5c73ea4e421a2ce864ea36ef9ee482a156ab79ea2f8fd68dcee80c2ed8cfaa7",
-    "run_owned_path": ".agent-run/SKAUD-20260714/evaluation/portfolio-v5/receipt.json",
+    "run_owned_path": "~/.local/share/provenant/v1/runs/SKAUD-20260714/evaluation/portfolio-v5/receipt.json",
     "sha256": "sha256:f3f1829bd5a4f860db43cefb7d39a540d1dde722c12332be89df471216fcf8f5"
   },
   "schedule": {
