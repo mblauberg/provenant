@@ -1388,7 +1388,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6.1-sol\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
         );
         let mut options = provenant_supervisor::exec::ExecOptions::new(
             &launch.argv,
@@ -1484,7 +1484,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
     Ok(())
 }
 
-/// Fake provider deliberately forwards no provider environment to its MCP child.
+/// Fake provider forwards no provider environment to its MCP child, only a
+/// baseline PATH as real providers do.
 pub(crate) fn lane_provider() -> Result {
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
     let mut entry = serde_json::Map::new();
@@ -1532,6 +1533,21 @@ pub(crate) fn lane_provider() -> Result {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    // A real provider hands its MCP child a baseline PATH. Mirror that with
+    // this fake's own directory first, so the nested dispatch resolves it.
+    let mut env = env;
+    if env.iter().all(|(key, _)| key != "PATH") {
+        let mut directories = vec![
+            std::env::current_exe()?
+                .parent()
+                .ok_or("provider bin")?
+                .to_path_buf(),
+        ];
+        directories.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        env.push(("PATH".into(), std::env::join_paths(directories)?));
+    }
     let mut input = Vec::new();
     std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)?;
     let cwd = std::env::current_dir()?;
