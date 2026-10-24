@@ -197,9 +197,10 @@ pub fn refresh_if_expiring(
 
 /// Claude uses the default config directory. The host reads its login token
 /// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
-/// unreadable and the CLI execs nothing. The model still gets no shell: file
-/// tools only, and edit tools only for writers. The one writable state is this
-/// session's transcript.
+/// unreadable. Provenant and its hook helpers are the only added executables.
+/// The model still gets no shell: file tools only, and edit tools only for
+/// writers. Writable state covers this session's transcript and Provenant's
+/// bounded coordination state.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -220,7 +221,6 @@ fn prepare(
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "-p".as_ref(),
-        "--safe-mode".as_ref(),
         "--strict-mcp-config".as_ref(),
         "--disable-slash-commands".as_ref(),
         "--permission-prompts".as_ref(),
@@ -262,7 +262,10 @@ fn prepare(
     let transcript_dir = project.join(&session_id);
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
+    let mut setup = input.provenant.claude(scratch, &mut argv)?;
+    setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     let mut env = base_env(input, scratch, "/usr/bin:/bin");
+    input.provenant.environment(&mut env);
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -272,12 +275,12 @@ fn prepare(
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
         cwd: input.cwd.to_owned(),
-        setup: vec![SetupStep::CreateDir(transcript_dir.clone())],
+        setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -298,7 +301,11 @@ fn prepare(
             observations: observations(OBSERVATIONS, access)?,
         },
         stream,
-    })
+    };
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, true);
+    Ok(spec)
 }
 
 /// Claude's per-project transcript directory name: every byte outside ASCII

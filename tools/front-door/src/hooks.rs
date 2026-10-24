@@ -230,11 +230,14 @@ fn with_git<T>(
         &CancelToken,
     ) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let temp = std::fs::canonicalize("/tmp")?;
+    let temp = std::fs::canonicalize(std::env::temp_dir())?;
     let anchor = LocalFs.open_anchor(&temp)?;
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;
     let result = (|| {
+        // Lanes grant this exact system binary; interactive hooks keep their
+        // usual installed-Git discovery.
+        let lane = std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
         let git = [
             "/opt/homebrew/bin/git",
             "/usr/local/bin/git",
@@ -244,6 +247,7 @@ fn with_git<T>(
         ]
         .into_iter()
         .map(Path::new)
+        .filter(|p| !lane || *p == Path::new("/usr/bin/git"))
         .find(|p| provenant_supervisor::sys::is_executable(p))
         .ok_or("Git unavailable")?;
         let git = std::fs::canonicalize(git)?;

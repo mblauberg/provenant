@@ -10,6 +10,37 @@ use provenant_supervisor::{
 use std::cell::Cell;
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn nested_lane_depth_stops_at_the_configured_maximum() {
+    assert!(matches!(next_lane_depth(0, 2), Ok(1)));
+    assert!(matches!(next_lane_depth(1, 2), Ok(2)));
+    assert!(matches!(
+        next_lane_depth(2, 2),
+        Err(RunError::DepthExceeded {
+            depth: 3,
+            max_depth: 2
+        })
+    ));
+}
+
+#[test]
+fn nested_dispatch_records_its_parent_attempt_and_depth() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = input();
+    nested.request.lane_depth = 2;
+    nested.request.parent_attempt = Some(parent);
+    let record = store.create(&nested, &call)?;
+    assert_eq!(record.parent, Some(parent));
+    let saved = store.request(record.run_id, &call)?;
+    assert_eq!(saved.lane_depth, 2);
+    assert_eq!(saved.parent_attempt, Some(parent));
+    Ok(())
+}
+
 struct Host {
     available: u64,
 }

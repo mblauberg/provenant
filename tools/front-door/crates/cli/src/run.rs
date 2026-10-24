@@ -62,6 +62,7 @@ impl From<run::RunError> for Fail {
             E::Conflict => (Status::Refused, "CONFLICT"),
             E::Cancelled => (Status::Error, "CANCELLED"),
             E::Refused => (Status::Refused, "REFUSED"),
+            E::DepthExceeded { .. } | E::DepthOverflow => (Status::Refused, "LANE_DEPTH"),
             E::Capacity => (Status::Refused, "QUEUE_FULL"),
             E::Contention => (Status::Error, "CONTENTION"),
             _ => (Status::Error, "IO"),
@@ -490,6 +491,7 @@ pub fn submit(
     submission: Submission,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     #[derive(Serialize)]
     struct Authority<'a> {
         mode: &'static str,
@@ -533,6 +535,8 @@ pub fn submit(
             tasks: requests,
             concurrency: submission.concurrency,
             parent: None,
+            lane_depth,
+            parent_attempt,
         },
         attempts,
         created_at: now(call.clock)?,
@@ -701,6 +705,75 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
         &call,
     )?;
     report(&session, &record, &started, command.wait, edge, &call)
+}
+
+fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
+    let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
+    let config = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )
+    .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+    let max_depth = config
+        .knobs
+        .get("lanes.max_depth")
+        .and_then(|knob| knob.value.as_u64())
+        .ok_or_else(|| {
+            Fail::new(
+                Status::Error,
+                "CONFIG",
+                "lanes.max_depth is missing or invalid",
+            )
+        })?;
+    lane_dispatch_values(
+        parent_depth.as_deref(),
+        parent_attempt.as_deref(),
+        max_depth,
+    )
+}
+
+fn environment_text(name: &str) -> Result<Option<String>, Fail> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Fail::new(
+            Status::Invalid,
+            "LANE_CONTEXT",
+            "lane context environment value is not valid text",
+        )),
+    }
+}
+
+fn lane_dispatch_values(
+    parent_depth: Option<&str>,
+    parent_attempt: Option<&str>,
+    max_depth: u64,
+) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = parent_depth
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "LANE_CONTEXT",
+                "lane depth environment value must be a non-negative integer",
+            )
+        })?
+        .unwrap_or(0);
+    let parent_attempt = parent_attempt
+        .map(AttemptId::parse)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "PARENT_ATTEMPT",
+                "parent attempt environment value is invalid",
+            )
+        })?;
+    let lane_depth = run::next_lane_depth(parent_depth, max_depth)?;
+    Ok((lane_depth, parent_attempt))
 }
 
 /// Hand every queued attempt of `run` to its own guardian. Fabric's facade
@@ -1361,4 +1434,28 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     Ok((data, human))
+}
+
+#[cfg(test)]
+mod lane_depth_tests {
+    use super::*;
+
+    #[test]
+    fn shared_submit_context_refuses_depth_above_the_limit() {
+        let parent = AttemptId::from_bytes([7; 16]).to_string();
+        let result = lane_dispatch_values(Some("2"), Some(&parent), 2);
+        let Err(failure) = result else {
+            panic!("depth above the configured maximum must be refused");
+        };
+        assert_eq!(failure.status, Status::Refused);
+        assert_eq!(failure.code, "LANE_DEPTH");
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_and_parent() {
+        let parent = AttemptId::from_bytes([8; 16]);
+        let parent_text = parent.to_string();
+        let result = lane_dispatch_values(None, Some(&parent_text), 2);
+        assert!(matches!(result, Ok((1, Some(found))) if found == parent));
+    }
 }

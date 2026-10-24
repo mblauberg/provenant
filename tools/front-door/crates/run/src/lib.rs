@@ -25,6 +25,18 @@ pub use reader::{
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
 
+pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
+pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
+
+/// Return the depth of the run being dispatched under this lane.
+pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
+    let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
+    if depth > max_depth {
+        return Err(RunError::DepthExceeded { depth, max_depth });
+    }
+    Ok(depth)
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("invalid run record: {0}")]
@@ -49,6 +61,10 @@ pub enum RunError {
     TerminalRecoveryRequired,
     #[error("operation refused by the execution context")]
     Refused,
+    #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
+    DepthExceeded { depth: u64, max_depth: u64 },
+    #[error("nested lane depth overflowed")]
+    DepthOverflow,
     #[error("host queue is full")]
     Capacity,
     #[error("run store is contended or its call budget expired")]

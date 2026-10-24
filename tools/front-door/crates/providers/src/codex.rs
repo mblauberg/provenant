@@ -67,6 +67,7 @@ fn prepare(
             format!("model_reasoning_effort=\"{effort}\"").into(),
         ]);
     }
+    input.provenant.codex(&mut argv)?;
     argv.push("-".into());
 
     // Codex runs helpers from its own package (code-mode host, bundled `rg`
@@ -81,9 +82,10 @@ fn prepare(
         subtree(package),
     ];
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    input.provenant.environment(&mut env);
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
@@ -113,7 +115,11 @@ fn prepare(
             observations: observations(OBSERVATIONS, access)?,
         },
         stream,
-    })
+    };
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, false);
+    Ok(spec)
 }
 
 crate::quota_source!(Codex, "codex");

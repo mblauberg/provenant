@@ -117,7 +117,7 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let plan = match providers.prepare(task, &prompt, resume.as_ref()) {
+            let mut plan = match providers.prepare(task, &prompt, resume.as_ref()) {
                 Ok(plan) => plan,
                 Err(reason) => {
                     self.withdraw(
@@ -135,6 +135,7 @@ impl RunStore {
                     continue;
                 }
             };
+            set_lane_environment(&mut plan.environment, request.lane_depth, id);
             let record = match self.mark_starting(id, &plan.route, call) {
                 Ok(record) => record,
                 // A concurrent start already took this attempt.
@@ -252,5 +253,46 @@ impl RunStore {
             )?;
             Ok(())
         })
+    }
+}
+
+fn set_lane_environment(
+    environment: &mut Vec<(OsString, OsString)>,
+    depth: u64,
+    parent: AttemptId,
+) {
+    set_environment_value(environment, LANE_DEPTH_ENV, depth.to_string());
+    set_environment_value(environment, PARENT_ATTEMPT_ENV, parent.to_string());
+}
+
+fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str, value: String) {
+    let name = OsString::from(name);
+    environment.retain(|(existing, _)| existing != &name);
+    environment.push((name, OsString::from(value)));
+}
+
+#[cfg(test)]
+mod lane_environment_tests {
+    use super::*;
+
+    #[test]
+    fn lane_environment_overrides_adapter_values() {
+        let parent = AttemptId::from_bytes([6; 16]);
+        let mut environment = vec![
+            (OsString::from(LANE_DEPTH_ENV), OsString::from("99")),
+            (OsString::from("OTHER"), OsString::from("kept")),
+        ];
+        set_lane_environment(&mut environment, 2, parent);
+        assert_eq!(
+            environment,
+            vec![
+                (OsString::from("OTHER"), OsString::from("kept")),
+                (OsString::from(LANE_DEPTH_ENV), OsString::from("2")),
+                (
+                    OsString::from(PARENT_ATTEMPT_ENV),
+                    OsString::from(parent.to_string())
+                ),
+            ]
+        );
     }
 }

@@ -17,6 +17,10 @@ pub struct CanonicalRequest {
     pub tasks: Vec<TaskRequest>,
     pub concurrency: u64,
     pub parent: Option<AttemptId>,
+    /// Depth assigned to this run when it was dispatched from a lane.
+    pub lane_depth: u64,
+    /// Attempt whose provider submitted this nested run, when present.
+    pub parent_attempt: Option<AttemptId>,
 }
 impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {

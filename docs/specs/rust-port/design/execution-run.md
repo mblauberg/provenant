@@ -425,8 +425,18 @@ the held files and directories before issuing `SettlementCommit`. Run retains
 writer exclusion through classified scratch settlement and fence clearing;
 missing, malformed or changed attestations keep the fence.
 
-Lineage uses explicit `AttemptRef` and a supervisor-verified inherited parent
-capability. Bad inherited ancestry is an error, not silently ignored metadata.
+The 2026-10-24 lane decision permits basic nested dispatch with a lightweight
+recursion guard: the shared CLI/Fabric submission edge reads
+`PROVENANT_LANE_DEPTH` and `PROVENANT_PARENT_ATTEMPT_ID`, refuses a child above
+`lanes.max_depth` (default 2), and records both depth and submitting parent in
+`CanonicalRequest`. Run overwrites these environment values on each child
+launch. Continuations retain their original depth and nested parent separately
+from their continuation target. This metadata is not cancellation authority;
+the explicit user decision supersedes requiring the capability below merely
+to dispatch a nested lane.
+
+For descendant cancellation, lineage uses explicit `AttemptRef` and a
+supervisor-verified inherited parent capability. Bad inherited ancestry is an error, not silently ignored metadata.
 Register a child under the same lock that closes its parent; reject a child
 registration after closure. A parent's cancel fans out cooperative requests to
 its registered children via the facade, each child retaining its own custody.

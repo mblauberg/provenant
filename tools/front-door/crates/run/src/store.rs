@@ -200,7 +200,7 @@ impl RunStore {
             operation_id: input.operation_id.clone(),
             request_digest: digest,
             task_ids: input.request.tasks.iter().map(|t| t.task_id).collect(),
-            parent: input.request.parent,
+            parent: input.request.parent_attempt.or(input.request.parent),
             children: vec![],
             revision: 1,
             generation: 0,

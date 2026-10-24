@@ -70,6 +70,8 @@ struct Args {
     write: bool,
     skip_live: bool,
     executable: PathBuf,
+    provenant: PathBuf,
+    assets: PathBuf,
     endpoint: String,
 }
 
@@ -112,6 +114,19 @@ fn args() -> Result<Args> {
         write,
         skip_live,
         executable: std::fs::canonicalize(found)?,
+        provenant: std::fs::canonicalize(
+            flags
+                .remove("--provenant")
+                .map(PathBuf::from)
+                .or_else(|| which("provenant"))
+                .ok_or("--provenant or provenant on PATH")?,
+        )?,
+        assets: std::fs::canonicalize(
+            flags
+                .remove("--assets")
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?),
+        )?,
         endpoint: endpoint.into(),
     })
 }
@@ -301,6 +316,16 @@ fn setup(steps: &[SetupStep]) -> Result<()> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => private_dir(path)?,
+            SetupStep::WriteFile { path, bytes } => {
+                use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
             SetupStep::Symlink { link, target } => match std::fs::read_link(link) {
                 Ok(existing) if &existing == target => {}
                 Ok(_) => return Err("conflicting link".into()),
@@ -775,6 +800,11 @@ fn main() -> Result<()> {
         }
         _ => None,
     };
+    let state = args.root.join("provenant-state");
+    private_dir(&state)?;
+    for child in ["fabric", "projects", "runs", "workflow"] {
+        private_dir(&state.join(child))?;
+    }
     let route = route(&args);
     let mut records = Vec::new();
     let mut continuation = None;
@@ -798,7 +828,20 @@ fn main() -> Result<()> {
             token: token.as_ref(),
             cwd,
             nonce,
+            provenant: provenant_providers::LaneRuntime {
+                executable: &args.provenant,
+                state: &args.root.join("provenant-state"),
+                assets: &args.assets,
+            },
         })?;
+        // Match the launch facts Run supplies after adapter preparation.
+        spec.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
+        spec.env.push((
+            "PROVENANT_PARENT_ATTEMPT_ID".into(),
+            provenant_core::AttemptId::from_bytes(nonce)
+                .to_string()
+                .into(),
+        ));
         spec.profile.observations = expected(&spec.profile, args.writer);
         if args.skip_live {
             // Probe debugging only: compile and probe without calling the CLI.

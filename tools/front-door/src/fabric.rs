@@ -818,6 +818,7 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     match error {
         RunError::NotFound => FacadeError::NotFound,
         RunError::Refused => FacadeError::ConfinementRefused,
+        RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
         RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
         RunError::Cancelled => FacadeError::Cancelled,
@@ -831,6 +832,8 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     match fail.code {
         "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
+        "LANE_DEPTH" => FacadeError::LaneDepth,
+        "LANE_CONTEXT" | "PARENT_ATTEMPT" => FacadeError::InvalidInput,
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
@@ -1045,6 +1048,7 @@ fn peer_error(code: &str, operation_id: Option<provenant_core::OperationId>) -> 
         ("output_too_large", _) => FacadeError::OutputTooLarge,
         ("invalid_input", _) => FacadeError::InvalidInput,
         ("confinement_refused", _) => FacadeError::ConfinementRefused,
+        ("lane_depth", _) => FacadeError::LaneDepth,
         ("continuation_unsupported", _) => FacadeError::ContinuationUnsupported,
         ("owner_unavailable", _) => FacadeError::OwnerUnavailable,
         ("cancelled", _) => FacadeError::Cancelled,

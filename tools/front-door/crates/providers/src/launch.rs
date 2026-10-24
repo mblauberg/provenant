@@ -31,6 +31,9 @@ pub enum SetupStep {
     /// directories created here get mode 0700; existing ones are never
     /// chmodded.
     CreateDir(PathBuf),
+    /// Create a mode-0600 file with these bytes, refusing an existing entry.
+    /// The launcher writes and syncs it before anchoring the profile.
+    WriteFile { path: PathBuf, bytes: Vec<u8> },
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },
 }
@@ -71,6 +74,7 @@ pub struct PrepareInput<'a> {
     pub cwd: &'a Path,
     /// Caller-supplied randomness; Claude uses it as a fresh session id.
     pub nonce: [u8; 16],
+    pub provenant: crate::LaneRuntime<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]

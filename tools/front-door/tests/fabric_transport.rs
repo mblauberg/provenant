@@ -290,6 +290,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 }],
                 concurrency: 1,
                 parent: None,
+                lane_depth: 1,
+                parent_attempt: None,
             },
             attempts: vec![provenant_run::NewAttempt {
                 attempt_id: attempt,
@@ -352,5 +354,28 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         conflict["structuredContent"]["code"], "conflict",
         "{conflict}"
     );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.extend([
+        (provenant_run::LANE_DEPTH_ENV.into(), "2".into()),
+        (
+            provenant_run::PARENT_ATTEMPT_ENV.into(),
+            "11111111111111111111111111111111".into(),
+        ),
+    ]);
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"nested-depth","tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}],"concurrency":1}}}),
+        ],
+    )?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["structuredContent"]["code"], "lane_depth");
+    assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }

@@ -80,6 +80,7 @@ impl Context {
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
+        let lane = std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
         let git = [
             "/opt/homebrew/bin/git",
             "/usr/local/bin/git",
@@ -88,6 +89,7 @@ impl Context {
         ]
         .into_iter()
         .map(Path::new)
+        .filter(|path| !lane || *path == Path::new("/usr/bin/git"))
         .find(|path| provenant_supervisor::sys::is_executable(path))
         .ok_or(EdgeError::Invalid)?;
         let runtime = provenant_confinement::UtilityRuntime::new(

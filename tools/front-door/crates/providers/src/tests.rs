@@ -648,6 +648,11 @@ fn fixture_input<'a>(
         token,
         cwd,
         nonce: [9; 16],
+        provenant: crate::LaneRuntime {
+            executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
+            state: std::path::Path::new("/fixture/state"),
+            assets: std::path::Path::new("/fixture/provenant"),
+        },
     }
 }
 
@@ -690,7 +695,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             ],
             _ => &[],
         };
-        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG"]
+        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG", "PROVENANT_ROOT"]
             .iter()
             .chain(extra)
             .copied()
@@ -703,6 +708,15 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         );
         match id {
             "codex" => {
+                assert!(
+                    argv.iter()
+                        .any(|arg| arg.starts_with("mcp_servers.fabric.command="))
+                );
+                assert!(
+                    argv.iter().any(|arg| arg
+                        == "mcp_servers.fabric.command=\"/fixture/provenant/bin/provenant\"")
+                );
+                assert!(argv.iter().any(|arg| arg == "mcp_servers.fabric.args=[\"--state-dir\",\"/fixture/state\",\"fabric\",\"mcp\",\"--client\",\"codex\"]"));
                 assert!(argv.iter().any(|arg| arg == "service_tier=\"default\""));
                 assert!(
                     !argv
@@ -711,10 +725,57 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 );
             }
             "claude" => {
+                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
+                assert!(argv.iter().any(|arg| arg == "--settings"));
+                assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
+                let config = |name: &str| {
+                    let path = argv
+                        .iter()
+                        .position(|arg| arg == name)
+                        .expect("config flag");
+                    let bytes = spec
+                        .setup
+                        .iter()
+                        .find_map(|step| match step {
+                            SetupStep::WriteFile { path: file, bytes }
+                                if file.as_os_str() == spec.argv[path + 1] =>
+                            {
+                                Some(bytes)
+                            }
+                            _ => None,
+                        })
+                        .expect("generated file");
+                    serde_json::from_slice::<serde_json::Value>(bytes).expect("JSON")
+                };
+                let mcp = config("--mcp-config");
+                assert_eq!(mcp["mcpServers"].as_object().expect("servers").len(), 1);
+                assert_eq!(
+                    mcp["mcpServers"]["fabric"],
+                    provenant_config::mcp_entry(
+                        provenant_records::Harness::Claude,
+                        std::path::Path::new("/fixture/provenant/bin/provenant"),
+                        std::path::Path::new("/fixture/state"),
+                    )
+                    .expect("installer entry")
+                );
+                let settings = config("--settings");
+                let hooks = settings["hooks"].as_object().expect("hooks");
+                assert_eq!(hooks.len(), provenant_config::CLAUDE_HOOKS.len());
+                for hook in provenant_config::CLAUDE_HOOKS {
+                    let command = hooks[hook.event][0]["hooks"][0]["command"]
+                        .as_str()
+                        .expect("hook command");
+                    assert!(command.starts_with("'/fixture/provenant/bin/provenant' '--state-dir' '/fixture/state' 'hook' 'claude'"));
+                }
+                let sources = argv
+                    .iter()
+                    .position(|arg| arg == "--setting-sources")
+                    .expect("isolated settings");
+                assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
                 assert_eq!(argv[tools + 1], "Read,Grep,Glob");
                 // The host's token is the only credential: no keychain or
-                // other credential path is readable and nothing else runs.
+                // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
                     spec.env
                         .iter()
@@ -722,7 +783,14 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                             && value == FIXTURE_TOKEN)
                 );
                 assert!(spec.profile.spec.authentication.is_empty());
-                assert_eq!(spec.profile.spec.process_executables.len(), 1);
+                assert!(
+                    spec.profile
+                        .spec
+                        .process_executables
+                        .iter()
+                        .any(|grant| grant.path
+                            == std::path::Path::new("/fixture/provenant/bin/provenant"))
+                );
                 assert!(matches!(
                     entry
                         .adapter
@@ -754,13 +822,17 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             Err(ProviderError::InvalidPath)
         ));
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
+        assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+            grant.path == package
+                || [
+                    "/fixture/provenant/bin/provenant",
+                    "/fixture/provenant/release.json",
+                    "/fixture/state/config.toml",
+                    "/fixture/state/host-id",
+                ]
                 .iter()
-                .all(|grant| grant.path == package)
-        );
+                .any(|path| grant.path == std::path::Path::new(path))
+        }));
         assert!(
             spec.profile
                 .spec
