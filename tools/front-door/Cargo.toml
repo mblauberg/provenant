@@ -118,6 +118,11 @@ strip = false
 workspace = true
 
 [[test]]
+name = "worktrees"
+path = "tests/worktree_driver.rs"
+harness = false
+
+[[test]]
 name = "fake_provider"
 path = "tests/fake_provider.rs"
 harness = false

@@ -94,7 +94,11 @@ impl TestRig {
             self.state.clone().into_os_string(),
         ];
         arguments.extend(args.iter().map(OsString::from));
-        self.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &arguments, None)
+        // Clippy also compiles the included command edge as a binary unit
+        // target, where Cargo supplies no integration-test executable path.
+        let binary = option_env!("CARGO_BIN_EXE_provenant")
+            .ok_or("production binary path is only available to integration targets")?;
+        self.execute_os(Path::new(binary), &arguments, None)
     }
     pub fn execute(
         &self,
