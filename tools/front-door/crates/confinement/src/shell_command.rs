@@ -18,9 +18,15 @@ pub struct ShellRefusal;
 /// process-control word in the line is refused. `kill -0` liveness probes are
 /// allowed. Scripts, aliases, functions and other languages are not interpreted.
 pub fn check(command: &str) -> Result<(), ShellRefusal> {
+    inspect(command, 0).map(drop)
+}
+/// The simple commands the same walk finds, as words with the command name
+/// first. Wrappers and shells are looked through, so `sudo git stash` and
+/// `bash -c 'git stash'` both yield `git stash`. Fails as `check` does.
+pub fn commands(command: &str) -> Result<Vec<Vec<String>>, ShellRefusal> {
     inspect(command, 0)
 }
-fn inspect(command: &str, depth: usize) -> Result<(), ShellRefusal> {
+fn inspect(command: &str, depth: usize) -> Result<Vec<Vec<String>>, ShellRefusal> {
     if depth > 8 || command.len() > 1024 * 1024 || command.contains('\0') {
         return Err(ShellRefusal);
     }
@@ -28,6 +34,7 @@ fn inspect(command: &str, depth: usize) -> Result<(), ShellRefusal> {
         chars: command.chars().collect(),
         at: 0,
         seen: Vec::new(),
+        commands: Vec::new(),
         data_reaches_shell: false,
     };
     lexer.list(depth, Until::End)?;
@@ -38,7 +45,7 @@ fn inspect(command: &str, depth: usize) -> Result<(), ShellRefusal> {
             }
         }
     }
-    Ok(())
+    Ok(lexer.commands)
 }
 const PROCESS_CONTROL: [&str; 8] = [
     "kill",
@@ -204,6 +211,8 @@ struct Scope {
     interpreter: Option<(usize, bool)>,
     cases: usize,
     heredocs: Vec<Heredoc>,
+    /// The words of the current simple command, once its name is known.
+    argv: Vec<String>,
 }
 #[derive(Default)]
 struct Word {
@@ -252,6 +261,8 @@ struct Lexer {
     at: usize,
     /// Decoded words and heredoc bodies, for the data rule.
     seen: Vec<String>,
+    /// Finished simple commands, including those inside shell bodies.
+    commands: Vec<Vec<String>>,
     data_reaches_shell: bool,
 }
 impl Lexer {
@@ -361,6 +372,9 @@ impl Lexer {
         }
         if let Some((operands, dynamic)) = scope.interpreter {
             self.data_reaches_shell |= operands == 0 || dynamic;
+        }
+        if !scope.argv.is_empty() {
+            self.commands.push(std::mem::take(&mut scope.argv));
         }
         let (cases, heredocs) = (scope.cases, std::mem::take(&mut scope.heredocs));
         *scope = Scope {
@@ -587,7 +601,7 @@ impl Lexer {
                     .strip_prefix("--split-string=")
                     .or_else(|| text.strip_prefix("-S"));
                 if let Some(body) = split.filter(|_| wrapper == ENV) {
-                    inspect(body, depth + 1)?;
+                    self.commands.extend(inspect(body, depth + 1)?);
                 }
                 if WRAPPERS[wrapper].1.contains(&text) {
                     Position::Value(wrapper)
@@ -597,7 +611,7 @@ impl Lexer {
             }
             Position::Value(wrapper) => Position::Wrapped(wrapper),
             Position::Body(wrapper) => {
-                inspect(text, depth + 1)?;
+                self.commands.extend(inspect(text, depth + 1)?);
                 Position::Wrapped(wrapper)
             }
             Position::Shell => {
@@ -607,14 +621,30 @@ impl Lexer {
                     *operands += 1;
                     *dynamic |= word.dynamic;
                 }
-                inspect(text, depth + 1)?;
+                self.commands.extend(inspect(text, depth + 1)?);
                 Position::Shell
             }
             Position::Argument if scope.find && FIND_ACTIONS.contains(&text) => {
                 Position::Wrapped(FIND)
             }
-            Position::Argument => Position::Argument,
-            Position::Command | Position::Wrapped(_) => self.command(scope, &word)?,
+            Position::Argument => {
+                if !scope.argv.is_empty() {
+                    scope.argv.push(word.text);
+                }
+                Position::Argument
+            }
+            Position::Command | Position::Wrapped(_) => {
+                let next = self.command(scope, &word)?;
+                if matches!(next, Position::Argument) {
+                    // `find -exec CMD` starts a second command in this scope.
+                    if !scope.argv.is_empty() {
+                        self.commands.push(std::mem::take(&mut scope.argv));
+                    }
+                    let name = word.text.rsplit('/').next().unwrap_or_default();
+                    scope.argv.push(name.trim_start_matches('=').to_owned());
+                }
+                next
+            }
         };
         Ok(())
     }

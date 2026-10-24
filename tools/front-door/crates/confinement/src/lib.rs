@@ -2,6 +2,7 @@
 
 pub mod disclosure;
 pub mod git_evidence;
+pub mod guard;
 pub mod output_custody;
 pub mod permissions;
 pub mod plan;
