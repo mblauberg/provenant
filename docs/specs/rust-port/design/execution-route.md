@@ -452,8 +452,11 @@ boundary.
 The MCP `fabric_submit` path seals queued child records without preparing or
 launching providers. The host worker rechecks the request's parent AttemptId and
 depth against its own parent run's sealed request and the current
-`lanes.max_depth`; invalid proposals terminate as rejected before provider
-preparation. Environment and path checks provide early feedback but do not
+`lanes.max_depth`, and bounds each child task by the parent attempt's sealed
+task: a read-only parent cannot propose a writer, and child delivery needs the
+parent's own delivery grant for the same remote and branch, with a pull request
+only when the parent may open one. Invalid proposals terminate as rejected
+before provider preparation. Environment and path checks provide early feedback but do not
 supply host launch authority.
 
 The guardian stops and joins its worker on observed provider exit, before

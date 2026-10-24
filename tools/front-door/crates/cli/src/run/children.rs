@@ -109,6 +109,16 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         .request(context.run_id, &call)
         .map_err(|error| error.to_string())?;
     let parent_depth = parent_request.lane_depth.unwrap_or(1);
+    // Children are bounded by this attempt's own sealed task authority.
+    let parent_task_id = parent
+        .record(context.attempt_id, &call)
+        .map_err(|error| error.to_string())?
+        .task_id;
+    let parent_task = parent_request
+        .tasks
+        .iter()
+        .find(|task| task.task_id == parent_task_id)
+        .ok_or("parent task missing from its request")?;
     let mut inputs =
         provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
     inputs.state_dir = Some(launch.configuration_root.clone());
@@ -193,11 +203,14 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                     .map_err(|error| error.to_string())?;
                 continue;
             }
-            if let Err(error) =
-                session
-                    .store
-                    .validate_child(id, context.attempt_id, parent_depth, maximum, &call)
-            {
+            if let Err(error) = session.store.validate_child(
+                id,
+                context.attempt_id,
+                parent_task,
+                parent_depth,
+                maximum,
+                &call,
+            ) {
                 session
                     .store
                     .refuse_queued(id, &error.to_string(), &call)
