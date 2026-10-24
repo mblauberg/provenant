@@ -226,11 +226,10 @@ production dispatch identity. Agy stays unavailable rather than inheriting a
 shared `default` cooldown when a user switches accounts.
 
 Stored snapshots are typed, versioned serde records. Edge-built
-`VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
-`Serialize` only. Persist separate `AvailabilityRecord`, `FamilyEvidenceRecord`
-and run-owned `PermitRecord` projections (`Serialize, Deserialize`), never nested
-fact types. Permit records bind operation/attempt, quota snapshot revision and
-expiry. On recovery the owning edge validates stored evidence/revision/expiry
+`VerifiedLineage` and `ReviewAvailability` facts implement
+`Serialize` only. Persist separate `AvailabilityRecord` and
+`FamilyEvidenceRecord` projections (`Serialize, Deserialize`), never nested
+fact types. On recovery the owning edge validates stored evidence/revision/expiry
 before reconstructing a fact; stored bytes cannot assert fresh availability or
 admission. Records owns shared value types and bounded codecs; domain crates
 own validation. Provider envelopes may have extra fields but required
@@ -283,7 +282,7 @@ below abbreviate `Result<T, ProviderError>`; failures are always typed.
 | Owner / consumer | Contract |
 | --- | --- |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
-| quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account readiness only. Run stores its `PermitRecord` projection and consumes the validated permit for the exact attempt with its own resource reservation; no second admission ledger. |
+| quota / run | `Admission::check(&ResolvedRoute) -> Result<(), QuotaError>`; provider/account readiness and persisted refusals only. Run keeps its own resource reservation; no second admission ledger and no quota permit. |
 | providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
 | providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
 | routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |

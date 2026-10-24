@@ -1,7 +1,7 @@
 //! Provider quota wire decoding. Effects and credentials stay at the supervisor edge.
 use provenant_quota::{
-    AccountScope, QuotaDetails, QuotaError, QuotaProbeInput, QuotaProbePlan, QuotaSnapshot,
-    QuotaStatus, QuotaWindow,
+    AccountScope, QuotaDetails, QuotaEffectKind, QuotaError, QuotaProbeInput, QuotaProbePlan,
+    QuotaSnapshot, QuotaStatus, QuotaWindow,
 };
 use serde_json::Value;
 
@@ -17,40 +17,33 @@ pub fn plan(
     if account.adapter != adapter {
         return Err(QuotaError::Invalid("quota adapter identity"));
     }
-    let plan = match adapter {
-        "claude" | "cursor" => QuotaProbePlan::HttpGet {
-            account: account.clone(),
-            input: input.clone(),
-        },
-        "codex" | "agy" => QuotaProbePlan::Command {
-            account: account.clone(),
-            input: input.clone(),
-        },
-        "opencode" => QuotaProbePlan::LocalLedger {
-            account: account.clone(),
-            input: input.clone(),
-        },
+    let kind = match adapter {
+        "claude" | "cursor" => QuotaEffectKind::HttpGet,
+        "codex" | "agy" => QuotaEffectKind::Command,
+        "opencode" => QuotaEffectKind::LocalLedger,
         _ => return Err(QuotaError::Disabled),
     };
-    Ok(plan)
+    Ok(QuotaProbePlan {
+        kind,
+        account: account.clone(),
+        input: input.clone(),
+    })
 }
 
 pub fn decode(
     plan: &QuotaProbePlan,
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
-    let account = plan.account();
+    let account = &plan.account;
     account.validate()?;
     if capture.overflowed || capture.exit_code.is_some_and(|code| code != 0) {
         return Err(QuotaError::Invalid("provider quota capture"));
     }
     let adapter = account.adapter.as_str();
     let effect_matches = match adapter {
-        "claude" | "cursor" => matches!(plan, QuotaProbePlan::HttpGet { .. }),
-        "codex" | "agy" => {
-            matches!(plan, QuotaProbePlan::Command { .. }) && capture.exit_code == Some(0)
-        }
-        "opencode" => matches!(plan, QuotaProbePlan::LocalLedger { .. }),
+        "claude" | "cursor" => plan.kind == QuotaEffectKind::HttpGet,
+        "codex" | "agy" => plan.kind == QuotaEffectKind::Command && capture.exit_code == Some(0),
+        "opencode" => plan.kind == QuotaEffectKind::LocalLedger,
         _ => return Err(QuotaError::Disabled),
     };
     if !effect_matches {
@@ -86,9 +79,9 @@ pub fn decode(
         account: account.clone(),
         revision: 0,
         status,
-        observed_unix_seconds: plan.input().now_unix_seconds,
+        observed_unix_seconds: plan.input.now_unix_seconds,
         source_ref: format!("quota.provider.{adapter}"),
-        authority_ref: plan.input().authority_ref.clone(),
+        authority_ref: plan.input.authority_ref.clone(),
         windows,
         details,
     };

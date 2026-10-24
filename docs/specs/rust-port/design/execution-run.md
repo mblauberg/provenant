@@ -274,7 +274,7 @@ Run owns schema and transactions; shared typed records live in records:
   wait/rendering but includes prompt, route, authority and execution controls.
 - `AdmissionTicket`: operation/attempt/project IDs, sequence, holder custody,
   active/queued count reservation, memory/disk floors, startup spacing,
-  quota permit reference, separate admission deadline and resource samples.
+  separate admission deadline and resource samples.
   A control receipt references `cancel.json`; it is not a second cancel file.
 - `RunEvent` and cursor rows: monotonic host sequence, project/attempt/revision,
   kind and typed change. Events and index changes commit with the attempt;
@@ -369,7 +369,7 @@ retains a transaction between calls.
 | run / workflow composition edge | `AttemptReader::attempt(AttemptId) -> Result<AttemptFact, RunError>` and `attempts(filter)` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
 | run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &Acceptance, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
-| quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
+| quota / run | `Admission::check(&ResolvedRoute) -> Result<(), QuotaError>`; provider/account quota readiness only, including the account record's persisted refusals. There is no operation-scoped permit; quota owns no second host admission ledger. |
 | providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control; the only rollout read is the current-attempt host identity projection below. |
 | supervisor / run | `launch(OwnedLaunch, CapturePlan, PublicationReservation) -> CustodyHandle`; `observe(handle, WaitBudget, &CancelToken) -> Observation`; `stop(handle, StopReason) -> StopReceipt`; `recover(CustodyRef) -> Reattached\|Exited\|Unknown`; same-binary detached worker handoff. Safe filesystem publication/locks have explicit budgets; fixed Git evidence reads use `run_utility`. |
 | confinement, config / run | Validated prompt snapshots, canonical writer scopes, confined plans and lifetime-bound writer reservation; reject primary-checkout writers, secrets and unsupported enforcement. Config supplies immutable policy snapshots. Resource/liveness probes use supervisor's safe OS API. |

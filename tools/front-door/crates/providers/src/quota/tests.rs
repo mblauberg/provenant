@@ -1,6 +1,7 @@
 use super::*;
 use provenant_quota::{
-    AccountScope, ProbeCapture, QuotaProbeInput, QuotaProbePlan, QuotaStatus, QuotaWindow,
+    AccountScope, ProbeCapture, QuotaEffectKind, QuotaProbeInput, QuotaProbePlan, QuotaStatus,
+    QuotaWindow,
 };
 
 const NOW: i64 = 1_792_800_000;
@@ -27,20 +28,16 @@ fn decode_fixture(adapter: &str, fixture: &str) -> QuotaSnapshot {
 }
 
 fn effect_plan(adapter: &str) -> QuotaProbePlan {
-    match adapter {
-        "claude" | "cursor" => QuotaProbePlan::HttpGet {
-            account: scope(adapter),
-            input: input(),
-        },
-        "codex" | "agy" => QuotaProbePlan::Command {
-            account: scope(adapter),
-            input: input(),
-        },
-        "opencode" => QuotaProbePlan::LocalLedger {
-            account: scope(adapter),
-            input: input(),
-        },
+    let kind = match adapter {
+        "claude" | "cursor" => QuotaEffectKind::HttpGet,
+        "codex" | "agy" => QuotaEffectKind::Command,
+        "opencode" => QuotaEffectKind::LocalLedger,
         _ => unreachable!(),
+    };
+    QuotaProbePlan {
+        kind,
+        account: scope(adapter),
+        input: input(),
     }
 }
 
