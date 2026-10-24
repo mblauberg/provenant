@@ -1,0 +1,3 @@
+[mcp_servers.fabric]
+command = "/FIXTURE_ROOT/bin/mcp-probe"
+args = ["--state-dir", "/FIXTURE_ROOT/state", "fabric", "mcp", "--client", "codex"]

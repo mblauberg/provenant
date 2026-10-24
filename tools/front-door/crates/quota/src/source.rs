@@ -1,4 +1,4 @@
-//! Probe contracts only. Scheduling, admission and persistence belong to step 2.
+//! Provider-owned wire decoding and supervisor effect contracts.
 use serde::{Deserialize, Serialize};
 
 /// Opaque, non-secret provider identity; never an email, credential or auth path.
@@ -76,4 +76,25 @@ pub trait QuotaSource: Sync {
         plan: &QuotaProbePlan,
         capture: &ProbeCapture,
     ) -> Result<QuotaSnapshot, crate::QuotaError>;
+}
+
+/// The binary injects provider registrations. Quota never imports providers.
+pub fn plan_probe(
+    sources: &[&dyn QuotaSource],
+    account: &AccountScope,
+    input: &QuotaProbeInput,
+) -> Result<QuotaProbePlan, crate::QuotaError> {
+    account.validate()?;
+    let duration = input
+        .deadline_unix_seconds
+        .checked_sub(input.now_unix_seconds)
+        .ok_or(crate::QuotaError::TimeRange)?;
+    if !(1..=crate::schedule::TICK_BUDGET_SECONDS).contains(&duration) {
+        return Err(crate::QuotaError::Invalid("probe deadline"));
+    }
+    sources
+        .iter()
+        .find(|s| s.adapter_id() == account.adapter)
+        .ok_or(crate::QuotaError::Disabled)?
+        .probe(account, input)
 }

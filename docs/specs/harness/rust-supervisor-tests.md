@@ -71,11 +71,12 @@ The user dropped timed trials on 2026-10-23; see the supervisor spec.
   - `test_missing_or_unknown_command_prints_usage_to_stderr_and_exits_2`
   - `test_help_is_concise_and_names_existing_command_owners`
   - `test_help_command_gives_detail_for_specific_command`
-- `tests/test_check_provenant_install.py` (4 tests, 39 lines):
-  - `test_check_accepts_an_installed_stub_matching_the_template`
-  - `test_check_rejects_installed_stub_drift`
-  - `test_check_still_accepts_the_template_when_a_crate_exists`
-  - `test_check_names_the_python_front_door_for_the_template`
+- `tests/test_check_provenant_install.py` retains seven isolated registration-query cases for the live Fabric host consumer:
+  - registration status without requiring an Agy executable
+  - commented OpenCode JSONC
+  - three malformed or wrong-shaped OpenCode configs
+  - Agy presence detection
+  - an explicit Cursor MCP config override
 - `tests/test_front_door_build.py` (3 tests, 12 lines):
   - `test_python_mode_never_looks_at_the_crate`
   - `test_auto_without_a_crate_is_the_template_with_no_note`

@@ -1,254 +1,283 @@
 import Foundation
 
-/// `provenant quota --json`, schema provenant.quota.report.v1 (scripts/provider_quota.py).
-struct QuotaReport: Decodable {
-    static let schemaID = "provenant.quota.report.v1"
-    let schema: String
-    let host: String?
-    let enabled: Bool
+/// A projection of the quota crate's versioned report for the menu-bar views.
+struct QuotaReport {
+    static let schemaVersion: UInt64 = 1
     let accounts: [Account]
-    // From `provenant quota tick`; an older CLI leaves them out.
-    let generatedAt: Date?
+    let generatedAt: Date
     let nextDueAt: Date?
-    private let refreshing: Lenient<[String]>?
-    // Display settings and the menu bar's account; an older CLI leaves them out.
-    private let display: Lenient<Display>?, headline: Lenient<Headline>?
-    var alertPercent: Double { display?.value?.shortWindowAlertPercent ?? 90 }
-    var pick: Headline? { headline?.value }
+    let refreshing: [String]
+    let reportPath: String
+    let coverage: Coverage
+    let sources: [Source]
+    var alertPercent: Double { 90 }
 
-    /// `quota.display`: a shorter window shows instead of the longest once it reaches this use.
-    struct Display: Decodable { let shortWindowAlertPercent: Double? }
-
-    /// `quota.menubar.headline`: recent | worst | none | <provider>/<account>, and the account it chose.
-    struct Headline: Decodable {
-        let mode: String
-        let account: String?
+    struct Coverage { let total, known: UInt64 }
+    struct Source {
+        let adapter, status: String
+        let error: String?
+        let nextDueAt: Date?
+        var title: String { QuotaReport.providerName(adapter) }
+        var statusTitle: String { QuotaReport.statusTitle(status) }
     }
 
-    struct Account: Decodable, Identifiable {
-        var id: String { "\(provider)/\(account)" }
-        let provider, account: String
+    struct Account: Identifiable {
+        let provider, account, accountKey: String
         let plan, error: String?
         let active: Bool?
         let priority: Double?
-        let status: String          // ok | stale | unavailable | unreported | disabled | signed_out
-        // The CLI's display vocabulary; an older CLI leaves them out.
+        let status: String
         let providerName, displayName, planLabel: String?
-        let backAt: Date?           // when an exhausted or signed-out account's first pool comes back
-        let observedAt: Date?
+        let backAt, observedAt: Date?
         let windows: [Window]
         let unreported: [String]?
-        let drawingCredits: Bool?   // the allowance is spent and credits keep the account usable
+        let drawingCredits: Bool?
         let creditBurnPerHour: Double?
-        private let schedule: Lenient<Schedule>?, usageCredits: Lenient<[Credit]>?, resets: Lenient<Resets>?
-        var hasReading: Bool { status == "ok" || status == "stale" }
-        /// Signed out of a single-account credential store: the last reading is kept, and never fetched.
-        var isSignedOut: Bool { status == "signed_out" }
-        var next: Schedule? { schedule?.value }
-        var credits: [Credit] { usageCredits?.value ?? [] }
-        var banked: Resets? { resets?.value }
+        let schedule: Schedule?
+        private let hasSnapshot: Bool
+
+        var id: String { "\(provider)/\(accountKey)" }
+        var hasReading: Bool { hasSnapshot && ["available", "credit_only", "exhausted", "stale"].contains(status) }
+        var requiresAuth: Bool { status == "auth_required" }
+        var next: Schedule? { schedule }
+        var credits: [Credit] { [] }
+        var banked: Resets? { nil }
+        var statusTitle: String {
+            QuotaReport.statusTitle(status)
+        }
+
+        fileprivate init(_ row: QuotaWireAccount, generatedAt: Date) throws {
+            let rowStatus = row.status
+            provider = row.account.adapter
+            account = row.account.label
+            accountKey = row.account.accountKey
+            guard QuotaReport.validStatuses.contains(rowStatus) else {
+                throw QuotaReport.invalid("unknown account status")
+            }
+            status = rowStatus
+            error = row.error
+            hasSnapshot = row.snapshot != nil
+            providerName = QuotaReport.providerName(provider)
+            displayName = account == "default" || account.isEmpty ? nil : account
+            plan = nil
+            planLabel = nil
+            active = nil
+            priority = nil
+            unreported = nil
+            drawingCredits = rowStatus == "credit_only"
+            creditBurnPerHour = nil
+            observedAt = row.ageSeconds.map { Date(timeIntervalSince1970: generatedAt.timeIntervalSince1970 - Double($0)) }
+            let mappedWindows = (row.snapshot?.windows ?? []).map { item in
+                let paceState = rowStatus == "exhausted" ? "exhausted" : rowStatus == "credit_only" ? "credit_only" : "on_pace"
+                return Window(name: item.pool, label: Fmt.human(item.pool), usedPercent: Double(item.usedBasisPoints) / 100,
+                              windowMinutes: nil, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
+                              limitAmount: nil, currency: nil, advisory: false, pool: item.pool, poolLabel: nil,
+                              pace: Pace(state: paceState, runsOutAt: nil, summary: nil))
+            }
+            windows = mappedWindows
+            backAt = rowStatus == "exhausted" ? mappedWindows.compactMap(\.resetAt).min() : nil
+            schedule = row.nextDueUnixSeconds.map { Schedule(nextDueAt: QuotaReport.date($0), reason: nil) }
+        }
     }
 
-    struct Schedule: Decodable {
-        let nextDueAt: Date
-        let reason: String?
-    }
-
-    /// A credit balance; `balance` is nil when unlimited.
-    struct Credit: Decodable {
+    struct Schedule { let nextDueAt: Date; let reason: String? }
+    struct Credit {
         let balance: Double?
         let unlimited: Bool
         let currency, unit: String?
         let expiresAt: Date?
     }
-
-    /// Banked resets available now, with expiries soonest first.
-    struct Resets: Decodable {
-        let available: Int
-        let expiresAt: [Date]
-    }
-
-    struct Window: Decodable, Identifiable {
+    struct Resets { let available: Int; let expiresAt: [Date] }
+    struct Window: Identifiable {
         var id: String { name }
         let name: String
         let label: String?
         let usedPercent: Double?
         let windowMinutes: Int?
         let resetAt: Date?
-        let usedAmount, limitAmount: Double?   // a budget window, such as dollars of cloud session credit
+        let usedAmount, limitAmount: Double?
         let currency: String?
         let advisory: Bool?
-        let pool, poolLabel: String?   // windows of one pool bind only that pool, such as agy's Gemini models
+        let pool, poolLabel: String?
         let pace: Pace
         var title: String { label ?? Fmt.human(name) }
-        /// "Claude models · Weekly" for a pooled window.
         var fullTitle: String { poolLabel.map { "\($0) · \(title)" } ?? title }
-        /// As in provider_quota.py `sets_state`: an untimed budget or an advisory window never binds the account.
         var setsState: Bool { advisory != true && !(limitAmount != nil && (windowMinutes ?? 0) == 0) }
-        /// A passed reset makes the reading obsolete until the next fetch.
         func isExpired(_ now: Date) -> Bool { resetAt.map { $0 <= now } ?? false }
     }
+    struct Pace { let state: String; let runsOutAt: Date?; let summary: String? }
 
-    /// exhausted | unknown | unreported | ahead_of_pace | deficit (legacy) | on_pace | reserve | early | not_started
-    struct Pace: Decodable {
-        let state: String
-        let runsOutAt: Date?
-        let summary: String?
+    private static let validStatuses: Set<String> = ["available", "credit_only", "exhausted", "stale", "unknown", "auth_required", "unsupported"]
+    private static func date(_ seconds: Int64) -> Date { Date(timeIntervalSince1970: Double(seconds)) }
+    private static func providerName(_ adapter: String) -> String {
+        switch adapter {
+        case "agy": "Antigravity"
+        case "claude": "Claude"
+        case "codex": "Codex"
+        case "cursor": "Cursor"
+        case "opencode": "OpenCode"
+        default: Fmt.human(adapter)
+        }
+    }
+    private static func statusTitle(_ status: String) -> String {
+        switch status {
+        case "stale": "Stale"
+        case "unknown": "Unknown"
+        case "auth_required": "Authentication required"
+        case "unsupported": "Unsupported"
+        case "credit_only": "Drawing on credits"
+        default: Fmt.human(status)
+        }
+    }
+    private static func invalid(_ message: String) -> DecodingError {
+        .dataCorrupted(.init(codingPath: [], debugDescription: message))
+    }
+
+    private static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
     }
 
     static func decode(_ data: Data) throws -> QuotaReport {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        // Z or offset forms, with or without fractional seconds; the result is an absolute instant.
-        decoder.dateDecodingStrategy = .custom { try Date($0.singleValueContainer().decode(String.self), strategy: .iso8601) }
-        return try decoder.decode(QuotaReport.self, from: data)
+        try project(decoder().decode(QuotaWireReport.self, from: data))
     }
 
-    /// A tick names the accounts it is fetching; a list older than the CLI's run limit is a crashed run's leftover.
-    func isRefreshing(now: Date) -> Bool {
-        !(refreshing?.value ?? []).isEmpty && generatedAt.map { now.timeIntervalSince($0) < 60 } ?? false
+    static func decodeEnvelope(_ data: Data, command: String) throws -> QuotaReport {
+        let envelope = try decoder().decode(QuotaEnvelope<QuotaWireReport>.self, from: data)
+        guard envelope.schemaVersion == schemaVersion, envelope.command == command, envelope.status == "ok" else {
+            throw invalid("unexpected quota command envelope")
+        }
+        guard let report = envelope.data else { throw invalid(envelope.error ?? "quota command returned no report") }
+        return try project(report)
     }
 
-    /// The account schedule due soonest.
-    var nextCheck: Schedule? { accounts.compactMap(\.next).min { $0.nextDueAt < $1.nextDueAt } }
+    private static func project(_ wire: QuotaWireReport) throws -> QuotaReport {
+        guard wire.schemaVersion == schemaVersion else { throw invalid("unsupported report version") }
+        guard !wire.reportPath.isEmpty, wire.reportPath.hasPrefix("/") else { throw invalid("report path is not absolute") }
+        let generatedAt = date(wire.generatedUnixSeconds)
+        let accounts = try wire.accounts.map { try Account($0, generatedAt: generatedAt) }
+        let sources = try (wire.sources ?? []).map { source -> Source in
+            guard validStatuses.contains(source.status) else { throw invalid("unknown source status") }
+            return Source(adapter: source.adapter, status: source.status, error: source.error,
+                          nextDueAt: source.nextDueUnixSeconds.map(date))
+        }
+        return QuotaReport(accounts: accounts, generatedAt: generatedAt,
+                           nextDueAt: wire.nextDueUnixSeconds.map(date), refreshing: wire.refreshingIds,
+                           reportPath: wire.reportPath, coverage: Coverage(total: wire.coverage.total, known: wire.coverage.known),
+                           sources: sources)
+    }
 
-    /// Accounts in display order: usable, credits, unreadable, exhausted, signed out; by priority, then report order.
+    func isRefreshing(now: Date) -> Bool { !refreshing.isEmpty && now.timeIntervalSince(generatedAt) < 60 }
+    var nextCheck: Schedule? { nextDueAt.map { Schedule(nextDueAt: $0, reason: nil) } }
     func sorted(now: Date) -> [Account] {
         accounts.enumerated().sorted { ($0.element.rank(now), $0.element.priority ?? 100, $0.offset)
             < ($1.element.rank(now), $1.element.priority ?? 100, $1.offset) }.map(\.element)
     }
-
-    /// The highest-use binding window across every enabled account (the report lists only those) that has a
-    /// current reading and is not exhausted. Exhausted accounts are left out, so a month-long exhaustion does
-    /// not pin the headline at 100% and hide the accounts you can still use.
     func top(now: Date) -> (account: Account, window: Window)? {
         accounts.filter { $0.rank(now) == 0 }.compactMap { account in account.binding(now: now).map { (account, $0) } }
             .max { $0.window.usedPercent! < $1.window.usedPercent! }
     }
-
-    /// The account the menu bar shows and the window to show for it. The CLI picks it (`quota.menubar.headline`);
-    /// an account it picked that is no longer usable gives way to the highest use, unless it was pinned. An older
-    /// CLI picks nothing, so the highest use shows. Nil for `none` or when nothing usable remains.
     func featured(now: Date) -> (account: Account, window: Window)? {
-        guard let pick else { return top(now: now).map { ($0.account, $0.account.display(now: now, alert: alertPercent) ?? $0.window) } }
-        guard let id = pick.account, let account = accounts.first(where: { $0.id == id }) else { return nil }
-        let pinned = pick.mode.contains("/")
-        guard pinned || account.rank(now) == 0 else { return top(now: now).flatMap { featured($0.account, now) } }
-        return featured(account, now)
+        top(now: now).map { ($0.account, $0.account.display(now: now, alert: alertPercent) ?? $0.window) }
     }
-
-    private func featured(_ account: Account, _ now: Date) -> (account: Account, window: Window)? {
-        account.display(now: now, alert: alertPercent).map { (account, $0) }
-    }
-
     func exhausted(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 3 } }
-
-    /// The menu bar shows the gauge alone: `none`, or the CLI found nothing usable.
-    var iconOnly: Bool { pick.map { $0.mode == "none" || $0.account == nil } ?? false }
-
+    var iconOnly: Bool { accounts.isEmpty }
     func drawing(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 1 } }
-
-    /// 100% only when no account outside exhaustion or credit use has a current reading.
     func headline(now: Date) -> Double? {
         top(now: now)?.window.usedPercent ?? (exhausted(now: now).isEmpty && drawing(now: now).isEmpty ? nil : 100)
     }
 }
 
-/// Decodes to nil instead of failing the whole report when an optional block has an unexpected shape.
-struct Lenient<Value: Decodable>: Decodable {
-    let value: Value?
-    init(from decoder: Decoder) throws { value = try? Value(from: decoder) }
+private struct QuotaWireReport: Decodable {
+    let schemaVersion: UInt64
+    let generatedUnixSeconds: Int64
+    let accounts: [QuotaWireAccount]
+    let coverage: QuotaWireCoverage
+    let refreshingIds: [String]
+    let nextDueUnixSeconds: Int64?
+    let reportPath: String
+    let sources: [QuotaWireSource]?
 }
+private struct QuotaEnvelope<Payload: Decodable>: Decodable {
+    let schemaVersion: UInt64
+    let command, status: String
+    let data: Payload?
+    let error: String?
+}
+private struct QuotaWireCoverage: Decodable { let total, known: UInt64 }
+private struct QuotaWireAccount: Decodable {
+    let account: QuotaWireScope
+    let snapshot: QuotaWireSnapshot?
+    let status: String
+    let ageSeconds: UInt64?
+    let nextDueUnixSeconds: Int64?
+    let refreshing: Bool
+    let error: String?
+}
+private struct QuotaWireScope: Decodable { let adapter, accountKey, label: String }
+private struct QuotaWireSnapshot: Decodable { let windows: [QuotaWireWindow] }
+private struct QuotaWireWindow: Decodable { let pool: String; let usedBasisPoints: UInt64; let resetsUnixSeconds: Int64? }
+private struct QuotaWireSource: Decodable { let adapter, status: String; let error: String?; let nextDueUnixSeconds: Int64? }
 
 extension QuotaReport.Account {
     typealias Window = QuotaReport.Window
-
-    /// Pool names in report order; empty when nothing is pooled.
     var pools: [String] { windows.compactMap(\.pool).reduce(into: []) { if !$0.contains($1) { $0.append($1) } } }
-
-    /// A pool's windows with the unpooled ones that bind every pool.
     func windows(in pool: String?) -> [Window] { windows.filter { $0.pool == nil || $0.pool == pool } }
-
-    /// Windows with a reading that still holds: a window whose reset has passed no longer counts.
     static func current(_ windows: [Window], now: Date) -> [Window] {
         windows.filter { $0.usedPercent != nil && !$0.isExpired(now) && $0.setsState }
     }
-
-    /// The window that constrains these most: an exhausted one, the one that resets last; else the highest use.
     static func worst(_ windows: [Window]) -> Window? {
         windows.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
             ?? windows.max { $0.usedPercent! < $1.usedPercent! }
     }
-
-    /// As in quota_display.py `display`: an exhausted window; else a shorter window at the alert use or more,
-    /// even when the longest is higher, since the short one runs out first; else the longest.
     static func shown(_ windows: [Window], alert: Double) -> Window? {
         if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
         let longest = windows.max { ($0.windowMinutes ?? 0, $0.usedPercent!) < ($1.windowMinutes ?? 0, $1.usedPercent!) }
         let alerts = windows.filter { $0.usedPercent! >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
         return alerts.max { $0.usedPercent! < $1.usedPercent! } ?? longest
     }
-
-    /// The window that binds the account now. Pools are independent, so the account is usable while any pool is:
-    /// the most used usable pool binds, and when every pool is exhausted, the pool back soonest binds.
     func binding(now: Date) -> Window? {
         let groups = pools.isEmpty ? [windows] : pools.map { windows(in: $0) }
         let worsts = groups.compactMap { Self.worst(Self.current($0, now: now)) }
         return worsts.filter { $0.pace.state != "exhausted" }.max { $0.usedPercent! < $1.usedPercent! }
             ?? worsts.min { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
     }
-
-    /// The window a reader sees, from the binding pool: the longest, unless a shorter one is nearly spent.
     func display(now: Date, alert: Double) -> Window? {
         let pool = binding(now: now)?.pool
         return Self.shown(Self.current(pools.isEmpty ? windows : windows(in: pool), now: now), alert: alert)
     }
-
-    /// True when a shorter window has taken the display from the longest, so the row names it.
     func showsShortWindow(now: Date, alert: Double) -> Bool {
         guard let shown = display(now: now, alert: alert) else { return false }
         let group = Self.current(pools.isEmpty ? windows : windows(in: shown.pool), now: now)
         return group.contains { ($0.windowMinutes ?? 0) > (shown.windowMinutes ?? 0) }
     }
-
-    /// One entry per pool, for its ring: the window shown for that pool, nil once every reading has reset.
     func poolRings(now: Date, alert: Double) -> [(pool: String?, window: Window?)] {
         (pools.isEmpty ? [nil] : pools.map(Optional.some)).map { pool in
             (pool, Self.shown(Self.current(pool == nil ? windows : windows(in: pool), now: now), alert: alert))
         }
     }
-
-    /// Exhausted pools other than the binding one, each with the window that keeps it exhausted.
     func spentPools(now: Date) -> [Window] {
         let bound = binding(now: now)?.pool
         return pools.filter { $0 != bound }.compactMap { Self.worst(Self.current(windows(in: $0), now: now)) }
             .filter { $0.pace.state == "exhausted" }
     }
-
-    /// When the account is usable again: the report's time, or the binding window's reset.
     func back(now: Date) -> Date? {
         backAt ?? (binding(now: now).flatMap { $0.pace.state == "exhausted" ? $0.resetAt : nil })
     }
-
-    /// Drawing on credits, per the report, until an exhausted window behind it resets.
-    func isDrawing(now: Date) -> Bool {
-        drawingCredits == true && (binding(now: now)?.pace.state == "exhausted" || !windows.contains { $0.pace.state == "exhausted" })
-    }
-
-    /// 0 usable, 1 drawing on credits, 2 no reading, 3 exhausted, 4 signed out.
+    func isDrawing(now _: Date) -> Bool { drawingCredits == true }
     func rank(_ now: Date) -> Int {
-        isSignedOut ? 4 : !hasReading ? 2 : isDrawing(now: now) ? 1 : binding(now: now)?.pace.state == "exhausted" ? 3 : 0
+        switch status {
+        case "auth_required": 4
+        case "exhausted": 3
+        case "credit_only": 1
+        case "available": 0
+        default: 2
+        }
     }
-
-    /// "Claude · Anese". The CLI names accounts; with an older CLI the label stands in, and `default` adds nothing.
-    var title: String {
-        let person = providerName != nil ? displayName : account == "default" ? nil : account
-        return [providerName ?? Fmt.human(provider), person].compactMap { $0 }.joined(separator: " · ")
-    }
-
+    var title: String { [providerName ?? Fmt.human(provider), displayName].compactMap { $0 }.joined(separator: " · ") }
     var planTitle: String? { planLabel ?? plan.map(Fmt.human) }
 }
-
 enum Fmt {
     private static let span: DateComponentsFormatter = {
         let f = DateComponentsFormatter()
@@ -373,7 +402,7 @@ enum Fmt {
 
     /// What a row says beside the account's name. The section header already names the state and the ring shows
     /// the use, so the row adds only what they cannot: the pool and any shorter window taking the display, the
-    /// reset after a symbol, and when an exhausted or signed-out account comes back.
+    /// reset after a symbol, and when an exhausted account comes back.
     struct Row {
         var lead: String? = nil       // "Claude models", "5-hour", or an unreadable account's error
         var reset: String? = nil      // "Thu 21 Mar", shown after the reset symbol
@@ -382,12 +411,12 @@ enum Fmt {
     }
 
     static func row(_ account: QuotaReport.Account, now: Date, alert: Double) -> Row {
-        if account.isSignedOut {
+        if account.requiresAuth {
             let when = account.backAt.map { back($0, now: now) } ?? account.observedAt.map { "read \(ago($0, now: now))" }
-            return Row(trailing: when, spoken: ["signed out", when].compactMap { $0 })
+            return Row(lead: account.statusTitle, trailing: when, spoken: [account.statusTitle, when].compactMap { $0 })
         }
         if !account.hasReading {
-            let why = account.error ?? "Not reported"
+            let why = account.error ?? account.statusTitle
             return Row(lead: why, spoken: [why])
         }
         let binding = account.binding(now: now)

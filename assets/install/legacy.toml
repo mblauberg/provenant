@@ -1,0 +1,471 @@
+schema_version = 1
+utility_hook_interpreters = []
+
+# Finite source entries. Each source is relative to the explicitly supplied
+# legacy checkout. Every skill entry applies to all listed harnesses.
+[[skills]]
+name = "autopilot"
+source = "skills/autopilot"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "code-review"
+source = "skills/code-review"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "d2-diagrams"
+source = "skills/d2-diagrams"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "deliver"
+source = "skills/deliver"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "diagnose"
+source = "skills/diagnose"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "engineering-docs"
+source = "skills/engineering-docs"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "engineering-writing"
+source = "skills/engineering-writing"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "evaluate"
+source = "skills/evaluate"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "grill-me"
+source = "skills/grill-me"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "implement"
+source = "skills/implement"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "legal-writing"
+source = "skills/legal-writing"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "natural-writing"
+source = "skills/natural-writing"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "orchestrate"
+source = "skills/orchestrate"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "prototype"
+source = "skills/prototype"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "refactor"
+source = "skills/refactor"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "release"
+source = "skills/release"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "retrospect"
+source = "skills/retrospect"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "scope"
+source = "skills/scope"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "session"
+source = "skills/session"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "setup-repo"
+source = "skills/setup-repo"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "skill-craft"
+source = "skills/skill-craft"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "tdd"
+source = "skills/tdd"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "tracker"
+source = "skills/tracker"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "ui-ux-design"
+source = "skills/ui-ux-design"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "work-map"
+source = "skills/work-map"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "_shared"
+source = "skills/_shared"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "remove"
+
+[[skills]]
+name = "playwright"
+source = "library/playwright"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "react-performance"
+source = "library/react-performance"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "tanstack-query"
+source = "library/tanstack-query"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+[[skills]]
+name = "typescript-clean-code"
+source = "library/typescript-clean-code"
+harnesses = ["claude", "codex", "cursor", "agy", "opencode"]
+disposition = "replace"
+
+# Directory projections are matched independently from their per-entry links.
+[[directory_links]]
+harness = "claude"
+area = "skills"
+source = "skills"
+disposition = "replace"
+
+[[directory_links]]
+harness = "claude"
+area = "workflows"
+source = "workflows"
+disposition = "remove"
+
+# Workflow entries are all retired.
+[[workflows]]
+harness = "claude"
+name = "codebase-polish.js"
+source = "workflows/codebase-polish.js"
+disposition = "remove"
+
+[[workflows]]
+harness = "claude"
+name = "cross-verify.js"
+source = "workflows/cross-verify.js"
+disposition = "remove"
+
+[[workflows]]
+harness = "claude"
+name = "implement-run.js"
+source = "workflows/implement-run.js"
+disposition = "remove"
+
+# Exact instruction-link targets. OpenCode entries are strings in its JSONC
+# instructions array; other entries name a harness instruction or companion.
+[[instruction_links]]
+harness = "claude"
+kind = "global_doctrine"
+source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "claude"
+kind = "checkout_doctrine"
+source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "claude"
+kind = "companion"
+source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "codex"
+kind = "global_doctrine"
+source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "codex"
+kind = "checkout_doctrine"
+source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "codex"
+kind = "companion"
+source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "agy"
+kind = "checkout_doctrine"
+source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "agy"
+kind = "companion"
+source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "opencode"
+kind = "checkout_doctrine"
+source = "AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "opencode"
+kind = "companion"
+source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "opencode"
+kind = "opencode_home_doctrine"
+source = "{home}/.agents/AGENTS.md"
+replacement_asset = "instructions/AGENTS.md"
+disposition = "replace"
+
+[[instruction_links]]
+harness = "opencode"
+kind = "opencode_companion"
+source = "HARNESS.md"
+replacement_asset = "instructions/HARNESS.md"
+disposition = "replace"
+
+# Git hook links are matched under the verified Git hooks directory by the
+# binary composition edge; only the source target is compiled here.
+[[git_hooks]]
+name = "pre-push"
+source = "scripts/hooks/pre-push"
+disposition = "replace"
+
+[[git_hooks]]
+name = "post-merge"
+source = "scripts/hooks/post-merge"
+disposition = "remove"
+
+# The previous front-door installer owned this exact path and embedded binary
+# identity block. The digest value may vary by build; all other file-form
+# markers are fixed and validated by the compiled matcher.
+[[legacy_shims]]
+path = "{home}/.local/bin/provenant"
+identity_prefix = "\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\nprovenant-front-door source-sha256="
+binary_magic_hex = ["7f454c46", "cffaedfe", "feedfacf", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]
+disposition = "replace"
+
+# The absolute interpreter used by utility_output_hook.py is host-specific.
+# No literal is accepted without a recorded fixture, so the root list remains empty.
+
+# Claude hooks are exact event, matcher, command, and command-leaf fixtures.
+[[hooks]]
+id = "compact_reinject"
+harness = "claude"
+event = "SessionStart"
+matcher = "compact"
+command_form = "python3_double_quoted"
+source = "skills/session/scripts/compact_reinject.py"
+args = []
+disposition = "replace"
+
+[[hooks]]
+id = "state_check"
+harness = "claude"
+event = "PreCompact"
+command_form = "python3_double_quoted"
+source = "skills/session/scripts/state_check.py"
+args = ["--hook"]
+disposition = "replace"
+
+[[hooks]]
+id = "lane_safety_guard"
+harness = "claude"
+event = "PreToolUse"
+matcher = "Bash"
+command_form = "python3_shell_quoted"
+source = "scripts/lane_safety_guard.py"
+args = []
+disposition = "replace"
+
+[[hooks]]
+id = "routing_context_session"
+harness = "claude"
+event = "SessionStart"
+matcher = "startup|resume|clear|compact"
+command_form = "python3_shell_quoted"
+source = "scripts/routing_context_hook.py"
+args = []
+disposition = "remove"
+
+[[hooks]]
+id = "routing_context_pre_tool"
+harness = "claude"
+event = "PreToolUse"
+matcher = "Agent|.*fabric_dispatch"
+command_form = "python3_shell_quoted"
+source = "scripts/routing_context_hook.py"
+args = ["--pre-tool"]
+disposition = "remove"
+
+[[hooks]]
+id = "utility_output"
+harness = "claude"
+event = "PostToolUse"
+matcher = "Bash"
+command_form = "absolute_python_shell_quoted"
+source = "scripts/utility_output_hook.py"
+args = []
+timeout = 30
+disposition = "remove"
+
+[[directory_links]]
+harness = "codex"
+area = "skills"
+source = "skills"
+disposition = "replace"
+
+[[directory_links]]
+harness = "cursor"
+area = "skills"
+source = "skills"
+disposition = "replace"
+
+[[directory_links]]
+harness = "agy"
+area = "skills"
+source = "skills"
+disposition = "replace"
+
+[[directory_links]]
+harness = "opencode"
+area = "skills"
+source = "skills"
+disposition = "replace"
+
+# The old installer emitted these exact MCP server shapes. Args may be absent
+# or an empty array; no other fields, env keys, values, or launch paths match.
+[[mcp]]
+harness = "claude"
+selector = "mcpServers.fabric"
+command = "{home}/.local/bin/provenant"
+command_array = false
+environment_field = "env"
+type = "stdio"
+args = "absent_or_empty"
+state_directory = "{home}/.local/state/agent-harness/fabric"
+seat = "claude"
+client_label = "claude"
+
+[[mcp]]
+harness = "codex"
+selector = "mcp_servers.fabric"
+command = "{home}/.local/bin/provenant"
+command_array = false
+environment_field = "env"
+args = "absent_or_empty"
+state_directory = "{home}/.local/state/agent-harness/fabric"
+seat = "codex"
+client_label = "codex"
+
+[[mcp]]
+harness = "cursor"
+selector = "mcpServers.fabric"
+command = "{home}/.local/bin/provenant"
+command_array = false
+environment_field = "env"
+args = "absent_or_empty"
+state_directory = "{home}/.local/state/agent-harness/fabric"
+seat = "cursor"
+client_label = "cursor"
+
+[[mcp]]
+harness = "agy"
+selector = "mcpServers.fabric"
+command = "{home}/.local/bin/provenant"
+command_array = false
+environment_field = "env"
+args = "absent_or_empty"
+state_directory = "{home}/.local/state/agent-harness/fabric"
+seat = "agy"
+client_label = "agy"
+
+[[mcp]]
+harness = "opencode"
+selector = "mcp.fabric"
+command = "{home}/.local/bin/provenant"
+command_array = true
+environment_field = "environment"
+type = "local"
+args = "absent"
+enabled = true
+state_directory = "{home}/.local/state/agent-harness/fabric"
+seat = "opencode"
+client_label = "opencode"

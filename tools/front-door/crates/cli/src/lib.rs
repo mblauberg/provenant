@@ -3,10 +3,13 @@
 pub mod check;
 pub mod domains;
 pub mod fabric;
+pub mod quota;
 pub mod route;
 pub use fabric::Fabric;
+pub use quota::Quota;
 pub use route::Route;
 mod grammar;
+pub mod install;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
@@ -327,7 +330,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
     if inv.globals.json
         && matches!(
             inv.command,
-            Command::Hook(_) | Command::Internal(_) | Command::Fabric(Fabric::Mcp)
+            Command::Hook(_) | Command::Internal(_) | Command::Fabric(Fabric::Mcp { .. })
         )
     {
         return invalid("--json is invalid for hook/MCP/internal execution");

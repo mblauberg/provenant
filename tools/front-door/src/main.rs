@@ -1,6 +1,7 @@
 //! The process edge composes typed owners and owns ordinary result delivery.
 #![forbid(unsafe_code)]
 mod checks;
+mod install;
 mod overflow;
 mod roots;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
@@ -162,7 +163,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             unavailable("config show", "config", globals)
         }
-        Command::Fabric(provenant_cli::Fabric::Mcp) => unavailable("fabric mcp", "fabric", globals),
+        Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
+            unavailable("fabric mcp", "fabric", globals)
+        }
         Command::Fabric(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;
@@ -183,8 +186,8 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 }
             }
         }
-        Command::Install(_) => unavailable("install", "config", globals),
-        Command::Uninstall(_) => unavailable("uninstall", "config", globals),
+        Command::Install(args) => install::run_install(args, globals),
+        Command::Uninstall(args) => install::run_uninstall(args, globals),
         Command::Route(command) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;
@@ -211,10 +214,25 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Telemetry(provenant_cli::Telemetry::Stats(_)) => {
             unavailable("telemetry stats", "telemetry", globals)
         }
-        Command::Quota(quota) => match quota {
-            provenant_cli::Quota::Show(_) => unavailable("quota show", "quota", globals),
-            provenant_cli::Quota::Tick { .. } => unavailable("quota tick", "quota", globals),
-        },
+        Command::Quota(cmd) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                roots::roots(globals, &assets, &project)
+            })();
+            match resolved {
+                Ok(roots) => {
+                    provenant_cli::quota::run(cmd, globals, &roots, provenant_providers::REGISTRY)
+                }
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Worktree(worktree) => match worktree {
             provenant_cli::Worktree::Create { .. } => {
                 unavailable("worktree create", "confinement", globals)

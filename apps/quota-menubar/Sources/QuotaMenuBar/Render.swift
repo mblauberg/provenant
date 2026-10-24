@@ -4,7 +4,7 @@ import SwiftUI
 /// `quota-menubar --render <report.json> <out.png> [--dark] [--expand <id>,...] [--screen-height <points>]
 /// [--now <ISO time>] [--scale <factor>]` draws the panel from a saved report into a PNG, offscreen, without running
 /// the CLI, at 2x as on a Retina display unless told otherwise.
-/// The clock defaults to the report's `generated_at`, so a fixture draws the same way on any day.
+/// The clock defaults to the report's `generated_unix_seconds`, so a fixture draws the same way on any day.
 @MainActor
 enum Render {
     static func run(_ arguments: [String]) -> Int32 {

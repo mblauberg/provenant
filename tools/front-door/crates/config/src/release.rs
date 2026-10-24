@@ -1,9 +1,7 @@
 //! Verified staged releases and bounded packaging. Build orchestration calls
 //! `package_release` after linking; runtime startup never builds itself.
 use crate::inspection::InspectionEvidence;
-use crate::managed::{
-    InstallError, ReleaseSmoke, directory, normal_absolute, path_wire, snapshot, snapshot_inspected,
-};
+use crate::managed::{InstallError, ReleaseSmoke, directory, normal_absolute, path_wire, snapshot};
 use provenant_core::CancelToken;
 use provenant_records::{
     CanonicalV1, Limits, ReleaseFile, ReleaseManifest, SourceDigest, SourceInput, VersionInfo,
@@ -37,12 +35,44 @@ impl Release {
         &self.source
     }
     pub fn read(source: &Path, target: &str, fs: &dyn SafeFs) -> Result<Self, InstallError> {
-        Self::read_inspected(source, target, fs, None)
+        let anchor = directory(source, false, fs).map_err(|error| match error {
+            InstallError::Fs(error) if error.is_not_found() => {
+                InstallError::Tampered(source.join("release.json"))
+            }
+            other => other,
+        })?;
+        Self::read_held(source, target, anchor)
     }
-    pub(crate) fn read_inspected(
+    pub(crate) fn read_scoped_inspected(
         source: &Path,
         target: &str,
         fs: &dyn SafeFs,
+        state_root: &Path,
+        mut evidence: Option<&mut InspectionEvidence>,
+    ) -> Result<Self, InstallError> {
+        let anchor = match crate::managed::directory_scoped(source, state_root, false, fs) {
+            Ok(anchor) => anchor,
+            Err(InstallError::Fs(error)) if error.is_not_found() => {
+                if let Some(evidence) = evidence.as_deref_mut() {
+                    evidence.observe(b"snapshot", &source.join("release.json"), None);
+                }
+                return Err(InstallError::Fs(error));
+            }
+            Err(error) => return Err(error),
+        };
+        Self::read_held_inspected(source, target, anchor, evidence)
+    }
+    fn read_held(
+        source: &Path,
+        target: &str,
+        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
+    ) -> Result<Self, InstallError> {
+        Self::read_held_inspected(source, target, anchor, None)
+    }
+    fn read_held_inspected(
+        source: &Path,
+        target: &str,
+        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
         mut evidence: Option<&mut InspectionEvidence>,
     ) -> Result<Self, InstallError> {
         normal_absolute(source)?;
@@ -50,7 +80,12 @@ impl Release {
         let Some(crate::managed::Snapshot {
             value: crate::managed::Value::File { bytes, mode: 0o600 },
             ..
-        }) = snapshot_inspected(&manifest_path, fs, evidence.as_deref_mut())?
+        }) = crate::managed::snapshot_below_inspected(
+            &manifest_path,
+            source,
+            anchor.as_ref(),
+            evidence.as_deref_mut(),
+        )?
         else {
             return Err(InstallError::Tampered(manifest_path));
         };
@@ -60,12 +95,19 @@ impl Release {
             return Err(InstallError::Platform);
         }
         check_bounds(&manifest)?;
+        let actual =
+            inventory_held_inspected(source, anchor.as_ref(), false, evidence.as_deref_mut())?;
         let mut files = BTreeMap::new();
         for item in &manifest.files {
             let relative = item.path.to_relative_path()?.as_path().to_path_buf();
             validate_name(&relative, item.mode)?;
             let path = source.join(&relative);
-            let current = snapshot_inspected(&path, fs, evidence.as_deref_mut())?;
+            let current = crate::managed::snapshot_below_inspected(
+                &path,
+                source,
+                anchor.as_ref(),
+                evidence.as_deref_mut(),
+            )?;
             let Some(crate::managed::Snapshot {
                 value: crate::managed::Value::File { bytes, mode },
                 ..
@@ -86,7 +128,6 @@ impl Release {
         if !files.contains_key(Path::new("bin/provenant")) {
             return Err(InstallError::Manifest("missing executable"));
         }
-        let actual = inventory_inspected(source, fs, false, evidence)?;
         let expected: Vec<_> = files.keys().cloned().collect();
         if actual != expected {
             return Err(InstallError::Manifest(
@@ -199,7 +240,8 @@ pub fn package_release(
     let mut release_files = Vec::new();
     for relative in names {
         let path = source.join(&relative);
-        let current = snapshot(&path, fs)?.ok_or_else(|| InstallError::Tampered(path.clone()))?;
+        let current = crate::managed::snapshot_scoped(&path, source, fs)?
+            .ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
         };
@@ -300,7 +342,7 @@ fn normalise_staged_modes(
 ) -> Result<(), InstallError> {
     for (relative, (expected_bytes, expected_mode)) in files {
         let path = source.join(relative);
-        let Some(current) = snapshot(&path, fs)? else {
+        let Some(current) = crate::managed::snapshot_scoped(&path, source, fs)? else {
             return Err(InstallError::Tampered(path));
         };
         let crate::managed::Value::File { bytes, mode } = current.value else {
@@ -320,7 +362,7 @@ fn normalise_staged_modes(
             .ok_or_else(|| InstallError::Path(path.clone()))?;
         let permissions = u32::try_from(*expected_mode)
             .map_err(|_| InstallError::Manifest("invalid release mode"))?;
-        let published = directory(parent, false, fs)?.atomic_write(
+        let published = crate::managed::directory_scoped(parent, source, false, fs)?.atomic_write(
             name,
             ".provenant-staging.",
             expected_bytes,
@@ -351,7 +393,7 @@ pub(crate) fn verify_binary_identity(
 }
 
 pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
-    inventory_with_cleanup(root, fs, false)
+    inventory_held(root, directory(root, false, fs)?.as_ref(), false)
 }
 
 // These are the exact names produced by supervisor temporary_name and
@@ -373,21 +415,21 @@ fn is_supervisor_staging_name(name: &OsStr) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-pub(crate) fn inventory_with_cleanup(
+pub(crate) fn inventory_held(
     root: &Path,
-    fs: &dyn SafeFs,
+    anchor: &dyn provenant_supervisor::fs::SafeDir,
     remove_staging: bool,
 ) -> Result<Vec<PathBuf>, InstallError> {
-    inventory_inspected(root, fs, remove_staging, None)
+    inventory_held_inspected(root, anchor, remove_staging, None)
 }
-fn inventory_inspected(
+pub(crate) fn inventory_held_inspected(
     root: &Path,
-    fs: &dyn SafeFs,
+    anchor: &dyn provenant_supervisor::fs::SafeDir,
     remove_staging: bool,
     evidence: Option<&mut InspectionEvidence>,
 ) -> Result<Vec<PathBuf>, InstallError> {
     struct Scan<'a> {
-        count: u64,
+        count: usize,
         evidence: Option<&'a mut InspectionEvidence>,
     }
     fn allowed_directory(path: &Path) -> bool {
@@ -408,7 +450,7 @@ fn inventory_inspected(
         root: &Path,
         tail: &Path,
         depth: usize,
-        fs: &dyn SafeFs,
+        dir: &dyn provenant_supervisor::fs::SafeDir,
         output: &mut Vec<PathBuf>,
         scan: &mut Scan<'_>,
         remove_staging: bool,
@@ -416,19 +458,15 @@ fn inventory_inspected(
         if depth > 64 {
             return Err(InstallError::Manifest("inventory bounds"));
         }
-        let dir = directory(&root.join(tail), false, fs)?;
         let mut names = Vec::new();
         for entry in dir.entries()? {
-            let name = entry?;
+            names.push(entry?);
             scan.count += 1;
-            if scan.count > ENTRY_LIMIT as u64 {
+            if scan.count > ENTRY_LIMIT {
                 return Err(InstallError::Manifest("inventory bounds"));
             }
-            names.push(name);
         }
         names.sort();
-        // Bind the complete bounded listing before a malformed entry can stop
-        // inspection. Filesystem iteration order cannot change the digest.
         if let Some(evidence) = scan.evidence.as_deref_mut() {
             for name in &names {
                 evidence.observe(b"inventory-entry", &root.join(tail).join(name), Some(&[]));
@@ -450,9 +488,15 @@ fn inventory_inspected(
                 continue;
             }
             match metadata.kind {
-                FileKind::Directory if allowed_directory(&path) => {
-                    walk(root, &path, depth + 1, fs, output, scan, remove_staging)?
-                }
+                FileKind::Directory if allowed_directory(&path) => walk(
+                    root,
+                    &path,
+                    depth + 1,
+                    dir.open_verified_directory(&name)?.as_ref(),
+                    output,
+                    scan,
+                    remove_staging,
+                )?,
                 FileKind::Regular if path == Path::new("release.json") => {}
                 FileKind::Regular => output.push(path),
                 _ => return Err(InstallError::Tampered(root.join(path))),
@@ -465,7 +509,7 @@ fn inventory_inspected(
         root,
         Path::new(""),
         0,
-        fs,
+        anchor,
         &mut output,
         &mut Scan { count: 0, evidence },
         remove_staging,

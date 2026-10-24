@@ -152,38 +152,12 @@ across every project the harness is loaded into: a merged worktree left behind
 is stale state that later agents mistake for live work, and each one carries its
 own uninherited dependency tree, in this repository roughly 400 MB apiece.
 
-An optional `post-merge` hook automates this. It is off by default. Enable it
-only where pull requests merge on the forge and the primary checkout receives
-them by `git pull`. Do not enable it where merges are made locally and then
-verified and pushed, or where the project's landing tool already prunes after
-the push: the hook would fire on the local merge, before verification and push.
-To opt in, run this command in the primary checkout; it refuses to overwrite
-any existing hook. The hook passes
-`ORIG_HEAD` to `scripts/clean.py --prune-merged --merged-since ORIG_HEAD`, so it
-prunes only branches the merge brought in. It quietly skips cleanup if
-`ORIG_HEAD` is missing. Merge commits are proven by ancestry. Squash merges are
-proven by a merged pull request whose head SHA exactly matches the local branch
-tip and whose merge commit is an ancestor of the integration branch. Only
-selected branches receive removal or skip reports; older merged worktrees are
-untouched.
-
-```sh
-hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
-```
-
-To disable it, remove only the symlink to this hook:
-
-```sh
-hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
-```
-
-An optional `pre-push` guard is off by default. It refuses pushes to the
-default branch from a linked worktree, non-fast-forward updates and deletion of
-the default branch, and pushed commits that add conflict markers. It reads the
-default branch from `origin/HEAD`, falling back to `main` or `master`. Enable it
-by linking `scripts/hooks/pre-push` at the free path
-`$(git rev-parse --git-path hooks)/pre-push`. Disable it only by removing that symlink;
-never replace an existing hook.
+Git hook registration is managed by Provenant. Include
+`--hooks on` in the `provenant install` command described in the
+[front-door runbook](runbooks/front-door.md). The installer resolves hook paths
+from the verified `--legacy-checkout` and uses the compiled manifest to
+identify legacy links. It preserves unmatched or foreign entries and reports
+unresolved manifest entries. Do not link or unlink Git hooks by hand.
 
 For a manual prune after one merge, name each branch that merge brought in:
 

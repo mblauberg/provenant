@@ -2,15 +2,24 @@
 
 The product checkout supplies code and shipped assets. The instance root owns
 user instructions, configuration and machine-local state. The Rust state design
-uses explicit `Roots` for these locations and installs a verified release under
-the selected state root.
+uses explicit roots and installs a verified, immutable release under the
+selected fresh state root. It does not import an old receipt or discover an old
+product checkout.
 
-The release and managed-file operations are library entrypoints. They do not
-read an old receipt or `.agent-fabric/product-root.json`, and this slice does
-not migrate an existing installation. CLI wiring for root selection, explicit
-harness selection and relocation remains in the later harness cut-over.
+To relocate, choose an absolute state path outside every legacy root and stage
+the packaged release at an absolute path. Use the stable binary, stop selected
+harness clients and config editors, and preview the exact cut-over before
+applying it. `--legacy-checkout` explicitly selects the one old checkout whose
+compiled entries may be matched.
 
-The old `scripts/install-harness` entrypoint refuses the retired Python install
-path. This runbook therefore has no relocation command until the Rust CLI
-cut-over lands. Uninstall is receipt-scoped: it removes only unchanged owned
-entries and never recursively deletes a checkout or state directory.
+```sh
+PROVENANT="$HOME/.local/bin/provenant"
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT"
+"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+```
+
+Keep the harnesses and config editors stopped through `check install`. The
+installer prints each matched change before writing and rejects unmatched
+foreign entries. `uninstall --harness NAME` removes only unchanged entries in
+the receipt; it never recursively deletes a checkout, state root or release.

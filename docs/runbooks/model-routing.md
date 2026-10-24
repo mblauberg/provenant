@@ -8,10 +8,9 @@ pool weights and model choices.
 
 ## Task classification
 
-The remaining Python dispatch path uses explicit classes, configured rules
-and a default. The utility-backed model classifier, shadow stages, routing-context
-hook and output-digest hook have been retired. This old path remains until the
-run/Fabric matrix gate; it is independent of Rust's explicit route resolver.
+Python dispatch uses explicit classes, configured rules and a default.
+Class and size determine tier; role is a label. The installer manages recorded
+hook registrations through the CLI's `HookSpec` policy and fixtures.
 
 The Rust command is `provenant route list|resolve`. Resolve takes exactly one
 `--model ADAPTER/ID` or `--route NAME`, optional `--effort` and at most two

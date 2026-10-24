@@ -9,8 +9,7 @@ let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "dev.provenant.quota
 /// What asked for a refresh, as `provenant quota tick --trigger` names it.
 enum Trigger: String { case timer, panel, manual, wake, power }
 
-/// Watches report.json and runs `provenant quota tick` only when an account is due or something happens, at most
-/// one run at a time. A CLI without `tick` gets the original fixed loop of `provenant quota --json`.
+/// Watches the current report and runs `provenant quota tick` when an account is due or something happens.
 @MainActor @Observable
 final class QuotaModel {
     private(set) var report: QuotaReport?
@@ -22,7 +21,6 @@ final class QuotaModel {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var clock: Timer?   // one shot, at the next reset that could change the label
     @ObservationIgnored private var launcher: CLI.Launcher?   // resolved once, forgotten if it stops working
-    @ObservationIgnored private var ticks: Bool?   // nil until the CLI shows whether it has `quota tick`
     @ObservationIgnored private var pending: Trigger?
     @ObservationIgnored private var watcher: ReportWatcher?
     @ObservationIgnored private var power = Power.current
@@ -30,8 +28,7 @@ final class QuotaModel {
     @ObservationIgnored private let network = NWPathMonitor()
     @ObservationIgnored private var online = false
     @ObservationIgnored private var waking = false   // woke, waiting for the network
-    @ObservationIgnored private let interval = max(
-        ProcessInfo.processInfo.environment["QUOTA_INTERVAL_SECONDS"].flatMap(Double.init) ?? 120, 5)
+    @ObservationIgnored private let retryInterval: Double = 120
     @ObservationIgnored private var fixture = false   // a saved report to draw; never runs the CLI
 
     /// A saved report, for `--render`: no timers, watchers or CLI runs.
@@ -58,20 +55,19 @@ final class QuotaModel {
             MainActor.assumeIsolated { self?.online = path.status == .satisfied; self?.tickOnceOnline() }
         }
         network.start(queue: .main)
-        run(.timer)   // also learns whether the CLI has `tick`
+        loadCurrent()
     }
 
-    /// ⌘R. Without `tick`, `--refresh` still bypasses the CLI's cache.
+    /// ⌘R.
     func refresh() { run(.manual) }
 
-    /// The panel can become key twice as it opens; the CLI decides whether data older than that is due.
-    /// Without `tick`, the original rule: refresh data older than half an interval.
+    /// The panel can become key twice as it opens; avoid closely spaced ticks.
     func panelOpened() {
-        if let updatedAt, Date.now.timeIntervalSince(updatedAt) < (ticks == false ? interval / 2 : 5) { return }
+        if let updatedAt, Date.now.timeIntervalSince(updatedAt) < 5 { return }
         run(.panel)
     }
 
-    /// A wake always runs `tick`, so a CLI upgraded while asleep is found.
+    /// A wake always ticks so the CLI can refresh due accounts.
     private func woke() {
         waking = true
         tickOnceOnline()
@@ -90,22 +86,30 @@ final class QuotaModel {
         let now = Power.current
         guard now != power else { return }
         power = now
-        if ticks == true { run(.power) }
+        run(.power)
     }
 
-    /// `provenant quota forget`: drops a signed-out account's remembered reading. The CLI refuses a signed-in one.
-    func forget(_ id: String) {
+    private func loadCurrent() {
         guard !fixture else { return }
+        isRefreshing = true
         let cached = launcher
         Task {
             let (resolved, outcome) = await withCheckedContinuation { done in
-                DispatchQueue.global(qos: .utility).async { done.resume(returning: CLI.quota(cached, ["quota", "forget", id, "--json"])) }
+                DispatchQueue.global(qos: .utility).async {
+                    done.resume(returning: CLI.quota(cached, ["quota", "show", "--json"]))
+                }
             }
             launcher = resolved
+            isRefreshing = false
             switch outcome {
-            case .report(let report): show(report)
-            case .failure(let failure): error = failure.message; relabel()
-            case .unsupported: break   // only `tick` reports this
+            case .report(let report):
+                show(report)
+                if watcher == nil { watch() } else { watcher?.arm() }
+                if report.nextDueAt.map({ $0 <= .now }) ?? true { run(.timer) }
+            case .failure(let failure):
+                error = failure.message
+                relabel()
+                schedule(nil)
             }
         }
     }
@@ -113,16 +117,13 @@ final class QuotaModel {
     private func run(_ trigger: Trigger) {
         guard !fixture else { return }
         guard !isRefreshing else {
-            // The run in flight covers timer and panel; the others still happen after it, the strongest first.
             let strength: [Trigger] = [.power, .wake, .manual]
             if let rank = strength.firstIndex(of: trigger), rank > pending.flatMap(strength.firstIndex) ?? -1 { pending = trigger }
             return
         }
         isRefreshing = true
-        let ticking = ticks != false || trigger == .wake
-        let arguments = ticking ? ["quota", "tick", "--trigger", trigger.rawValue, "--power", power, "--json"]
-            : ["quota", "--json"] + (trigger == .manual ? ["--refresh"] : [])
-        if ticking { log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power, privacy: .public)") }
+        let arguments = ["quota", "tick", "--trigger", trigger.rawValue, "--power", power, "--json"]
+        log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power, privacy: .public)")
         let cached = launcher
         Task {
             let (resolved, outcome) = await withCheckedContinuation { done in
@@ -132,18 +133,12 @@ final class QuotaModel {
             isRefreshing = false
             switch outcome {
             case .report(let report):
-                // Only a run of `tick` shows the CLI has it.
-                if ticking, ticks != true { ticks = true; watch() }
-                watcher?.arm()   // the first tick may have created the directory
                 show(report)
+                if watcher == nil { watch() } else { watcher?.arm() }
             case .failure(let failure):
-                error = failure.message   // the last good report stays, flagged
+                error = failure.message
                 relabel()
-                if ticks != false { schedule(nil) }
-            case .unsupported:
-                log.notice("quota tick is unsupported; polling every \(Int(self.interval)) s")
-                (ticks, watcher, pending) = (false, nil, nil)
-                return startLoop()
+                schedule(nil)
             }
             if let next = pending { pending = nil; run(next) }
         }
@@ -151,11 +146,10 @@ final class QuotaModel {
 
     /// Runs and the watcher both deliver reports, in either order; an older one never replaces a newer.
     private func show(_ incoming: QuotaReport) {
-        let report = self.report.flatMap { shown in
-            shown.generatedAt.flatMap { at in incoming.generatedAt.map { $0 < at } } == true ? shown : nil } ?? incoming
+        let report = self.report.flatMap { shown in incoming.generatedAt < shown.generatedAt ? shown : nil } ?? incoming
         (self.report, error, updatedAt) = (report, nil, .now)
         relabel()
-        if ticks == true { schedule(report.nextDueAt ?? report.nextCheck?.nextDueAt) }
+        schedule(report.nextDueAt)
     }
 
     /// Recomputes the status item's content, and wakes again only when a reset or return could change it. A
@@ -177,14 +171,15 @@ final class QuotaModel {
     /// One timer at the earliest due time, but no sooner than 30 s, so a report that is always due cannot spin.
     private func schedule(_ due: Date?) {
         timer?.invalidate()
-        let delay = max(due?.timeIntervalSinceNow ?? interval, 30)
+        let delay = max(due?.timeIntervalSinceNow ?? retryInterval, 30)
         timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.run(.timer) } }
         timer?.tolerance = min(delay * 0.1, 60)   // lets the system coalesce wakeups
         RunLoop.main.add(timer!, forMode: .common)
     }
 
     private func watch() {
-        watcher = ReportWatcher(dir: CLI.stateDir) { [weak self] data in
+        guard let report else { return }
+        watcher = ReportWatcher(file: URL(fileURLWithPath: report.reportPath)) { [weak self] data in
             switch CLI.decode(data) {
             case .success(let report): MainActor.assumeIsolated { self?.show(report) }
             case .failure: log.error("report.json is unreadable")
@@ -192,34 +187,26 @@ final class QuotaModel {
         }
     }
 
-    /// The original fixed loop, for a CLI without `tick`.
-    private func startLoop() {
-        timer?.invalidate()
-        timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.run(.timer) } }
-        timer?.tolerance = interval * 0.2
-        RunLoop.main.add(timer!, forMode: .common)
-        run(.timer)
-    }
 }
 
 /// Follows `<state dir>/report.json`. The CLI replaces it by atomic rename, which shows as a write on the
 /// directory, so the source watches the directory and re-arms when the directory itself is removed or moved.
 final class ReportWatcher {
-    private let dir: URL, changed: (Data) -> Void
+    private let file: URL, changed: (Data) -> Void
     private var source: DispatchSourceFileSystemObject?
     private var seen: [Int]?
 
-    init(dir: URL, changed: @escaping (Data) -> Void) {
-        (self.dir, self.changed) = (dir, changed)
+    init(file: URL, changed: @escaping (Data) -> Void) {
+        (self.file, self.changed) = (file, changed)
         arm()
     }
 
     deinit { source?.cancel() }
 
-    /// Opens the directory unless it is already watched; it may not exist until the first tick creates it.
+    /// Opens the report directory; it may not exist until the first tick creates it.
     func arm() {
         guard source == nil else { return }
-        let fd = open(dir.path, O_EVTONLY)
+        let fd = open(file.deletingLastPathComponent().path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main)
         source.setEventHandler { [weak self] in
@@ -235,13 +222,12 @@ final class ReportWatcher {
         source.setCancelHandler { close(fd) }
         source.resume()
         self.source = source
-        log.info("watching the quota state dir")
+        log.info("watching the quota report directory")
         check()
     }
 
-    /// Reads the report only when its inode, size or modification time changed; snapshot and lock files share the directory.
     private func check() {
-        let path = dir.appending(path: "report.json").path
+        let path = file.path
         var info = stat()
         guard stat(path, &info) == 0 else { return }
         let stamp = [Int(info.st_ino), Int(info.st_size), info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec]
@@ -264,7 +250,7 @@ enum Power {
 /// Runs `provenant quota` off the main thread. The app never reads credentials itself.
 enum CLI {
     struct Failure: Error { let message: String }
-    enum Outcome { case report(QuotaReport), failure(Failure), unsupported }
+    enum Outcome { case report(QuotaReport), failure(Failure) }
     struct Launcher: Sendable { let url: URL, path: String?, custom: Bool }
     struct Output { let status: Int32, signalled: Bool, timedOut: Bool, out: Data, err: String }
 
@@ -281,18 +267,10 @@ enum CLI {
         var reaped: siginfo_t { get { lock.withLock { exit } } set { lock.withLock { exit = newValue } } }
     }
 
-    /// Where `tick` writes report.json: provider_quota.py `state_root() / 'quota'`. The CLI inherits this
-    /// process's environment, so it sees the same AGENT_FABRIC_STATE_ROOT.
-    static var stateDir: URL {
-        let root = ProcessInfo.processInfo.environment["AGENT_FABRIC_STATE_ROOT"].map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/state/agent-harness/fabric")
-        return root.appending(path: "quota", directoryHint: .isDirectory)
-    }
-
     static func quota(_ cached: Launcher?, _ arguments: [String]) -> (Launcher?, Outcome) {
-        // Logs carry the cause only; messages can hold paths and CLI output.
+        let operation = arguments.dropFirst().first ?? "tick"
         func fail(_ launcher: Launcher?, _ cause: String, _ message: String) -> (Launcher?, Outcome) {
-            log.error("\(arguments[1], privacy: .public) failed: \(cause, privacy: .public)")
+            log.error("quota \(operation, privacy: .public) failed: \(cause, privacy: .public)")
             return (launcher, .failure(Failure(message: message)))
         }
         guard let launcher = cached ?? resolve() else {
@@ -307,18 +285,14 @@ enum CLI {
         let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
         if run.timedOut { return fail(launcher, "timeout", "provenant quota timed out after 60 seconds.") }
         if run.signalled { return fail(launcher, "signal \(run.status)", "provenant quota was killed by signal \(run.status).") }
-        if run.status == 127 {   // the launcher or its interpreter is gone: re-resolve next time
+        if run.status == 127 {
             let hint = launcher.custom ? "" : " Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
             return fail(nil, "status 127", "\(name) exited with status 127: \(detail).\(hint)")
         }
-        // An older CLI rejects `tick` as a usage error and prints no JSON.
-        if run.status != 0, arguments[1] == "tick", (try? JSONSerialization.jsonObject(with: run.out)) == nil {
-            return (launcher, .unsupported)
-        }
         if run.status != 0 { return fail(launcher, "status \(run.status)", "\(name) exited with status \(run.status): \(detail)") }
-        switch decode(run.out) {
+        switch decodeEnvelope(run.out, command: "quota \(operation)") {
         case .success(let report): return (launcher, .report(report))
-        case .failure(let failure): return fail(launcher, "unreadable report", failure.message)
+        case .failure(let failure): return fail(launcher, "unreadable response", failure.message)
         }
     }
 
@@ -429,8 +403,7 @@ enum CLI {
     }
 
     static func decode(_ data: Data) -> Result<QuotaReport, Failure> {
-        let report: QuotaReport
-        do { report = try QuotaReport.decode(data) } catch {
+        do { return .success(try QuotaReport.decode(data)) } catch {
             let (keys, why): ([CodingKey], String) = switch error as? DecodingError {
             case .keyNotFound(let key, let context): (context.codingPath + [key], "is missing")
             case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
@@ -440,7 +413,12 @@ enum CLI {
             let path = keys.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined().trimmingCharacters(in: ["."])
             return .failure(Failure(message: "The report\(path.isEmpty ? "" : " field \(path)") \(why)"))
         }
-        guard report.schema == QuotaReport.schemaID else { return .failure(Failure(message: "Unsupported report schema \(report.schema).")) }
-        return .success(report)
     }
+
+    static func decodeEnvelope(_ data: Data, command: String) -> Result<QuotaReport, Failure> {
+        do { return .success(try QuotaReport.decodeEnvelope(data, command: command)) } catch {
+            return .failure(Failure(message: "The quota command returned an unreadable response: \(error.localizedDescription)"))
+        }
+    }
+
 }

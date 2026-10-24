@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -1196,20 +1195,6 @@ def test_prune_merged_plan_fails_closed_if_integration_branch_disappears(tmp_pat
     else:
         raise AssertionError("a plan with no integration branch was applied")
     assert target.exists()
-
-
-def test_post_merge_hook_documented_commands_use_configured_hooks_path(tmp_path):
-    root = repo(tmp_path)
-    hooks = tmp_path / "custom-hooks"
-    hooks.mkdir()
-    subprocess.run(["git", "-C", str(root), "config", "core.hooksPath", str(hooks)], check=True)
-    document = (SCRIPT.parent.parent / "docs" / "worktrees.md").read_text()
-    section = document.split("## Post-merge pruning", 1)[1]
-    commands = re.findall(r"```sh\n([^`]+)\n```", section)
-
-    for command in commands[:2]:
-        subprocess.run(["sh", "-c", command], cwd=root, check=True)
-        assert (hooks / "post-merge").is_symlink() == (command == commands[0])
 
 
 def test_squash_merge_proof_uses_pr_changed_paths(tmp_path, monkeypatch):

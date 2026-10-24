@@ -1,0 +1,8 @@
+[
+  "--state-dir",
+  "/FIXTURE_ROOT/state",
+  "fabric",
+  "mcp",
+  "--client",
+  "claude"
+]

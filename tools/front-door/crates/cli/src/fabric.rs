@@ -13,7 +13,10 @@ use std::{io, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Fabric {
-    Mcp,
+    Mcp {
+        #[arg(long, value_parser = crate::install::harness_parser())]
+        client: Option<provenant_records::Harness>,
+    },
     Identity,
     #[command(subcommand)]
     Mail(Mail),
@@ -381,7 +384,7 @@ fn recipient(value: &str, host: provenant_core::HostId) -> Result<ActorId, EdgeE
 impl Fabric {
     fn path(&self) -> String {
         let (domain, verb) = match self {
-            Self::Mcp => return "fabric mcp".into(),
+            Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
             Self::Mail(v) => (
                 "mail",
@@ -480,7 +483,7 @@ fn execute(
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let value = match cmd {
-        Fabric::Identity | Fabric::Mcp => return Err(EdgeError::Invalid),
+        Fabric::Identity | Fabric::Mcp { .. } => return Err(EdgeError::Invalid),
         Fabric::Mail(Mail::Send {
             to,
             kind,
