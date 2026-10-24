@@ -56,7 +56,8 @@ impl Error {
                 | WorktreeError::LiveWriter
                 | WorktreeError::UnknownWriter
                 | WorktreeError::Primary
-                | WorktreeError::IdentityChanged,
+                | WorktreeError::IdentityChanged
+                | WorktreeError::PrimaryMoved,
             ) => Outcome::Refused,
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
             _ => Outcome::Error,
