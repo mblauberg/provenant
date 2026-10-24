@@ -244,14 +244,14 @@ pub fn plan_tick_with_settings(
         .filter_map(|d| d.accounts.as_ref())
         .flatten()
     {
-        let empty = AccountRecord::empty(account.clone());
-        let current = records
-            .iter()
-            .find(|r| {
-                r.account.adapter == account.adapter && r.account.account_key == account.account_key
-            })
-            .unwrap_or(&empty);
-        if next_due(current, tick.trigger, tick.power)?.is_some_and(|due| due <= now) {
+        let current = records.iter().find(|r| {
+            r.account.adapter == account.adapter && r.account.account_key == account.account_key
+        });
+        let due = match current {
+            Some(record) => next_due(record, tick.trigger, tick.power)?,
+            None => interval(&account.adapter, tick.trigger, tick.power).map(|_| i64::MIN),
+        };
+        if due.is_some_and(|due| due <= now) {
             if account.adapter == "agy" {
                 solo.push(vec![account.clone()]);
             } else {
