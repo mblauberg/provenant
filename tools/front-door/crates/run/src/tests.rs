@@ -120,7 +120,8 @@ pub(super) fn exit() -> ExitObservation {
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
-        terminal_observed: true,
+        // Production guardians have no live frame decoder; delivery must not need one.
+        terminal_observed: false,
         unresolved_cleanup: false,
         unresolved_pids: vec![],
         settlement_evidence: SettlementEvidence::LinuxKernelChildren,

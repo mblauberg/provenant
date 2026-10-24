@@ -416,12 +416,13 @@ impl RunStore {
             }
         }
         // Recovered/result-only publication never starts external delivery.
+        // A succeeded outcome already proves the provider's terminal event in
+        // the sealed stdout, so no live frame observation is required.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         if !result_orphan
             && decoded.outcome == Outcome::Succeeded
             && !cancelled
             && exit.stop_reason.is_none()
-            && exit.terminal_observed
             && !exit.unresolved_cleanup
             && exit.publication == custody::PublicationState::Durable
             && let Completion::Live {
