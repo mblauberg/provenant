@@ -951,7 +951,11 @@ impl ProviderGroup {
                 self.last_adopted_signal.insert(identity.clone(), signal);
                 DeliveryOutcome::Delivered
             } else {
-                DeliveryOutcome::Failed(kill_failure(&io::Error::last_os_error()))
+                match kill_failure(&io::Error::last_os_error()) {
+                    // Gone between the observation and the signal: the goal.
+                    DeliveryFailure::NoSuchProcess => continue,
+                    failure => DeliveryOutcome::Failed(failure),
+                }
             };
             deliveries.push(AdoptedDelivery {
                 identity: identity.clone(),

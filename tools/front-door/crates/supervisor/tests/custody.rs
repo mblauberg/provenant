@@ -871,6 +871,61 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     wait_for_identity_absence(&descendant)?;
     Ok(())
 }
+/// A lane with an MCP child registers a nested owner whose custody macOS cannot
+/// prove; that must not stop cleanup ending a different, exact escapee, and
+/// cleanup must not repeat a signal to a provider that is already gone.
+#[cfg(target_os = "macos")]
+fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
+    root: &Path,
+) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    let ready_path = root.join("esc-ready.sock");
+    let owner_path = root.join("esc-owner.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let owner_listener = UnixListener::bind(&owner_path)?;
+    let (_writer, handle) = start(
+        root,
+        "esc",
+        "s2-registered-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+            owner_path.into_os_string(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let escapee = process_identity(read_pid_line(&mut stream)?)?;
+    let mut owner = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner, b'R')?;
+    let owner_identity: ProcessIdentity =
+        serde_json::from_slice(&std::fs::read(home.join("s2-owner.json"))?)?;
+    let exit = exited(&handle)?;
+    // The owner is protected and still holds custody, so the exit is unresolved
+    // for the whole cleanup budget; the escapee is nevertheless gone.
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    wait_for_identity_absence(&escapee)?;
+    assert!(!exit.unresolved_pids.contains(&escapee.pid), "{exit:?}");
+    process_identity(owner_identity.pid)?;
+    // Every failed provider signal also warns, so none means none repeated.
+    assert!(
+        !exit
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("signal failed")),
+        "{exit:?}"
+    );
+    assert_eq!(exit.omitted_warnings, 0, "{exit:?}");
+    drop(owner);
+    wait_for_identity_absence(&owner_identity)?;
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
     let ready_path = root.join("mark-ready.sock");
@@ -1610,6 +1665,11 @@ const CASES: &[Case] = &[
     (
         "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
         setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures",
+        escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures,
     ),
     #[cfg(target_os = "macos")]
     (

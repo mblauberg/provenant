@@ -386,6 +386,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         protected: std::collections::BTreeSet::new(),
         registry: hooks.children,
         descendant_stop_allowed: false,
+        registry_listed: false,
         attempt: inherited.attempt_directory,
         writer_dir: inherited.writer_directory,
         reservation,
@@ -444,6 +445,10 @@ struct Driver<'a> {
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
+    /// The nested-child registry was read this tick. Owners it lists that
+    /// cannot be proven stay in `protected`, so a stop aimed at one exact
+    /// other identity is safe even when `descendant_stop_allowed` is not.
+    registry_listed: bool,
 }
 #[derive(Default)]
 struct Events {

@@ -185,12 +185,14 @@ impl Driver<'_> {
             Ok(census) => census,
             Err(_) => {
                 self.descendant_stop_allowed = false;
+                self.registry_listed = false;
                 self.reservation.census_incomplete = true;
                 return None;
             }
         };
         let Some(root) = self.reservation.provider.as_ref() else {
             self.descendant_stop_allowed = false;
+            self.registry_listed = false;
             self.reservation.census_incomplete = true;
             return None;
         };
@@ -228,9 +230,11 @@ impl Driver<'_> {
         child.record_census(&census);
         self.spared.refresh(&census);
         let mut registry_unknown = self.registry.is_none();
+        let mut registry_listed = false;
         if let Some(registry) = self.registry {
             match registry.registered_children() {
                 Ok(children) if children.len() <= 4096 => {
+                    registry_listed = true;
                     for registered in children {
                         let identity = registered.registration.identity();
                         match crate::sys::census::prove_nested_custody(
@@ -295,6 +299,7 @@ impl Driver<'_> {
         self.protected
             .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
+        self.registry_listed = registry_listed;
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
@@ -319,6 +324,10 @@ impl Driver<'_> {
                     && fact.identity.pid != provider_pid
                     && fact.identity != self.guardian
                     && !spared.contains(&fact.identity)
+                    // A nested owner's own descendants are its to end.
+                    && !self.protected.iter().any(|owner| {
+                        census.ancestry(&fact.identity, owner) != crate::census::Ancestry::No
+                    })
                     && i32::try_from(fact.identity.pid)
                         .is_ok_and(|pid| crate::sys::census::darwin_in_attempt_sandbox(pid, &name))
             })
@@ -473,9 +482,13 @@ impl Driver<'_> {
                 libc::SIGTERM
             };
             let outcome = stop_delivery_outcome(child.stop(escalation));
-            self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
-            if outcome != DeliveryOutcome::Delivered {
-                push_warning(warnings, omitted, "post-terminal provider signal failed");
+            // ESRCH means the provider is already gone (or already signalled),
+            // which later ticks would only repeat; it is not a failed delivery.
+            if outcome != DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess) {
+                self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
+                if outcome != DeliveryOutcome::Delivered {
+                    push_warning(warnings, omitted, "post-terminal provider signal failed");
+                }
             }
             #[cfg(target_os = "linux")]
             if self.descendant_stop_allowed {
@@ -494,7 +507,7 @@ impl Driver<'_> {
                 }
             }
             #[cfg(target_os = "macos")]
-            if self.descendant_stop_allowed {
+            if self.registry_listed {
                 for delivery in child.stop_marked(escalation, &marked) {
                     self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }

@@ -171,7 +171,10 @@ sandboxed, allowed to look that name up, and denied an unrelated control name
 (the control excludes system daemons whose sandboxes allow lookups broadly). It
 joins the tracked set, so cleanup cannot settle while it lives, and receives
 TERM then KILL after the descendant grace, each time after re-observing its
-full identity. A survivor is published in `unresolved_pids`. An unconfined
+full identity. This needs only a readable nested-child registry: macOS cannot
+prove a registered owner's custody, so that owner stays protected (as do its
+descendants) while other escapees are still ended. A signal to a provider that
+is already gone (ESRCH) is neither recorded nor warned about. A survivor is published in `unresolved_pids`. An unconfined
 launch is the residual: libproc cannot reconstruct that missing history. Every
 production launch is confined; Linux has no confinement backend and does not
 use the check. Census observations never grant
