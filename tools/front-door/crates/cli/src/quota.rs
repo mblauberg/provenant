@@ -352,7 +352,7 @@ fn execute(
         write_intent(&dir, drop, &mut records)?;
     }
     // No known account or executable probe form exists without an activation
-    // recording. Never synthesize identity or credential authority to probe it.
+    // recording. Never invent identity or credential authority to probe it.
     let report = schedule::report(
         &records,
         &detected,
