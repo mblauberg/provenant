@@ -222,15 +222,16 @@ jobs:
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" check install --source "$RUNNER_TEMP/release"
           codex_config="$RUNNER_TEMP/home/.codex/config.toml"
-          grep -Fq '[mcp_servers.fabric]' "$codex_config"
+          fabric_entry='^(fabric = |\[mcp_servers\.fabric\])'
+          grep -Eq "$fabric_entry" "$codex_config"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
             --harness codex --bin-dir "$RUNNER_TEMP/bin"
-          test "$(grep -Fxc '[mcp_servers.fabric]' "$codex_config")" -eq 1
+          test "$(grep -Ec "$fabric_entry" "$codex_config")" -eq 1
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
           if [ -f "$codex_config" ]; then
-            if grep -Fq '[mcp_servers.fabric]' "$codex_config"; then
+            if grep -Eq "$fabric_entry" "$codex_config"; then
               echo "Uninstall left the managed Codex entry behind."
               exit 1
             fi
