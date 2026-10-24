@@ -315,8 +315,12 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        let transcript_account = account.as_ref().filter(|_| adapter.id() == "claude").map(|account| account.directory());
-        if let Err(error) = apply_setup(&spec.setup, &[scratch, private_state], transcript_account) {
+        let transcript_account = account
+            .as_ref()
+            .filter(|_| adapter.id() == "claude")
+            .map(|account| account.directory());
+        if let Err(error) = apply_setup(&spec.setup, &[scratch, private_state], transcript_account)
+        {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
@@ -536,11 +540,16 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
 /// Setup stays below run-owned roots, except Claude's selected account projects.
 /// Only directory creation gets that exception; links remain run-owned.
 /// Traversal opens each component without following links.
-fn apply_setup(steps: &[SetupStep], roots: &[&Path], claude_account: Option<&Path>) -> Result<(), String> {
+fn apply_setup(
+    steps: &[SetupStep],
+    roots: &[&Path],
+    claude_account: Option<&Path>,
+) -> Result<(), String> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => {
-                let transcript_root = claude_account.filter(|directory| path.starts_with(directory.join("projects")));
+                let transcript_root =
+                    claude_account.filter(|directory| path.starts_with(directory.join("projects")));
                 let (parent, name) = match transcript_root {
                     Some(directory) => setup_parent(&[directory], path, true)?,
                     None => setup_parent(roots, path, true)?,
@@ -649,6 +658,31 @@ mod tests {
                 None,
             )?;
             assert!(scratch.join("cargo-home/nested").is_dir());
+            apply_setup(
+                &[SetupStep::CreateDir(outside.join("projects/session"))],
+                &roots,
+                Some(&outside),
+            )?;
+            assert!(outside.join("projects/session").is_dir());
+            assert!(
+                apply_setup(
+                    &[SetupStep::CreateDir(outside.join("credentials/new"))],
+                    &roots,
+                    Some(&outside)
+                )
+                .is_err()
+            );
+            assert!(
+                apply_setup(
+                    &[SetupStep::Symlink {
+                        link: outside.join("projects/link"),
+                        target: state.clone()
+                    }],
+                    &roots,
+                    Some(&outside)
+                )
+                .is_err()
+            );
             std::os::unix::fs::symlink(&outside, scratch.join("escape"))?;
             for step in [
                 SetupStep::CreateDir(outside.join("x")),
@@ -660,7 +694,7 @@ mod tests {
                     target: outside.clone(),
                 },
             ] {
-                assert!(apply_setup(&[step], &roots).is_err());
+                assert!(apply_setup(&[step], &roots, None).is_err());
             }
             assert!(!outside.join("x").exists());
             Ok(())

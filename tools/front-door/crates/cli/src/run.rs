@@ -187,10 +187,12 @@ impl run::Providers for Registry<'_> {
                 })
             })
             .flatten();
-        let observed_model = rollout
-            .as_ref()
-            .map(|turn| turn.model.as_str())
-            .or_else(|| outcome.model());
+        let observed_model = if adapter.id() == "codex" {
+            // Missing or invalid rollout evidence cannot fall back to another source.
+            rollout.as_ref().map(|turn| turn.model.as_str())
+        } else {
+            outcome.model()
+        };
         let mut decoded = run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),

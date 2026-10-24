@@ -63,17 +63,18 @@ fn fixture() -> Result {
     let session = "01234567-89ab-cdef-0123-456789abcdef";
     let sessions = home.join("sessions/2026/10/24");
     fs::create_dir_all(&sessions)?;
-    let mut model = "gpt-6-luna";
-    if prompt.contains("mismatch") {
-        model = "wrong-model";
-    }
+    let recorded_session = if prompt.contains("mismatch") {
+        "other-thread"
+    } else {
+        session
+    };
     if !prompt.contains("missing") {
         fs::write(
             sessions.join(format!("rollout-2026-10-24T00-00-00-{session}.jsonl")),
             format!(
                 "{}\n{}\n{}\n",
-                json!({"type":"session_meta","payload":{"id":session}}),
-                json!({"type":"turn_context","payload":{"model":model,"effort":"low"}}),
+                json!({"type":"session_meta","payload":{"id":recorded_session}}),
+                json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":"must not be retained"}})
             ),
         )?;
