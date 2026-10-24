@@ -24,6 +24,7 @@ struct QuotaReport {
     struct Account: Identifiable {
         let provider, account, accountKey: String
         let plan, error: String?
+        let fingerprint, creditBalance, note: String?
         let active: Bool?
         let priority: Double?
         let status: String
@@ -34,6 +35,7 @@ struct QuotaReport {
         let drawingCredits: Bool?
         let creditBurnPerHour: Double?
         let schedule: Schedule?
+        let banked: Resets?
         private let hasSnapshot: Bool
 
         var id: String { "\(provider)/\(accountKey)" }
@@ -41,14 +43,14 @@ struct QuotaReport {
         var requiresAuth: Bool { status == "auth_required" }
         var next: Schedule? { schedule }
         var credits: [Credit] { [] }
-        var banked: Resets? { nil }
         var statusTitle: String {
             QuotaReport.statusTitle(status)
         }
 
         fileprivate init(_ row: QuotaWireAccount, generatedAt: Date) throws {
             let rowStatus = row.status
-            provider = row.account.adapter
+            let adapter = row.account.adapter
+            provider = adapter
             account = row.account.label
             accountKey = row.account.accountKey
             guard QuotaReport.validStatuses.contains(rowStatus) else {
@@ -59,23 +61,36 @@ struct QuotaReport {
             hasSnapshot = row.snapshot != nil
             providerName = QuotaReport.providerName(provider)
             displayName = account == "default" || account.isEmpty ? nil : account
-            plan = nil
+            let details = row.snapshot?.details
+            plan = details?.plan
             planLabel = nil
             active = nil
-            priority = nil
+            priority = details?.priority.map(Double.init)
+            fingerprint = details?.fingerprint
+            creditBalance = details?.creditBalance
+            note = details?.note
             unreported = nil
             drawingCredits = rowStatus == "credit_only"
             creditBurnPerHour = nil
+            banked = details?.resetCredits.map { count in
+                Resets(available: Int(clamping: count),
+                       expiresAt: (details?.resetExpiriesUnixSeconds ?? []).map(QuotaReport.date).sorted())
+            }
             observedAt = row.ageSeconds.map { Date(timeIntervalSince1970: generatedAt.timeIntervalSince1970 - Double($0)) }
             let mappedWindows = (row.snapshot?.windows ?? []).map { item in
-                let paceState = ["exhausted", "credit_only"].contains(rowStatus) ? "exhausted" : "on_pace"
-                return Window(name: item.pool, label: Fmt.human(item.pool), usedPercent: Double(item.usedBasisPoints) / 100,
-                              windowMinutes: nil, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
-                              limitAmount: nil, currency: nil, advisory: false, pool: item.pool, poolLabel: nil,
+                let presentation = QuotaReport.windowPresentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
+                let paceState = item.usedBasisPoints >= 10_000 ? "exhausted" : "on_pace"
+                let minutes = item.windowSeconds.map { Int(clamping: $0 / 60) }
+                    ?? QuotaReport.fallbackWindowMinutes(adapter: adapter, name: item.pool)
+                return Window(name: item.pool, label: presentation.title, usedPercent: Double(item.usedBasisPoints) / 100,
+                              windowMinutes: minutes, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
+                              limitAmount: nil, currency: nil, advisory: presentation.advisory, pool: presentation.pool,
+                              poolLabel: presentation.poolLabel,
                               pace: Pace(state: paceState, runsOutAt: nil, summary: nil))
             }
             windows = mappedWindows
-            backAt = rowStatus == "exhausted" ? mappedWindows.compactMap(\.resetAt).min() : nil
+            let binding = QuotaReport.Account.binding(in: mappedWindows, now: generatedAt)
+            backAt = rowStatus == "exhausted" && binding?.pace.state == "exhausted" ? binding?.resetAt : nil
             schedule = row.nextDueUnixSeconds.map { Schedule(nextDueAt: QuotaReport.date($0), reason: nil) }
         }
     }
@@ -127,6 +142,79 @@ struct QuotaReport {
         case "unsupported": "Unsupported"
         case "credit_only": "Exhausted, drawing on credits"
         default: Fmt.human(status)
+        }
+    }
+
+    private static func windowPresentation(adapter: String, name: String, seconds: UInt64?)
+        -> (title: String, pool: String?, poolLabel: String?, advisory: Bool) {
+        let duration = durationTitle(seconds)
+        if adapter == "claude" {
+            if name.hasPrefix("session:") {
+                return (duration.map { "Session · \($0)" } ?? "Session", nil, nil, false)
+            }
+            if name.hasPrefix("weekly_all:") { return ("Weekly", nil, nil, false) }
+            if name.hasPrefix("weekly_scoped:") {
+                let model = String(name.dropFirst("weekly_scoped:".count))
+                return ("Weekly · \(Fmt.human(model))", nil, nil, true)
+            }
+        }
+        if adapter == "agy" {
+            for (prefix, title) in [("gemini.", "Gemini"), ("claude.", "Claude")] where name.hasPrefix(prefix) {
+                let kind = String(name.dropFirst(prefix.count))
+                return (duration ?? namedWindowTitle(kind), String(prefix.dropLast()), title, false)
+            }
+        }
+        if adapter == "codex", let separator = name.lastIndex(of: ".") {
+            let pool = String(name[..<separator])
+            let kind = String(name[name.index(after: separator)...])
+            if ["primary", "secondary"].contains(kind) {
+                return (duration ?? namedWindowTitle(kind), pool, modelPoolTitle(pool), false)
+            }
+        }
+        return (duration ?? namedWindowTitle(name), nil, nil, false)
+    }
+
+    private static func modelPoolTitle(_ slug: String) -> String {
+        slug.split(separator: "-").map { part in
+            let word = String(part)
+            if word.lowercased() == "gpt" { return "GPT" }
+            return Fmt.human(word)
+        }.joined(separator: " ")
+    }
+
+    private static func durationTitle(_ seconds: UInt64?) -> String? {
+        guard let seconds else { return nil }
+        let hour: UInt64 = 3_600, day: UInt64 = 86_400
+        if (4 * hour...6 * hour).contains(seconds) { return "5-hour" }
+        if (22 * hour...26 * hour).contains(seconds) { return "Daily" }
+        if (6 * day...8 * day).contains(seconds) { return "Weekly" }
+        if (27 * day...33 * day).contains(seconds) { return "Monthly" }
+        if seconds >= hour && seconds.isMultiple(of: hour) { return "\(seconds / hour)-hour" }
+        if seconds >= 60 && seconds.isMultiple(of: 60) { return "\(seconds / 60)-minute" }
+        return "\(seconds)-second"
+    }
+
+    private static func namedWindowTitle(_ name: String) -> String {
+        switch name.lowercased() {
+        case "five_hour", "5h": "5-hour"
+        case "seven_day", "weekly", "weekly_all": "Weekly"
+        case "thirty_day": "Monthly"
+        case "billing_cycle": "Billing cycle"
+        case "session": "Session"
+        default: Fmt.human(name)
+        }
+    }
+
+    private static func fallbackWindowMinutes(adapter: String, name: String) -> Int? {
+        switch name.lowercased() {
+        case "five_hour", "5h", "gemini.5h", "session": return 300
+        case "seven_day", "weekly", "weekly_all", "gemini.weekly", "claude.weekly": return 10_080
+        case "thirty_day": return 43_200
+        default:
+            if adapter == "claude" && (name.hasPrefix("session:") || name.hasPrefix("weekly_scoped:") || name.hasPrefix("weekly_all:")) {
+                return name.hasPrefix("session:") ? 300 : 10_080
+            }
+            return nil
         }
     }
     private static func invalid(_ message: String) -> DecodingError {
@@ -216,8 +304,21 @@ private struct QuotaWireAccount: Decodable {
     let error: String?
 }
 private struct QuotaWireScope: Decodable { let adapter, accountKey, label: String }
-private struct QuotaWireSnapshot: Decodable { let windows: [QuotaWireWindow] }
-private struct QuotaWireWindow: Decodable { let pool: String; let usedBasisPoints: UInt64; let resetsUnixSeconds: Int64? }
+private struct QuotaWireSnapshot: Decodable {
+    let windows: [QuotaWireWindow]
+    let details: QuotaWireDetails?
+}
+private struct QuotaWireDetails: Decodable {
+    let plan, fingerprint, creditBalance, note: String?
+    let priority, resetCredits: UInt64?
+    let resetExpiriesUnixSeconds: [Int64]?
+}
+private struct QuotaWireWindow: Decodable {
+    let pool: String
+    let usedBasisPoints: UInt64
+    let resetsUnixSeconds: Int64?
+    let windowSeconds: UInt64?
+}
 private struct QuotaWireSource: Decodable { let adapter, status: String; let error: String?; let nextDueUnixSeconds: Int64? }
 
 extension QuotaReport.Account {
@@ -237,12 +338,24 @@ extension QuotaReport.Account {
         let alerts = windows.filter { $0.usedPercent! >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
         return alerts.max { $0.usedPercent! < $1.usedPercent! } ?? longest
     }
-    func binding(now: Date) -> Window? {
-        let groups = pools.isEmpty ? [windows] : pools.map { windows(in: $0) }
-        let worsts = groups.compactMap { Self.worst(Self.current($0, now: now)) }
-        return worsts.filter { $0.pace.state != "exhausted" }.max { $0.usedPercent! < $1.usedPercent! }
-            ?? worsts.min { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
+    fileprivate static func binding(in windows: [Window], now: Date) -> Window? {
+        let worsts = Self.groups(in: windows).compactMap { Self.worst(Self.current($0.windows, now: now)) }
+        let available = worsts.filter { $0.pace.state != "exhausted" }
+        if let binding = available.max(by: { $0.usedPercent! < $1.usedPercent! }) { return binding }
+        return worsts.min(by: { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) })
     }
+    private static func groups(in windows: [Window]) -> [(pool: String?, windows: [Window])] {
+        var groups: [(pool: String?, windows: [Window])] = []
+        let global = windows.filter { $0.pool == nil }
+        if !global.isEmpty { groups.append((nil, global)) }
+        var pools: [String] = []
+        for window in windows {
+            if let pool = window.pool, !pools.contains(pool) { pools.append(pool) }
+        }
+        groups += pools.map { pool in (Optional(pool), windows.filter { $0.pool == nil || $0.pool == pool }) }
+        return groups.isEmpty ? [(nil, windows)] : groups
+    }
+    func binding(now: Date) -> Window? { Self.binding(in: windows, now: now) }
     func display(now: Date, alert: Double) -> Window? {
         let pool = binding(now: now)?.pool
         return Self.shown(Self.current(pools.isEmpty ? windows : windows(in: pool), now: now), alert: alert)
@@ -253,13 +366,14 @@ extension QuotaReport.Account {
         return group.contains { ($0.windowMinutes ?? 0) > (shown.windowMinutes ?? 0) }
     }
     func poolRings(now: Date, alert: Double) -> [(pool: String?, window: Window?)] {
-        (pools.isEmpty ? [nil] : pools.map(Optional.some)).map { pool in
-            (pool, Self.shown(Self.current(pool == nil ? windows : windows(in: pool), now: now), alert: alert))
+        Self.groups(in: windows).map { group in
+            (group.pool, Self.shown(Self.current(group.windows, now: now), alert: alert))
         }
     }
     func spentPools(now: Date) -> [Window] {
         let bound = binding(now: now)?.pool
-        return pools.filter { $0 != bound }.compactMap { Self.worst(Self.current(windows(in: $0), now: now)) }
+        return Self.groups(in: windows).filter { $0.pool != bound }
+            .compactMap { Self.worst(Self.current($0.windows, now: now)) }
             .filter { $0.pace.state == "exhausted" }
     }
     func back(now: Date) -> Date? {
@@ -397,7 +511,7 @@ enum Fmt {
 
     /// "Gemini back Mon 9 am", for an exhausted pool that does not bind the account.
     static func spent(_ window: QuotaReport.Window, now: Date) -> String {
-        "\(window.pool.map(human) ?? window.title) \(back(window.resetAt, now: now))"
+        "\(window.poolLabel ?? window.pool.map(human) ?? window.title) \(back(window.resetAt, now: now))"
     }
 
     /// What a row says beside the account's name. The section header already names the state and the ring shows

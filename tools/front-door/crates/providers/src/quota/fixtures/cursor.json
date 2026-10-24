@@ -1,0 +1,32 @@
+{
+  "payload": {
+    "individualUsage": {
+      "plan": {
+        "enabled": true,
+        "used": 2000,
+        "limit": 2000,
+        "remaining": 0,
+        "breakdown": {
+          "included": 2000,
+          "bonus": 7044,
+          "total": 9044
+        },
+        "autoPercentUsed": 100,
+        "apiPercentUsed": 100,
+        "totalPercentUsed": 100
+      },
+      "onDemand": {
+        "enabled": false,
+        "used": 0,
+        "limit": null,
+        "remaining": null
+      }
+    },
+    "teamUsage": {},
+    "billingCycleStart": "2026-10-13T22:25:54.000Z",
+    "billingCycleEnd": "2026-11-13T22:25:54.000Z",
+    "membershipType": "pro_student",
+    "limitType": "user"
+  },
+  "details": {}
+}

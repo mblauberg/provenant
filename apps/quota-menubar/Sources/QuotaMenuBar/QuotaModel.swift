@@ -296,8 +296,8 @@ enum CLI {
         }
     }
 
-    /// PROVENANT_BIN; else `provenant` and PATH from the user's login shell, so its `env python3` shebang
-    /// resolves; else ~/.local/bin/provenant with this process's PATH.
+    /// PROVENANT_BIN; else `provenant` and PATH from the user's login shell; else ~/.local/bin/provenant
+    /// with this process's PATH.
     static func resolve() -> Launcher? {
         let environment = ProcessInfo.processInfo.environment
         if let bin = environment["PROVENANT_BIN"], !bin.isEmpty {

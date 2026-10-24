@@ -219,6 +219,47 @@ replaces `scripts/provider_identity.py` with its non-secret scope semantics;
 telemetry neither configures accounts nor infers them from email, tokens or
 model names.
 
+### Live quota and Claude identity
+
+The binary edge interprets three non-secret probe plans: account-scoped HTTP,
+bounded commands and a read-only local ledger. `~/.agents/config/telemetry.json`
+(or `$AGENT_FABRIC_INSTANCE_ROOT/config/telemetry.json`) remains the account
+configuration because Rust config has no account schema yet. Configured plans
+and priorities override provider defaults. Codex uses app-server rate limits,
+with a read-only OAuth usage request when that service is unavailable; both
+include credit balances and banked resets. Cursor reports its billing cycle;
+agy reports independent Gemini and Claude pools. OpenCode Go sums the local
+read-only message stores once per message, uses configured caps and cycle
+anchors, and labels its estimate as partial to this machine. Window durations
+travel with usage, since Codex primary limits can be weekly rather than 5-hour.
+A fresh matching agy pool observation supersedes an older refusal only when
+all active windows in that pool are available. Quota exposes this through
+admission; dispatch must supply its verified route-to-pool bindings.
+
+An authentication failure retains the last snapshot, marks its report row stale,
+and keeps its observation time and reset deadlines. The menu bar projects
+those deadlines against the current time and omits elapsed windows; staleness
+alone never sets usage to zero.
+
+`~/.claude-pro`, `~/.claude-anese` and `~/.claude-michael` stay signed in to
+their fixed accounts; the working `~/.claude` session rotates between them.
+The default keychain item, `Claude Code-credentials`, is used only with
+`CLAUDE_CONFIG_DIR` unset. Fixed directories use the suffixed item from the
+host's `keychain_suffix` helper (first eight SHA-256 hex characters of the
+absolute directory). Quota fingerprints the identity from
+`claude auth status --json` as the first 16 SHA-256 hex characters. It
+attributes the default item's reading to the matching configured label, then
+uses the freshest unexpired token per account. Raw identities are never stored
+or logged, and quota never writes credentials.
+
+By default, `quota.claude_refresh_expired` permits one refresh attempt per
+account and expiry. From a scratch directory, Claude Code runs within the
+bounded tick deadline as
+`claude -p x --model provenant-refresh-probe --max-turns 1 </dev/null`
+(setting `CLAUDE_CONFIG_DIR` for fixed accounts). Its unknown-model error
+occurs before inference; quota then rereads the keychain item. Setting the
+option to `false` skips the attempt.
+
 Providers normalises inclusive wire counts once, subtracting known cached/write
 input and reasoning output. Run records the disjoint result; telemetry never
 subtracts twice or clamps an inconsistent breakdown. Known token counts sum

@@ -280,7 +280,7 @@ struct PoolRings: View {
             }
         }
         .frame(width: Self.size, height: Self.size)
-        .help(rings.count > 1 ? rings.map { "\($0.pool.map(Fmt.human) ?? "") models \($0.window?.usedPercent.map(Fmt.percent) ?? "–")" }
+        .help(rings.count > 1 ? rings.map { "\($0.window?.poolLabel ?? $0.pool.map(Fmt.human) ?? "") models \($0.window?.usedPercent.map(Fmt.percent) ?? "–")" }
             .joined(separator: " · ") : "")
     }
 
@@ -292,12 +292,18 @@ struct WindowList: View {
     let account: QuotaReport.Account, now: Date
 
     var body: some View {
-        let meta = [account.planTitle, account.requiresAuth ? "authentication required" : nil,
+        let meta = [account.planTitle,
+                    account.fingerprint.map { "identity \($0)" },
+                    account.priority.map { "priority \($0.formatted(.number.precision(.fractionLength(0))))" },
+                    account.note,
+                    account.requiresAuth ? "authentication required" : nil,
                     account.observedAt.map { "observed \(Fmt.ago($0, now: now))" },
                     account.status == "stale" ? (account.error != nil ? "last fetch failed" : "window reset since reading") : nil].compactMap { $0 }
         let burn = account.isDrawing(now: now) ? account.creditBurnPerHour : nil
         // Present only when the account has some.
-        let extras = account.credits.map { Fmt.credit($0, burn: burn) } + [account.banked.map(Fmt.resets)].compactMap { $0 }
+        let credit = account.creditBalance.map { ["Credit balance: \($0)"] } ?? []
+        let resets = account.banked.map { [Fmt.resets($0)] } ?? []
+        let extras = account.credits.map { Fmt.credit($0, burn: burn) } + credit + resets
         VStack(alignment: .leading, spacing: 6) {
             // A window the provider did not report is left out: missing never means 0%.
             ForEach(account.windows.filter { $0.usedPercent != nil }) { window in

@@ -418,14 +418,17 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "provenant-cli",
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
  "provenant-providers",
+ "provenant-quota",
  "provenant-records",
  "provenant-supervisor",
  "provenant-workflow",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -542,6 +545,7 @@ dependencies = [
 name = "provenant-providers"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "provenant-confinement",
  "provenant-core",
  "provenant-quota",

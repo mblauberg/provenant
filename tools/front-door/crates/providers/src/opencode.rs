@@ -43,3 +43,5 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         _ => vec![],
     })
 }
+
+crate::quota_source!(OpenCode, "opencode");
