@@ -1,12 +1,14 @@
 # Landing lease
 
-Fabric owns the landing lease: its semantics, store and command grammar are in
-the [Fabric design](../specs/rust-port/design/fabric.md). The root
-`provenant lease` synonym and its exit-code contract are gone, and no CLI route
-forwards to another owner.
+Use `provenant fabric identity --json` to verify the selected project and inbox.
+Acquire with `provenant fabric landing acquire --reference refs/heads/main
+--expected OID --candidate OID --lease-seconds 300 --operation-id ID`.
+Keep the returned `proof` private. Renew, verify and release use `--reference`,
+`--id`, `--generation` and the 32-digit hex `--token`. Renew and release also
+require a unique `--operation-id`; retries reuse that ID and identical input.
 
-Never treat empty output or an owner-unavailable result (exit 4) as an acquired
-lease. A landing tool that needs the lease refuses to land without one. Over
-MCP, use `fabric_landing_lease` only after verifying the connection's identity,
-as [Fabric connection identity](../../skills/orchestrate/references/fabric-identity.md)
-describes.
+Observe another generation with `provenant fabric landing wait --reference
+refs/heads/main --generation N --wait SECONDS`. The budget is 1–14400 seconds;
+exit 124 means the observation expired. Waiting never acquires a lease.
+Ownership refusal exits 1. A lease is advisory coordination, not push authority.
+Fenced home-host push and reconciliation belong to the Git transport step F7.

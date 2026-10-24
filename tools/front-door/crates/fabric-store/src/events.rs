@@ -41,7 +41,7 @@ pub struct Event {
 }
 
 pub(crate) fn append(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     record: &EventRecord,
     dedup: Option<&str>,
 ) -> Result<i64> {

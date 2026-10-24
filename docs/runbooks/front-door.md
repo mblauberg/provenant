@@ -24,7 +24,12 @@ PROVENANT="$HOME/.local/bin/provenant"
 
 Review every planned change before applying it; a failed preview prevents
 writes. The default is `--hooks off`; enabling hooks requires a recorded
-`HookSpec` policy and fixture for each registered handler. `check install`
+`HookSpec` policy and fixture for each registered handler. No hook policy has
+landed yet, so `--hooks on` currently refuses before writing. Legacy Claude
+`PostToolUse`/`Bash` groups also refuse cut-over until their host-specific
+utility-hook interpreter has an exact recorded entry in `legacy.toml`; resolve
+that registration explicitly instead of inferring ownership from its command.
+`check install`
 compares the installed binary, assets, receipt and owned selectors without
 repair. To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`; it removes only

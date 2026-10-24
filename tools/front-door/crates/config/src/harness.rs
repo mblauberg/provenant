@@ -283,7 +283,9 @@ pub(crate) fn capture(
             }
         }
         if target.harness == Harness::Opencode {
-            bytes = rewrite_instruction_array(&bytes, &root, targets, previous, &mut plan, path)?;
+            bytes = rewrite_instruction_array(
+                &bytes, release, targets, previous, &mut plan, path,
+            )?;
             if let Some(array) = crate::splice::get(&bytes, &["instructions"])? {
                 let array = array
                     .as_array()
@@ -422,12 +424,18 @@ pub(crate) fn snapshot_target(
 }
 fn rewrite_instruction_array(
     bytes: &[u8],
-    root: &Path,
+    release: &Release,
     targets: &Targets,
     previous: Option<&InstallReceipt>,
     plan: &mut HarnessPlan,
     path: &Path,
 ) -> Result<Vec<u8>, InstallError> {
+    let root = targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(release.manifest().source_digest.to_string());
     let Some(array) = crate::splice::get(bytes, &["instructions"])? else {
         return Ok(bytes.to_vec());
     };
@@ -471,6 +479,9 @@ fn rewrite_instruction_array(
             }
         }
         if let Some(asset) = asset {
+            if !release.files.contains_key(Path::new(asset)) {
+                return Err(InstallError::Manifest("missing instruction asset"));
+            }
             let new = root.join(asset);
             let new = new.to_str().ok_or(InstallError::InvalidConfig(
                 "instruction path requires UTF-8",
@@ -645,6 +656,14 @@ impl Targets {
     }
 }
 pub fn apply_install_config(targets: &mut Targets, fs: &dyn SafeFs) -> Result<(), InstallError> {
+    apply_install_config_with_domains(targets, fs, &crate::domains::NO_DOMAINS)
+}
+
+pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serialize>(
+    targets: &mut Targets,
+    fs: &dyn SafeFs,
+    sections: &crate::DomainSections<T>,
+) -> Result<(), InstallError> {
     // `load` accepts a bounded optional reader and validates the entire user
     // configuration; no unrelated domain policy is interpreted by installation.
     let path = targets.roots.state.as_path().join("config.toml");
@@ -658,7 +677,7 @@ pub fn apply_install_config(targets: &mut Targets, fs: &dyn SafeFs) -> Result<()
         }
         return Ok(());
     };
-    let settings = crate::load(&targets.roots, Some(bytes.as_slice()))?;
+    let settings = crate::load_with_domains(&targets.roots, Some(bytes.as_slice()), sections)?;
     {
         settings.install.validate()?;
         if let Some(bin) = settings.install.bin_dir {
@@ -734,20 +753,35 @@ fn legacy_links(
                 && actual == link.target
             {
                 plan.authorized.insert(path.clone());
-                let retained = match link.area {
-                    LegacyArea::Skills if !link.name.is_empty() => release
-                        .files
-                        .contains_key(&Path::new("skills").join(&link.name).join("SKILL.md")),
-                    LegacyArea::Instruction | LegacyArea::GlobalInstruction => release
-                        .files
-                        .contains_key(Path::new("instructions/AGENTS.md")),
-                    LegacyArea::Companion => release
-                        .files
-                        .contains_key(Path::new("instructions/HARNESS.md")),
-                    _ => false,
-                };
-                if !retained {
+                if !link.retained || matches!(link.area, LegacyArea::GitHook) {
+                    // Hooks are off; retained handlers cannot register until
+                    // CLI owns a fixture-backed HookSpec.
                     plan.removals.insert(path);
+                } else {
+                    let replacement = match link.area {
+                        LegacyArea::Skills if link.name.is_empty() => {
+                            // Replace the link itself with a managed directory.
+                            plan.removals.insert(path);
+                            None
+                        }
+                        LegacyArea::Skills => {
+                            let skill = Path::new("skills").join(&link.name).join("SKILL.md");
+                            let library = Path::new("library").join(&link.name).join("SKILL.md");
+                            if release.files.contains_key(&skill) {
+                                Some(skill)
+                            } else {
+                                Some(library)
+                            }
+                        }
+                        LegacyArea::Instruction | LegacyArea::GlobalInstruction => {
+                            Some(PathBuf::from("instructions/AGENTS.md"))
+                        }
+                        LegacyArea::Companion => Some(PathBuf::from("instructions/HARNESS.md")),
+                        _ => return Err(InstallError::Manifest("unsupported legacy replacement")),
+                    };
+                    if replacement.is_some_and(|asset| !release.files.contains_key(&asset)) {
+                        return Err(InstallError::Manifest("missing legacy replacement asset"));
+                    }
                 }
             }
         }

@@ -102,6 +102,11 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
             .ok_or("preview")?,
     )?;
     assert_eq!(preview["kind"], "actions");
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n",
+    )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
         code(&installed),
@@ -161,6 +166,30 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
         None,
     )?;
     assert_eq!(code(&init), 0);
+    let source_alias = rig.root.join("legacy-source-alias");
+    symlink(&legacy, &source_alias)?;
+    let sensitive = legacy.join("sensitive-release");
+    fs::create_dir(&sensitive)?;
+    fs::write(sensitive.join("release.json"), "private manifest sentinel")?;
+    let source = source_alias.join("sensitive-release");
+    let mut denied_args = args(&source, true);
+    denied_args.extend(["--legacy-checkout".into(), legacy.clone().into_os_string()]);
+    let denied = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &denied_args,
+        None,
+    )?;
+    assert_eq!(code(&denied), 1);
+    let denied: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
+    assert_eq!(
+        denied["error"]["message"],
+        format!("unmanaged destination conflicts: {}", source.display())
+    );
+    assert_eq!(
+        fs::read_to_string(sensitive.join("release.json"))?,
+        "private manifest sentinel"
+    );
+    assert!(!rig.state.exists());
     let old = legacy.join(".git/hooks/post-merge");
     symlink(legacy.join("scripts/hooks/post-merge"), &old)?;
     let mut args = args(&stage, false);

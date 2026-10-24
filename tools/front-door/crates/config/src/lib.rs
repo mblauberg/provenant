@@ -9,7 +9,9 @@ mod domains;
 mod harness;
 mod loader;
 mod managed;
-pub use harness::{InstallSettings, TargetSettings, apply_install_config};
+pub use harness::{
+    InstallSettings, TargetSettings, apply_install_config, apply_install_config_with_domains,
+};
 mod legacy;
 mod presets;
 mod project_binding;
@@ -23,7 +25,7 @@ mod tests;
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
 pub use loader::{check_config, config_show, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
-pub use project_binding::{ProjectBinding, ProjectLocation, bind_project};
+pub use project_binding::{ProjectBinding, ProjectLocation, bind_host, bind_project};
 pub use provenant_records::Finding;
 
 use serde::{Deserialize, Serialize, Serializer};

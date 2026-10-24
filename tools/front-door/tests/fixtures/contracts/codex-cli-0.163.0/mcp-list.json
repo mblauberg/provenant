@@ -1,0 +1,25 @@
+[
+  {
+    "name": "fabric",
+    "enabled": true,
+    "disabled_reason": null,
+    "transport": {
+      "type": "stdio",
+      "command": "/FIXTURE_ROOT/bin/mcp-probe",
+      "args": [
+        "--state-dir",
+        "/FIXTURE_ROOT/state",
+        "fabric",
+        "mcp",
+        "--client",
+        "codex"
+      ],
+      "env": null,
+      "env_vars": [],
+      "cwd": null
+    },
+    "startup_timeout_sec": null,
+    "tool_timeout_sec": null,
+    "auth_status": "unsupported"
+  }
+]

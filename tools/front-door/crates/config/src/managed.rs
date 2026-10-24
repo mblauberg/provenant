@@ -177,7 +177,55 @@ impl Targets {
             configured_configs: BTreeSet::new(),
         }
     }
-    pub(crate) fn validate(&self) -> Result<(), InstallError> {
+    /// Composition calls this after config, environment and flags. Resolve
+    /// parents only: final config symlinks and whole skills links stay visible.
+    pub fn resolve_destinations(
+        &mut self,
+        resolver: &impl provenant_core::PathResolver,
+    ) -> Result<(), InstallError> {
+        let resolve = |path: &Path| -> Result<PathBuf, InstallError> {
+            resolver.resolve_existing_ancestor(path).map_err(|source| {
+                InstallError::Fs(FsError::Io {
+                    operation: "resolve install destination",
+                    path: path.into(),
+                    source,
+                })
+            })
+        };
+        let destination = |path: &Path| -> Result<PathBuf, InstallError> {
+            let parent = path
+                .parent()
+                .ok_or_else(|| InstallError::Conflict(path.into()))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| InstallError::Conflict(path.into()))?;
+            Ok(resolve(parent)?.join(name))
+        };
+        self.bin_dir = resolve(&self.bin_dir)?;
+        for target in &mut self.harnesses {
+            target.skills_dir = destination(&target.skills_dir)?;
+            target.mcp_file = destination(&target.mcp_file)?;
+            target.hook_file = target.hook_file.as_deref().map(&destination).transpose()?;
+            target.instruction = target
+                .instruction
+                .as_deref()
+                .map(&destination)
+                .transpose()?;
+        }
+        let global = destination(&self.home.join(".agents/AGENTS.md"))?;
+        if self
+            .protected_roots
+            .iter()
+            .chain(self.legacy_checkout.iter())
+            .any(|root| global.starts_with(root))
+        {
+            return Err(InstallError::Conflict(global));
+        }
+        self.validate()
+    }
+
+    /// Validate all destinations before any source or harness file is read.
+    pub fn validate(&self) -> Result<(), InstallError> {
         if self.harnesses.is_empty()
             || self
                 .harnesses
@@ -237,6 +285,19 @@ impl Targets {
             }
             if let Some(p) = &h.instruction {
                 normal_absolute(p)?;
+            }
+        }
+        for path in file_paths.iter().chain(skills_paths.iter()).chain([
+            &self.bin_dir.join("provenant"),
+            &self.home.join(".agents/AGENTS.md"),
+        ]) {
+            if self
+                .protected_roots
+                .iter()
+                .chain(self.legacy_checkout.iter())
+                .any(|root| path.starts_with(root))
+            {
+                return Err(InstallError::Conflict(path.clone()));
             }
         }
         for path in &file_paths {
@@ -489,23 +550,32 @@ fn desired(
         "binary".into(),
     )?;
     for target in &targets.harnesses {
-        let mut skills = BTreeSet::new();
+        let mut skills = BTreeMap::new();
         for path in release.files.keys() {
-            let Ok(tail) = path.strip_prefix("skills") else {
-                continue;
-            };
-            let mut components = tail.components();
-            if let (Some(Component::Normal(name)), Some(Component::Normal(file)), None) =
-                (components.next(), components.next(), components.next())
+            let mut components = path.components();
+            if let (
+                Some(Component::Normal(area)),
+                Some(Component::Normal(name)),
+                Some(Component::Normal(file)),
+                None,
+            ) = (
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+            ) && (area == "skills" || area == "library")
                 && file == "SKILL.md"
+                && skills
+                    .insert(name.to_os_string(), Path::new(area).join(name))
+                    .is_some()
             {
-                skills.insert(name.to_os_string());
+                return Err(InstallError::Manifest("duplicate retained skill name"));
             }
         }
-        for name in skills {
+        for (name, relative) in skills {
             insert(
                 target.skills_dir.join(&name),
-                Value::Link(root.join("skills").join(&name)),
+                Value::Link(root.join(relative)),
                 Some(target.harness),
                 "skill".into(),
             )?;

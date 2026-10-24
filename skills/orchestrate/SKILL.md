@@ -13,8 +13,9 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before dispatch, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
-   `fabric_work_claim` for the issue or repository-relative path set with a
-   stable unique `session_id`; renew it while work continues and release it when
+   `provenant fabric claim acquire --issue KEY --operation-id ID` (or
+   repeat `--path PATH` for a path set); keep its generation/token proof, renew
+   it while work continues and release it when
    finished. Do not dispatch against a conflicting live claim; dispatch does not
    enforce claims.
 4. After dispatch, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
@@ -47,8 +48,9 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
-  it, and acquire `fabric_landing_lease` with the integration branch's current
-  remote SHA. Before a lane merge or cherry-pick, run
+  it, and acquire `provenant fabric landing acquire` with the integration
+  reference, expected remote OID, candidate OID and operation ID. See the
+  [landing lease runbook](../../docs/runbooks/landing-lease.md). Before a lane merge or cherry-pick, run
   `python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" --cwd <lane-worktree>`
   and consume the SHA it prints, rather than resolving the mutable lane branch
   again. It refuses any commit since the primary HEAD that changes `.agents/`
@@ -57,9 +59,10 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
   `fabric landing-push <session-id> <generation> <branch> --label <seat>`
   for the final push; it checks the holder, generation and remote SHA, then runs
   the gate from the leased remote SHA before pushing the pinned head. The label must match the MCP lease holder; a matching
-  `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
-  after an aborted landing. To wait for another chair's lease, use
-  `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.
+  `PROVENANT_AGENT_LABEL` export selects the inbox. Renew an expiring lease
+  and release it after an aborted landing, using its generation/token proof
+  and an operation ID. To observe another chair's lease, use
+  `provenant fabric landing wait --reference REF --generation N --wait SECONDS`.
   A project whose landing tool takes and releases the lease itself says so in
   its project skill; the chair then leaves the lease to that tool.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.

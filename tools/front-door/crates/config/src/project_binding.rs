@@ -193,7 +193,8 @@ fn find_binding(
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
         let directory = projects.open_verified_directory(&entry)?;
         verify_directory(&*directory, true)?;
-        let bytes = read_record(&*directory)?;
+        let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
+        let bytes = read_record(&*directory, OsStr::new(RECORD), &entry, RECORD_LIMIT)?;
         let record: ProjectBindingRecord =
             serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
         if record.schema_version != 1 || record.project != project {
@@ -291,26 +292,30 @@ fn verify_directory(directory: &dyn SafeDir, private: bool) -> Result<(), Config
     Ok(())
 }
 
-fn read_record(directory: &dyn SafeDir) -> Result<Vec<u8>, ConfigError> {
-    let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-    if entry.kind != FileKind::Regular || entry.links != 1 || entry.size > RECORD_LIMIT {
+fn read_record(
+    directory: &dyn SafeDir,
+    name: &OsStr,
+    entry: &Metadata,
+    limit: u64,
+) -> Result<Vec<u8>, ConfigError> {
+    if entry.kind != FileKind::Regular || entry.links != 1 || entry.size > limit {
         return Err(ConfigError::InvalidProjectBinding);
     }
-    let mut file = directory.open_read(OsStr::new(RECORD))?;
+    let mut file = directory.open_read(name)?;
     let opened = file.metadata()?;
-    if !same_metadata(&entry, &opened) {
+    if !same_metadata(entry, &opened) {
         return Err(ConfigError::InvalidProjectBinding);
     }
     let mut bytes = Vec::new();
     (&mut *file)
-        .take(RECORD_LIMIT.saturating_add(1))
+        .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| ConfigError::InvalidProjectBinding)?;
-    if bytes.len() as u64 > RECORD_LIMIT {
+    if bytes.len() as u64 > limit {
         return Err(ConfigError::InvalidProjectBinding);
     }
     let after = file.metadata()?;
-    let path_after = directory.metadata_at(OsStr::new(RECORD), false)?;
+    let path_after = directory.metadata_at(name, false)?;
     if !same_metadata(&opened, &after)
         || after.size != bytes.len() as u64
         || !same_metadata(&after, &path_after)
@@ -357,6 +362,58 @@ fn decode_location(value: &str) -> Result<PathBuf, ConfigError> {
     let path = PathBuf::from(OsString::from_vec(bytes));
     validate_location(&path).map_err(|_| ConfigError::InvalidProjectBinding)?;
     Ok(path)
+}
+
+/// Initialise the host's random identity once, using the same safe state
+/// anchor and locking contract as project bindings. Never reads legacy roots.
+pub fn bind_host(roots: &Roots, fs: &dyn SafeFs) -> Result<provenant_core::HostId, ConfigError> {
+    let state = fs.open_anchor(roots.state.as_path())?;
+    verify_directory(&*state, true)?;
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), LOCK_WAIT_SECONDS)
+        .map_err(|_| ConfigError::ProjectBindingBudget)?;
+    let cancel = CancelToken::new();
+    let _lock = state.lock(
+        OsStr::new("host-binding.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let name = OsStr::new("host-id");
+    match state.metadata_at(name, false) {
+        Ok(meta) => {
+            if meta.kind != FileKind::Regular
+                || meta.links != 1
+                || meta.uid != effective_uid()
+                || meta.mode & 0o077 != 0
+                || meta.size != 32
+            {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let bytes = read_record(&*state, name, &meta, 32)?;
+            if bytes.len() != 32 {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let text =
+                std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+            text.parse().map_err(|_| ConfigError::InvalidProjectBinding)
+        }
+        Err(error) if error.is_not_found() => {
+            let id = provenant_core::HostId::from_bytes(fs.entropy_128()?);
+            match state.atomic_write(
+                name,
+                ".host-",
+                id.to_string().as_bytes(),
+                0o600,
+                PublishMode::NoReplace,
+            )? {
+                provenant_supervisor::fs::Publication::Durable => Ok(id),
+                _ => Err(ConfigError::InvalidProjectBinding),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

@@ -28,3 +28,27 @@ fn uncertain_mutation_errors_include_only_the_operation_id() {
         json!({"code":"launch_unknown","operation_id":"dispatch-17"})
     );
 }
+
+#[test]
+fn every_mcp_observation_wait_uses_the_transport_cap() {
+    for (tool, mut args) in [
+        (
+            "fabric_events",
+            json!({"op":"read","limit":1,"wait_ms":55000}),
+        ),
+        (
+            "fabric_landing",
+            json!({"op":"wait","reference":"main","generation":1,"wait_ms":55000}),
+        ),
+        (
+            "fabric_run",
+            json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_ms":55000}),
+        ),
+    ] {
+        assert!(ToolCall::parse(tool, args.clone()).is_ok());
+        args["wait_ms"] = json!(55001);
+        assert!(
+            matches!(ToolCall::parse(tool, args), Err(InvalidInput::Arguments { path }) if path == "arguments.wait_ms")
+        );
+    }
+}

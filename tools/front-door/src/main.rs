@@ -165,6 +165,26 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Fabric(provenant_cli::Fabric::Mcp { .. }) => {
             unavailable("fabric mcp", "fabric", globals)
         }
+        Command::Fabric(cmd) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                let roots = roots::roots(globals, &assets, &project)?;
+                Ok((roots, roots::home()?, project))
+            })();
+            match resolved {
+                Ok((roots, home, cwd)) => {
+                    provenant_cli::fabric::run(cmd, globals, &roots, &home, &cwd)
+                }
+                Err(error) => {
+                    let status = match error {
+                        roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
+                        _ => Outcome::Error,
+                    };
+                    fail(&inv.leaf, status, "ROOT", &error.to_string(), globals)
+                }
+            }
+        }
         Command::Install(args) => install::run_install(args, globals),
         Command::Uninstall(args) => install::run_uninstall(args, globals),
         Command::Route(route) => match route {

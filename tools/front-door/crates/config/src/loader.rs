@@ -410,12 +410,16 @@ impl Overrides<'_> {
             let expected = at(self.defaults, path);
             if expected.is_none() {
                 self.issue(path, "unknown_key");
-            } else if let (Some(expected), Some(table)) = (expected, value.as_table()) {
-                if expected.is_table() {
-                    self.apply::<T>(effective, table, path);
-                } else {
-                    self.issue(path, "type");
-                }
+            } else if let Some(table) = value.as_table().filter(|_| {
+                expected.and_then(Item::as_table).is_some_and(|table| {
+                    !table.is_empty()
+                        || !probe(&Item::Table(self.defaults.clone()), path, value)
+                            .and_then(|item| item.into_table().ok())
+                            .as_ref()
+                            .is_some_and(decodes::<T>)
+                })
+            }) {
+                self.apply::<T>(effective, table, path);
             } else {
                 let before = self.issues.len();
                 self.check::<T>(expected, value, path);
@@ -451,6 +455,17 @@ impl Overrides<'_> {
             let expected_table = expected.and_then(table);
             if expected_table.is_none() {
                 self.issue(path, "type");
+                return;
+            }
+            // Empty compiled maps have no exemplar keys. The aggregate's
+            // closed serde model decides whether this is a typed map or a
+            // closed empty section; unknown fields still fail deserialisation.
+            if expected_table.as_ref().is_some_and(Table::is_empty)
+                && probe(&Item::Table(self.defaults.clone()), path, user)
+                    .and_then(|item| item.into_table().ok())
+                    .as_ref()
+                    .is_some_and(decodes::<T>)
+            {
                 return;
             }
             let before = self.issues.len();

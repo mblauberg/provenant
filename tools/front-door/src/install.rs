@@ -453,12 +453,41 @@ fn output_install(
     }
 }
 
-pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
-    let (_environment, targets) =
+pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
+    let (_environment, mut targets) =
         match selected_targets(globals, &args.harness, args.legacy_checkout.as_deref()) {
             Ok(value) => value,
             Err(error) => return edge_error("install", error, globals),
         };
+    targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
+    if let Err(error) = targets.resolve_destinations(&LocalFs) {
+        return install_error("install", &error, globals);
+    }
+    args.bin_dir = Some(targets.bin_dir.clone());
+    if let Some(checkout) = &args.legacy_checkout {
+        let resolve = |path: &Path| {
+            provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, path).map_err(
+                |source| {
+                    EdgeError::Install(InstallError::Fs(provenant_supervisor::fs::FsError::Io {
+                        operation: "resolve install source boundary",
+                        path: path.into(),
+                        source,
+                    }))
+                },
+            )
+        };
+        match (resolve(checkout), resolve(&args.source)) {
+            (Ok(checkout), Ok(source)) if source.starts_with(&checkout) => {
+                return install_error(
+                    "install",
+                    &InstallError::Conflict(args.source.clone()),
+                    globals,
+                );
+            }
+            (Err(error), _) | (_, Err(error)) => return edge_error("install", error, globals),
+            _ => {}
+        }
+    }
     let fs = LocalFs;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();

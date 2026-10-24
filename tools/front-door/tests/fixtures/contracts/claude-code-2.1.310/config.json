@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "fabric": {
+      "type": "stdio",
+      "command": "/FIXTURE_ROOT/bin/mcp-probe",
+      "args": [
+        "--state-dir",
+        "/FIXTURE_ROOT/state",
+        "fabric",
+        "mcp",
+        "--client",
+        "claude"
+      ],
+      "env": {}
+    }
+  }
+}

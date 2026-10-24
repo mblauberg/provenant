@@ -33,7 +33,7 @@ When Herdr is absent or not in use, record `HERDR-NOT-USED: <reason>` (existing
 rule). Dispatch through Fabric, observe with
 `provenant lanes --all --wait N --condition all`, read retained events with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
-bounded slices with `fabric_output`, and steer with `fabric_send` or
+bounded slices with `fabric_output`, and steer with `provenant fabric mail send` or
 `fabric_dispatch` with `resume: "<run id>"` and a prompt (`resume` also answers
 `input_required` lanes).
 
@@ -127,29 +127,22 @@ be aware that a repeated send repeats the pane effect.
 
 ## Send answer-bearing work
 
-Create a structured Fabric task and request message with the owning
-task/revision, conversation and message IDs, expected output or artifact and
-`reply_to`. A deadline may be recorded in the named run artifact as a
-chair-owned expectation; Fabric does not enforce it. Herdr is not the transport
-of record and cannot reliably wake, interrupt or notify a peer.
+Create the task with `provenant fabric task create`, then send its request
+with `provenant fabric mail send --task ID`. Give each mutation a unique
+`--operation-id`; a retry reuses that ID and identical input. Replies use
+`--reply-to MESSAGE_ID` and identify the output artifact. A deadline in the run
+artifact is a chair-owned expectation; Herdr cannot enforce or deliver it.
 
-The peer explicitly reads its Fabric inbox: a normal read atomically claims
-delivery, while a peek is observation-only. The claim TTL must cover expected
-processing and artifact custody; it has transport-expiry semantics only and
-there is no renewal. After processing and persisting the output, the peer must
-send a correlated reply, then explicitly acknowledge the claim. If it crashes
-after the reply but before acknowledgement, redelivery may duplicate the
-reply; the chair dedupes by the request `reply_to` together with the named
-artifact and digest. Claim/ack and correlation enforce and evidence message
-delivery only: they do not prove that the provider started, stayed live,
-completed, or produced a valid result. The named run artifact remains the
-canonical record of scope, output and verification. The chair explicitly reads
-its inbox and verifies the reply relation; do not assume a subscription,
-transactional callback, terminal result or automatic wake-up exists.
+The peer reads ordered deliveries with `provenant fabric mail read --after SEQ`.
+Reading is observation-only. After persisting its result and correlated reply,
+it advances its cursor with `provenant fabric mail mark-read SEQ --operation-id
+ID`. Advance only through processed deliveries. Distinct labels give independent
+consumers separate cursors. Delivery and correlation do not establish provider
+liveness or completion: verify the named artifact and run receipt.
 
 Fabric derives the project from the working directory. A repository's primary
 checkout and ordinary registered linked worktrees share messages, tasks and
-activity, while `fabric_whoami` retains the caller's resolved `cwd`. Agents may
+activity, while `provenant fabric identity --json` retains the caller's resolved `cwd`. Agents may
 therefore keep a persistent MCP session or use the CLI from their own worktree
 without a manual project override. Separate repositories and copied worktree
 metadata stay isolated.
@@ -225,14 +218,12 @@ proof of a correct result: inspect the pane record and bounded output, then use
 the Fabric reply or named artifact. A `blocked` agent needs input; `unknown`
 means integration or detection is not yet reliable.
 
-For answer-bearing Fabric work, the chair explicitly reads the correlated reply
-from its inbox and verifies the named artifact. Use one bounded
-`fabric_inbox(wait_seconds)` call when there is no useful local work left. When
-several tasks share an inbox, pass `task_id` so unrelated deliveries remain
-untouched. Do not improvise a database poller; `fabric watch <ids>` is the
-supported waiter (see [chair-loop.md](chair-loop.md)). Fabric has no subscription,
-terminal callback or automatic lead wake-up; pane state remains advisory and
-never proves completion.
+For answer-bearing Fabric work, read the correlated reply with
+`provenant fabric mail read --after SEQ --limit N` and verify its artifact.
+When there is no local work, observe the project event stream with
+`provenant fabric events read --after SEQ --wait SECONDS`, then read the inbox
+again. Each wait has an explicit budget. A deadline does not cancel work;
+pane state remains advisory and never proves completion.
 
 ## Finish
 

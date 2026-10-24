@@ -43,7 +43,7 @@ pub enum Command {
     #[command(subcommand)]
     Config(Config),
     #[command(subcommand)]
-    Fabric(Fabric),
+    Fabric(crate::fabric::Fabric),
     Install(Install),
     Uninstall(Uninstall),
     #[command(subcommand)]
@@ -71,13 +71,7 @@ pub enum Command {
 pub enum Config {
     Show,
 }
-#[derive(Debug, Subcommand)]
-pub enum Fabric {
-    Mcp {
-        #[arg(long, value_parser = crate::install::harness_parser())]
-        client: Option<Harness>,
-    },
-}
+
 pub use crate::install::{Install, InstallCheck, Uninstall};
 #[derive(Debug, Subcommand)]
 pub enum Route {

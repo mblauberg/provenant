@@ -134,7 +134,7 @@ fn load_operation(
     }
     Ok(operation)
 }
-fn save_operation(tx: &Transaction<'_>, operation: &PushOperation) -> Result<()> {
+fn save_operation(tx: &rusqlite::Connection, operation: &PushOperation) -> Result<()> {
     tx.execute("INSERT INTO operations VALUES(?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET phase=excluded.phase,record=excluded.record",params![operation.request.project.to_string(),operation.id.as_str(),operation.request.claim.to_string(),operation.digest.to_string(),operation.phase.sql(),encode(operation)?])?;
     Ok(())
 }
@@ -205,7 +205,7 @@ impl Store {
     }
     fn save_landing(
         &self,
-        tx: &Transaction<'_>,
+        tx: &rusqlite::Connection,
         value: &Landing,
         token: Option<&[u8]>,
     ) -> Result<()> {

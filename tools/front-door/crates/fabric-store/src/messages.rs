@@ -56,7 +56,7 @@ pub struct Delivery {
     pub message: Message,
 }
 
-pub(crate) fn insert_message(tx: &Transaction<'_>, message: &Message) -> Result<bool> {
+pub(crate) fn insert_message(tx: &rusqlite::Connection, message: &Message) -> Result<bool> {
     text(&message.body, "body")?;
     if message.recipients.is_empty()
         || message.recipients.len() > 100

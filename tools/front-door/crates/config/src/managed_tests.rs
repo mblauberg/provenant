@@ -1939,6 +1939,12 @@ fn legacy_checkout_destinations_and_duplicate_owned_instruction_values_refuse() 
     let legacy = f.home.join("old-checkout");
     f.targets.legacy_checkout = Some(legacy.clone());
     f.targets.bin_dir = legacy.join("bin");
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    fs::write(
+        f.source.join("instructions/AGENTS.md"),
+        "fixture instructions",
+    )
+    .unwrap();
     let release = f.release();
     let error = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
     assert_eq!(
@@ -2110,4 +2116,180 @@ fn install_uses_strict_configuration_before_planning() {
         fs::read(f.targets.roots.state.as_path().join("config.toml")).unwrap(),
         bytes
     );
+}
+
+#[test]
+fn protected_destination_is_refused_before_any_filesystem_read() {
+    struct NoReads;
+    impl SafeFs for NoReads {
+        fn root(&self, _: bool) -> TestFsResult<Box<dyn SafeDir>> {
+            panic!("unexpected root read")
+        }
+        fn open_anchor(&self, _: &Path) -> TestFsResult<Box<dyn SafeDir>> {
+            panic!("unexpected anchor read")
+        }
+        fn open_source(&self, _: &Path) -> TestFsResult<Box<dyn SafeFile>> {
+            panic!("unexpected source read")
+        }
+        fn temporary_name(&self) -> TestFsResult<OsString> {
+            panic!("unexpected write")
+        }
+    }
+    let mut f = Fixture::new();
+    let release = f.release();
+    let old = f.home.join("old-checkout");
+    fs::create_dir(&old).unwrap();
+    let sentinel = old.join("config.toml");
+    fs::write(&sentinel, "private sentinel must not be read").unwrap();
+    // Composition resolves aliases to a canonical protected root once; the
+    // pure plan must reject every destination before opening any file.
+    let alias = f.home.join("old-alias");
+    symlink(&old, &alias).unwrap();
+    f.targets
+        .protected_roots
+        .push(alias.canonicalize().unwrap());
+    f.targets.harnesses[0].mcp_file = alias.join("config.toml");
+    assert_eq!(
+        f.targets
+            .resolve_destinations(&LocalFs)
+            .unwrap_err()
+            .to_string(),
+        format!("unmanaged destination conflicts: {}", sentinel.display())
+    );
+    let error = Snapshots::capture(&release, &f.targets, &NoReads).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("unmanaged destination conflicts: {}", sentinel.display())
+    );
+    assert_eq!(
+        fs::read_to_string(&sentinel).unwrap(),
+        "private sentinel must not be read"
+    );
+    assert!(!f.targets.roots.state.as_path().exists());
+}
+
+#[test]
+fn mcp_registry_matches_recorded_client_config_contracts() {
+    let mut f = Fixture::new();
+    for (harness, fixture) in [
+        (
+            Harness::Claude,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/contracts/claude-code-2.1.310/config.json"
+            )),
+        ),
+        (
+            Harness::Codex,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/contracts/codex-cli-0.163.0/config.toml"
+            )),
+        ),
+        (
+            Harness::Agy,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/contracts/agy-1.4.6/mcp_config.json"
+            )),
+        ),
+    ] {
+        f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[harness]);
+        let normalized = fixture
+            .replace(
+                "/FIXTURE_ROOT/bin/mcp-probe",
+                f.targets.bin_dir.join("provenant").to_str().unwrap(),
+            )
+            .replace(
+                "/FIXTURE_ROOT/state",
+                f.targets.roots.state.as_path().to_str().unwrap(),
+            );
+        let document: serde_json::Value = if harness == Harness::Codex {
+            toml_edit::de::from_str(&normalized).unwrap()
+        } else {
+            serde_json::from_str(&normalized).unwrap()
+        };
+        let mut expected = document[if harness == Harness::Codex {
+            "mcp_servers"
+        } else {
+            "mcpServers"
+        }]["fabric"]
+            .clone();
+        // Codex's recorded optional env is absent; an empty env has the same
+        // accepted wire meaning and is emitted explicitly by the registry.
+        if harness == Harness::Codex {
+            expected["env"] = serde_json::json!({});
+        }
+        let plan = f.plan();
+        let edit = plan
+            .actions()
+            .iter()
+            .flat_map(|a| &a.edits)
+            .find(|edit| edit.selector.ends_with("fabric"))
+            .unwrap();
+        assert_eq!(edit.after.as_ref(), Some(&expected));
+        if harness == Harness::Claude {
+            let recorded: serde_json::Value = serde_json::from_str(
+                &include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/contracts/claude-code-2.1.310/stdio-argv.json"
+                ))
+                .replace(
+                    "/FIXTURE_ROOT/state",
+                    f.targets.roots.state.as_path().to_str().unwrap(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(expected["args"], recorded);
+        }
+        assert!(!f.targets.roots.state.as_path().exists());
+    }
+}
+
+#[test]
+fn compiled_replace_disposition_refuses_missing_assets_and_links_library_skills() {
+    let mut f = Fixture::new();
+    let legacy = f.home.join("legacy-checkout");
+    f.targets.legacy_checkout = Some(legacy.clone());
+    let skills = f.targets.harnesses[0].skills_dir.clone();
+    fs::create_dir_all(&skills).unwrap();
+    symlink(legacy.join("skills/autopilot"), skills.join("autopilot")).unwrap();
+    assert_eq!(
+        Snapshots::capture(&f.release(), &f.targets, &LocalFs)
+            .unwrap_err()
+            .to_string(),
+        "invalid release manifest: missing legacy replacement asset"
+    );
+    assert_eq!(
+        fs::read_link(skills.join("autopilot")).unwrap(),
+        legacy.join("skills/autopilot")
+    );
+    assert!(!f.targets.roots.state.as_path().exists());
+    for relative in ["skills/autopilot", "library/playwright"] {
+        let dir = f.source.join(relative);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "---\nname: retained\n---\n").unwrap();
+    }
+    symlink(legacy.join("library/playwright"), skills.join("playwright")).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        fs::read_link(skills.join("autopilot"))
+            .unwrap()
+            .ends_with("skills/autopilot")
+    );
+    assert!(
+        fs::read_link(skills.join("playwright"))
+            .unwrap()
+            .ends_with("library/playwright")
+    );
+    assert!(f.plan().actions().is_empty());
 }
