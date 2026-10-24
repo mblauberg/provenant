@@ -66,8 +66,9 @@ impl Iterator for Attempts<'_> {
 /// reviewer: each dispatched attempt is its own execution identity, derived
 /// from the attempt ID, so a chair's dispatched reviews are never its own
 /// decision-maker reviews and distinct attempts stay distinct reviewers.
-/// An observed provider is an adapter, not a model family; no verified model
-/// lineage is recorded, so the family stays unknown.
+/// An observed provider is an adapter, not a model family; run holds no
+/// catalogue, so the family stays unknown here and the edge fills it from the
+/// routing catalogue.
 fn reviewer_fact(
     attempt: AttemptId,
     owner: Option<ActorId>,
