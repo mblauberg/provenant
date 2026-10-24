@@ -318,9 +318,9 @@ jobs:
           blocking="$(echo "$NEEDS_JSON" | jq -r --arg run_macos "$RUN_MACOS" \
             'to_entries[]
              | select(.value.result != "success"
-                 and !(.key == "rust-macos-release"
-                   and .value.result == "skipped"
-                   and $run_macos == "false"))
+                 and (.key != "rust-macos-release"
+                   or .value.result != "skipped"
+                   or $run_macos != "false"))
              | "\(.key)=\(.value.result)"')"
           if [ -n "$blocking" ]; then
             echo "Blocking job results:"
