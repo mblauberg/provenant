@@ -3,10 +3,8 @@
 //! The runtime owns the request and response contracts. The binary composition
 //! layer implements `RunOwner` by binding the local run store, dispatcher and
 //! home-host router. This module does not launch processes or invent records.
-//!
-//! TODO(chair): bind submit, cancel and resume to Lane B's dispatch/control API
-//! once that API reaches main. The current run crate stores and reads records;
-//! a durable queued record alone is not proof that work was dispatched.
+//! Submit, cancel and resume bind to Run's shared launch path; a durable
+//! queued record alone is not proof that work was dispatched.
 
 use super::coordination::facade::{
     AttemptTarget, FacadeError, OutputInput, OutputResult, RunInput, SubmitInput, WaitCondition,

@@ -432,6 +432,10 @@ impl Directory {
     /// off the original anchor device. This cannot detect ABA replacement or
     /// prevent entry mutation after the final stat; callers own directory access
     /// policy. The returned descriptor retains its opened identity after rename.
+    /// Unprivileged free bytes on this directory's filesystem, for admission.
+    pub fn available_bytes(&self) -> std::io::Result<u64> {
+        crate::sys::resources::available_bytes(&self.file)
+    }
     pub fn open_verified_directory(&self, name: &OsStr) -> Result<Self> {
         let before = self.metadata_at(name, false)?;
         let child = self.open_directory(name)?;
@@ -470,8 +474,7 @@ impl Directory {
     }
 
     /// Attempt one nonblocking acquisition with the same verified inode checks.
-    #[cfg(any(target_os = "macos", test))]
-    pub(crate) fn try_lock(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+    pub fn try_lock(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
         self.lock_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
     }
 
@@ -540,6 +543,20 @@ impl Directory {
                 .map_err(error("openat create", &self.path.join(name)))?,
             &self.path.join(name),
         )
+    }
+    /// Best-effort logs append without truncation or following a final link.
+    pub fn open_append(&self, name: &OsStr) -> Result<FileHandle> {
+        let name = component(name)?;
+        let file = FileHandle::regular(
+            os::open_append_at(&self.file, name)
+                .map_err(error("openat append", &self.path.join(name)))?,
+            &self.path.join(name),
+        )?;
+        let metadata = file.metadata()?;
+        if metadata.links != 1 || metadata.uid != os::effective_uid() {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        Ok(file)
     }
     pub fn mkdir(&self, name: &OsStr, mode: u32) -> Result<()> {
         let name = component(name)?;

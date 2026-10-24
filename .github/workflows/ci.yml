@@ -157,6 +157,9 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo test -p provenant-supervisor -p provenant-confinement --locked
+      - name: Run menu bar tests
+        working-directory: apps/quota-menubar
+        run: swift test
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
@@ -227,7 +230,7 @@ jobs:
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           version: "1.31.1"
-          # Audit exactly the surfaces this job is path-filtered on.
+          # Audit workflow definitions on every tested tree.
           inputs: ".github/workflows"
           online-audits: "false"
           advanced-security: "false"

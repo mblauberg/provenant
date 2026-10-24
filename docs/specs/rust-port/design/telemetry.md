@@ -10,7 +10,7 @@ records and cut-over. Author route: `codex/gpt-6.1-sol@high` via Fabric.
 bundled price table. It reports supervised usage, API-equivalent cost estimates,
 route outcomes, attempt timing, route comparison, cost per accepted delivery and
 measurement coverage. Run owns durable records, admission,
-the registry and terminal publication. Telemetry owns no store, writer lock,
+the registry and terminal publication. The attempt reducer owns no store, writer lock,
 background collection or provider lifecycle operation; a report failure cannot
 signal a provider or change a published outcome.
 
@@ -28,7 +28,8 @@ improve the harness and evaluate configurations, efficiency, performance and
 cost-effectiveness. It needs per-route outcomes, time, usage, cost and cost per
 accepted delivery, not raw OTel streams, a second store or old history. Every
 report reduces run's terminal attempt records and workflow's acceptance facts
-on demand; telemetry writes nothing.
+on demand. The command edge also keeps the bounded local demand log described
+below; the attempt reducer remains pure.
 
 | Keep | Contract |
 |---|---|
@@ -43,12 +44,43 @@ on demand; telemetry writes nothing.
 |---|---|
 | SQLite ledger, writer lock, advisory writes, `record_attempt`, ingest and sources | Duplicate run's durable facts without a product reader. No telemetry supervisor edge or new database. |
 | Ledger import and history carry-forward | The new binary never opens, imports or deletes the old ledger. Its history stays on disk for the old install. No import command or receipt. |
-| Transcript/receipt discovery and OTel ingest/export/collector | No reader for the raw collection (about 0.5 GB a day); the comparison reader is served by run's records. OTel prompt/tool logging stays off. Unsupervised CLI activity is outside coverage; old transcripts and collector data stay untouched. |
+| Transcript/receipt discovery and OTel ingest/export/collector | No reader for the raw collection (about 0.5 GB a day); the comparison reader is served by run's records. OTel prompt/tool logging stays off. CLI demand counts do not imply token/cost coverage; old transcripts and collector data stay untouched. |
 | Delivery telemetry writes and the old accepted-cost report | Workflow retains acceptance evidence. No telemetry `upsert_delivery`, `delivery_report` or delivery rows; the read-only join below replaces them. |
 | Changes and retro reports | Still no product reader; `stats --by` is the comparison view. Delete both reducers `scripts/telemetry_changes.py` and `scripts/telemetry_delivery.py`; the retrospect skill keeps using evidence directly. |
 | Cross-host summaries, aliases and read-time refresh | Stats is local and read-only. No SSH telemetry operation, top-level `stats`/`retro` aliases or implicit refresh. |
 | Weekly quota history and ledger fallback | History is not carried forward. Execution-route/quota owns any future window history, reset interpretation, probes and cooldowns. |
 | Model heuristics, parent rollups and compaction telemetry | Exact recorded identity suffices. Run owns context and lineage; parent references never add another usage total. |
+
+## Local demand counters (#1224)
+
+The binary composition edge owns a separate best-effort `usage.jsonl` under
+`Roots.state`, shared by CLI invocation completion and the Fabric MCP transport
+hook. `EVENT_KINDS` registers `cli.verb` and `mcp.tool`. Records contain the
+canonical verb or installed tool name, timestamp and duration in milliseconds,
+plus CLI exit code or MCP outcome. Unknown tool names are `unknown`; argument,
+prompt and result text never enter the writer. Skill loads and script entry
+points remain unrecorded. OTel prompt and tool logging stays off.
+
+Supervisor supplies descriptor-relative, no-follow `O_APPEND` access. Each
+line is at most 512 bytes and uses one write without a lock, tail read or sync.
+Only rotation tries an exclusive nonblocking lock; a busy lock still permits
+appends. CLI completion and existing MCP workers rotate around 5,000,000 bytes,
+replacing the single `usage.jsonl.1` backup. MCP's event loop never rotates or
+locks. Concurrent writes can briefly exceed the cap. Reports read up to the cap
+from each file without locks and tolerate a missing backup; rotation can make
+a concurrent report approximate. I/O errors discard the event without changing
+the call. Readers skip torn lines, including a record joined to a torn tail.
+`PROVENANT_USAGE_STATE_DIR` optionally isolates counters from other state.
+Local filesystem operations add small overhead, without a hard latency
+promise on a stalled filesystem.
+
+`provenant telemetry stats --usage [--since 30d]` reads both bounded logs and
+sorts units by call count. The CLI grammar and MCP catalogue supply zero-call
+rows. Dates/RFC3339 and `--until` also bound the interval; malformed and torn
+lines are skipped. Retention is bounded by size rather than days, so counts
+are observed demand, not proof of inactivity beyond the retained logs. Stats
+records its own invocation after rendering. This log neither replaces run's
+terminal facts nor adds an edge from run or the pure reducer to a writer.
 
 ## Command and report
 
@@ -218,6 +250,47 @@ owns provider-specific window/reset semantics. Providers/execution-route
 replaces `scripts/provider_identity.py` with its non-secret scope semantics;
 telemetry neither configures accounts nor infers them from email, tokens or
 model names.
+
+### Live quota and Claude identity
+
+The binary edge interprets three non-secret probe plans: account-scoped HTTP,
+bounded commands and a read-only local ledger. `~/.agents/config/telemetry.json`
+(or `$AGENT_FABRIC_INSTANCE_ROOT/config/telemetry.json`) remains the account
+configuration because Rust config has no account schema yet. Configured plans
+and priorities override provider defaults. Codex uses app-server rate limits,
+with a read-only OAuth usage request when that service is unavailable; both
+include credit balances and banked resets. Cursor reports its billing cycle;
+agy reports independent Gemini and Claude pools. OpenCode Go sums the local
+read-only message stores once per message, uses configured caps and cycle
+anchors, and labels its estimate as partial to this machine. Window durations
+travel with usage, since Codex primary limits can be weekly rather than 5-hour.
+A fresh matching agy pool observation supersedes an older refusal only when
+all active windows in that pool are available. Quota exposes this through
+admission; dispatch must supply its verified route-to-pool bindings.
+
+An authentication failure retains the last snapshot, marks its report row stale,
+and keeps its observation time and reset deadlines. The menu bar projects
+those deadlines against the current time and omits elapsed windows; staleness
+alone never sets usage to zero.
+
+`~/.claude-pro`, `~/.claude-anese` and `~/.claude-michael` stay signed in to
+their fixed accounts; the working `~/.claude` session rotates between them.
+The default keychain item, `Claude Code-credentials`, is used only with
+`CLAUDE_CONFIG_DIR` unset. Fixed directories use the suffixed item from the
+host's `keychain_suffix` helper (first eight SHA-256 hex characters of the
+absolute directory). Quota fingerprints the identity from
+`claude auth status --json` as the first 16 SHA-256 hex characters. It
+attributes the default item's reading to the matching configured label, then
+uses the freshest unexpired token per account. Raw identities are never stored
+or logged, and quota never writes credentials.
+
+By default, `quota.claude_refresh_expired` permits one refresh attempt per
+account and expiry. From a scratch directory, Claude Code runs within the
+bounded tick deadline as
+`claude -p x --model provenant-refresh-probe --max-turns 1 </dev/null`
+(setting `CLAUDE_CONFIG_DIR` for fixed accounts). Its unknown-model error
+occurs before inference; quota then rereads the keychain item. Setting the
+option to `false` skips the attempt.
 
 Providers normalises inclusive wire counts once, subtracting known cached/write
 input and reasoning output. Run records the disjoint result; telemetry never

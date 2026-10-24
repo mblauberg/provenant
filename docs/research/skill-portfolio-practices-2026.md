@@ -93,8 +93,9 @@ The standalone `agy-headless` skill and direct Agy helper routes were retired.
 At this evidence cut-off, the planned provider-action route was recorded as
 the intended owner of Gemini execution, authority, model lineage, durable
 actions and recovery; that daemon-era plan is not current runtime truth. The
-current boundary is direct provider CLI execution, while `cf_dispatch.py`
-remains the direct adapter route. Fabric carries coordination when available;
+Rust replacement boundary is direct provider CLI execution through the run
+and provider owners under `tools/front-door/crates/`. The Python adapter
+route is retired. Fabric carries coordination when available;
 when it is unavailable, the missing roundtrip is recorded as degraded.
 
 ### 11 July historical dispositions, not current work

@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, seal},
+    artifacts::{artifact_path, read_sealed, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -24,6 +24,7 @@ pub struct PreparedRun {
 }
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
+#[derive(Clone)]
 pub struct TerminalPublication<'a> {
     pub outcome: Outcome,
     pub finished_at: WallTime,
@@ -39,11 +40,144 @@ pub struct TerminalPublication<'a> {
     pub usage: UsageRecord,
 }
 impl RunStore {
+    /// A result-only orphan predates durable terminal intent. The trusted
+    /// provider/confinement edge must revalidate its terminal facts; the file's
+    /// presence alone never establishes success, route identity or completeness.
+    /// The supplied result rendering is ignored in favour of the sealed bytes.
+    pub fn recover_result_only(
+        &self,
+        id: AttemptId,
+        facts: &TerminalPublication<'_>,
+        exit: &ExitObservation,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let old = self.record(id, call)?;
+        let dir = self.attempt_dir(old.run_id, id, false)?;
+        if read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
+            return Err(RunError::TerminalRecoveryRequired);
+        }
+        let raw = read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or(RunError::Nonterminal)?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| RunError::Validation("sealed result is not UTF-8"))?;
+        let publication = TerminalPublication {
+            result: text,
+            ..facts.clone()
+        };
+        self.publish_terminal(id, old.revision, &publication, exit, call)
+    }
+    /// Recover an interrupted terminal publication from sealed evidence.
+    pub fn recover_terminal(
+        &self,
+        id: AttemptId,
+        exit: &ExitObservation,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let old = self.record(id, call)?;
+        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let pending: AttemptRecord = decode(
+            &read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?
+                .ok_or(RunError::TerminalRecoveryRequired)?,
+        )?;
+        super::reader::validate_attempt(&pending)?;
+        if pending.attempt_id != id
+            || pending.run_id != old.run_id
+            || pending.project_id != old.project_id
+            || pending.task_id != old.task_id
+            || pending.operation_id != old.operation_id
+            || pending.generation != old.generation
+        {
+            return Err(RunError::Conflict);
+        }
+        let AttemptState::Terminal {
+            outcome,
+            finished_at,
+            ref reason,
+            ..
+        } = pending.state
+        else {
+            return Err(RunError::Validation("pending publication is not terminal"));
+        };
+        let result = pending
+            .result
+            .as_ref()
+            .ok_or(RunError::Validation("pending result missing"))?;
+        let raw = self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| RunError::Validation("pending result is not UTF-8"))?;
+        let publication = TerminalPublication {
+            outcome,
+            finished_at,
+            started_at: pending.started_at,
+            provider_ms: pending.provider_ms,
+            reason: reason.clone(),
+            result: text,
+            complete: result.complete,
+            redacted: result.redacted,
+            resolved_route: pending.resolved_route.clone(),
+            applied_route: pending.applied_route.clone(),
+            observed_route: pending.observed_route.clone(),
+            usage: pending.usage.clone(),
+        };
+        self.publish_terminal(
+            id,
+            pending.revision.checked_sub(1).ok_or(RunError::Conflict)?,
+            &publication,
+            exit,
+            call,
+        )
+    }
     /// Reserve records first, seal the exact request/prompts, then acknowledge.
     /// Repeating a prepared operation repairs a publication gap with the same
     /// request. No scheduler, admission or launch is implied by acceptance here.
     pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
         validate_request(input)?;
+        // A crash before sealing left the operation prepared under its own
+        // IDs; a replay with fresh IDs adopts them rather than conflicting.
+        if let Some(op) = self.operation(&input.operation_id, call)?
+            && op.state == OperationState::Prepared
+            && op.request_digest == input.request.digest()?
+            && op.run_id != input.run_id
+        {
+            return self.create_exact(&self.adopt(op.run_id, input, call)?, call);
+        }
+        self.create_exact(input, call)
+    }
+    fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
+        let ids: Vec<(String, String)> = call.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT task,id FROM attempts WHERE run=?1 AND project=?2")?;
+            let rows = query.query_map(
+                params![run.to_string(), self.context.project_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        let attempts = input
+            .attempts
+            .iter()
+            .map(|new| {
+                let (_, id) = ids
+                    .iter()
+                    .find(|(task, _)| *task == new.task_id.to_string())
+                    .ok_or(RunError::Conflict)?;
+                Ok(NewAttempt {
+                    attempt_id: AttemptId::parse(id)
+                        .map_err(|_| RunError::Validation("attempt index ID"))?,
+                    task_id: new.task_id,
+                    prompt: new.prompt.clone(),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(PreparedRun {
+            run_id: run,
+            operation_id: input.operation_id.clone(),
+            request: input.request.clone(),
+            attempts,
+            created_at: input.created_at,
+        })
+    }
+    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
         let digest = input.request.digest()?;
         let context = &self.context;
         let existing = self.operation(&input.operation_id, call)?;
@@ -79,7 +213,11 @@ impl RunStore {
             project_id: context.project_id,
             actor_id: context.actor_id,
             operation_id: input.operation_id.clone(),
-            kind: OperationKind::Dispatch,
+            kind: if input.request.parent.is_some() {
+                OperationKind::Resume
+            } else {
+                OperationKind::Dispatch
+            },
             request_digest: digest,
             run_id: input.run_id,
             state: OperationState::Prepared,
@@ -108,18 +246,36 @@ impl RunStore {
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
                 return Ok(());
             }
+            let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
+            if queued + input.request.tasks.len() as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
             tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
-            for task in &input.request.tasks {
+            if let Some(target) = input.request.parent {
+                // Each terminal attempt is continued at most once.
+                let taken = tx.execute("INSERT INTO continuations(target,run) VALUES (?1,?2) ON CONFLICT DO NOTHING", params![target.to_string(), input.run_id.to_string()])?;
+                if taken != 1 { return Err(RunError::Conflict); }
+            }
+            // A continuation is the next attempt of the prior task.
+            let number: i64 = match input.request.parent {
+                None => 1,
+                Some(target) => {
+                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
+                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
+                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
+                }
+            };
+            for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
-                    schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: 1, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
+                    schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
+                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
-                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,1,1,0,?5)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), bytes(&attempt)?])?;
+                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
+                let waves = index as u64 / input.request.concurrency.max(1);
+                self.queue_ticket(tx, &attempt, input.request.concurrency, waves.saturating_mul(task.provider_timeout_seconds))?;
             }
             Ok(())
         })?;
@@ -183,22 +339,136 @@ impl RunStore {
         if exit.scope.run != old.run_id
             || exit.scope.attempt != id
             || exit.scope.generation != old.generation
-            || !exit.terminal_observed
             || exit.unresolved_cleanup
         {
             return Err(RunError::Validation(
                 "exit/cleanup evidence is unresolved or out of scope",
             ));
         }
+        if publication.outcome == Outcome::Succeeded
+            && (outcome_exit != Some(0) || exit.never_spawned)
+        {
+            return Err(RunError::Validation("success lacks verified provider exit"));
+        }
+        self.commit_terminal(
+            old,
+            expected_revision,
+            publication,
+            Some(durable_exit),
+            outcome_exit,
+            !exit.never_spawned,
+            call,
+        )
+    }
+    /// End an attempt that never reached a provider: refused before spawn or
+    /// cancelled while queued. It has no custody to release and no exit.
+    /// `expected` names the state the caller observed; any other state is a
+    /// conflict, so a cancelled queued attempt never races a starting launch.
+    pub fn withdraw(
+        &self,
+        id: AttemptId,
+        expected: AttemptState,
+        outcome: Outcome,
+        reason: &str,
+        finished_at: WallTime,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
+            return Err(RunError::Validation("withdrawal outcome"));
+        }
+        let old = self.record(id, call)?;
+        let dir = self.run_dir(old.run_id, false)?;
+        let _writer = dir.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        let old = self.record(id, call)?;
+        if let AttemptState::Terminal { .. } = old.state {
+            return Ok(None);
+        }
+        if old.state != expected
+            || !matches!(old.state, AttemptState::Queued | AttemptState::Starting)
+        {
+            return Err(RunError::Conflict);
+        }
+        let revision = old.revision;
+        let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
+        // An interrupted withdrawal resumes its own sealed facts, so a retry
+        // never renders a second finished_at or reason.
+        let (outcome, finished_at, reason) =
+            match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
+                Some(raw) => {
+                    let saved: AttemptRecord = decode(&raw)?;
+                    super::reader::validate_attempt(&saved)?;
+                    match saved.state {
+                        AttemptState::Terminal {
+                            outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
+                            exit_code: None,
+                            finished_at,
+                            reason,
+                        } if saved.attempt_id == id
+                            && saved.run_id == old.run_id
+                            && saved.generation == old.generation
+                            && saved.exit_evidence.is_none()
+                            && saved.provider_launched == Some(false)
+                            && Some(saved.revision) == revision.checked_add(1) =>
+                        {
+                            (saved_outcome, finished_at, reason)
+                        }
+                        _ => return Err(RunError::TerminalRecoveryRequired),
+                    }
+                }
+                None => (
+                    outcome,
+                    finished_at,
+                    Some(reason.chars().take(256).collect()),
+                ),
+            };
+        let publication = TerminalPublication {
+            outcome,
+            finished_at,
+            started_at: None,
+            provider_ms: None,
+            reason,
+            result: "",
+            complete: true,
+            redacted: false,
+            resolved_route: None,
+            applied_route: None,
+            observed_route: None,
+            usage: UsageRecord::default(),
+        };
+        self.commit_terminal(old, revision, &publication, None, None, false, call)
+            .map(Some)
+    }
+    /// Seal result and terminal intent, then commit the attempt, run summary,
+    /// operation state, released admission and event together. The caller
+    /// holds the run's publication lock.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one commit point for every terminal path"
+    )]
+    fn commit_terminal(
+        &self,
+        old: AttemptRecord,
+        expected_revision: u64,
+        publication: &TerminalPublication<'_>,
+        durable_exit: Option<ArtifactRecord>,
+        outcome_exit: Option<i64>,
+        launched: bool,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let id = old.attempt_id;
         if publication.result.len() as u64 > RESULT_LIMIT {
             return Err(RunError::TooLarge {
                 limit: RESULT_LIMIT,
             });
         }
         if publication.outcome == Outcome::Succeeded
-            && (outcome_exit != Some(0)
-                || exit.never_spawned
-                || !publication.complete
+            && (!publication.complete
                 || publication.result.is_empty()
                 || !super::reader::verified_route(
                     publication.resolved_route.as_ref(),
@@ -207,13 +477,13 @@ impl RunStore {
                 ))
         {
             return Err(RunError::Validation(
-                "success lacks complete result or verified provider exit/identity",
+                "success lacks complete result or verified provider identity",
             ));
         }
         let mut next = old.clone();
         next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
         next.started_at = publication.started_at;
-        next.provider_launched = Some(!exit.never_spawned);
+        next.provider_launched = Some(launched);
         next.provider_ms = publication.provider_ms;
         next.resolved_route = publication.resolved_route.clone();
         next.applied_route = publication.applied_route.clone();
@@ -233,7 +503,7 @@ impl RunStore {
             reason: publication.reason.clone(),
         };
         next.publication_error = None;
-        next.exit_evidence = Some(durable_exit);
+        next.exit_evidence = durable_exit;
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
                 return Ok(old);
@@ -244,14 +514,26 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         super::reader::validate_attempt(&next)?;
-        bytes(&next)?;
+        let intent = bytes(&next)?;
         let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
-        seal(
-            &attempt_dir,
-            "result.md",
-            publication.result.as_bytes(),
-            RESULT_LIMIT,
-        )?;
+        // Seal the result, then the exact terminal intent that names it. A
+        // crash between them leaves a result-only orphan, which the edge
+        // recovers with revalidated facts; intent never names missing bytes.
+        match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
+            Some(saved) if saved != intent => return Err(RunError::TerminalRecoveryRequired),
+            Some(_) => {}
+            None => {
+                seal(
+                    &attempt_dir,
+                    "result.md",
+                    publication.result.as_bytes(),
+                    RESULT_LIMIT,
+                )?;
+                #[cfg(test)]
+                crate::tests::crash_at("result");
+                seal(&attempt_dir, "terminal-pending.json", &intent, RECORD_LIMIT)?;
+            }
+        }
         #[cfg(test)]
         crate::tests::crash_at("sealed");
         self.write(call, |tx| {
@@ -282,6 +564,9 @@ impl RunStore {
 fn validate_request(input: &PreparedRun) -> Result<()> {
     if input.request.schema_version != 1 {
         return Err(RunError::Version(input.request.schema_version as i64));
+    }
+    if input.request.parent.is_some() && input.request.tasks.len() != 1 {
+        return Err(RunError::Validation("a continuation has one task"));
     }
     if !(1..=64).contains(&input.request.tasks.len())
         || !(1..=8).contains(&input.request.concurrency)
@@ -382,7 +667,7 @@ fn sealed_exit(
     if stored.scope != exit.scope
         || stored.termination != exit.termination
         || stored.never_spawned != exit.never_spawned
-        || !stored.terminal_observed
+        || stored.terminal_observed != exit.terminal_observed
         || stored.unresolved_cleanup
         || stored.settlement_evidence != exit.settlement_evidence
     {

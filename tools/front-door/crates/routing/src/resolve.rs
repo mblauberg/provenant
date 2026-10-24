@@ -30,6 +30,14 @@ impl RoutingContext<'_> {
     }
     fn validate(&self) -> Result<(), RoutingError> {
         self.catalogue.validate()?;
+        if self
+            .catalogue
+            .pools
+            .keys()
+            .any(|name| self.config.routes.contains_key(name))
+        {
+            return Err(RoutingError::InvalidValue);
+        }
         if !provenant_config::DomainConfig::validate(self.config).is_empty() {
             return Err(RoutingError::InvalidValue);
         }
@@ -55,6 +63,7 @@ pub struct RouteList {
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
     pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
+    pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMember>>,
     pub availability: Vec<AvailabilityView>,
 }
 pub fn list(
@@ -105,6 +114,19 @@ pub fn list(
             .iter()
             .filter(|(_, r)| matches(r.model.adapter()))
             .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        pools: context
+            .catalogue
+            .pools
+            .iter()
+            .filter_map(|(name, members)| {
+                let members: Vec<_> = members
+                    .iter()
+                    .filter(|member| matches(member.model.adapter()))
+                    .cloned()
+                    .collect();
+                (!members.is_empty()).then(|| (name.clone(), members))
+            })
             .collect(),
         availability,
     })
@@ -231,29 +253,72 @@ fn candidate(
         },
     })
 }
+fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -> bool {
+    !confidential
+        || catalogue
+            .model(model)
+            .is_some_and(|row| row.trains_on_prompts == Some(false))
+}
 pub fn resolve(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
 ) -> Result<ResolvedRoute, RoutingError> {
     context.validate()?;
-    let (model, effort) = match &request.choice {
-        RouteChoice::Model(model) => (model, request.effort.as_deref()),
+    let (model, effort, pool_primary) = match &request.choice {
+        RouteChoice::Model(model) => {
+            if !privacy_allowed(model, request.confidential, context.catalogue) {
+                return Err(RoutingError::ConfidentialModel);
+            }
+            (model, request.effort.as_deref(), None)
+        }
         RouteChoice::NamedRoute(name) => {
             if !crate::request::identifier(name) {
                 return Err(RoutingError::InvalidValue);
             }
-            let named = context
-                .config
-                .routes
-                .get(name)
-                .ok_or(RoutingError::UnknownRoute)?;
-            (
-                &named.model,
-                request.effort.as_deref().or(named.effort.as_deref()),
-            )
+            if let Some(pool) = context.catalogue.pools.get(name) {
+                let mut first_unavailable = None;
+                let mut selected = None;
+                for member in pool {
+                    if (member.free && !request.allow_free)
+                        || !privacy_allowed(&member.model, request.confidential, context.catalogue)
+                    {
+                        continue;
+                    }
+                    let effort = request.effort.as_deref().or(member.effort.as_deref());
+                    let option = candidate(&member.model, effort, context)?;
+                    if matches!(&option.readiness, RouteReadiness::Ready { .. }) {
+                        selected = Some((&member.model, effort, option));
+                        break;
+                    }
+                    if first_unavailable.is_none() {
+                        first_unavailable = Some((&member.model, effort, option));
+                    }
+                }
+                let (model, effort, primary) = selected
+                    .or(first_unavailable)
+                    .ok_or(RoutingError::ConfidentialModel)?;
+                (model, effort, Some(primary))
+            } else {
+                let named = context
+                    .config
+                    .routes
+                    .get(name)
+                    .ok_or(RoutingError::UnknownRoute)?;
+                if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
+                    return Err(RoutingError::ConfidentialModel);
+                }
+                (
+                    &named.model,
+                    request.effort.as_deref().or(named.effort.as_deref()),
+                    None,
+                )
+            }
         }
     };
-    let primary = candidate(model, effort, context)?;
+    let primary = match pool_primary {
+        Some(primary) => primary,
+        None => candidate(model, effort, context)?,
+    };
     let models = match &request.fallback {
         Fallback::None => &[][..],
         Fallback::Models(models) => models.as_slice(),
@@ -263,7 +328,8 @@ pub fn resolve(
     }
     let alternatives = models
         .iter()
-        .map(|m| candidate(m, effort, context))
+        .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
+        .map(|model| candidate(model, effort, context))
         .collect::<Result<Vec<_>, _>>()?;
     let exclusions = std::iter::once(&primary)
         .chain(alternatives.iter())

@@ -8,7 +8,8 @@ this file owns the durable requirements once accepted. It grants no authority
 and relaxes no gate in `HARNESS.md`. It builds on
 [Fabric across the user's own hosts](fabric-hosts.md), the
 [operating model](harness/operating-model.md) (R4 telemetry, R6 continuity)
-and the [profile telemetry stamp](harness/profiles.md#telemetry-stamp). Visual
+and the [profile configuration owners](harness/profiles.md). The legacy
+profile telemetry stamp is retired. Visual
 and interaction design lives in the companion
 [console design](observability-console-design.md).
 
@@ -683,8 +684,9 @@ Two peers (names are examples):
 }
 ```
 
-Paths derive from `AGENT_FABRIC_STATE_ROOT`, `AGENT_FABRIC_INSTANCE_ROOT` and
-provider identity directories.
+Paths derive from `--state-dir` or `PROVENANT_STATE_DIR` (default
+`~/.local/share/provenant/v1`) and provider identity directories. There is no
+separate instance-root environment variable in the Rust runtime.
 
 ## Projector
 
@@ -705,7 +707,7 @@ The amendments to ADR 0020 and Fabric hosts must list exactly these:
 2. **SSH use.** From Slice 6 it uses the user's SSH configuration and agent to
    contact peers, only while a watcher is registered.
 3. **Its own directory.** It writes only under
-   `$AGENT_FABRIC_STATE_ROOT/projector/`.
+   `$PROVENANT_STATE_DIR/projector/`.
 4. **One supervised process.** An opt-in LaunchAgent named
    `dev.provenant.projector` (`KeepAlive`, background process type, low-priority
    I/O). No Linux supervisor; `provenant projector run --foreground` serves CI
@@ -727,9 +729,10 @@ because of the authority it held, not its language; this pilot holds none.
 - **Build versus depend.** Build narrow hot-path tools Provenant owns end to
   end (watching, parsing, rolling up); depend on established foundations
   (SQLite, cryptography, file watching, Git).
-- SSH: it shells out to `ssh` (or `AGENT_FABRIC_SSH_PROGRAM`) with the same
-  argument construction as `scripts/fabric_hosts.py`, checked by one shared
-  fixture of expected argument vectors tested in both languages.
+- SSH: reuse the bounded transport in
+  `tools/front-door/crates/fabric-runtime/src/hosts.rs`. The Rust runtime
+  discovers `/usr/bin/ssh` or `/bin/ssh`; it has no SSH-program environment
+  override. Transport tests assert the fixed argument vector.
 - macOS supported; Linux built and tested in CI only. One instance per state
   root, by advisory lock. Targets: a change reflected within 2 seconds, idle
   CPU under 1 second per hour, resident memory under 64 MiB.
@@ -744,13 +747,13 @@ because of the authority it held, not its language; this pilot holds none.
 - While watched, each peer is pulled once per `observe.pull_interval_seconds`
   (default 60, 10% jitter). An explicit refresh (⌘R, `lanes --fresh`) writes a
   request file, honoured at most once per peer every 10 seconds.
-- **Peer verb.** The peer entrypoint gains `observe.digest`, added to both
-  the Python `parse_request` in `scripts/fabric_hosts.py` and the TypeScript
-  peer handler in `runtime/fabric/src/peer-lanes.ts`. Like `telemetry.stats`
-  it takes `{schema_version, since_generation}` and no `project_path`, which
-  stays required for lane verbs only. It returns `unchanged`, or the peer's
-  manifest, host record, lanes and cached quota report. Session lists are not
-  in the digest.
+- **Proposed peer extension.** Add observation actions to the typed
+  `PeerAction` protocol in
+  `tools/front-door/crates/fabric-runtime/src/hosts.rs`, served by
+  `provenant fabric peer`. `observe.digest` is a design label, not a current
+  Rust action. It would take `{schema_version, since_generation}` and return
+  `unchanged`, or the peer's manifest, host record, lanes and cached quota
+  report. Session lists are not in the digest.
 - **Size.** Responses stay under the 1 MiB `MAX_RESPONSE_BYTES` cap: the lanes
   file holds non-terminal lanes and those finished in the last 24 hours, at
   most 500 rows; beyond that it sets `truncated: true` and the reader uses the
@@ -771,7 +774,7 @@ JSON Schemas live in `schemas/projector/v1/`; fabricated fixtures in
 `tests/fixtures/projector/v1/`, never copied from real sessions.
 
 ```text
-$AGENT_FABRIC_STATE_ROOT/projector/          0700
+$PROVENANT_STATE_DIR/projector/          0700
   lock
   requests/                                  watch leases and refresh requests
   v1/

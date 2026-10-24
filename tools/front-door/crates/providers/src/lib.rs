@@ -8,6 +8,7 @@ mod contract;
 pub mod cursor;
 mod launch;
 pub mod opencode;
+pub mod quota;
 mod stream;
 pub use contract::*;
 pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin, mode_enabled};
@@ -20,7 +21,7 @@ pub struct Registration {
     pub quota_source: Option<&'static dyn QuotaSource>,
 }
 
-/// One registry for execution and quota. OpenCode has no supported quota source.
+/// One registry for execution and quota.
 pub static REGISTRY: &[Registration] = &[
     Registration {
         adapter: &codex::Codex,
@@ -40,7 +41,7 @@ pub static REGISTRY: &[Registration] = &[
     },
     Registration {
         adapter: &opencode::OpenCode,
-        quota_source: None,
+        quota_source: Some(&opencode::OpenCode),
     },
 ];
 
@@ -142,17 +143,17 @@ macro_rules! quota_source {
             }
             fn probe(
                 &self,
-                _: &provenant_quota::AccountScope,
-                _: &provenant_quota::QuotaProbeInput,
+                account: &provenant_quota::AccountScope,
+                input: &provenant_quota::QuotaProbeInput,
             ) -> Result<provenant_quota::QuotaProbePlan, provenant_quota::QuotaError> {
-                Err(provenant_quota::QuotaError::Disabled)
+                crate::quota::plan($id, account, input)
             }
             fn decode(
                 &self,
                 plan: &provenant_quota::QuotaProbePlan,
-                _: &provenant_quota::ProbeCapture,
+                capture: &provenant_quota::ProbeCapture,
             ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
-                match *plan {}
+                crate::quota::decode(plan, capture)
             }
         }
     };

@@ -243,17 +243,35 @@ fn write_intent(
     }
     Ok(())
 }
-fn detections(registry: &[provenant_providers::Registration]) -> Vec<Detection> {
+fn detections(
+    registry: &[provenant_providers::Registration],
+    configured: &[AccountScope],
+) -> Vec<Detection> {
     registry
         .iter()
         .map(|r| {
             let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
             Detection {
                 adapter: r.adapter.id().into(),
-                accounts: None,
+                accounts: {
+                    let accounts: Vec<_> = configured
+                        .iter()
+                        .filter(|a| a.adapter == r.adapter.id())
+                        .cloned()
+                        .collect();
+                    (!accounts.is_empty()
+                        && !matches!(
+                            status,
+                            Ok(provenant_providers::AccountDetection::AuthRequired)
+                        ))
+                    .then_some(accounts)
+                },
                 status: match status {
                     Ok(provenant_providers::AccountDetection::AuthRequired) => {
                         QuotaStatus::AuthRequired
+                    }
+                    _ if configured.iter().any(|a| a.adapter == r.adapter.id()) => {
+                        QuotaStatus::Available
                     }
                     _ if r.quota_source.is_none() => QuotaStatus::Unsupported,
                     _ => QuotaStatus::Unknown,
@@ -262,10 +280,20 @@ fn detections(registry: &[provenant_providers::Registration]) -> Vec<Detection> 
         })
         .collect()
 }
+fn add_configured(records: &mut Vec<AccountRecord>, configured: &[AccountScope]) {
+    for account in configured {
+        if !records.iter().any(|r| {
+            r.account.adapter == account.adapter && r.account.account_key == account.account_key
+        }) {
+            records.push(AccountRecord::empty(account.clone()));
+        }
+    }
+}
 fn execute(
     command: &Quota,
     roots: &Roots,
     registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
 ) -> Result<QuotaReport, EdgeError> {
     let (filter, tick) = match command {
         Quota::Show(filter) => (filter, None),
@@ -304,12 +332,13 @@ fn execute(
         .as_second();
     let path = roots.state.as_path().join("quota/report.json");
     let report_path = path.to_str().ok_or(EdgeError::Path)?.to_owned();
-    let detected = detections(registry);
+    let configured = effects.accounts()?;
+    let detected = detections(registry, &configured);
     let query = QuotaQuery {
         adapter: filter.adapter.clone(),
     };
     let Some(tick) = tick else {
-        let records = match Directory::open_anchor(roots.state.as_path()) {
+        let mut records = match Directory::open_anchor(roots.state.as_path()) {
             Ok(root) => {
                 check_private(&root)?;
                 match root.open_verified_directory(OsStr::new("quota")) {
@@ -321,6 +350,7 @@ fn execute(
             Err(e) if e.is_not_found() => Vec::new(),
             Err(e) => return Err(e.into()),
         };
+        add_configured(&mut records, &configured);
         return Ok(schedule::report(
             &records,
             &detected,
@@ -345,8 +375,75 @@ fn execute(
     for drop in &plan.drops {
         write_intent(&dir, drop, &mut records)?;
     }
-    // No known account or executable probe form exists without an activation
-    // recording. Never invent identity or credential authority to probe it.
+    for account in plan.batches.iter().flatten() {
+        let at = clock
+            .wall_now()
+            .map_err(|_| EdgeError::Time)?
+            .as_timestamp()
+            .as_second();
+        if at >= plan.deadline_unix_seconds - 1 {
+            break;
+        }
+        let current = records
+            .iter()
+            .find(|r| {
+                r.account.adapter == account.adapter && r.account.account_key == account.account_key
+            })
+            .cloned();
+        let token = format!("quota-{}-{at}", std::process::id());
+        let intent = schedule::reserve(
+            current.as_ref(),
+            account,
+            at,
+            &token,
+            tick.trigger,
+            tick.power,
+        )?;
+        write_intent(&dir, &intent, &mut records)?;
+        let source = registry
+            .iter()
+            .filter_map(|r| r.quota_source)
+            .find(|s| s.adapter_id() == account.adapter);
+        let outcome = match source {
+            Some(source) => {
+                let input = QuotaProbeInput {
+                    now_unix_seconds: at,
+                    deadline_unix_seconds: plan.deadline_unix_seconds,
+                    authority_ref: Some("configured-local-quota".into()),
+                };
+                match source.probe(account, &input) {
+                    Ok(probe) => effects
+                        .capture(&probe, current.as_ref())
+                        .and_then(|capture| {
+                            source
+                                .decode(&probe, &capture)
+                                .map_err(|_| ProbeFailure::Malformed)
+                        }),
+                    Err(_) => Err(ProbeFailure::Disabled),
+                }
+            }
+            None => Err(ProbeFailure::Disabled),
+        };
+        let finished = clock
+            .wall_now()
+            .map_err(|_| EdgeError::Time)?
+            .as_timestamp()
+            .as_second();
+        let reserved = records
+            .iter()
+            .find(|r| r.account == *account)
+            .ok_or(QuotaError::Conflict)?;
+        if finished < at + schedule::TICK_BUDGET_SECONDS {
+            let complete = schedule::complete(reserved, &token, finished, outcome, None)?;
+            write_intent(&dir, &complete, &mut records)?;
+        }
+    }
+    add_configured(&mut records, &configured);
+    let now = clock
+        .wall_now()
+        .map_err(|_| EdgeError::Time)?
+        .as_timestamp()
+        .as_second();
     let report = schedule::report(
         &records,
         &detected,
@@ -380,12 +477,13 @@ pub fn run(
     globals: &crate::Globals,
     roots: &Roots,
     registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
         Quota::Tick { .. } => "quota tick",
     };
-    let result = execute(&command, roots, registry);
+    let result = execute(&command, roots, registry, effects);
     let (envelope, human) = match result {
         Ok(report) => {
             let mut human = format!(

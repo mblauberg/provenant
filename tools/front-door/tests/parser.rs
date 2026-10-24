@@ -1,7 +1,7 @@
 mod support;
 use support::{Result, TestRig, code};
 #[test]
-fn invalid_json_is_an_envelope_and_unbuilt_owners_never_succeed() -> Result {
+fn invalid_json_is_an_envelope() -> Result {
     let rig = TestRig::new()?;
     let invalid = rig.command(&["lanes", "--wait", "0", "--json"])?;
     assert_eq!(code(&invalid), 2);
@@ -13,10 +13,118 @@ fn invalid_json_is_an_envelope_and_unbuilt_owners_never_succeed() -> Result {
             .unwrap_or_default()
             .contains("Usage:")
     );
-    let unavailable = rig.command(&["lanes", "--json"])?;
-    assert_eq!(code(&unavailable), 4);
-    let value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "OWNER_UNAVAILABLE");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
+    let rig = TestRig::new()?;
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let state = rig.state.to_string_lossy().into_owned();
+    let empty = rig.command(&["lanes", "--json"])?;
+    assert_eq!(code(&empty), 0);
+    let value: serde_json::Value = serde_json::from_slice(&empty.stdout.bytes)?;
+    assert_eq!(value["data"]["lanes"], serde_json::json!([]));
+    let args = [
+        "--state-dir",
+        &state,
+        "dispatch",
+        "--prompt-stdin",
+        "--model",
+        "codex/id",
+        "--operation-id",
+        "fixture",
+        "--json",
+    ];
+    let out = rig.execute(binary, &args, Some(b"hello"))?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let lane = &value["data"]["lanes"][0];
+    assert_eq!(lane["state"], "rejected");
+    // Replaying the operation returns the same run.
+    let again: serde_json::Value =
+        serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
+    assert_eq!(again["data"]["run_id"], value["data"]["run_id"]);
+    // Secret-bearing input is refused before any record and never echoed.
+    let secret = format!("use ghp_{}", "a1".repeat(18));
+    let mut refused = args;
+    refused[7] = "secret";
+    let out = rig.execute(binary, &refused, Some(secret.as_bytes()))?;
+    let text = String::from_utf8_lossy(&out.stdout.bytes);
+    assert!(
+        text.contains("SECRET_INPUT") && !text.contains(&secret[4..]),
+        "{text}"
+    );
+    // A worktree is never silently run read-only (#1310); a missing one says so (#1309).
+    for (mode, worktree, expected) in [
+        ("read-only", ".", "INVALID"),
+        ("worktree-write", "missing-worktree", "WORKTREE_MISSING"),
+    ] {
+        let mut flags = args.to_vec();
+        flags.extend(["--host", "workshop", "--mode", mode, "--worktree", worktree]);
+        let out = rig.execute(binary, &flags, Some(b"hello"))?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(value["error"]["code"], expected, "{value}");
+    }
+    let attempt = format!(
+        "{}/{}/{}",
+        lane["run_id"].as_str().ok_or("run")?,
+        lane["task_id"].as_str().ok_or("task")?,
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
+    assert_eq!(value["data"]["text"], "hello");
+
+    let cancel = rig.command(&["cancel", &attempt, "--operation-id", "stop", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&cancel.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["receipts"][0]["receipt"]["state"],
+        "already_terminal"
+    );
+    // Providers expose no sessions yet, so resume refuses before it spends
+    // the attempt's one continuation.
+    let resume = [
+        "--state-dir",
+        &state,
+        "resume",
+        &attempt,
+        "--prompt-stdin",
+        "--operation-id",
+        "again",
+        "--json",
+    ];
+    let out = rig.execute(binary, &resume, Some(b"more"))?;
+    assert_eq!(code(&out), 1);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "UNSUPPORTED");
+    let reconcile = rig.command(&["reconcile", "--json"])?;
+    assert_eq!(code(&reconcile), 0);
+    let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;
+    assert_eq!(value["data"]["runs"], serde_json::json!([]));
+    // Prices ship as a reviewed product asset beside the binary.
+    std::fs::create_dir_all(rig.project.join("config"))?;
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/telemetry-prices.toml"
+        ),
+        rig.project.join("config/telemetry-prices.toml"),
+    )?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(
+        code(&stats),
+        0,
+        "{}",
+        String::from_utf8_lossy(&stats.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert_eq!(value["data"]["totals"]["attempts"], 1);
     rig.assert_legacy_unchanged()
 }
 
@@ -216,7 +324,23 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             )?;
             assert_eq!(code(&out), 2, "{leaf:?} {flag}");
         }
-        if leaf == ["root"] || matches!(leaf.first(), Some(&"quota" | &"route" | &"worktree")) {
+        if leaf == ["root"]
+            || matches!(
+                leaf.first(),
+                Some(
+                    &"quota"
+                        | &"route"
+                        | &"worktree"
+                        | &"dispatch"
+                        | &"lanes"
+                        | &"output"
+                        | &"cancel"
+                        | &"resume"
+                        | &"reconcile"
+                        | &"telemetry"
+                )
+            )
+        {
             continue;
         }
         let out = rig.command(&leaf)?;

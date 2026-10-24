@@ -1,0 +1,33 @@
+{
+  "payload": {
+    "windows": [
+      {
+        "pool": "five_hour",
+        "used_percent": 0.0,
+        "resets_at": null,
+        "window_seconds": 18000
+      },
+      {
+        "pool": "seven_day",
+        "used_percent": 100.0,
+        "resets_at": 1792970400,
+        "window_seconds": 604800
+      },
+      {
+        "pool": "thirty_day",
+        "used_percent": 24.04,
+        "resets_at": 1794957600,
+        "window_seconds": 2678400
+      }
+    ]
+  },
+  "details": {
+    "plan": "Go",
+    "fingerprint": null,
+    "priority": null,
+    "credit_balance": null,
+    "reset_credits": null,
+    "reset_expiries_unix_seconds": [],
+    "note": "Local estimate, this machine only; calibrated Go caps, other hosts not counted"
+  }
+}
