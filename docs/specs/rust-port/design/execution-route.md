@@ -466,7 +466,8 @@ and requires a launched fake Codex child and a marker written by that child,
 for read-only and writer parents from both Codex and Claude. Writer parents
 submit a writer child on another registered worktree. Registration validation
 and writer custody use the original host state root; the lane only resolves
-its requested project/worktree paths and queues the proposal. Synthetic
+its requested project/worktree paths and queues the proposal. A held reader
+child also checks explicit parent cancellation after provider launch. Synthetic
 state-write evidence is confined to fixture builds. Live provider execution
 remains subject to the activation gates below; the fixture does not establish
 live-provider acceptance. Host recovery selects the child store explicitly.

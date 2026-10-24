@@ -238,10 +238,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 )
             ) {
                 for (id, generation) in accepted {
-                    let record = session
-                        .store
-                        .record(id, &call)
-                        .map_err(|error| error.to_string())?;
+                    let record = match session.store.record(id, &call) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            launch_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
                     if matches!(record.state, run::AttemptState::Terminal { .. }) {
                         continue;
                     }

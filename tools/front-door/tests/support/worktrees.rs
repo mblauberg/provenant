@@ -1612,6 +1612,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
 /// baseline PATH as real providers do.
 pub(crate) fn lane_provider() -> Result {
     if std::env::var(provenant_run::LANE_DEPTH_ENV).as_deref() == Ok("2") {
+        let mut prompt = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut prompt)?;
         let state = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("child CODEX_HOME")?);
         fs::write(
             state.join("fake-child-launched"),
@@ -1621,6 +1623,9 @@ pub(crate) fn lane_provider() -> Result {
             std::io::stdout(),
             "{{\"type\":\"thread.started\",\"thread_id\":\"fixture-child\"}}"
         )?;
+        if prompt.contains("wait for host cancellation") {
+            thread::park_timeout(Duration::from_secs(5));
+        }
         return Ok(());
     }
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
@@ -1920,11 +1925,20 @@ fn verify_lane_profile(
     fs::write(state.join("config.toml"), config(2))?;
     let nested_frames =
         String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
+    let cancel_child =
+        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
     let nested_frames = if confinement.writer.is_some() {
         nested_frames.replace(
             "\"timeout_ms\":1000",
             "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
         )
+    } else {
+        nested_frames
+    };
+    let nested_frames = if cancel_child {
+        nested_frames
+            .replace("read only", "wait for host cancellation")
+            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
     } else {
         nested_frames
     };
@@ -1976,7 +1990,23 @@ fn verify_lane_profile(
     let clock = provenant_supervisor::clock::SystemClock::new();
     let call = writer_call(&clock, &cancel)?;
     let store = provenant_run::RunStore::open(&child_context, &call)?;
+    if cancel_child {
+        let run = store.record(attempt_id, &call)?.run_id;
+        wait_for_path(
+            &child.join(format!(
+                "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
+            )),
+            Duration::from_secs(8),
+        )?;
+        host.provider_exited(
+            &parent.encode()?,
+            Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
+        )?;
+    }
     let record = await_terminal(&store, attempt_id, &call)?;
+    if cancel_child {
+        assert_terminal_outcome(&record, provenant_run::Outcome::Cancelled)?;
+    }
     let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
         return Err("child attempt was not terminal".into());
     };
