@@ -82,7 +82,7 @@ pub fn list(
             let reason = availability_reason(r, record, context);
             AvailabilityView {
                 adapter: r.adapter.id().into(),
-                record: record.cloned(),
+                record: record.map(AvailabilitySummary::from),
                 reason,
                 age_seconds: record
                     .and_then(|r| context.now_seconds().checked_sub(r.observed_unix_seconds))

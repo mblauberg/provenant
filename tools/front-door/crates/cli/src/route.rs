@@ -217,6 +217,29 @@ pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {
     };
     match rendered {
         Ok(()) => crate::exit_status(&result.status),
+        Err(crate::RenderError::TooLarge) => {
+            let message = "route result exceeds 1 MiB";
+            let mut failure = CommandResult::new(name, Outcome::Error, ());
+            failure.error = Some(CommandError {
+                code: "RESULT_TOO_LARGE".into(),
+                message: message.into(),
+                cause: None,
+                repair: None,
+            });
+            if globals.json {
+                let _ = crate::render(&failure, RenderMode::Json, &mut io::stdout().lock());
+            } else {
+                let _ = crate::render(
+                    &failure,
+                    RenderMode::Human {
+                        text: "provenant: RESULT_TOO_LARGE: route result exceeds 1 MiB\n",
+                        read_only: false,
+                    },
+                    &mut io::stderr().lock(),
+                );
+            }
+            3
+        }
         Err(_) => 3,
     }
 }

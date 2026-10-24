@@ -216,3 +216,25 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     assert!(!rig.state.exists());
     Ok(())
 }
+
+#[test]
+fn large_cached_observation_sets_have_a_compact_bounded_projection() -> Result {
+    let rig = rig()?;
+    let cache = rig.state.join("routing/availability");
+    fs::create_dir_all(&cache)?;
+    for adapter in ["codex", "claude", "cursor", "agy", "opencode"] {
+        let record = serde_json::json!({"schema_version":1,"adapter":adapter,"executable":"/fixture/provider","version":"fixture","fixture_ref":"recording","catalogue_revision":"recordings-20261024-v1","account_key":"opaque-account","observed_models":vec!["\"".repeat(512); 256],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
+        fs::write(
+            cache.join(format!("{adapter}.json")),
+            serde_json::to_vec(&record)?,
+        )?;
+    }
+    let listed = call(&rig, &["route", "list"], 0)?;
+    for row in listed["data"]["availability"]
+        .as_array()
+        .ok_or("availability")?
+    {
+        assert_eq!(row["record"]["observed_model_count"], 256);
+    }
+    Ok(())
+}
