@@ -222,7 +222,13 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        let scratch = &paths.scratch;
+        // A read-only lane's scratch is its private temporary directory, which
+        // terminal commit and withdrawal remove; writer scratch keeps settlement.
+        let scratch = if writer.is_some() {
+            &paths.scratch
+        } else {
+            &paths.temporary
+        };
         let private_state = &paths.provider_state;
         let plan = match confinement_plan(
             project_id,
@@ -309,7 +315,8 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        if let Err(error) = apply_setup(&spec.setup, private_state) {
+        let transcript_account = account.as_ref().filter(|_| adapter.id() == "claude").map(|account| account.directory());
+        if let Err(error) = apply_setup(&spec.setup, &[scratch, private_state], transcript_account) {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
@@ -484,6 +491,7 @@ fn confinement_plan(
     ConfinedPlan::new(PlanRequest {
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
+            read_only: None,
             mode,
             scratch: grant(scratch),
             private_state: Some(grant(private_state)),
@@ -525,21 +533,30 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
     provenant_supervisor::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-fn apply_setup(steps: &[SetupStep], private_state: &Path) -> Result<(), String> {
+/// Setup stays below run-owned roots, except Claude's selected account projects.
+/// Only directory creation gets that exception; links remain run-owned.
+/// Traversal opens each component without following links.
+fn apply_setup(steps: &[SetupStep], roots: &[&Path], claude_account: Option<&Path>) -> Result<(), String> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => {
-                crate::accounts::ensure_directory(path)?;
+                let transcript_root = claude_account.filter(|directory| path.starts_with(directory.join("projects")));
+                let (parent, name) = match transcript_root {
+                    Some(directory) => setup_parent(&[directory], path, true)?,
+                    None => setup_parent(roots, path, true)?,
+                };
+                match parent.mkdir(name, 0o700) {
+                    Ok(()) => parent.sync().map_err(|error| error.to_string())?,
+                    // Fallback candidates share one attempt's paths.
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                parent
+                    .open_verified_directory(name)
+                    .map_err(|error| error.to_string())?;
             }
             SetupStep::Symlink { link, target } => {
-                if link.parent() != Some(private_state) {
-                    return Err("provider setup link is outside private state".into());
-                }
-                let name = link
-                    .file_name()
-                    .ok_or("provider setup link has no final component")?;
-                let parent =
-                    Directory::open_anchor(private_state).map_err(|error| error.to_string())?;
+                let (parent, name) = setup_parent(roots, link, false)?;
                 parent
                     .symlink(target, name)
                     .map_err(|error| error.to_string())?;
@@ -548,6 +565,39 @@ fn apply_setup(steps: &[SetupStep], private_state: &Path) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+fn setup_parent<'a>(
+    roots: &[&Path],
+    path: &'a Path,
+    create: bool,
+) -> Result<(Directory, &'a std::ffi::OsStr), String> {
+    let (root, relative) = roots
+        .iter()
+        .find_map(|root| Some((root, path.strip_prefix(root).ok()?)))
+        .ok_or("provider setup path is outside run-owned state")?;
+    let mut names = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => names.push(name),
+            _ => return Err("provider setup path is not normalised".into()),
+        }
+    }
+    let name = names.pop().ok_or("provider setup path names its root")?;
+    let mut directory = Directory::open_anchor(root).map_err(|error| error.to_string())?;
+    for component in names {
+        if create {
+            match directory.mkdir(component, 0o700) {
+                Ok(()) => directory.sync().map_err(|error| error.to_string())?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        directory = directory
+            .open_verified_directory(component)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((directory, name))
 }
 
 /// Fixture access to the production plan builder; installed builds omit it.
@@ -568,4 +618,54 @@ pub fn writer_fixture_plan(
         Some(writer),
         "codex",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_stays_below_run_owned_roots_without_following_links()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base = std::env::temp_dir().join(format!("provenant-setup-{}", std::process::id()));
+        std::fs::create_dir(&base)?;
+        let base = canonical(&base)?;
+        let (scratch, state, outside) = (base.join("tmp"), base.join("state"), base.join("out"));
+        for path in [&scratch, &state, &outside] {
+            std::fs::create_dir(path)?;
+        }
+        let roots = [scratch.as_path(), state.as_path()];
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            apply_setup(
+                &[
+                    SetupStep::CreateDir(scratch.join("cargo-home/nested")),
+                    SetupStep::CreateDir(scratch.join("cargo-home/nested")),
+                    SetupStep::Symlink {
+                        link: scratch.join("cargo-home/registry"),
+                        target: outside.clone(),
+                    },
+                ],
+                &roots,
+                None,
+            )?;
+            assert!(scratch.join("cargo-home/nested").is_dir());
+            std::os::unix::fs::symlink(&outside, scratch.join("escape"))?;
+            for step in [
+                SetupStep::CreateDir(outside.join("x")),
+                SetupStep::CreateDir(scratch.join("../out/x")),
+                SetupStep::CreateDir(scratch.clone()),
+                SetupStep::CreateDir(scratch.join("escape/x")),
+                SetupStep::Symlink {
+                    link: scratch.join("cargo-home/registry/x"),
+                    target: outside.clone(),
+                },
+            ] {
+                assert!(apply_setup(&[step], &roots).is_err());
+            }
+            assert!(!outside.join("x").exists());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&base)?;
+        result
+    }
 }

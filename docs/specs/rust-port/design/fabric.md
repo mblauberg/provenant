@@ -1,8 +1,8 @@
 # Fabric Rust design
 
-Status: proposed, conformed 24 October 2026. Audience: the two Rust chairs and Fabric
-implementers. This document defines the replacement, its dependency requests and
-its deletions. It approves no install, import, live-provider run or landing.
+Status: accepted and conformed to the shipped Rust implementation, 24 October
+2026. This document records the Fabric contract and its deliberate feature
+cuts. It does not authorise an install, import, live-provider run or landing.
 
 ## Direction and boundary
 
@@ -14,8 +14,8 @@ and explicit SSH peers. Keep bounded graph execution with ordered route fallback
 Remove named sessions, interpreter bridges,
 parallel status engines, permissive input repair and duplicated routing policy.
 
-The [binding cross-area decisions](https://github.com/mblauberg/provenant/blob/docs/rust-port-slices/docs/specs/rust-port/design/README.md#cross-area-decisions)
-govern shared contracts and win over conflicting area prose. [PORTING v7](https://github.com/mblauberg/provenant/blob/docs/rust-port-slices/docs/specs/rust-port/PORTING.md)
+The [binding cross-area decisions](README.md#cross-area-decisions)
+govern shared contracts and win over conflicting area prose. [PORTING v7](../PORTING.md)
 supersedes transition/parity rules; the dependency allowlist, crate layering,
 typed errors, serde records, bounded inputs and `supervisor::sys` unsafe boundary
 still apply. There is no async runtime. Only provider wire forms, harness hook
@@ -29,9 +29,10 @@ state stores and transcripts untouched; cut-over only reads the import source.
 `telemetry stats` reduces run terminal records with the price table, without a
 ledger. The old ledger is neither imported nor deleted; the OTel collector retires.
 
-Source baseline: `3eb3a0b5`. The fetched `docs/rust-port-slices` SLICES cards
-31–38 are an inventory, not a delivery plan. Counts below are physical lines at
-that baseline. The unmerged diffs of [#1332](https://github.com/mblauberg/provenant/pull/1332),
+Historical source baseline: `3eb3a0b5`. The old SLICES cards and pull requests
+below are planning history only; current ownership and cross-area decisions are
+in this in-tree design set. Counts below are physical lines at that baseline.
+The unmerged diffs of [#1332](https://github.com/mblauberg/provenant/pull/1332),
 [#1334](https://github.com/mblauberg/provenant/pull/1334) and
 [#1344](https://github.com/mblauberg/provenant/pull/1344) are reuse candidates,
 not prerequisites to merge wholesale.
@@ -44,8 +45,8 @@ not prerequisites to merge wholesale.
 | User through CLI | Identify the project, inspect runs and failures, send messages, manage peers and landing | `README.md:92,148`; `tools/front-door/src/main.rs` routes Fabric, lease, hosts, lanes, events and graph |
 | Orchestration skills | Correlated requests and replies, owned worktrees, actual route receipts and restartable work | `skills/orchestrate/SKILL.md:11–23` names dispatch, status, continuation and output; dispatch/batch execution stays with `run` |
 | Hooks and workflow helpers | Stable hook stdin/stdout, bounded context and notifications | The CLI-owned `HookSpec` registry defines recorded hook protocols; legacy Python hook configuration retires at state cut-over. `scripts/routing_context_hook.py` is legacy survey evidence, not an installer API. |
-| Another host | Explicit placement, host-owned status/cancel, committed code transport and bounded output | `scripts/fabric_hosts.py:250,700`; `scripts/fabric_lanes.py:18`; `scripts/fabric_git.py:24` |
-| Installer and six MCP clients | Register the same installed binary while preserving unrelated client configuration | `scripts/configure-fabric-mcp.py:168`; [registration runbook](../../../runbooks/fabric-mcp-registration.md) |
+| Another host | Explicit placement, host-owned status/cancel, committed code transport and bounded output | Historical Python survey: `scripts/fabric_hosts.py`, `scripts/fabric_lanes.py` and `scripts/fabric_git.py`; current behaviour is owned by `fabric-runtime`. |
+| Installer and MCP clients | Register the same installed binary while preserving unrelated client configuration | Historical installer survey: `scripts/configure-fabric-mcp.py`; current registration is owned by config and `fabric-mcp`; see the [registration runbook](../../../runbooks/fabric-mcp-registration.md). |
 | Other library owners | One run/status API and one policy loader | `fabric_policy.py` is also imported by lint, secret scan and provider execution; its filename does not make those policies Fabric-owned |
 
 The source paths abbreviated as `src/` in this table are below `runtime/fabric/`.
@@ -81,8 +82,9 @@ tables; join deliveries to messages for kinds and read state. Group activity by
 kind, and count qualified IDs in run_observations. No bodies, prompts,
 transcripts or credentials were inspected. Telemetry history remains with the old install.
 
-Additional closure evidence: `writer_lease.py:201–239` reads graph reservations
-directly; remove that DB coupling and rely on run's real writer lock.
+Historical closure survey (legacy Python sources, no longer current owners):
+`writer_lease.py:201–239` read graph reservations directly; the replacement
+uses run's writer lock.
 `dispatch_preflight.py:517–580`, `provider_confinement.py:197–201` (both under
 `skills/orchestrate/scripts/`) and `scripts/telemetry_hosts.py:21–23` use host
 helpers. Their Rust owners must consume typed host/temporary-path APIs before
@@ -182,17 +184,14 @@ become blocked after a failed prerequisite. Canonical plan/checkpoint digests,
 a per-project, per-graph lock and atomic publication under new state make ticks restartable.
 No shell gates or named sessions return.
 
-The run API remains the owner of launch, custody, status, output and controls.
-If its dispatch/control service has not landed when F3 binds, the binary uses the
-minimal typed Fabric trait and reports `owner_unavailable` for unsupported owner
-operations. That binding is an explicit integration TODO, never a successful
-launch receipt. Existing run records remain authoritative for supported reads.
+The run API owns launch, custody, status, output and controls. The binary binds
+these operations to run's typed service and existing records; it does not use a
+placeholder owner.
 The binary binds status, frozen-target waits and run events to the scoped run
 store. Input-required wakes either wait condition; observation timeout does not
-cancel work. Submit, full active-run listing, cancel, resume and exported output
-remain `owner_unavailable` until Lane B supplies their owner APIs. Graph tick
-persists its starting key before reporting that missing dispatch binding; graph
-status can read the checkpoint. Aliases retain the facade's named-role
+cancel work. Submit, active-run listing, cancel, resume and exported output are
+bound to their owners. Graph tick persists its starting key before execution;
+graph status can read the checkpoint. Aliases retain the facade's named-role
 preference rather than fabricating an explicit model.
 
 CLI `fabric host list`, hidden `fabric peer`, `fabric graph run/status/cancel/resume`, and
@@ -472,10 +471,9 @@ the chair. Missing launch evidence counts as launched. Graph attempts use
 `limits.graph_timeout_ms` from the Fabric configuration.
 
 Cancellation persists the admission fence before asking the run owner to cancel
-accepted attempts. An unavailable owner returns its typed error; the fence still
-prevents new graph work. Resume checks the same document digest and reuses each
-attempt key. Until the dispatch/control owner is bound, execution returns
-`owner_unavailable`; graph status and the admission fence remain available.
+accepted attempts. Resume checks the same document digest and reuses each
+attempt key. The `fabric_run` operation `list` remains unavailable; graph run,
+status, cancel and resume use the bound graph owner.
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
 exact route if known, and next cursor/artefact references. Do not repeat result
@@ -726,8 +724,9 @@ Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. Use CLI's exits: 0 success,
 1 failed/refused/findings, 2 invalid input/version, 3 cannot proceed (setup,
-I/O or contention), 124 wait deadline, 130 invocation cancelled. There is no
-exit 4: partial coverage, unknown targets and input-required are typed `data`.
+I/O or contention), 4 unavailable capability, 124 wait deadline, 130
+invocation cancelled. Partial coverage, unknown targets and input-required are
+typed `data`.
 A wait whose condition is met exits 0 regardless of target outcome; it never
 cancels the underlying run on deadline. Missing evidence needed to proceed is
 3. MCP budget expiry returns typed timeout data and preserves JSON-RPC errors

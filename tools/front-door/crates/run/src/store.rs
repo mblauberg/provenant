@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, read_sealed, seal},
+    artifacts::{artifact_path, read_sealed, remove_temporary_best_effort, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -269,7 +269,7 @@ impl RunStore {
                 let attempt = AttemptRecord {
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
+                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), subject: None, head: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None,
                 };
@@ -507,6 +507,9 @@ impl RunStore {
         next.exit_evidence = durable_exit;
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
+                if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
+                    remove_temporary_best_effort(&attempt_dir);
+                }
                 return Ok(old);
             }
             return Err(RunError::Conflict);
@@ -557,6 +560,7 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
+        remove_temporary_best_effort(&attempt_dir);
         #[cfg(test)]
         crate::tests::crash_at("committed");
         Ok(next)

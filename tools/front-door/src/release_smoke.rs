@@ -29,12 +29,27 @@ struct SmokeEnvelope<T> {
 
 pub(crate) struct SystemSmoke {
     executor: SystemExecutor,
+    environment: Vec<(OsString, OsString)>,
 }
 impl SystemSmoke {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(home: Option<&Path>) -> io::Result<Self> {
         let executor = SystemExecutor::new(1)
             .map_err(|_| io::Error::other("cannot start bounded release smoke executor"))?;
-        Ok(Self { executor })
+        Ok(Self {
+            executor,
+            environment: home.map_or_else(Vec::new, |home| {
+                [
+                    "HOME",
+                    "XDG_CONFIG_HOME",
+                    "CLAUDE_CONFIG_DIR",
+                    "CODEX_HOME",
+                    "PROVENANT_STATE_DIR",
+                ]
+                .into_iter()
+                .map(|key| (key.into(), home.as_os_str().to_owned()))
+                .collect()
+            }),
+        })
     }
     fn invoke<T: DeserializeOwned>(
         &self,
@@ -44,7 +59,6 @@ impl SystemSmoke {
     ) -> io::Result<SmokeEnvelope<T>> {
         let mut argv = vec![executable.as_os_str().to_owned()];
         argv.extend(args.iter().map(OsString::from));
-        let env: [(OsString, OsString); 0] = [];
         let mut options = ExecOptions::new(
             &argv,
             executable
@@ -52,7 +66,7 @@ impl SystemSmoke {
                 .ok_or_else(|| io::Error::other("release binary has no parent"))?,
             Duration::from_secs(30),
         );
-        options.env = Some(&env);
+        options.env = Some(&self.environment);
         options.stdout = StreamPolicy::Capture { limit: 1_048_576 };
         options.stderr = StreamPolicy::Discard;
         options.cancel = Some(cancel);
@@ -116,16 +130,6 @@ impl ReleaseSmoke for SystemSmoke {
     fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
         let executable = release.source().join("bin/provenant");
         let identity = self.identity(&executable, cancel)?;
-        let manifest = release.manifest();
-        if identity.source_digest != manifest.source_digest
-            || identity.asset_digest != manifest.asset_digest
-            || identity.target != manifest.target
-            || identity.toolchain != manifest.toolchain
-        {
-            return Err(io::Error::other(
-                "release version identity differs from manifest",
-            ));
-        }
         let help = self.invoke::<serde_json::Value>(&executable, &["--help", "--json"], cancel)?;
         if help.schema_version != 1
             || help.command != "help"

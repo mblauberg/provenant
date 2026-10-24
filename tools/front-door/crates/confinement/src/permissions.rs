@@ -147,6 +147,8 @@ pub enum Availability {
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
+    #[error("invalid read-only project write policy")]
+    InvalidReadOnlyPolicy,
     #[error("path is not an absolute, normalised path")]
     InvalidPath,
     #[error("permission root is too broad")]
@@ -272,6 +274,8 @@ pub struct ProviderProfileSpec {
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
     pub runtime_reads: Vec<PathGrant>,
+    /// Literal directory discovery; never the contents of provider config.
+    pub discovery_reads: Vec<PathGrant>,
     pub authentication: Vec<AuthenticationProfile>,
     pub continuation_reads: Vec<PathGrant>,
     /// Provider-owned state the CLI must write outside scratch, such as one
@@ -519,6 +523,7 @@ impl WorktreeWriteGrants {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    pub read_only: Option<crate::plan::ReadOnlyGrants>,
     pub mode: AccessMode,
     pub scratch: PathGrant,
     /// Attempt-private retained provider state, separate from disposable scratch.
@@ -774,6 +779,7 @@ pub fn required_anchors(
         .chain(&plan.private_state)
         .chain(&spec.process_executables)
         .chain(&spec.runtime_reads)
+        .chain(&spec.discovery_reads)
         .chain(&spec.state_writes)
         .chain(&spec.tool_exec_roots)
         .chain(
@@ -789,6 +795,9 @@ pub fn required_anchors(
         if let NetworkGrant::UnixSocket { root } = grant {
             grants.push(root);
         }
+    }
+    if let Some(read_only) = &plan.read_only {
+        grants.extend(read_only.git_reads.iter().chain(&read_only.writes));
     }
     let derived = worktree
         .map(|(verified, selected_ref)| WorktreeWriteGrants::derive(verified, selected_ref));
@@ -1067,11 +1076,32 @@ fn compile_sbpl(
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     let mut read_grants = plan.read_roots.clone();
+    if let Some(read_only) = &plan.read_only {
+        if !matches!(plan.mode, AccessMode::ReadOnly) {
+            return Err(PermissionError::InvalidReadOnlyPolicy);
+        }
+        read_only.revalidate(anchors.safe_fs)?;
+        read_grants.extend(read_only.git_reads.iter().cloned());
+        for grant in &read_only.writes {
+            validate_noncredential_grant(grant)?;
+            if plan
+                .protected_roots
+                .iter()
+                .chain(&plan.secret_roots)
+                .chain(&read_only.git_reads)
+                .any(|p| grant.overlaps(p))
+            {
+                return Err(PermissionError::ProtectedOverlap);
+            }
+            verify_writable_tree(&grant.path, anchors)?;
+        }
+    }
     if let Some(grants) = &worktree_grants {
         read_grants.push(grants.worktree.clone());
     }
     read_grants.extend(plan.protected_roots.iter().cloned());
     read_grants.extend(profile.spec.runtime_reads.iter().cloned());
+    read_grants.extend(profile.spec.discovery_reads.iter().cloned());
     read_grants.extend(profile.spec.process_executables.iter().cloned());
     let mut credential_writes = Vec::new();
     if let Some(mechanism) = &plan.selected_authentication {
@@ -1146,6 +1176,9 @@ fn compile_sbpl(
                 .flat_map(|authentication| &authentication.roots),
         )
         .collect();
+    if let Some(read_only) = &plan.read_only {
+        scratch_exclusions.extend(read_only.git_reads.iter().chain(&read_only.writes));
+    }
     scratch_exclusions.extend(plan.network.iter().chain(&profile.spec.network).filter_map(
         |grant| match grant {
             NetworkGrant::UnixSocket { root } => Some(root),
@@ -1255,6 +1288,12 @@ fn compile_sbpl(
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
     }
     verify_state_writes(plan, profile, anchors)?;
+    if let Some(read_only) = &plan.read_only {
+        read_only.revalidate(anchors.safe_fs)?;
+        for grant in &read_only.writes {
+            verify_writable_tree(&grant.path, anchors)?;
+        }
+    }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_state_write(plan, &authority.cargo_cache, anchors)?;
         let cache = anchors
@@ -1508,6 +1547,22 @@ fn render_profile(
         }
     }
 
+    if let Some(read_only) = &plan.read_only {
+        for grant in &read_only.writes {
+            for operation in ["file-read*", "file-write*"] {
+                push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
+            }
+            // Restrict this exception, preserving separate provider auth grants.
+            source.push_str(&format!(
+                "(deny file-write* (require-all (subpath \"{}\") (regex #\"{}\")))\n",
+                sbpl_path(&grant.path)?,
+                crate::plan::read_only::exclusion_regex()
+            ));
+        }
+        for git in &read_only.git_reads {
+            push_rule(&mut source, "deny", "file-write*", &git.path, git.scope)?;
+        }
+    }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         push_worktree_rule(
             &mut source,
@@ -1794,6 +1849,7 @@ fn require_observation(
 fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
     if spec.process_executables.len() > MAX_PATH_GRANTS
         || spec.runtime_reads.len() > MAX_PATH_GRANTS
+        || spec.discovery_reads.len() > MAX_PATH_GRANTS
         || spec.authentication.len() > 16
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
         || spec.state_writes.len() > MAX_PATH_GRANTS
@@ -1816,6 +1872,17 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
     }
     for grant in &spec.runtime_reads {
         validate_noncredential_grant(grant)?;
+    }
+    for grant in &spec.discovery_reads {
+        grant.validate()?;
+        if grant.scope != PathScope::Exact
+            || !matches!(
+                grant.path.file_name().and_then(OsStr::to_str),
+                Some(".agents" | ".claude" | ".codex")
+            )
+        {
+            return Err(PermissionError::InvalidPath);
+        }
     }
     for auth in &spec.authentication {
         if auth.mechanism.is_empty()
@@ -2223,6 +2290,189 @@ mod tests {
             )),
             Err(PermissionError::CredentialRoot)
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::plan::{
+            CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest, ReadOnlyPolicy,
+        };
+        use crate::utility::{GitMutation, execute_git_mutation};
+        use provenant_core::WorkScope;
+        use std::os::unix::fs::PermissionsExt;
+        let f = crate::test_support::Fixture::new()?;
+        let branch = GitRefName::branch("read-only-profile")?;
+        let linked = f._temp.path().join("linked");
+        let outcome = execute_git_mutation(
+            &f.executor,
+            &f.repo,
+            &f.runtime,
+            GitMutation::WorktreeAdd {
+                branch,
+                base: Some(f.head()?),
+                path: linked.clone(),
+                create_branch: true,
+            },
+            f.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        let repo =
+            f.runtime
+                .open_read_repo(&f.executor, &linked, f.budget()?, &CancelToken::new())?;
+        let root = repo.root_path();
+        std::fs::create_dir_all(root.join(".agent-run/locks"))?;
+        let scratch = provenant_supervisor::fs::canonicalize(f._temp.path())?.join("private-tmp");
+        std::fs::create_dir(&scratch)?;
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        let policy: ReadOnlyPolicy =
+            serde_json::from_str(r#"{"readOnlyWritable":[".agent-run/locks"]}"#)?;
+        let binding = f.binding()?;
+        let plan = ConfinedPlan::new(
+            PlanRequest {
+                scope: WorkScope::Project(binding.project_id()),
+                permissions: PlanPermissions {
+                    read_only: None,
+                    mode: AccessMode::ReadOnly,
+                    scratch: PathGrant {
+                        path: scratch.clone(),
+                        scope: PathScope::Subtree,
+                    },
+                    private_state: None,
+                    read_roots: vec![],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: None,
+                    include_continuation: false,
+                    network: vec![],
+                    capabilities: vec![],
+                    nested_confinement: false,
+                },
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            }
+            .with_read_only_repo(&repo, &binding, &policy)?,
+        )?;
+        use FixtureOperation as O;
+        use FixtureOutcome::{Allowed, Denied};
+        let home = provenant_supervisor::fs::canonicalize(&f.home)?;
+        for directory in [
+            home.join(".cargo/bin"),
+            home.join(".cargo/registry"),
+            home.join(".rustup/toolchains"),
+            scratch.join("target"),
+        ] {
+            std::fs::create_dir_all(directory)?;
+        }
+        std::fs::write(
+            home.join(".rustup/settings.toml"),
+            "default_toolchain = 'fixture'",
+        )?;
+        std::fs::write(home.join(".cargo/credentials.toml"), "fixture-secret")?;
+        let subtree = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: "/usr/bin/true".into(),
+                    scope: PathScope::Exact,
+                }],
+                runtime_reads: vec![
+                    subtree(home.join(".cargo/bin")),
+                    subtree(home.join(".cargo/registry")),
+                    subtree(home.join(".rustup/toolchains")),
+                    PathGrant {
+                        path: home.join(".rustup/settings.toml"),
+                        scope: PathScope::Exact,
+                    },
+                ],
+                tool_exec_roots: vec![
+                    subtree(home.join(".cargo/bin")),
+                    subtree(home.join(".rustup/toolchains")),
+                    subtree(scratch.join("target")),
+                ],
+                ..Default::default()
+            },
+            observations: BTreeMap::from([
+                (O::DeclaredRead, Allowed),
+                (O::UndeclaredRead, Denied),
+                (O::UndeclaredWrite, Denied),
+                (O::SecretRead, Denied),
+                (O::ProtectedWrite, Denied),
+                (O::OtherNetwork, Denied),
+                (O::DeclaredProcessExec, Allowed),
+                (O::UndeclaredProcessExec, Denied),
+                (O::ProcessFork, Denied),
+                (O::RuntimeRead, Allowed),
+            ]),
+        };
+        let paths = required_anchors(plan.permissions(), &profile, None);
+        let directories = paths
+            .iter()
+            .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let anchors = Anchors {
+            home: &home,
+            directories: &directories,
+            safe_fs: &LocalFs,
+            worktree: None,
+        };
+        let compiled =
+            MacOsSandboxBackend { ready: true }.compile(plan.permissions(), &profile, &anchors)?;
+        let source = String::from_utf8(compiled.profile)?;
+        let git = binding.common_dir();
+        assert!(repo.0.private_git_dir().starts_with(git));
+        assert!(source.contains(&format!(
+            "(allow file-read* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(source.contains(&format!(
+            "(deny file-write* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(!source.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            git.display()
+        )));
+        assert!(source.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            root.join(".agent-run/locks").display()
+        )));
+        for tool in [home.join(".cargo/bin"), home.join(".rustup/toolchains")] {
+            assert!(source.contains(&format!(
+                "(allow file-read* (subpath \"{}\"))",
+                tool.display()
+            )));
+            assert!(source.contains(&format!(
+                "(allow process-exec (subpath \"{}\"))",
+                tool.display()
+            )));
+        }
+        assert!(!source.contains("credentials"));
+        assert!(!source.contains(&format!(
+            "(allow file-read* (subpath \"{}\"))",
+            home.join(".cargo").display()
+        )));
+        assert!(source.contains(&format!(
+            "(deny file-write* (require-all (subpath \"{}\") (regex #",
+            root.join(".agent-run/locks").display()
+        )));
+        assert!(!source.contains("(deny file-write* (regex #"));
+        assert!(source.contains(&crate::plan::read_only::exclusion_regex()));
+        // A component swapped for a symlink after resolution cannot be compiled.
+        std::fs::rename(root.join(".agent-run"), root.join("moved"))?;
+        std::os::unix::fs::symlink(root.join("moved"), root.join(".agent-run"))?;
+        assert!(
+            MacOsSandboxBackend { ready: true }
+                .compile(plan.permissions(), &profile, &anchors)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2736,6 +2986,7 @@ mod tests {
         };
         let cache = authority.cargo_cache.path.clone();
         let plan = PlanPermissions {
+            read_only: None,
             private_state: None,
             mode: AccessMode::WorktreeWrite(Box::new(authority)),
             scratch: PathGrant {
@@ -2976,6 +3227,7 @@ mod tests {
             observations: BTreeMap::new(),
         };
         let plan = PlanPermissions {
+            read_only: None,
             private_state: None,
             mode: AccessMode::ReadOnly,
             scratch: PathGrant {

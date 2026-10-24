@@ -52,6 +52,9 @@ pub struct LaunchPaths {
     pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
+    /// Private temporary directory for a read-only lane, never a shared system
+    /// one. Terminal commit and withdrawal remove it best-effort.
+    pub temporary: PathBuf,
 }
 pub trait Providers {
     /// Prepare one task, trying its fallback routes in order. An error is a
@@ -217,6 +220,7 @@ impl RunStore {
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
+            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
             let base = self
                 .context
                 .state_root
@@ -232,6 +236,7 @@ impl RunStore {
                     .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
+                temporary: base.join("tmp"),
             };
             let plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
                 Ok(plan) => plan,
@@ -253,7 +258,14 @@ impl RunStore {
                     continue;
                 }
             };
-            let record = match self.mark_starting(id, &plan.route, call) {
+            // Record the exact project-relative exceptions of the plan that launches.
+            let writable = plan
+                .confinement
+                .as_ref()
+                .and_then(|c| c.plan.permissions().read_only.as_ref())
+                .map(|g| g.writable_paths())
+                .unwrap_or_default();
+            let record = match self.mark_starting(id, &plan.route, writable, call) {
                 Ok(record) => record,
                 // A concurrent start already took this attempt.
                 Err(RunError::Conflict) => continue,

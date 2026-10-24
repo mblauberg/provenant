@@ -566,6 +566,9 @@ pub fn run(
     roots: &Roots,
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
+    publish: impl FnOnce(
+        &CommandResult<Option<provenant_quota::QuotaReport>>,
+    ) -> io::Result<provenant_records::AbsolutePath>,
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
@@ -649,28 +652,12 @@ pub fn run(
             read_only: matches!(command, Quota::Show(_)),
         }
     };
-    let rendered = if globals.json || envelope.error.is_none() {
-        crate::render(&envelope, mode, &mut io::stdout().lock())
-    } else {
-        crate::render(&envelope, mode, &mut io::stderr().lock())
-    };
-    match rendered {
-        Ok(()) => crate::exit_status(&envelope.status),
-        Err(crate::RenderError::TooLarge) => {
-            let mut bounded = CommandResult::new(name, Outcome::Error, ());
-            bounded.error = Some(CommandError {
-                code: "RESULT_TOO_LARGE".into(),
-                message: "quota report exceeds 1 MiB; filter with --adapter".into(),
-                cause: None,
-                repair: None,
-            });
-            if globals.json {
-                let _ = crate::render(&bounded, crate::RenderMode::Json, &mut io::stdout().lock());
-            } else {
-                let _ = crate::render(&bounded, mode, &mut io::stderr().lock());
-            }
-            3
-        }
-        Err(_) => 3,
-    }
+    let outcome = crate::render_or_publish(
+        &envelope,
+        mode,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        publish,
+    );
+    outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

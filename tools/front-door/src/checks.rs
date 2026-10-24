@@ -4,15 +4,14 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{Release, ReleaseSmoke, Targets};
+use provenant_config::{Release, Targets};
 use provenant_core::CancelToken;
-use provenant_records::{CommandResult, Outcome, VersionInfo};
+use provenant_records::{CommandResult, Outcome};
 use provenant_supervisor::{
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    exec::SystemExecutor,
     fs::{self, LocalFs, SafeFs},
 };
 use std::{
-    ffi::OsString,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -220,15 +219,18 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             )?)
         }
         Inspectable::Install { source, page } => private_home(|private| {
-            let executor = SystemExecutor::new(1)?;
-            let smoke = Smoke {
-                executor: &executor,
-                home: private,
-            };
+            let smoke = crate::release_smoke::SystemSmoke::new(Some(private))?;
             let cancel = CancelToken::new();
             let release = source
                 .as_deref()
-                .map(|path| Release::read(path, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs))
+                .map(|path| {
+                    // Resolve aliased ancestors (macOS /tmp, /var) as install does; the
+                    // release tree itself still refuses symlinks.
+                    let path =
+                        provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, path)
+                            .unwrap_or_else(|_| path.to_path_buf());
+                    Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs)
+                })
                 .transpose()?;
             let inspection = provenant_config::inspect_install(
                 &Targets::new(roots.clone(), &home, &[]),
@@ -322,18 +324,8 @@ fn git_page(
 ) -> Result<CheckPage, Error> {
     private_home(|home| {
         let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/opt/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
-        .ok_or(CheckError::Evidence("Git executable unavailable"))?;
-        let git = fs::canonicalize(git)?;
+        let git = roots::git_binary().ok_or(CheckError::Evidence("Git executable unavailable"))?;
+        let git = fs::canonicalize(&git)?;
         let runtime = provenant_confinement::UtilityRuntime::new(fs, git, home)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
@@ -350,62 +342,4 @@ fn git_page(
             cancel: &cancel,
         })?)
     })
-}
-struct Smoke<'a> {
-    executor: &'a dyn Executor,
-    home: &'a Path,
-}
-impl ReleaseSmoke for Smoke<'_> {
-    fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
-        let env: Vec<(OsString, OsString)> = [
-            ("HOME", self.home.as_os_str()),
-            ("XDG_CONFIG_HOME", self.home.as_os_str()),
-            ("CLAUDE_CONFIG_DIR", self.home.as_os_str()),
-            ("CODEX_HOME", self.home.as_os_str()),
-            ("PROVENANT_STATE_DIR", self.home.as_os_str()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.into(), v.to_owned()))
-        .collect();
-        let mut version = None;
-        for args in [&["--version", "--json"][..], &["help"][..]] {
-            let argv: Vec<_> =
-                std::iter::once(release.source().join("bin/provenant").into_os_string())
-                    .chain(args.iter().map(OsString::from))
-                    .collect();
-            let mut options = ExecOptions::new(&argv, self.home, Duration::from_secs(30));
-            options.env = Some(&env);
-            options.cancel = Some(cancel);
-            options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
-            options.stderr = StreamPolicy::Capture { limit: 8192 };
-            options.stop_on_output_limit = true;
-            let output = self.executor.execute(options).map_err(io::Error::other)?;
-            if output.termination != Termination::Exit(0)
-                || output.timed_out
-                || output.cancelled
-                || output.drain_truncated
-                || output.overflow_stopped
-                || output.stdout.truncated
-                || output.stdout.read_failed
-                || output.stderr.read_failed
-            {
-                return Err(io::Error::other("release smoke failed"));
-            }
-            if args.first() == Some(&"--version") {
-                #[derive(serde::Deserialize)]
-                struct VersionEnvelope {
-                    command: String,
-                    status: String,
-                    data: VersionInfo,
-                }
-                let envelope: VersionEnvelope = serde_json::from_slice(&output.stdout.bytes)
-                    .map_err(|_| io::Error::other("release version record"))?;
-                if envelope.command != "version" || envelope.status != "ok" {
-                    return Err(io::Error::other("release version outcome"));
-                }
-                version = Some(envelope.data);
-            }
-        }
-        version.ok_or_else(|| io::Error::other("release identity unavailable"))
-    }
 }

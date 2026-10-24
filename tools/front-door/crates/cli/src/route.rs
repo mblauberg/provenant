@@ -87,7 +87,7 @@ enum EdgeError {
 }
 #[derive(Serialize)]
 #[serde(untagged)]
-enum Data {
+pub enum Data {
     List(provenant_routing::RouteList),
     Resolved(provenant_records::ResolvedRoute),
 }
@@ -323,7 +323,12 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
         })
     })
 }
-pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {
+pub fn run(
+    command: Route,
+    globals: &Globals,
+    roots: &Roots,
+    publish: impl FnOnce(&CommandResult<Option<Data>>) -> io::Result<provenant_records::AbsolutePath>,
+) -> u8 {
     let name = match command {
         Route::List(_) => "route list",
         Route::Resolve(_) => "route resolve",
@@ -413,36 +418,12 @@ pub fn run(command: Route, globals: &Globals, roots: &Roots) -> u8 {
             read_only: true,
         }
     };
-    let rendered = if !globals.json && result.error.is_some() {
-        crate::render(&result, mode, &mut io::stderr().lock())
-    } else {
-        crate::render(&result, mode, &mut io::stdout().lock())
-    };
-    match rendered {
-        Ok(()) => crate::exit_status(&result.status),
-        Err(crate::RenderError::TooLarge) => {
-            let message = "route result exceeds 1 MiB";
-            let mut failure = CommandResult::new(name, Outcome::Error, ());
-            failure.error = Some(CommandError {
-                code: "RESULT_TOO_LARGE".into(),
-                message: message.into(),
-                cause: None,
-                repair: None,
-            });
-            if globals.json {
-                let _ = crate::render(&failure, RenderMode::Json, &mut io::stdout().lock());
-            } else {
-                let _ = crate::render(
-                    &failure,
-                    RenderMode::Human {
-                        text: "provenant: RESULT_TOO_LARGE: route result exceeds 1 MiB\n",
-                        read_only: false,
-                    },
-                    &mut io::stderr().lock(),
-                );
-            }
-            3
-        }
-        Err(_) => 3,
-    }
+    let outcome = crate::render_or_publish(
+        &result,
+        mode,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        publish,
+    );
+    outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

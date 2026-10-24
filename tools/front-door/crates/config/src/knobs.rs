@@ -135,11 +135,7 @@ fn registry() -> Result<Registry, ConfigError> {
     serde_json::from_str(REGISTRY).map_err(|_| ConfigError::KnobRegistry)
 }
 fn profile_name(profile: Profile) -> &'static str {
-    match profile {
-        Profile::Balanced => "balanced",
-        Profile::Economy => "economy",
-        Profile::Rigorous => "rigorous",
-    }
+    profile.as_str()
 }
 fn invalid(name: &str, rule: &'static str) -> ConfigError {
     ConfigError::KnobValue {

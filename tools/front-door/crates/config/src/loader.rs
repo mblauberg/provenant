@@ -225,18 +225,22 @@ fn inspect<T: DeserializeOwned + Serialize>(
         let location = site(&user_sites, "schema_version", &user_origin, false);
         match version {
             None => return Err(ConfigError::MissingVersion { location }),
-            Some(item) if item.as_integer().is_some_and(|v| v != 1) => {
+            Some(item)
+                if item
+                    .as_integer()
+                    .is_some_and(|v| v != crate::CONFIG_SCHEMA_VERSION as i64) =>
+            {
                 return Err(ConfigError::UnsupportedVersion { location });
             }
             _ => {}
         }
     }
     // Inspect this single scalar without decoding the header or any domain.
-    let profile = match user.get("profile").and_then(Item::as_str) {
-        Some("economy") => Profile::Economy,
-        Some("rigorous") => Profile::Rigorous,
-        _ => Profile::Balanced,
-    };
+    let profile = user
+        .get("profile")
+        .and_then(Item::as_str)
+        .and_then(Profile::from_name)
+        .unwrap_or_default();
     let overrides = knobs_item.as_ref().map(Item::as_table_like);
     if matches!(overrides, Some(None)) {
         return Err(ConfigError::Schema {
@@ -251,13 +255,13 @@ fn inspect<T: DeserializeOwned + Serialize>(
         }
     })?;
     let compiled = Origin::Compiled { profile };
-    let header = match profile {
-        Profile::Balanced => "schema_version=1\nprofile='balanced'",
-        Profile::Economy => "schema_version=1\nprofile='economy'",
-        Profile::Rigorous => "schema_version=1\nprofile='rigorous'",
-    };
-    let mut defaults = parse(header, &compiled, "")?;
-    let mut compiled_sites = sites(&defaults, header, &compiled, "");
+    let header = format!(
+        "schema_version={}\nprofile='{}'",
+        crate::CONFIG_SCHEMA_VERSION,
+        profile.as_str()
+    );
+    let mut defaults = parse(&header, &compiled, "")?;
+    let mut compiled_sites = sites(&defaults, &header, &compiled, "");
     let mut domains = Table::new();
     for entry in sections.entries {
         let prefix = format!("domains.{}", entry.name);
