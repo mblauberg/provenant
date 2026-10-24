@@ -22,6 +22,29 @@ use std::{
 };
 
 const LIMIT: usize = 1_048_576;
+// Private, exclusively created command working directories. The supervisor
+// owns entropy and mode-0700 creation; tempfile remains a dev-only dependency.
+struct ProbeScratch(PathBuf);
+impl ProbeScratch {
+    fn new() -> Result<Self, ProbeFailure> {
+        let parent = fs::canonicalize(std::env::temp_dir()).map_err(|_| ProbeFailure::Network)?;
+        let anchor = provenant_supervisor::fs::Directory::open_anchor(&parent)
+            .map_err(|_| ProbeFailure::Network)?;
+        let name = provenant_supervisor::fs::temporary_name().map_err(|_| ProbeFailure::Network)?;
+        anchor
+            .mkdir(&name, 0o700)
+            .map_err(|_| ProbeFailure::Network)?;
+        Ok(Self(parent.join(name)))
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for ProbeScratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 struct Account {
     scope: AccountScope,
     identity_dir: PathBuf,
@@ -184,10 +207,7 @@ impl LiveQuota {
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
-        let scratch = tempfile::Builder::new()
-            .prefix("provenant-quota-")
-            .tempdir()
-            .map_err(|_| ProbeFailure::Network)?;
+        let scratch = ProbeScratch::new()?;
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
         let mut env = vec![
@@ -437,10 +457,7 @@ impl LiveQuota {
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
-        let scratch = tempfile::Builder::new()
-            .prefix("provenant-agy-quota-")
-            .tempdir()
-            .map_err(|_| ProbeFailure::Network)?;
+        let scratch = ProbeScratch::new()?;
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
