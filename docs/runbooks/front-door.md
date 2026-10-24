@@ -58,14 +58,18 @@ preview prevents writes. Hooks default off. `--hooks on` registers hooks for
 each selected harness that has a fixture-backed `HookSpec` (Claude today) and
 refuses only when none does. To install into a further Claude config directory,
 rerun `install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry
-then goes to that directory's `.claude.json`. An exact legacy entry marked
+then goes to that directory's `.claude.json`. Each directory is a separate
+target in the one receipt, so runs accumulate and touch only the selected
+directory. An exact legacy entry marked
 `replace` is replaced only when that handler is available. Otherwise the
 installer preserves it byte-for-byte and reports it as unresolved. `check
 install` reports unresolved legacy entries as findings with exit 1 and compares
-the installed binary, assets, receipt and owned selectors without repair. To
-remove an installation, run `provenant --state-dir "$STATE" uninstall --harness
-claude`; it removes only unchanged owned entries and keeps the state and
-release assets. Reapply `install` after resolving a partial-write error.
+the installed binary, assets, receipt and owned selectors of every recorded
+target, whatever the environment, without repair. To remove an installation,
+run `provenant --state-dir "$STATE" uninstall --harness claude`; it removes only
+unchanged owned entries and keeps the state and release assets. With
+`CLAUDE_CONFIG_DIR` (or `CODEX_HOME`) set, uninstall removes only that
+directory's target; without it, every recorded target of the harness. Reapply `install` after resolving a partial-write error.
 
 `build.rs` stamps the source and asset digests; the packaging example produces
 typed `release.json` with the binary and product assets. The CLI grammar is frozen in

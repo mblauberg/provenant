@@ -100,13 +100,25 @@ fn selected_targets(
     Ok((environment, targets))
 }
 
+/// Resolves targets as install does, so `CLAUDE_CONFIG_DIR`/`CODEX_HOME`
+/// select the matching recorded target. Without them, uninstall acts on every
+/// recorded target of each harness, at its recorded paths.
 fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targets, EdgeError> {
     let environment = environment(globals, None)?;
-    Ok(Targets::new(
+    let mut targets = cli::install::configured_targets(
         environment.roots,
         &environment.home,
         harnesses,
-    ))
+        &LocalFs,
+        environment.claude.as_deref(),
+        environment.codex.as_deref(),
+        None,
+    )
+    .map_err(EdgeError::Install)?;
+    targets
+        .resolve_destinations(&LocalFs)
+        .map_err(EdgeError::Install)?;
+    Ok(targets)
 }
 
 fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {

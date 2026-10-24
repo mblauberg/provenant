@@ -893,6 +893,7 @@ impl Targets {
                 let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
                 if !default.harnesses.is_empty() {
                     if !self.configured_homes.contains(&target.harness) {
+                        self.environment_homes.insert(target.harness);
                         let instruction = target
                             .instruction
                             .as_ref()

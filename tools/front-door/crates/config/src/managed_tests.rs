@@ -2181,6 +2181,106 @@ fn claude_config_dir_moves_its_mcp_registration() {
 }
 
 #[test]
+fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let path = f.source.join("instructions").join(name);
+        fs::write(&path, b"release instruction").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (roots, home) = (f.targets.roots.clone(), f.home.clone());
+    let claude = |dir: Option<&Path>| {
+        let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
+        targets.hooks = true;
+        targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        targets.apply_environment(dir, None).unwrap();
+        targets
+    };
+    let (default, alternate) = (home.join(".claude"), home.join(".claude-pro"));
+    let (default_mcp, alternate_mcp) = (home.join(".claude.json"), alternate.join(".claude.json"));
+    let installed = |dir: &Path, mcp: &Path| {
+        dir.join("skills/example").is_symlink()
+            && dir.join("CLAUDE.md").is_symlink()
+            && dir.join("HARNESS.md").is_symlink()
+            && fs::read_to_string(mcp).is_ok_and(|text| text.contains("\"fabric\""))
+            && fs::read_to_string(dir.join("settings.json"))
+                .is_ok_and(|text| text.contains("pre-tool-use"))
+    };
+    let inspect = |targets: &Targets| {
+        inspect_install(
+            targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &CancelToken::new(),
+        )
+        .unwrap()
+        .findings
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let release = f.release();
+    let mut apply = |targets: Targets| {
+        f.targets = targets;
+        install(
+            &f.plan_for(release.clone()),
+            &context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
+    };
+    apply(claude(None));
+    apply(claude(Some(&alternate)));
+    assert!(installed(&default, &default_mcp));
+    assert!(installed(&alternate, &alternate_mcp));
+    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.harnesses, vec![Harness::Claude]);
+    assert_eq!(receipt.harness_targets.len(), 2);
+
+    // Check covers every recorded target, whichever one the environment names.
+    assert!(inspect(&claude(None)).is_empty());
+    let link = default.join("skills/example");
+    fs::remove_file(&link).unwrap();
+    assert!(inspect(&claude(Some(&alternate))).iter().any(|finding| {
+        finding.rule == "owned_entry_drift" && finding.path.to_path_buf().unwrap() == link
+    }));
+    apply(claude(None));
+    assert!(installed(&default, &default_mcp));
+    assert!(installed(&alternate, &alternate_mcp));
+
+    uninstall(
+        &claude(Some(&alternate)),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
+    assert!(installed(&default, &default_mcp));
+    assert!(fs::symlink_metadata(alternate.join("skills/example")).is_err());
+    assert!(fs::symlink_metadata(alternate.join("CLAUDE.md")).is_err());
+    assert!(
+        !fs::read_to_string(&alternate_mcp)
+            .unwrap()
+            .contains("\"fabric\"")
+    );
+    assert!(
+        !fs::read_to_string(alternate.join("settings.json"))
+            .unwrap()
+            .contains("pre-tool-use")
+    );
+    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.harness_targets.len(), 1);
+    assert_eq!(
+        receipt.harness_targets[0].skills_dir.to_path_buf().unwrap(),
+        default.join("skills")
+    );
+    assert!(inspect(&claude(None)).is_empty());
+}
+
+#[test]
 fn only_manifest_matched_utility_hooks_refuse_and_check_reports_findings() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
