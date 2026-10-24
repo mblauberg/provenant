@@ -211,10 +211,25 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Telemetry(provenant_cli::Telemetry::Stats(_)) => {
             unavailable("telemetry stats", "telemetry", globals)
         }
-        Command::Quota(quota) => match quota {
-            provenant_cli::Quota::Show(_) => unavailable("quota show", "quota", globals),
-            provenant_cli::Quota::Tick { .. } => unavailable("quota tick", "quota", globals),
-        },
+        Command::Quota(cmd) => {
+            let resolved = (|| -> Result<_, roots::RootError> {
+                let assets = roots::product_root()?;
+                let project = roots::selected_project(globals.project.as_deref(), false)?;
+                roots::roots(globals, &assets, &project)
+            })();
+            match resolved {
+                Ok(roots) => {
+                    provenant_cli::quota::run(cmd, globals, &roots, provenant_providers::REGISTRY)
+                }
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Worktree(worktree) => match worktree {
             provenant_cli::Worktree::Create { .. } => {
                 unavailable("worktree create", "confinement", globals)

@@ -57,7 +57,7 @@ pub enum Command {
     #[command(subcommand)]
     Telemetry(Telemetry),
     #[command(subcommand)]
-    Quota(Quota),
+    Quota(crate::quota::Quota),
     #[command(subcommand)]
     Worktree(Worktree),
     #[command(subcommand)]
@@ -288,32 +288,6 @@ pub struct Stats {
     pub until: Option<jiff::Timestamp>,
     #[arg(long)]
     pub detail: bool,
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Trigger {
-    Timer,
-    Panel,
-    Manual,
-    Wake,
-    Power,
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Power {
-    Ac,
-    Battery,
-    Low,
-}
-#[derive(Debug, Subcommand)]
-pub enum Quota {
-    Show(Adapter),
-    Tick {
-        #[command(flatten)]
-        adapter: Adapter,
-        #[arg(long, value_enum, default_value = "manual")]
-        trigger: Trigger,
-        #[arg(long, value_enum, default_value = "ac")]
-        power: Power,
-    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {

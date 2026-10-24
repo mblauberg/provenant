@@ -1,529 +1,671 @@
-//! Adaptive refresh scheduling. No clock reads; activity discovery only reads metadata.
-use crate::{
-    time::{add_seconds, from_timestamp, iso, parse_time, seconds_between, stamp},
-    *,
-};
-use jiff::{Timestamp, tz::TimeZone};
+//! Scheduling uses explicit integer seconds; it never sleeps or executes a probe.
+use crate::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::UNIX_EPOCH,
-};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Config {
-    pub enabled: bool,
-    pub min_interval_seconds: Number,
-    pub max_interval_seconds: Number,
-    pub active_window_seconds: Number,
-    pub jitter_fraction: Number,
-    pub coalesce_seconds: Number,
-    pub near_exhaustion_percent: Number,
-    pub near_exhaustion_factor: Number,
-    pub runs_out_horizon_factor: Number,
-    pub reset_grace_seconds: Number,
-    pub exhausted_recheck_seconds: Number,
-    pub battery_factor: Number,
-    pub low_power_factor: Number,
-    pub low_power_skip_costs: Vec<String>,
-    pub manual_min_age_seconds: Number,
-    pub event_debounce_seconds: Number,
-    pub max_parallel: u64,
-    pub base_seconds: Number,
-    pub max_seconds: Number,
-    pub auth_seconds: Number,
-    pub missing_seconds: Number,
-    pub cost: String,
-    pub solo: bool,
-    pub ttl_active_seconds: Number,
-    pub ttl_idle_seconds: Number,
-    pub ttl_panel_seconds: Number,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    Timer,
+    Panel,
+    Manual,
+    Wake,
+    Power,
 }
-const KEYS: &[&str] = &[
-    "enabled",
-    "min_interval_seconds",
-    "max_interval_seconds",
-    "active_window_seconds",
-    "jitter_fraction",
-    "coalesce_seconds",
-    "near_exhaustion_percent",
-    "near_exhaustion_factor",
-    "runs_out_horizon_factor",
-    "reset_grace_seconds",
-    "exhausted_recheck_seconds",
-    "battery_factor",
-    "low_power_factor",
-    "low_power_skip_costs",
-    "manual_min_age_seconds",
-    "event_debounce_seconds",
-    "max_parallel",
-    "base_seconds",
-    "max_seconds",
-    "auth_seconds",
-    "missing_seconds",
-    "cost",
-    "solo",
-    "ttl_active_seconds",
-    "ttl_idle_seconds",
-    "ttl_panel_seconds",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Power {
+    Ac,
+    Battery,
+    Low,
+}
+#[derive(Clone, Debug)]
+pub struct QuotaQuery {
+    pub adapter: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct QuotaTick {
+    pub adapter: Option<String>,
+    pub trigger: Trigger,
+    pub power: Power,
+}
+
+const INTERVALS: &[(&str, u64, u64)] = &[
+    ("claude", 300, 120),
+    ("codex", 900, 300),
+    ("cursor", 1800, 600),
+    ("agy", 1200, 900),
 ];
-fn numeric(v: &Value) -> Option<f64> {
-    v.as_f64().filter(|v| v.is_finite())
-}
-fn valid(key: &str, v: &Value) -> bool {
-    match key {
-        "enabled" | "solo" => v.is_boolean(),
-        "cost" => v
-            .as_str()
-            .is_some_and(|s| ["cheap", "moderate", "expensive"].contains(&s)),
-        "low_power_skip_costs" => v
-            .as_array()
-            .is_some_and(|items| items.iter().all(|i| valid("cost", i))),
-        "max_parallel" => v.as_u64().is_some_and(|v| v >= 1) && !v.is_f64(),
-        _ => numeric(v).is_some_and(|n| match key {
-            "jitter_fraction" => (0.0..1.0).contains(&n),
-            "near_exhaustion_percent" => (0.0..=100.0).contains(&n),
-            "near_exhaustion_factor" => n > 0.0 && n <= 1.0,
-            "battery_factor" | "low_power_factor" => n >= 1.0,
-            "min_interval_seconds"
-            | "max_interval_seconds"
-            | "runs_out_horizon_factor"
-            | "base_seconds"
-            | "max_seconds"
-            | "ttl_active_seconds"
-            | "ttl_idle_seconds"
-            | "ttl_panel_seconds" => n > 0.0,
-            _ => n >= 0.0,
-        }),
+pub const TICK_BUDGET_SECONDS: i64 = 55;
+pub fn interval(adapter: &str, trigger: Trigger, power: Power) -> Option<u64> {
+    let (_, timer, panel) = INTERVALS.iter().find(|(id, _, _)| *id == adapter)?;
+    if adapter == "agy" && power == Power::Low {
+        return None;
     }
+    let base = match trigger {
+        Trigger::Manual => 30,
+        Trigger::Panel => *panel,
+        _ => *timer,
+    };
+    Some(
+        base * match power {
+            Power::Ac => 1,
+            Power::Battery => 2,
+            Power::Low => 4,
+        },
+    )
 }
-impl Config {
-    pub fn for_provider(provider: &str) -> Self {
-        let (cost, solo, active, idle, panel) = match provider {
-            "claude" => ("moderate", false, 300, 1800, 120),
-            "codex" => ("moderate", false, 900, 3600, 300),
-            "cursor" => ("cheap", false, 1800, 3600, 600),
-            "opencode" => ("cheap", false, 300, 3600, 60),
-            "agy" => ("expensive", true, 1200, 7200, 900),
-            _ => ("moderate", false, 900, 3600, 300),
-        };
-        Self {
-            enabled: true,
-            min_interval_seconds: Number::Int(60),
-            max_interval_seconds: Number::Int(21600),
-            active_window_seconds: Number::Int(900),
-            jitter_fraction: Number::Float(0.1),
-            coalesce_seconds: Number::Int(120),
-            near_exhaustion_percent: Number::Int(85),
-            near_exhaustion_factor: Number::Float(0.5),
-            runs_out_horizon_factor: Number::Int(2),
-            reset_grace_seconds: Number::Int(60),
-            exhausted_recheck_seconds: Number::Int(21600),
-            battery_factor: Number::Int(2),
-            low_power_factor: Number::Int(4),
-            low_power_skip_costs: vec!["expensive".into()],
-            manual_min_age_seconds: Number::Int(30),
-            event_debounce_seconds: Number::Int(30),
-            max_parallel: 3,
-            base_seconds: Number::Int(120),
-            max_seconds: Number::Int(3600),
-            auth_seconds: Number::Int(3600),
-            missing_seconds: Number::Int(86400),
-            cost: cost.into(),
-            solo,
-            ttl_active_seconds: Number::Int(active),
-            ttl_idle_seconds: Number::Int(idle),
-            ttl_panel_seconds: Number::Int(panel),
-        }
-    }
+fn add(now: i64, seconds: u64) -> Result<i64, QuotaError> {
+    now.checked_add(i64::try_from(seconds).map_err(|_| QuotaError::TimeRange)?)
+        .ok_or(QuotaError::TimeRange)
 }
-/// Invalid layers fall through in source order and emit a note for each refusal.
-pub fn resolve(
-    provider: &str,
-    account: &Value,
-    settings: &Value,
-) -> Result<(Config, Vec<String>), QuotaError> {
-    let mut values =
-        serde_json::to_value(Config::for_provider(provider)).map_err(QuotaError::Record)?;
-    let mut notes = vec![];
-    for &key in KEYS {
-        let backoff = [
-            "base_seconds",
-            "max_seconds",
-            "auth_seconds",
-            "missing_seconds",
-        ]
-        .contains(&key);
-        let group = if backoff { "backoff" } else { "schedule" };
-        for (name, layer) in [
-            ("account quota".to_owned(), account),
-            (
-                format!("quota.providers.{provider}"),
-                &settings["providers"][provider],
-            ),
-            (format!("quota.{group}"), &settings[group]),
-        ] {
-            let Some(value) = layer.as_object().and_then(|o| o.get(key)) else {
-                continue;
-            };
-            if valid(key, value) {
-                values[key] = value.clone();
-                break;
-            }
-            notes.push(format!("{name}.{key} is invalid; using the default"));
-        }
+pub fn next_due(
+    record: &AccountRecord,
+    trigger: Trigger,
+    power: Power,
+) -> Result<Option<i64>, QuotaError> {
+    let Some(ttl) = interval(&record.account.adapter, trigger, power) else {
+        return Ok(None);
+    };
+    let mut due = match record.last_attempt_unix_seconds {
+        Some(at) => add(at, ttl)?,
+        None => i64::MIN,
+    };
+    if let Some(backoff) = record.backoff_until_unix_seconds {
+        due = due.max(backoff);
     }
-    let mut config: Config = serde_json::from_value(values).map_err(QuotaError::Record)?;
-    if config
-        .max_interval_seconds
-        .numeric_cmp(config.min_interval_seconds)
-        .is_lt()
+    if let Some(claim) = &record.claim {
+        due = due.max(claim.deadline_unix_seconds);
+    }
+    Ok(Some(due))
+}
+pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
+    let base = match failure {
+        ProbeFailure::Network | ProbeFailure::RateLimited => 120_u64
+            .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
+            .min(3600),
+        ProbeFailure::Auth => 3600,
+        ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
+        ProbeFailure::Malformed => 120,
+    };
+    base.max(retry_after_seconds.unwrap_or(0).min(86400))
+}
+pub fn reserve(
+    current: Option<&AccountRecord>,
+    account: &AccountScope,
+    now: i64,
+    token: &str,
+    trigger: Trigger,
+    power: Power,
+) -> Result<UpdateIntent, QuotaError> {
+    account.validate()?;
+    if !component(token) {
+        return Err(QuotaError::Invalid("claim token"));
+    }
+    let mut record = current
+        .cloned()
+        .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.validate()?;
+    if record.account != *account || next_due(&record, trigger, power)?.is_none_or(|due| due > now)
     {
-        notes.push("max_interval_seconds is below min_interval_seconds; using the defaults".into());
-        config.min_interval_seconds = Number::Int(60);
-        config.max_interval_seconds = Number::Int(21600);
+        return Err(QuotaError::Conflict);
     }
-    Ok((config, notes))
-}
-pub fn jitter(seed: &str, fraction: f64) -> f64 {
-    let hash = Sha256::digest(seed.as_bytes());
-    let mut bytes = [0; 8];
-    bytes.copy_from_slice(&hash[..8]);
-    (u64::from_be_bytes(bytes) as f64 / 18446744073709551616.0 * 2.0 - 1.0) * fraction
-}
-pub fn backoff_seconds(
-    kind: ErrorKind,
-    failures: i64,
-    retry_after: Option<f64>,
-    config: &Config,
-    seed: &str,
-) -> f64 {
-    let wait = match kind {
-        ErrorKind::Missing => config.missing_seconds.get(),
-        ErrorKind::Auth => config.auth_seconds.get(),
-        _ => config
-            .max_seconds
-            .get()
-            .min(config.base_seconds.get() * 2.0_f64.powi((failures.clamp(1, 32) - 1) as i32)),
-    } * (1.0 + jitter(&format!("{seed}|{failures}"), config.jitter_fraction.get()));
-    if kind == ErrorKind::RateLimited {
-        retry_after
-            .filter(|v| v.is_finite())
-            .map_or(wait, |r| wait.max(r))
-    } else {
-        wait
-    }
-}
-fn sets_state(row: &Window) -> bool {
-    row.advisory != Some(true)
-        && !(row.limit_amount.map(Number::get).is_some_and(|v| v != 0.0)
-            && row.window_minutes.map(Number::get).is_none_or(|v| v == 0.0))
-}
-fn near(rows: &[&Window], now: Timestamp, ttl: f64, config: &Config) -> bool {
-    rows.iter().any(|row| {
-        let used = row.used();
-        if used >= 100.0 {
-            return false;
-        }
-        if used >= config.near_exhaustion_percent.get() {
-            return true;
-        }
-        let Some((reset, minutes)) = stamp(row.reset_at.as_deref())
-            .zip(row.window_minutes.map(Number::get).filter(|v| *v != 0.0))
-        else {
-            return false;
-        };
-        let remaining = seconds_between(reset, now);
-        let elapsed = minutes * 60.0 - remaining;
-        if used <= 0.0 || remaining <= 0.0 || elapsed <= 0.0 {
-            return false;
-        }
-        let runs_out = (100.0 - used) / (used / elapsed);
-        runs_out < remaining && runs_out <= config.runs_out_horizon_factor.get() * ttl
+    record.revision = record
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    record.claim = Some(RefreshClaim {
+        token: token.into(),
+        deadline_unix_seconds: add(now, TICK_BUDGET_SECONDS as u64)?,
+    });
+    record.backoff_until_unix_seconds = None;
+    record.last_attempt_unix_seconds = Some(now);
+    record.validate()?;
+    Ok(UpdateIntent {
+        account: account.clone(),
+        expected: current.cloned(),
+        replacement: Some(record),
     })
 }
-pub struct PlanInput<'a> {
-    pub account_id: &'a str,
-    pub snapshot: Option<&'a Snapshot>,
-    pub now: Timestamp,
-    pub config: &'a Config,
-    pub trigger: &'a str,
-    pub power: &'a str,
-    pub activity_at: Option<f64>,
-    pub ignore_backoff: bool,
-    pub notes: &'a [String],
-}
-pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
-    let PlanInput {
-        account_id,
-        snapshot,
-        now,
-        config,
-        trigger,
-        power,
-        activity_at,
-        ignore_backoff,
-        notes,
-    } = input;
-    let blank = Snapshot::default();
-    let snapshot = snapshot.unwrap_or(&blank);
-    let state = snapshot.fetch.clone().unwrap_or_default();
-    let attempted = snapshot.attempted_at.as_ref().and_then(parse_time);
-    let failures = state.failures.unwrap_or_default().integer_part()?;
-    let kind = state
-        .error_kind
-        .as_deref()
-        .filter(|s| ["rate_limited", "network", "auth", "missing", "other"].contains(s))
-        .map(ErrorKind::from_name);
-    let backoff = if failures.get() != 0.0 {
-        state.backoff_until.as_ref().and_then(parse_time)
-    } else {
-        None
-    };
-    let duration = state
-        .last_duration_ms
-        .map(Number::get)
-        .filter(|v| v.is_finite())
-        .unwrap_or(0.0)
-        / 1000.0;
-    let seen = activity_at
-        .filter(|v| v.is_finite())
-        .map(from_timestamp)
-        .transpose()?;
-    let own = attempted
-        .zip(seen)
-        .is_some_and(|(a, s)| a <= s && seconds_between(s, a) <= duration + 5.0);
-    let active =
-        seen.is_some_and(|s| !own && seconds_between(now, s) <= config.active_window_seconds.get());
-    let since_fetch = seen.zip(attempted).is_some_and(|(s, a)| !own && s > a);
-    let base = if active {
-        config.ttl_active_seconds
-    } else {
-        config.ttl_idle_seconds
-    };
-    let mut reason = if active { "active" } else { "idle" };
-    let rows: Vec<_> = snapshot
-        .windows
-        .iter()
-        .filter(|r| r.used().is_finite() && sets_state(r))
-        .collect();
-    let mut factor = Number::Int(1);
-    if near(&rows, now, base.get(), config) {
-        factor = config.near_exhaustion_factor;
-        reason = "near_exhaustion";
+pub fn complete(
+    current: &AccountRecord,
+    token: &str,
+    now: i64,
+    outcome: Result<QuotaSnapshot, ProbeFailure>,
+    retry_after_seconds: Option<u64>,
+) -> Result<UpdateIntent, QuotaError> {
+    current.validate()?;
+    if current.last_attempt_unix_seconds.is_none_or(|t| t > now)
+        || current
+            .claim
+            .as_ref()
+            .is_none_or(|c| c.token != token || c.deadline_unix_seconds <= now)
+    {
+        return Err(QuotaError::Conflict);
     }
-    if trigger != "manual" {
-        factor = factor.multiply(match power {
-            "battery" => config.battery_factor,
-            "low" => config.low_power_factor,
-            _ => Number::Int(1),
-        })?;
-    }
-    let mut ttl = config.max_interval_seconds.min(
-        config
-            .min_interval_seconds
-            .max(base.multiply_capped(factor, config.max_interval_seconds)?),
-    );
-    if power == "low" && trigger != "manual" && config.low_power_skip_costs.contains(&config.cost) {
-        ttl = config.max_interval_seconds;
-        reason = "low_power";
-    }
-    let mut next_due = if let Some(attempted) = attempted {
-        let mut due = add_seconds(
-            attempted,
-            ttl.get()
-                * (1.0
-                    + jitter(
-                        &format!("{account_id}|{}", iso(attempted)),
-                        config.jitter_fraction.get(),
-                    )),
-        )?;
-        let exhausted: Vec<_> = rows
-            .iter()
-            .filter(|r| r.used() >= 100.0)
-            .map(|r| stamp(r.reset_at.as_deref()))
-            .collect();
-        if !exhausted.is_empty() && exhausted.iter().all(|r| r.is_some_and(|r| r > now)) {
-            if let Some(last) = exhausted.into_iter().flatten().max() {
-                due = add_seconds(last, config.reset_grace_seconds.get())?.min(add_seconds(
-                    attempted,
-                    config.exhausted_recheck_seconds.get(),
-                )?);
-                reason = "exhausted_until_reset";
-            }
-        }
-        if let Some(passed) = rows
-            .iter()
-            .filter_map(|r| stamp(r.reset_at.as_deref()))
-            .filter(|r| attempted < *r && *r <= now)
-            .min()
-        {
-            due = passed;
-            reason = "reset_passed";
-        }
-        due
-    } else {
-        reason = "first_fetch";
-        now
-    };
-    let mut blocked = false;
-    let mut plain = next_due;
-    if let Some(backoff) = backoff {
-        if !(kind == Some(ErrorKind::Auth) && since_fetch) {
-            next_due = backoff;
-            reason = "backoff";
-            blocked = backoff > now
-                && !ignore_backoff
-                && !(trigger == "manual" && kind != Some(ErrorKind::RateLimited));
-        } else {
-            next_due = now;
-            plain = now;
-        }
-    }
-    let age = attempted
-        .map(|a| seconds_between(now, a))
-        .unwrap_or(f64::INFINITY);
-    let coalesce = config.coalesce_seconds.get().min(0.25 * ttl.get());
-    let timer_due = seconds_between(next_due.min(plain), now) <= coalesce;
-    let due = !blocked
-        && match trigger {
-            "timer" => timer_due,
-            "panel" => timer_due || age >= config.ttl_panel_seconds.get(),
-            "manual" => timer_due || age >= config.manual_min_age_seconds.get(),
-            "event" => {
-                timer_due
-                    || age
-                        >= config
-                            .min_interval_seconds
-                            .get()
-                            .max(config.event_debounce_seconds.get())
-            }
-            "wake" => timer_due || age >= config.min_interval_seconds.get(),
-            _ => false,
-        };
-    Ok((
-        Schedule {
-            next_due_at: iso(next_due),
-            reason: reason.into(),
-            ttl_seconds: ttl.rounded_integer()?,
-            trigger: state.trigger,
-            failures,
-            backoff_until: backoff.map(iso),
-            error_kind: if failures.get() != 0.0 { kind } else { None },
-            last_duration_ms: state.last_duration_ms,
-            source_kind: state
-                .source_kind
-                .filter(|s| !s.is_empty())
-                .or_else(|| attempted.map(|_| "fetch".into())),
-            notes: notes.to_vec(),
-        },
-        due,
-    ))
-}
-fn newest_files(directory: &Path, suffix: &str, limit: usize) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return vec![];
-    };
-    let mut folders = vec![];
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return vec![];
-        };
-        // DirEntry::is_dir in Python follows live links but skips dangling ones.
-        if entry.path().is_dir() {
-            let Ok(metadata) = fs::metadata(entry.path()) else {
-                return vec![];
-            };
-            let Ok(modified) = metadata.modified() else {
-                return vec![];
-            };
-            folders.push((modified, entry.path()));
-        }
-    }
-    folders.sort_by(|a, b| b.cmp(a));
-    folders
-        .into_iter()
-        .take(limit)
-        .flat_map(|(_, folder)| {
-            fs::read_dir(folder)
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .filter(|e| e.file_name().to_string_lossy().ends_with(suffix))
-                .map(|e| e.path())
-        })
-        .collect()
-}
-/// `now` and the local zone are explicit, including across midnight and DST changes.
-pub fn activity_paths(
-    provider: &str,
-    identity_dir: &Path,
-    now: Timestamp,
-    home: &Path,
-    timezone: &TimeZone,
-) -> Vec<PathBuf> {
-    let root = if identity_dir == Path::new("~") {
-        home.to_path_buf()
-    } else if let Ok(rest) = identity_dir.strip_prefix("~/") {
-        home.join(rest)
-    } else {
-        identity_dir.to_path_buf()
-    };
-    match provider {
-        "claude" => {
-            let mut paths = vec![root.join("history.jsonl")];
-            paths.extend(newest_files(&root.join("projects"), ".jsonl", 4));
-            paths
-        }
-        "codex" => {
-            let today = now.to_zoned(timezone.clone()).date();
-            let mut paths = vec![];
-            for day in [
-                Some(today),
-                today.checked_sub(jiff::Span::new().days(1)).ok(),
-            ]
-            .into_iter()
-            .flatten()
+    let mut next = current.clone();
+    next.revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    next.claim = None;
+    match outcome {
+        Ok(mut snapshot) => {
+            snapshot.validate()?;
+            if snapshot.account != current.account
+                || snapshot.observed_unix_seconds > now
+                || current
+                    .last_attempt_unix_seconds
+                    .is_some_and(|at| snapshot.observed_unix_seconds < at)
             {
-                let folder = root.join("sessions").join(format!(
-                    "{:04}/{:02}/{:02}",
-                    day.year(),
-                    day.month(),
-                    day.day()
-                ));
-                if let Ok(entries) = fs::read_dir(folder) {
-                    paths.extend(entries.filter_map(Result::ok).map(|e| e.path()));
-                }
+                return Err(QuotaError::Invalid("probe observation"));
             }
-            paths
+            snapshot.revision = next.revision;
+            next.snapshot = Some(snapshot);
+            next.failures = 0;
+            next.last_error = None;
+            next.backoff_until_unix_seconds = None;
         }
-        "opencode" => vec![root.join("opencode.db-wal")],
-        "agy" => vec![home.join(".gemini/antigravity-cli/log")],
-        _ => vec![],
+        Err(failure) => {
+            next.failures = next.failures.saturating_add(1);
+            next.last_error = Some(failure);
+            next.backoff_until_unix_seconds = Some(add(
+                now,
+                backoff(failure, next.failures, retry_after_seconds),
+            )?);
+        }
+    }
+    next.validate()?;
+    Ok(UpdateIntent {
+        account: current.account.clone(),
+        expected: Some(current.clone()),
+        replacement: Some(next),
+    })
+}
+/// `None` is unknown detection, never an authoritative empty account list.
+#[derive(Clone, Debug)]
+pub struct Detection {
+    pub adapter: String,
+    pub accounts: Option<Vec<AccountScope>>,
+    pub status: QuotaStatus,
+}
+pub struct TickPlan {
+    pub drops: Vec<UpdateIntent>,
+    /// Three cheap probes per batch; Agy alone. The edge observes the shared deadline.
+    pub batches: Vec<Vec<AccountScope>>,
+    pub deadline_unix_seconds: i64,
+}
+pub fn plan_tick(
+    records: &[AccountRecord],
+    detections: &[Detection],
+    tick: &QuotaTick,
+    now: i64,
+) -> Result<TickPlan, QuotaError> {
+    plan_tick_with_settings(records, detections, tick, now, &Settings::default())
+}
+pub fn plan_tick_with_settings(
+    records: &[AccountRecord],
+    detections: &[Detection],
+    tick: &QuotaTick,
+    now: i64,
+    settings: &Settings,
+) -> Result<TickPlan, QuotaError> {
+    use provenant_config::DomainConfig;
+    if !settings.validate().is_empty() {
+        return Err(QuotaError::Invalid("scheduling settings"));
+    }
+    validate_inputs(records, detections)?;
+    let selected = |id: &str| tick.adapter.as_ref().is_none_or(|s| s == id);
+    let mut drops = Vec::new();
+    for record in records {
+        if selected(&record.account.adapter)
+            && detections.iter().any(|d| {
+                d.adapter == record.account.adapter
+                    && d.accounts.as_ref().is_some_and(|accounts| {
+                        !accounts.iter().any(|a| {
+                            a.adapter == record.account.adapter
+                                && a.account_key == record.account.account_key
+                        })
+                    })
+            })
+        {
+            drops.push(UpdateIntent {
+                account: record.account.clone(),
+                expected: Some(record.clone()),
+                replacement: None,
+            });
+        }
+    }
+    let mut cheap = Vec::new();
+    let mut solo = Vec::new();
+    for account in detections
+        .iter()
+        .filter(|d| selected(&d.adapter))
+        .filter_map(|d| d.accounts.as_ref())
+        .flatten()
+    {
+        let empty = AccountRecord::empty(account.clone());
+        let current = records
+            .iter()
+            .find(|r| {
+                r.account.adapter == account.adapter && r.account.account_key == account.account_key
+            })
+            .unwrap_or(&empty);
+        if next_due(current, tick.trigger, tick.power)?.is_some_and(|due| due <= now) {
+            if account.adapter == "agy" {
+                solo.push(vec![account.clone()]);
+            } else {
+                cheap.push(account.clone());
+            }
+        }
+    }
+    let mut batches = cheap
+        .chunks(settings.max_parallel as usize)
+        .map(<[AccountScope]>::to_vec)
+        .collect::<Vec<_>>();
+    batches.extend(solo);
+    Ok(TickPlan {
+        drops,
+        batches,
+        deadline_unix_seconds: add(now, settings.wall_budget_seconds)?,
+    })
+}
+fn validate_inputs(records: &[AccountRecord], detections: &[Detection]) -> Result<(), QuotaError> {
+    if records.len() > MAX_ACCOUNTS || detections.len() > MAX_ACCOUNTS {
+        return Err(QuotaError::Invalid("account bound"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for record in records {
+        record.validate()?;
+        if !seen.insert((&record.account.adapter, &record.account.account_key)) {
+            return Err(QuotaError::Invalid("duplicate account"));
+        }
+    }
+    seen.clear();
+    let mut adapters = std::collections::BTreeSet::new();
+    let mut count = 0;
+    for detection in detections {
+        if detection.accounts.is_some()
+            && matches!(
+                detection.status,
+                QuotaStatus::Unknown
+                    | QuotaStatus::AuthRequired
+                    | QuotaStatus::Unsupported
+                    | QuotaStatus::Stale
+            )
+        {
+            return Err(QuotaError::Invalid(
+                "failed detection cannot assert accounts",
+            ));
+        }
+        if !component(&detection.adapter) || !adapters.insert(&detection.adapter) {
+            return Err(QuotaError::Invalid("duplicate adapter"));
+        }
+        for account in detection.accounts.iter().flatten() {
+            account.validate()?;
+            count += 1;
+            if count > MAX_ACCOUNTS
+                || account.adapter != detection.adapter
+                || !seen.insert((&account.adapter, &account.account_key))
+            {
+                return Err(QuotaError::Invalid("detected account"));
+            }
+        }
+    }
+    Ok(())
+}
+pub fn report(
+    records: &[AccountRecord],
+    detections: &[Detection],
+    query: &QuotaQuery,
+    now: i64,
+    path: String,
+) -> Result<QuotaReport, QuotaError> {
+    validate_inputs(records, detections)?;
+    let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
+    let mut accounts = Vec::new();
+    for record in records.iter().filter(|r| selected(&r.account.adapter)) {
+        let age = record.snapshot.as_ref().map(|s| {
+            u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
+        });
+        let fresh = record.snapshot.as_ref().is_some_and(|s| {
+            s.observed_unix_seconds <= now
+                && age.is_some_and(|a| {
+                    a < interval(&record.account.adapter, Trigger::Timer, Power::Ac).unwrap_or(0)
+                })
+        });
+        let status = match &record.snapshot {
+            Some(snapshot) if fresh => snapshot.status,
+            Some(_) => QuotaStatus::Stale,
+            None if record.last_error == Some(ProbeFailure::Auth) => QuotaStatus::AuthRequired,
+            None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
+            None => QuotaStatus::Unknown,
+        };
+        accounts.push(AccountRow {
+            account: record.account.clone(),
+            snapshot: record.snapshot.clone(),
+            status,
+            age_seconds: age,
+            next_due_unix_seconds: next_due(record, Trigger::Timer, Power::Ac)?.map(|d| d.max(now)),
+            refreshing: record
+                .claim
+                .as_ref()
+                .is_some_and(|c| c.deadline_unix_seconds > now),
+            error: record.last_error,
+        });
+    }
+    let sources = detections
+        .iter()
+        .filter(|d| selected(&d.adapter) && d.accounts.as_ref().is_none_or(Vec::is_empty))
+        .map(|d| SourceRow {
+            adapter: d.adapter.clone(),
+            status: d.status,
+            error: (d.status == QuotaStatus::Unsupported).then_some(ProbeFailure::Disabled),
+            next_due_unix_seconds: None,
+        })
+        .collect::<Vec<_>>();
+    let known = accounts
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.status,
+                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+            )
+        })
+        .count() as u64;
+    let refreshing_ids = accounts
+        .iter()
+        .filter(|a| a.refreshing)
+        .map(|a| format!("{}/{}", a.account.account_key, a.account.adapter))
+        .collect();
+    let next_due_unix_seconds = accounts
+        .iter()
+        .filter_map(|a| a.next_due_unix_seconds)
+        .min();
+    Ok(QuotaReport {
+        schema_version: 1,
+        generated_unix_seconds: now,
+        coverage: Coverage {
+            total: (accounts.len() + sources.len()) as u64,
+            known,
+        },
+        accounts,
+        sources,
+        refreshing_ids,
+        next_due_unix_seconds,
+        report_path: path,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn account() -> AccountScope {
+        AccountScope {
+            adapter: "claude".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        }
+    }
+    #[test]
+    fn manual_respects_floor_backoff_and_expired_claims() {
+        let mut r = AccountRecord::empty(account());
+        r.last_attempt_unix_seconds = Some(100);
+        r.backoff_until_unix_seconds = Some(400);
+        r.claim = Some(RefreshClaim {
+            token: "old".into(),
+            deadline_unix_seconds: 155,
+        });
+        assert_eq!(next_due(&r, Trigger::Manual, Power::Ac).unwrap(), Some(400));
+        let claim = reserve(Some(&r), &r.account, 400, "new", Trigger::Manual, Power::Ac).unwrap();
+        assert!(claim.check(Some(&r)).is_ok());
+        assert_eq!(
+            claim
+                .replacement
+                .as_ref()
+                .unwrap()
+                .claim
+                .as_ref()
+                .unwrap()
+                .deadline_unix_seconds,
+            455
+        );
+        assert!(matches!(
+            reserve(Some(&r), &r.account, 399, "new", Trigger::Manual, Power::Ac),
+            Err(QuotaError::Conflict)
+        ));
+    }
+    #[test]
+    fn backoff_has_bounded_exponential_and_retry_after_floor() {
+        assert_eq!(backoff(ProbeFailure::Network, 1, None), 120);
+        assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
+        assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
+        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 3600);
+        assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
+    }
+    #[test]
+    fn completion_rejects_late_claim_and_keeps_good_snapshot_on_failure() {
+        let a = account();
+        let mut r = AccountRecord::empty(a.clone());
+        r.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: a.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 50,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+        });
+        let intent = reserve(Some(&r), &a, 400, "claim", Trigger::Manual, Power::Ac).unwrap();
+        let current = intent.replacement.unwrap();
+        assert!(matches!(
+            complete(&current, "claim", 456, Err(ProbeFailure::Network), None),
+            Err(QuotaError::Conflict)
+        ));
+        let failed = complete(&current, "claim", 420, Err(ProbeFailure::Network), None).unwrap();
+        assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
+        assert!(failed.check(Some(&r)).is_err());
     }
 }
-pub fn activity(
-    provider: &str,
-    identity_dir: &Path,
-    now: Timestamp,
-    home: &Path,
-    timezone: &TimeZone,
-) -> Option<f64> {
-    activity_paths(provider, identity_dir, now, home, timezone)
-        .iter()
-        .filter_map(|p| {
-            fs::metadata(p)
-                .ok()?
-                .modified()
-                .ok()
-                .map(|m| match m.duration_since(UNIX_EPOCH) {
-                    Ok(d) => d.as_secs_f64(),
-                    Err(e) => -e.duration().as_secs_f64(),
-                })
-        })
-        .filter(|v| *v != 0.0)
-        .max_by(f64::total_cmp)
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+    fn account(adapter: &str, key: &str) -> AccountScope {
+        AccountScope {
+            adapter: adapter.into(),
+            account_key: key.into(),
+            label: "work".into(),
+        }
+    }
+    #[test]
+    fn label_change_keeps_account_and_refresh_schedule() {
+        let mut record = AccountRecord::empty(account("claude", "work"));
+        record.last_attempt_unix_seconds = Some(90);
+        let mut renamed = record.account.clone();
+        renamed.label = "renamed".into();
+        let plan = plan_tick(
+            &[record],
+            &[Detection {
+                adapter: "claude".into(),
+                accounts: Some(vec![renamed]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaTick {
+                adapter: None,
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            100,
+        )
+        .unwrap();
+        assert!(plan.drops.is_empty());
+        assert!(plan.batches.is_empty());
+    }
+    #[test]
+    fn detection_removes_only_authoritatively_absent_accounts_and_batches_probes() {
+        let records = [AccountRecord::empty(account("claude", "old"))];
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let unknown = [Detection {
+            adapter: "claude".into(),
+            accounts: None,
+            status: QuotaStatus::Unknown,
+        }];
+        assert!(
+            plan_tick(&records, &unknown, &tick, 100)
+                .unwrap()
+                .drops
+                .is_empty()
+        );
+        let detected = [
+            Detection {
+                adapter: "claude".into(),
+                accounts: Some(
+                    ["a", "b", "c", "d"]
+                        .map(|key| account("claude", key))
+                        .into(),
+                ),
+                status: QuotaStatus::Available,
+            },
+            Detection {
+                adapter: "agy".into(),
+                accounts: Some(vec![account("agy", "a")]),
+                status: QuotaStatus::Available,
+            },
+        ];
+        let plan = plan_tick(&records, &detected, &tick, 100).unwrap();
+        assert_eq!(plan.drops.len(), 1);
+        assert_eq!(
+            plan.batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 1, 1]
+        );
+        assert_eq!(plan.deadline_unix_seconds, 155);
+        let low = QuotaTick {
+            power: Power::Low,
+            ..tick
+        };
+        assert!(
+            plan_tick(&records, &detected, &low, 100)
+                .unwrap()
+                .batches
+                .iter()
+                .flatten()
+                .all(|a| a.adapter != "agy")
+        );
+    }
+    #[test]
+    fn competing_claims_and_stale_completions_cannot_overwrite() {
+        let r = AccountRecord::empty(account("claude", "work"));
+        let first = reserve(
+            Some(&r),
+            &r.account,
+            100,
+            "first",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
+        let second = reserve(
+            Some(&r),
+            &r.account,
+            100,
+            "second",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
+        let claimed = first.replacement.as_ref().unwrap();
+        assert!(second.check(Some(claimed)).is_err());
+        assert!(
+            reserve(
+                Some(claimed),
+                &r.account,
+                110,
+                "third",
+                Trigger::Manual,
+                Power::Ac
+            )
+            .is_err()
+        );
+        let next = reserve(
+            Some(claimed),
+            &r.account,
+            160,
+            "third",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let late = complete(claimed, "first", 120, Err(ProbeFailure::Network), None).unwrap();
+        assert!(late.check(Some(&next)).is_err());
+        // Detection removed the first claim; the same account now starts a new
+        // refresh with the same revision but a different claim identity.
+        let recreated = reserve(
+            None,
+            &r.account,
+            125,
+            "recreated",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        assert_eq!(recreated.revision, claimed.revision);
+        assert!(late.check(Some(&recreated)).is_err());
+
+        assert!(matches!(
+            reserve(
+                Some(&AccountRecord {
+                    revision: u64::MAX,
+                    ..r.clone()
+                }),
+                &r.account,
+                100,
+                "overflow",
+                Trigger::Manual,
+                Power::Ac
+            ),
+            Err(QuotaError::NumberOutOfRange)
+        ));
+    }
+    #[test]
+    fn expired_claim_is_not_rendered_refreshing_and_bad_state_is_rejected() {
+        let mut record = AccountRecord::empty(account("claude", "work"));
+        record.claim = Some(RefreshClaim {
+            token: "old".into(),
+            deadline_unix_seconds: 100,
+        });
+        record.last_attempt_unix_seconds = Some(45);
+        let report = report(
+            &[record.clone()],
+            &[],
+            &QuotaQuery { adapter: None },
+            100,
+            "fixture".into(),
+        )
+        .unwrap();
+        assert!(report.refreshing_ids.is_empty());
+        assert!(!report.accounts[0].refreshing);
+        let mut value = serde_json::to_value(&record).unwrap();
+        value["revision"] = serde_json::json!("18446744073709551616");
+        assert!(AccountRecord::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        record.account.account_key = "../escape".into();
+        assert!(report_for_bad(record).is_err());
+    }
+    fn report_for_bad(record: AccountRecord) -> Result<QuotaReport, QuotaError> {
+        report(
+            &[record],
+            &[],
+            &QuotaQuery { adapter: None },
+            100,
+            "fixture".into(),
+        )
+    }
 }

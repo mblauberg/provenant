@@ -3,8 +3,10 @@
 pub mod check;
 pub mod domains;
 pub mod fabric;
+pub mod quota;
 pub mod route;
 pub use fabric::Fabric;
+pub use quota::Quota;
 pub use route::Route;
 mod grammar;
 mod render;
