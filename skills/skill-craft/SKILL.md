@@ -35,7 +35,7 @@ Both branches follow this without restating it in two voices:
 - **Token model, three-tier:** always-loaded frontmatter, triggered branch
   body, and entrypoint references loaded at one hop. Reference documents may
   link to sibling references, but that depth is not recursively enforced by
-  `check_harness.py`.
+  `provenant check harness`.
 - **Tier placement:** a rule is applied reliably only if it sits in the
   always-loaded `SKILL.md` core rules. A rule buried in a reference file is
   skipped, because references load late and deep. When a skill keeps missing a

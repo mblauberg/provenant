@@ -196,11 +196,7 @@ cannot substitute for these local typed artifacts.
 The profile gate uses independently authored positive, negative and boundary
 cases rather than receipts emitted by the reference generator:
 
-```sh
-scripts/check-harness
-```
-
-The harness gate includes the delivery scenario replay. Every expected outcome
-must match. The dataset covers each base profile in both directions, exercises
+Hosted CI runs the delivery scenario replay and records evidence against the
+pull request head. Every expected outcome must match. The dataset covers each base profile in both directions, exercises
 the high-stakes overlay twice, and repeats stochastic or boundary cases where
 reproducibility matters.

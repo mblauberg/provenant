@@ -380,33 +380,7 @@ pub enum Rules {
     Academic,
     Legal,
 }
-#[derive(Debug, Subcommand)]
-pub enum Check {
-    Config(Page),
-    Install {
-        #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
-        source: Option<PathBuf>,
-        #[command(flatten)]
-        page: Page,
-    },
-    Harness(Page),
-    Release {
-        #[arg(long, requires = "head")]
-        base: Option<GitOid>,
-        #[arg(long, requires = "base")]
-        head: Option<GitOid>,
-        #[command(flatten)]
-        page: Page,
-    },
-    Writing {
-        #[arg(required = true, num_args = 1..=256)]
-        paths: Vec<PathBuf>,
-        #[arg(long, value_enum, default_value = "general")]
-        rules: Rules,
-        #[command(flatten)]
-        page: Page,
-    },
-}
+pub use crate::check::Check;
 #[derive(Debug, Subcommand)]
 pub enum Hook {
     #[command(subcommand)]
@@ -433,7 +407,7 @@ pub enum Internal {
     },
 }
 
-fn absolute(value: PathBuf) -> Result<PathBuf, &'static str> {
+pub(crate) fn absolute(value: PathBuf) -> Result<PathBuf, &'static str> {
     let path = value;
     if !path.is_absolute() {
         return Err("expected an absolute path");

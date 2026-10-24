@@ -216,37 +216,35 @@ Run the checkout gates, or require exact-head `ci-status`:
 For a pull request branch, run only the tests covering changed files; the hosted runner runs the gates on the pull request head, and for heavy files such as `tests/test_cf_dispatch.py`, run only the named failing test.
 
 ```sh
-scripts/check-harness
+provenant check config
+provenant check install
+provenant check harness
+provenant check release
 npm run check
 scripts/static-security-check.py
-scripts/public-release-check
 git diff --check
 ```
 
-`provenant gate` runs exactly that list as one composite, with per-step
-pass/fail output and a non-zero exit when any step fails (`scripts/gate`
-owns the steps; a contract test binds them to this block).
+Each check returns ordered findings, exits 1 for findings, 2 for malformed
+command input and 3 for unreadable evidence. Use `--limit N` and the returned
+`--cursor TOKEN` for further pages. Changing inputs or rules invalidates a
+cursor. Full test suites and release scans run in hosted CI.
 
-Audit every ref reachable in the local clone with:
-
-```sh
-scripts/public-release-check --history
-```
-
-Before a public push, prove the exact non-empty commit range selected for
-publication. `origin/main` must be an ancestor of `HEAD`:
+Before publication, scan an exact nonempty ancestor range as well as the
+tracked working files and raw HEAD. Pin both endpoints:
 
 ```sh
-scripts/public-release-check --publication-range \
-  "$(git rev-parse --verify --end-of-options 'origin/main^{commit}')" \
-  "$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"
+provenant check release \
+  --base "$(git rev-parse --verify --end-of-options 'origin/main^{commit}')" \
+  --head "$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"
 ```
 
-The publication-range check applies the public-tree policy to the selected
-`HEAD` and scans the selected commits, their trees, messages and author email.
-It is target-scoped evidence: it deliberately ignores the checkout, index and
-unrelated private refs. The script owns the hardened raw-object verification
-details; default no-flag mode still checks the checkout and index.
+The check includes every selected commit's raw author, committer and message
+bytes and every blob in its tree, including files added and deleted within
+the range. It also checks publication heads for required legal files and
+rejects private paths, symlinks, secrets, personal home paths and evidence
+that cannot be read within the byte bounds. It reads no unrelated refs and
+never fetches, publishes or rewrites history.
 
 Publication used a fresh root commit, `a39c7b7e`. History rewrites stay gated
 behind explicit user authority. Never push private pre-publication refs merely

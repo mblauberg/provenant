@@ -25,7 +25,7 @@ body:
     attributes:
       label: Commit or version
       description: 'Output of: git rev-parse --short HEAD (or the released version string)'
-      placeholder: 0ea935f
+      placeholder: "0ea935f"
     validations:
       required: true
 

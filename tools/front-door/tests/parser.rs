@@ -101,10 +101,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
 }
 #[test]
 fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Result {
-    use std::{
-        fs,
-        os::unix::fs::{PermissionsExt, symlink},
-    };
+    use std::{fs, os::unix::fs::symlink};
     let mut rig = TestRig::new()?;
     let alias = rig.root.join("legacy-alias");
     symlink(rig.home.join(".agents"), &alias)?;
@@ -120,25 +117,16 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     )?;
     assert_eq!(code(&out), 2);
     let invalid = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&invalid), 4);
-    fs::write(rig.project.join("HARNESS.md"), "# fixture")?;
-    fs::create_dir_all(rig.project.join("scripts"))?;
-    let checker = rig.project.join("scripts/check-harness");
-    fs::write(&checker, "#!/bin/sh\nexit 97\n")?;
-    fs::set_permissions(&checker, fs::Permissions::from_mode(0o755))?;
+    assert_eq!(code(&invalid), 0);
     rig.env.push(("GIT_DIR".into(), "/invalid/redirect".into()));
     let check = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&check), 4); // Selected caller; never execute the Python checker.
+    assert_eq!(code(&check), 0);
     let value: serde_json::Value = serde_json::from_slice(&check.stdout.bytes)?;
     assert_eq!(value["command"], "check harness");
     let fake = rig.project.join("fake");
     fs::create_dir_all(fake.join("scripts"))?;
     fs::write(fake.join(".git"), "not a Git worktree file")?;
     fs::write(fake.join("HARNESS.md"), "# fixture")?;
-    fs::copy(
-        rig.project.join("scripts/check-harness"),
-        fake.join("scripts/check-harness"),
-    )?;
     let invalid = rig.execute_os(
         std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
         &[
@@ -173,13 +161,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
 
 #[test]
 fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
-    use std::{fs, os::unix::fs::PermissionsExt};
     let rig = TestRig::new()?;
-    fs::write(rig.project.join("HARNESS.md"), "# fixture")?;
-    fs::create_dir_all(rig.project.join("scripts"))?;
-    let checker = rig.project.join("scripts/check-harness");
-    fs::write(&checker, "#!/bin/sh\nexit 97\n")?;
-    fs::set_permissions(checker, fs::Permissions::from_mode(0o755))?;
     let attempt = format!(
         "{}/{}/{}",
         "11".repeat(16),
@@ -219,10 +201,6 @@ fn every_cli_owned_binding_refuses_until_its_owner_is_connected() -> Result {
         vec!["worktree", "create", "fixture"],
         vec!["worktree", "list"],
         vec!["worktree", "remove", "fixture"],
-        vec!["check", "config"],
-        vec!["check", "install"],
-        vec!["check", "harness"],
-        vec!["check", "release"],
         vec!["check", "writing", "fixture.md"],
         vec!["hook", "claude", "pre-tool-use"],
         vec!["hook", "claude", "pre-compact"],

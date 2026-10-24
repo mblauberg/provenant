@@ -24,7 +24,7 @@ changing memory policy.
   registered worktree shares its repository's project but keeps its own
   working directory. `AGENT_FABRIC_LABEL` gives several agents of one
   provider separate inboxes.
-- **Checks.** Heavy checks, such as `scripts/check-harness` and full test
+- **Checks.** Heavy checks, such as release scans and full test
   suites, run in GitHub Actions rather than on a contributor's or agent's
   machine. Push the branch, open the pull request and let CI run them.
   Locally, run only fast targeted checks: static lint, type checks and the

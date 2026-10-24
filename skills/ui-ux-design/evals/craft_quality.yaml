@@ -1,5 +1,5 @@
-# Output-quality rubric cases for ui-ux-design. Unlike trigger_cases.yaml and
-# regression_cases.yaml, these do not test routing: each case runs the skill on
+# Output-quality rubric cases for ui-ux-design. Unlike trigger_cases.json and
+# regression_cases.json, these do not test routing: each case runs the skill on
 # its prompt, against its fixture where one is given, and an independent grader
 # scores the produced artifact against the rubric. The grader uses a different model family from the run, cites the
 # artifact location (file, capture, or frame) behind each verdict, and marks

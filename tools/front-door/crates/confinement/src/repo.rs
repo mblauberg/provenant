@@ -201,10 +201,15 @@ pub struct VerifiedRepo {
     gitdir_backlink_bytes: Option<Vec<u8>>,
     probe_data: Option<RepoProbeData>,
     config_digest: Option<[u8; 32]>,
+    native_alternates: bool,
 }
 
 impl VerifiedRepo {
-    fn open_structure(fs: Arc<dyn SafeFs>, path: impl AsRef<Path>) -> Result<Self, RepoError> {
+    fn open_structure(
+        fs: Arc<dyn SafeFs>,
+        path: impl AsRef<Path>,
+        native_alternates: bool,
+    ) -> Result<Self, RepoError> {
         let (root_path, root) = open_canonical_anchor(fs.as_ref(), path.as_ref(), false)?;
         let root_identity = root.metadata()?;
         if root_identity.kind != FileKind::Directory
@@ -300,9 +305,11 @@ impl VerifiedRepo {
             }
         }
 
-        reject_alternates(private.as_ref())?;
-        if !private_identity.same_identity(&common_identity) {
-            reject_alternates(common.as_ref())?;
+        if !native_alternates {
+            reject_alternates(private.as_ref())?;
+            if !private_identity.same_identity(&common_identity) {
+                reject_alternates(common.as_ref())?;
+            }
         }
 
         Ok(Self {
@@ -322,6 +329,7 @@ impl VerifiedRepo {
             gitdir_backlink_bytes,
             probe_data: None,
             config_digest: None,
+            native_alternates,
         })
     }
 
@@ -335,7 +343,19 @@ impl VerifiedRepo {
     where
         E: From<RepoError>,
     {
-        let mut repo = Self::open_structure(fs, path).map_err(E::from)?;
+        Self::open_mode(fs, path, false, probe)
+    }
+
+    pub(crate) fn open_mode<E>(
+        fs: Arc<dyn SafeFs>,
+        path: impl AsRef<Path>,
+        native_alternates: bool,
+        probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
+    ) -> Result<Self, E>
+    where
+        E: From<RepoError>,
+    {
+        let mut repo = Self::open_structure(fs, path, native_alternates).map_err(E::from)?;
         let config_before = repo.configuration_digest().map_err(E::from)?;
         repo.probe_data = Some(probe(&repo)?);
         let config_after = repo.configuration_digest().map_err(E::from)?;
@@ -406,7 +426,8 @@ impl VerifiedRepo {
     }
 
     pub fn revalidate(&self) -> Result<(), RepoError> {
-        let current = Self::open_structure(self.fs.clone(), &self.root_path)?;
+        let current =
+            Self::open_structure(self.fs.clone(), &self.root_path, self.native_alternates)?;
         let Some(config_digest) = self.config_digest else {
             return Err(RepoError::Unprobed);
         };
@@ -426,6 +447,18 @@ impl VerifiedRepo {
             return Err(RepoError::IdentityChanged);
         }
         Ok(())
+    }
+}
+
+/// Read-only Git evidence capability. Native alternates belong to Git's object
+/// resolution contract; this wrapper cannot be passed to any mutation service.
+pub struct ReadOnlyRepo(pub(crate) VerifiedRepo);
+impl ReadOnlyRepo {
+    pub fn root_path(&self) -> &Path {
+        self.0.root_path()
+    }
+    pub fn root_dir(&self) -> &dyn SafeDir {
+        self.0.root_dir()
     }
 }
 
@@ -454,7 +487,7 @@ pub fn verify_worktree(
     path: impl AsRef<Path>,
 ) -> Result<VerifiedWorktree, RepoError> {
     repo.revalidate()?;
-    let mut worktree = VerifiedRepo::open_structure(repo.fs.clone(), path)?;
+    let mut worktree = VerifiedRepo::open_structure(repo.fs.clone(), path, false)?;
     if repo.probe_data.is_none() || repo.config_digest.is_none() {
         return Err(RepoError::Unprobed);
     }

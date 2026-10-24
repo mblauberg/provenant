@@ -16,7 +16,7 @@ def test_skill_promotion_uses_structural_form_and_routing_fixture():
     proposal_fields = {
         field["id"]: field for field in proposal["body"] if "id" in field
     }
-    cases = yaml.safe_load(read("skills/skill-craft/evals/trigger_cases.yaml"))["cases"]
+    cases = json.loads(read("skills/skill-craft/evals/trigger_cases.json"))["cases"]
     promotion = next(
         case for case in cases
         if case["relation"] == "boundary" and case["expected"]["primary_skill"] == "skill-craft"

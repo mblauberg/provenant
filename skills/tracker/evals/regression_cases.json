@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "target_skill": "tracker",
+  "cases": [
+    {
+      "id": "r126",
+      "relation": "positive",
+      "prompt": "File this new epic on the board, set its priority field to the repository's documented default, and leave promotion to the owner's rule.",
+      "tags": [
+        "direct",
+        "board"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "A priority or horizon field is optional and repository-declared; agents use its documented default and promotion rule."
+    }
+  ]
+}
