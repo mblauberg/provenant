@@ -528,6 +528,7 @@ pub struct ProviderCommand {
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
+    pub secret_input: Option<crate::exec::SecretInput>,
     /// Opaque, bounded reference for the composed terminal holder. It travels
     /// on the handoff pipe only and is never written to the launch summary.
     pub holder_context: Vec<u8>,

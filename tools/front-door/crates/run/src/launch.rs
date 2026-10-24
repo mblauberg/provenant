@@ -26,12 +26,13 @@ pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
     }
 }
 
-/// One prepared provider invocation. Secrets travel only in `environment`,
-/// in memory and on the handoff pipe.
+/// One prepared provider invocation. Secret inputs stay in memory and travel
+/// on the handoff pipe, then a dedicated read pipe into the provider.
 pub struct PreparedLaunch {
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub stdin: Vec<u8>,
+    pub secret_input: Option<provenant_supervisor::exec::SecretInput>,
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
@@ -521,6 +522,7 @@ impl RunStore {
             environment: plan.environment,
             cwd: plan.cwd,
             stdin: plan.stdin,
+            secret_input: plan.secret_input,
             holder_context,
         };
         let capture = capture_plan(task);

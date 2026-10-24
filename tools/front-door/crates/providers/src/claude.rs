@@ -407,7 +407,7 @@ fn refresh_account(
 }
 
 /// Claude uses the selected config directory. The host reads its login token
-/// and passes it in `CLAUDE_CODE_OAUTH_TOKEN`, so the keychain stays
+/// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Writers additionally deny keychain services and the security
 /// executable, use private configuration and ask Claude to scrub subprocess
 /// credentials. The shell_enabled knob retains the file-tools-only fallback.
@@ -419,7 +419,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // No credential path is granted: the token arrives in the environment.
+    // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -461,7 +461,7 @@ fn prepare(
     let shell = shell_enabled("claude", access, session);
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
-        Access::WorktreeWrite if shell => ("bypassPermissions", "Read,Grep,Glob,Edit,Write,Bash"),
+        Access::WorktreeWrite if shell => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
         Access::WorktreeWrite => ("acceptEdits", "Read,Grep,Glob,Edit,Write"),
     };
     argv.extend(
@@ -487,7 +487,13 @@ fn prepare(
     let transcript_dir = project.join(&session_id);
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
-    let mut setup = input.provenant.claude(scratch, &mut argv)?;
+    // Scrub mode forces default permissions, regardless of --permission-mode.
+    let allowed_tools = if shell {
+        "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+    } else {
+        "mcp__fabric__*"
+    };
+    let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
 
     let path = if shell {
         format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
@@ -501,7 +507,6 @@ fn prepare(
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
             ("DISABLE_AUTOUPDATER", "1".as_ref()),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".as_ref()),
-            ("CLAUDE_CODE_OAUTH_TOKEN", token.access.as_ref()),
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
@@ -542,6 +547,10 @@ fn prepare(
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        secret_input: Some(provenant_supervisor::exec::SecretInput {
+            descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
+            bytes: token.access.as_bytes().to_vec(),
+        }),
         cwd: input.cwd.to_owned(),
         setup,
         profile: ProviderProfile {

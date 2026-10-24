@@ -25,7 +25,6 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -398,6 +397,7 @@ fn spawn_identified(
     env: &[(OsString, OsString)],
     boot: &str,
     permit: Permit,
+    secret: Option<&child::SecretPipe>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
@@ -410,12 +410,11 @@ fn spawn_identified(
     unsafe {
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
-    child::configure_command(
-        &mut command,
-        &[lease.handoff_file().as_fd()],
-        Some(env),
-        false,
-    )?;
+    let mut pass = vec![lease.handoff_file().as_fd()];
+    if let Some(pipe) = secret {
+        pass.push(pipe.fd());
+    }
+    child::configure_command(&mut command, &pass, Some(env), false)?;
     let worker = std::thread::Builder::new()
         .name("provider-identity".into())
         .spawn(move || {
@@ -499,15 +498,12 @@ pub(crate) struct ProviderGroup {
 }
 impl ProviderGroup {
     pub(crate) fn spawn(
-        argv: &[OsString],
-        env: &[(OsString, OsString)],
-        cwd: &Path,
-        input: bool,
-        capture: crate::custody::CapturePlan,
+        spec: super::raw_exec::SpawnSpec<'_>,
         lease: &crate::fs::LockGuard,
         boot: &str,
     ) -> io::Result<Self> {
-        let (program, args) = argv
+        let (program, args) = spec
+            .argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty provider argv"))?;
         let reaper = Reaper::new(1)?;
@@ -517,25 +513,36 @@ impl ProviderGroup {
                 "provider reaper admission is full",
             )
         })?;
+        let secret = spec.secret_input.map(child::SecretPipe::new).transpose()?;
+        let mut env = spec.env.map(<[_]>::to_vec).unwrap_or_default();
+        if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {
+            env = pipe.environment(input, &env);
+        }
         let mut command = Command::new(program);
         command
             .args(args)
             .env_clear()
             .envs(env.iter().map(|(key, value)| (key, value)))
-            .current_dir(cwd)
+            .current_dir(spec.cwd)
             .process_group(0)
-            .stdin(if input { Stdio::piped() } else { Stdio::null() })
-            .stdout(if capture.stdout.piped() {
+            .stdin(if spec.input {
                 Stdio::piped()
             } else {
                 Stdio::null()
             })
-            .stderr(if capture.stderr.piped() {
+            .stdout(if spec.capture_stdout {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(if spec.capture_stderr {
                 Stdio::piped()
             } else {
                 Stdio::null()
             });
-        let (child, identity, permit) = spawn_identified(command, lease, env, boot, permit)?;
+        let (child, identity, permit) =
+            spawn_identified(command, lease, &env, boot, permit, secret.as_ref())?;
+        drop(secret);
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,
             _ => {

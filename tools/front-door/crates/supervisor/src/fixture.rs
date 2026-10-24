@@ -377,12 +377,15 @@ impl ReaperFixture {
         let env = environment(root);
         let child = crate::sys::raw_exec::OwnedPid::spawn(
             permit,
-            &argv,
-            Some(&env),
-            root,
-            false,
-            false,
-            false,
+            crate::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root,
+                input: false,
+                secret_input: None,
+                capture_stdout: false,
+                capture_stderr: false,
+            },
         )?;
         drop(child);
         Ok(())

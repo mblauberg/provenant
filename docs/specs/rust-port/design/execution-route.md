@@ -373,7 +373,7 @@ adds only its verified permission/config arguments; no raw caller argv.
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
 | Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={...} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` plus dispatch lineage; `PATH=~/.cargo/bin:/usr/bin:/bin`. `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` plus dispatch lineage; default config directory, with the access token read by the host and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
+| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` plus dispatch lineage; default config directory, with the access token read by the host and delivered through a pipe, and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
@@ -579,7 +579,9 @@ macOS 27.0.1 arm64, 2026-10-24):
   directory reads that service with its path-digest suffix and sets
   `CLAUDE_CONFIG_DIR`, so accounts never cross). Stdout is captured in memory
   and never logged or stored; only `accessToken` and `expiresAt` are kept, and
-  the token is passed as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15
+  the token is passed through an inherited pipe named by
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. No token value enters the child's
+  start environment. If it expires within 15
   minutes the host first runs the CLI once outside the sandbox (`claude -p x
   --model provenant-refresh-probe --max-turns 1`: the CLI refreshes its stored
   token, then the API rejects the model, so no usage is spent) and reads
@@ -650,33 +652,74 @@ The required macOS `lane_prepare_isolates_nested_state` case runs `git
 These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude writer Bash defaults on for fresh and resume modes through the existing
-activation matrix's `shell_enabled` knob. Setting that knob false restores
-file tools only. This explicit CLAUDE-SHELL decision supersedes the earlier
-recorder-only shell gate in #1425/#1428; access/session activation still uses
-its original live captures, which do not acquire shell-proof claims.
-The host-read `CLAUDE_CODE_OAUTH_TOKEN` stays in memory, with
-`CLAUDE_CONFIG_DIR` in retained private state. R7 takes precedence over
-#1414's credential-file suggestion. Writers use `bypassPermissions` and
-`Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, denying
-`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`.
-Keychain files have no read grant. The shell observation rows describe the
-native profile contract exercised in macOS CI, not new live CLI captures.
+Claude writer Bash is default-off for fresh and resume modes through the
+activation matrix's `shell_enabled` knob. The earlier default-on decision is
+superseded by REVIEW-FIX-2: each enabled shell mode must cite its own live
+capture proving successful Bash execution, `subprocess_env_scrub: true` and
+an identified CLI version. Historical file-tool captures prove none of these.
+Recording builds can prepare the shell candidate without activating it.
+R7 takes precedence over #1414's credential-file suggestion.
 
-Writer launches set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. The
-[Claude environment reference](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
-documents credential scrubbing for Bash, hooks and stdio MCP servers, with
-broader name/value filtering from version 2.1.251. The inspected host install
-is 2.1.310; the native regression does not execute that CLI or prove its scrub.
-Host acceptance must check the actual Bash child has no selected OAuth token,
-without printing it, and record the CLI version. An old CLI may ignore or
-incompletely implement this control. It is defence in depth, not OS-level
-isolation of the parent credential: macOS process-environment inspection is
-not excluded by this profile's `sysctl-read` allowance. The parent still holds
-the selected token and HTTPS egress remains any-host TCP 443. Token theft and
-exfiltration therefore remain residual risks. Other credentials stay outside
-the grants. This authorised default remains behind `shell_enabled`; no
-allowed-client keychain IPC proof or perfect shell-token isolation is claimed.
+The host delivers the selected OAuth token through a dedicated pipe and sets
+only `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` to its read descriptor number.
+`CLAUDE_CODE_OAUTH_TOKEN` is absent from the complete child environment. The
+supervisor bounds the pipe input to 512 bytes, closes the write end before
+spawn, inherits only the read end alongside the existing custody descriptor,
+and closes its own reader after spawn. All other descriptors remain
+close-on-exec. Closing the provider's reader before it spawns Bash belongs to
+Claude; our pipe is already at EOF after its token has been consumed. The
+inspected 2.1.310 binary implements this descriptor interface. This removes the
+token from macOS `KERN_PROCARGS2` start-environment inspection: Seatbelt's
+`sysctl-read` and process-info denials do not prevent that same-user access,
+so changing the sysctl rule is not a credential boundary.
+
+Shell candidates set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. In 2.1.310 this
+forces permission mode to `default`, ignoring bypass mode. Candidates therefore
+pass `--allowedTools Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*` explicitly,
+as well as the corresponding `--tools` list. Read-only and file-tool lanes keep
+their narrower MCP allow-list and tool list. Shell candidates deny
+`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`; keychain
+files have no read grant. Live acceptance must record fresh and resume Bash
+results, confirm the child has neither OAuth environment variable and record
+the CLI version. Native tests prove the pipe/argv/profile contracts, not the
+installed CLI's handling of inherited descriptors or subprocess scrubbing.
+Claude still holds the token in memory and has any-host HTTPS egress, so this
+does not claim perfect credential isolation from a compromised provider.
+
+The private `CLAUDE_CONFIG_DIR` is within writable provider state: Bash can
+modify it, and terminal staging cleanup retains it. Adapter resume with that
+same private-state root can read those changes. `--setting-sources ""` and
+`--strict-mcp-config` mitigate settings/MCP injection; the directory is not an
+immutable trust boundary. The current dispatch composition refuses continuation
+until it has a provider session, so this is not a claim of working run resume.
+
+The per-worktree Cargo cache is both writable and executable, and subsequent
+lanes for the same worktree incarnation reuse it. A planted
+`cargo-home/config.toml` or executable can affect later lane builds. Host code
+only prepares and anchors the cache; it never runs Cargo with that home or
+executes cache contents. Lane children execute those contents inside their
+confinement profile. CLT `usr/libexec/git-core` is readable but has no exec
+grant. `git status`, `git diff` and `git commit` are built-ins and need no
+helpers there; commands needing external Git helpers remain outside this grant.
+
+After the chair approves the pro account, quota and throwaway-worktree run,
+record both shell sessions from the repository root (the recorder does not
+flip `shell_enabled`):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/private/tmp CARGO_BUILD_JOBS=4
+export RUSTUP_TOOLCHAIN=1.99.1
+export CARGO_TARGET_DIR=/private/tmp/provenant-cargo-target-fix-v1-review-2
+cargo build --manifest-path tools/front-door/Cargo.toml -p provenant
+record_root=$(mktemp -d /private/tmp/provenant-claude-shell.XXXXXX)
+cargo run --manifest-path tools/front-door/Cargo.toml -p provenant-providers \
+  --features recording --example record -- claude worktree_write \
+  --account pro --model claude-haiku-5-5 --root "$record_root" \
+  --provenant "$CARGO_TARGET_DIR/debug/provenant" --assets "$PWD" --write
+```
+
+Review the redacted captures and the recorder's separate keychain-IPC gate
+before enabling either mode. No live recording was made by REVIEW-FIX-2.
 
 The native regression checks actual security-tool execution and synthetic
 keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume

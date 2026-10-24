@@ -307,6 +307,7 @@ fn start(
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        secret_input: None,
         holder_context: Vec::new(),
     };
     let handle = launch(
@@ -726,6 +727,7 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        secret_input: None,
         holder_context: Vec::new(),
     };
     cancel.cancel();
@@ -789,6 +791,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![b'p'; 256 * 1024],
+        secret_input: None,
         holder_context: Vec::new(),
     };
     let handle = launch(

@@ -89,6 +89,7 @@ fn prepare(
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        secret_input: None,
         cwd: input.cwd.to_owned(),
         setup: Vec::new(),
         profile: ProviderProfile {

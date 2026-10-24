@@ -51,6 +51,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         environment: fixture::environment(root),
         cwd: root.into(),
         stdin: vec![],
+        secret_input: None,
         holder_context: Vec::new(),
     };
     let handle = launch(
