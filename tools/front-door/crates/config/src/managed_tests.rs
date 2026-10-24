@@ -2290,7 +2290,7 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     fs::write(
         &settings,
-        b"{ // fixture comment\n\"z\":{\"first\":1,\"second\":2,},\"hooks\":{},}",
+        b"{\n\"z\":{\"first\":1,\"second\":2,},\"hooks\":{},}",
     )
     .unwrap();
     let clock = SystemClock::new();

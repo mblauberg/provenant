@@ -119,7 +119,7 @@ verify)
     echo "verified $task"
     ;;
 run)
-    route= split=acceptance limit=100
+    route='' split=acceptance limit=100
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --route) route=$2; shift 2 ;;
