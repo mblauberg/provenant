@@ -86,18 +86,28 @@ fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::V
     let lane = value["data"]["lanes"][0].clone();
     // Codex's fixture protocol carries no observed answering model. Prove the
     // confined process exited cleanly without waiving Run's identity gate.
-    assert!(lane["exit_code"] == 0, "{value}");
     let attempt = rig
         .state
         .join("runs")
         .join(lane["run_id"].as_str().ok_or("run id")?)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt id")?);
+    assert!(
+        lane["exit_code"] == 0,
+        "{value}\nprovider stderr: {}",
+        capture(&attempt.join("stderr.log"))?
+    );
     assert_eq!(
         fs::read(attempt.join("provider-state/compose-proof"))?,
         b"proved"
     );
     Ok((lane, attempt))
+}
+
+fn capture(path: &Path) -> Result<String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(8192).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Result {
@@ -180,12 +190,13 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
 pub(crate) fn provider() -> Result {
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
-    let cwd = std::env::current_dir()?;
+    let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let state = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     if prompt.ends_with("reader") || prompt.ends_with("reader-empty") {
         let primary = cwd.parent().and_then(Path::parent).ok_or("primary")?;
-        fs::read(primary.join(".git/config"))?;
+        fs::read(primary.join(".git/config"))
+            .map_err(|error| format!("common Git read: {error}"))?;
         let args: Vec<OsString> = [
             "/usr/bin/git",
             "--no-optional-locks",
@@ -199,7 +210,15 @@ pub(crate) fn provider() -> Result {
         let env: Vec<_> = std::env::vars_os().collect();
         let mut options = ExecOptions::new(&args, &cwd, std::time::Duration::from_secs(3));
         options.env = Some(&env);
-        assert_eq!(code(&SystemExecutor::new(1)?.execute(options)?), 0);
+        let output = SystemExecutor::new(1)?
+            .execute(options)
+            .map_err(|error| format!("Git status execution: {error}"))?;
+        assert_eq!(
+            code(&output),
+            0,
+            "Git status stderr: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
         denied(&primary.join(".git/config"))?;
         if prompt.ends_with("reader-empty") {
             denied(&cwd.join(".agent-run/locks/compose-lock"))?;
