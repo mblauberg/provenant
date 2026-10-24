@@ -371,7 +371,7 @@ adds no execution verbs and never calls old orchestrate scripts.
 Hooks are rows in cli's `HookSpec` table, invoked as `hook claude pre-compact`
 and `hook claude compact`, with host-native stdout/exit contracts rather than the CLI envelope. They read
 at most 1 MiB host JSON stdin and emit at most 8 KiB context. Advisory callbacks
-exit 0 even for missing/invalid state, with a bounded diagnostic. SessionStart
+exit 0 even for missing/invalid state, with a bounded diagnostic. When a read or clock step fails, the diagnostic names the cause as an OS kind and code or a typed error, never a path. SessionStart
 obtains the actual session ID from the host event and injects the validated key
 and this save command with the actual ID substituted:
 `provenant workflow session save <session-id> --file <checkpoint.md>`.
