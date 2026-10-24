@@ -420,8 +420,10 @@ prefilters must prove a superset. Retired skill-path prefixes and `--history`/an
 scans are not ported.
 
 `check writing PATHS… [--rules general|academic|legal]` calls workflow's
-data-driven writing rules beside each `SKILL.md`, reuses `Finding` and exits 1
-on findings. There is no `provenant lint`.
+data-driven writing rules beside each `SKILL.md` in the selected project
+checkout, so the check works in a confined lane without reading the installed
+release root. It reuses `Finding` and exits 1 on findings. There is no
+`provenant lint`.
 Date lint is a workspace test over Rust `#[test]` sources (ADR 0028 decision 7),
 with injected clocks or a local `timebomb: allow REASON` for deliberate dates;
 no `check dates`, Python AST or JS matching.

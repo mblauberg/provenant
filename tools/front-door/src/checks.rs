@@ -178,7 +178,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             provenant_cli::Rules::Academic => RuleSet::Academic,
             provenant_cli::Rules::Legal => RuleSet::Legal,
         };
-        let inspection = writing::inspect(&assets, &project, &paths, set)?;
+        let inspection = writing::inspect(&project, &project, &paths, set)?;
         let evidence = inspection
             .evidence
             .iter()
