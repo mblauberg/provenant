@@ -60,8 +60,9 @@ project-local JSON document path. Status and cancel take its `id`. The CLI uses
 `provenant fabric graph run|status|cancel|resume`. Calls advance bounded work
 under a checkpoint lock and return typed graph state. They do not start a daemon.
 
-Each node declares `access: read_only|worktree_write`; writers name an absolute
-worktree which the execution owner must verify and confine before launch.
+Each node declares `access: read_only|worktree_write`; writers name a registered
+worktree by absolute path or relative to the selected repository's primary root.
+The execution owner verifies and confines it before launch.
 Auth refusals, usage limits and adapter unavailability may advance routes before
 provider launch. After launch, only read-only nodes may fall back. Writer
 failures preserve the worktree for the chair. Unknown launch evidence is treated

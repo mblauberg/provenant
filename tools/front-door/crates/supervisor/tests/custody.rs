@@ -98,6 +98,54 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
             .links
             == 1
     );
+    // A lost submitter never handed this Prepared reservation to a guardian.
+    // Explicit recovery can clear it without fabricating an exit receipt.
+    acquire_recovery(
+        Directory::open_anchor(&path)?,
+        WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+        &token,
+        &clock,
+    )?
+    .withdraw_prepared()?;
+    assert!(!path.join("reservation.json").exists());
+    let lease = fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        scope(),
+        WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+        &token,
+        &clock,
+    )?;
+    lease.withdraw_unlaunched()?;
+    let prior_owner = std::fs::read(path.join("ownership.json"))?;
+    let next = Scope {
+        run: RunId::from_bytes([3; 16]),
+        attempt: AttemptId::from_bytes([4; 16]),
+        generation: 1,
+    };
+    drop(fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        next,
+        budget(&clock)?,
+        &token,
+        &clock,
+    )?);
+    // Crash after reservation publication, before replacing the reused owner.
+    std::fs::write(path.join("ownership.json"), prior_owner)?;
+    acquire_recovery(
+        Directory::open_anchor(&path)?,
+        budget(&clock)?,
+        &token,
+        &clock,
+    )?
+    .withdraw_prepared()?;
+    fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        scope(),
+        budget(&clock)?,
+        &token,
+        &clock,
+    )?
+    .withdraw_unlaunched()?;
     Ok(())
 }
 struct Decoder;
