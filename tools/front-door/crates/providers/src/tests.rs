@@ -680,6 +680,16 @@ pub(super) fn fixture_input<'a>(
         token,
         cwd,
         nonce: [9; 16],
+        provenant: crate::LaneRuntime {
+            executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
+            git: std::path::Path::new("/fixture/git/bin/git"),
+            state: std::path::Path::new("/fixture/state"),
+            child_state: std::path::Path::new("/fixture/state/children/attempt"),
+            home: std::path::Path::new("/fixture/home"),
+            depth: 1,
+            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+            assets: std::path::Path::new("/fixture/provenant"),
+        },
     }
 }
 
@@ -729,11 +739,22 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             ],
             _ => &[],
         };
-        let expected: Vec<_> = ["HOME", "USER", "PATH", "TMPDIR", "LANG"]
-            .iter()
-            .chain(extra)
-            .copied()
-            .collect();
+        let expected: Vec<_> = [
+            "HOME",
+            "USER",
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "PROVENANT_ROOT",
+            "PROVENANT_GIT",
+            "PROVENANT_LANE_DEPTH",
+            "PROVENANT_PARENT_ATTEMPT_ID",
+            "PROVENANT_RUN_STATE_DIR",
+        ]
+        .iter()
+        .chain(extra)
+        .copied()
+        .collect();
         assert_eq!(keys, expected, "{id}");
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
@@ -750,10 +771,18 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                 );
             }
             "claude" => {
+                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
+                assert!(argv.iter().any(|arg| arg == "--settings"));
+                assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
+                let sources = argv
+                    .iter()
+                    .position(|arg| arg == "--setting-sources")
+                    .expect("isolated settings");
+                assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
                 assert_eq!(argv[tools + 1], "Read,Grep,Glob");
                 // The host's token is the only credential: no keychain or
-                // other credential path is readable and nothing else runs.
+                // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
                     spec.env
                         .iter()
@@ -761,7 +790,14 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
                             && value == FIXTURE_TOKEN)
                 );
                 assert!(spec.profile.spec.authentication.is_empty());
-                assert_eq!(spec.profile.spec.process_executables.len(), 1);
+                assert!(
+                    spec.profile
+                        .spec
+                        .process_executables
+                        .iter()
+                        .any(|grant| grant.path
+                            == std::path::Path::new("/fixture/provenant/bin/provenant"))
+                );
                 assert!(matches!(
                     entry
                         .adapter
@@ -793,14 +829,22 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             Err(ProviderError::InvalidPath)
         ));
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
+        assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+            grant.path == package
+                || (id == "codex" && grant.path.starts_with("/fixture/home"))
+                || [
+                    "/fixture/provenant/bin/provenant",
+                    "/fixture/git/bin/git",
+                    "/fixture/provenant/release.json",
+                    "/fixture/state/config.toml",
+                    "/fixture/state/host-id",
+                    "/fixture/state/projects",
+                    "/fixture/state/routing",
+                    "/fixture/state/fabric",
+                ]
                 .iter()
-                .all(|grant| grant.path == package
-                    || (id == "codex" && grant.path.starts_with("/fixture/home")))
-        );
+                .any(|path| grant.path == std::path::Path::new(path))
+        }));
         assert!(
             spec.profile
                 .spec
@@ -1595,8 +1639,33 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                         .spec
                         .state_writes
                         .iter()
+                        .filter(|g| !g.path.starts_with("/fixture/state"))
                         .all(|g| g.path.starts_with(&dir))
                 );
+                let lane = spec
+                    .profile
+                    .spec
+                    .state_writes
+                    .iter()
+                    .filter(|g| g.path.starts_with("/fixture/state"))
+                    .collect::<Vec<_>>();
+                let mut expected = vec![
+                    crate::launch::subtree("/fixture/state/children/attempt"),
+                    crate::launch::subtree("/fixture/state/fabric/locks"),
+                    crate::launch::subtree("/fixture/state/workflow"),
+                ];
+                expected.extend(
+                    [
+                        "fabric/fabric.sqlite3",
+                        "fabric/fabric.sqlite3-wal",
+                        "fabric/fabric.sqlite3-shm",
+                        "fabric/fabric.sqlite3-journal",
+                        "host-binding.lock",
+                    ]
+                    .map(|name| crate::launch::exact(Path::new("/fixture/state").join(name))),
+                );
+                assert_eq!(lane.len(), expected.len());
+                assert!(expected.iter().all(|grant| lane.contains(&grant)));
             } else {
                 // The accepted design keeps runtime state per attempt. Only the
                 // selected identity's auth.json is linked into CODEX_HOME.

@@ -24,7 +24,7 @@ use std::{
 
 mod provider;
 #[cfg(feature = "fixture")]
-pub use provider::writer_fixture_plan;
+pub use provider::{prepare_fixture, writer_fixture_plan};
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -68,6 +68,7 @@ impl From<run::RunError> for Fail {
             E::Conflict => (Status::Refused, "CONFLICT"),
             E::Cancelled => (Status::Error, "CANCELLED"),
             E::Refused => (Status::Refused, "REFUSED"),
+            E::DepthExceeded { .. } | E::DepthOverflow => (Status::Refused, "LANE_DEPTH"),
             E::Capacity => (Status::Refused, "QUEUE_FULL"),
             E::Contention => (Status::Error, "CONTENTION"),
             _ => (Status::Error, "IO"),
@@ -118,6 +119,7 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
 pub struct Registry<'a> {
     pub roots: Option<&'a Roots>,
     pub home: Option<&'a Path>,
+    pub assets: Option<&'a Path>,
     pub cwd: Option<&'a Path>,
     pub state_root: Option<&'a Path>,
     pub project_id: Option<provenant_core::ProjectId>,
@@ -293,12 +295,40 @@ fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::R
         cancel,
     })
 }
+/// Shared Fabric identity/config, isolated Run custody for a lane's children.
+pub fn execution_state(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+) -> Result<provenant_core::StateRoot, Fail> {
+    let Some(path) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) else {
+        return Ok(roots.state.clone());
+    };
+    let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
+    inputs.state_dir = Some(path.into());
+    let state = inputs
+        .resolve(&provenant_supervisor::fs::LocalFs)
+        .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
+        .state;
+    if !state
+        .as_path()
+        .starts_with(roots.state.as_path().join("children"))
+    {
+        return Err(Fail::new(
+            Status::Refused,
+            "LANE_CONTEXT",
+            "child Run store is outside the lane namespace",
+        ));
+    }
+    Ok(state)
+}
+
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
@@ -316,7 +346,7 @@ fn open_read_only(
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
     let context = run::ExecutionContext {
-        state_root: roots.state,
+        state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
@@ -499,6 +529,7 @@ pub fn submit(
     submission: Submission,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
     let config = provenant_config::read_with_domains(
@@ -572,6 +603,8 @@ pub fn submit(
             tasks: requests,
             concurrency,
             parent: None,
+            lane_depth: Some(lane_depth),
+            parent_attempt,
         },
         attempts,
         created_at: now(call.clock)?,
@@ -632,7 +665,7 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
         .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
         if manifest.schema_version != 1 || !(1..=64).contains(&manifest.tasks.len()) {
             return Err(Fail::new(
-                Status::Invalid,
+                Status::Refused,
                 "INVALID",
                 "manifest needs schema_version 1 and 1-64 tasks",
             ));
@@ -747,6 +780,126 @@ fn dispatch_inner(command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, 
     report(&session, &record, &started, command.wait, edge, &call)
 }
 
+fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
+    let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
+    let config = provenant_config::read_with_domains(
+        roots,
+        &provenant_supervisor::fs::LocalFs,
+        &crate::domains::SECTIONS,
+    )
+    .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+    let max_depth = config
+        .knobs
+        .get("lanes.max_depth")
+        .and_then(|knob| knob.value.as_u64())
+        .ok_or_else(|| {
+            Fail::new(
+                Status::Error,
+                "CONFIG",
+                "lanes.max_depth is missing or invalid",
+            )
+        })?;
+    lane_dispatch_values(
+        parent_depth.as_deref(),
+        parent_attempt.as_deref(),
+        max_depth,
+        roots.state.as_path(),
+        std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+fn environment_text(name: &str) -> Result<Option<String>, Fail> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Fail::new(
+            Status::Invalid,
+            "LANE_CONTEXT",
+            "lane context environment value is not valid text",
+        )),
+    }
+}
+
+fn lane_dispatch_values(
+    parent_depth: Option<&str>,
+    parent_attempt: Option<&str>,
+    max_depth: u64,
+    state: &Path,
+    run_state: Option<&Path>,
+) -> Result<(u64, Option<AttemptId>), Fail> {
+    let parent_depth = parent_depth
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "LANE_CONTEXT",
+                "lane depth environment value must be a non-negative integer",
+            )
+        })?;
+    let parent_attempt = parent_attempt
+        .map(AttemptId::parse)
+        .transpose()
+        .map_err(|_| {
+            Fail::new(
+                Status::Invalid,
+                "PARENT_ATTEMPT",
+                "parent attempt environment value is invalid",
+            )
+        })?;
+    if let Some(run_state) = run_state {
+        let invalid = || {
+            Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane environment must match its child Run store path",
+            )
+        };
+        let relative = run_state.strip_prefix(state).map_err(|_| invalid())?;
+        let mut parts = relative.components();
+        let mut depth = 0;
+        let mut parent = None;
+        while let Some(part) = parts.next() {
+            if part.as_os_str() != "children" {
+                return Err(invalid());
+            }
+            let id = parts
+                .next()
+                .and_then(|part| part.as_os_str().to_str())
+                .ok_or_else(invalid)?;
+            parent = Some(AttemptId::parse(id).map_err(|_| invalid())?);
+            depth += 1;
+        }
+        if depth == 0 || parent_depth != Some(depth) || parent_attempt != parent {
+            return Err(invalid());
+        }
+        return Ok((run::next_lane_depth(depth, max_depth)?, parent));
+    }
+    let parent_depth = match (parent_depth, parent_attempt) {
+        (None, None) => 0,
+        (Some(depth), Some(_)) if depth >= 1 => depth,
+        (Some(_), Some(_)) => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "nested lane context requires a depth of at least 1",
+            ));
+        }
+        _ => {
+            return Err(Fail::new(
+                Status::Refused,
+                "LANE_CONTEXT",
+                "lane depth and parent attempt must be supplied together",
+            ));
+        }
+    };
+    let lane_depth = run::next_lane_depth(parent_depth, max_depth)?;
+    Ok((lane_depth, parent_attempt))
+}
+
 /// Hand every queued attempt of `run` to its own guardian. Fabric's facade
 /// shares this path with the CLI leaves.
 pub fn launch(
@@ -774,6 +927,7 @@ pub fn launch(
     let registry = Registry {
         roots: Some(edge.roots),
         home: Some(edge.home),
+        assets: Some(edge.assets),
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
@@ -1309,6 +1463,7 @@ fn reconcile_inner(
     let registry = Registry {
         roots: Some(edge.roots),
         home: Some(edge.home),
+        assets: Some(edge.assets),
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
@@ -1492,6 +1647,72 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 }
 
 #[cfg(test)]
+mod lane_depth_tests {
+    use super::*;
+
+    #[test]
+    fn shared_submit_context_refuses_depth_above_the_limit() {
+        let parent = AttemptId::from_bytes([7; 16]).to_string();
+        let state = Path::new("/state");
+        let child = state
+            .join("children")
+            .join(&parent)
+            .join("children")
+            .join(&parent);
+        let result = lane_dispatch_values(Some("2"), Some(&parent), 2, state, Some(&child));
+        let Err(failure) = result else {
+            panic!("depth above the configured maximum must be refused");
+        };
+        assert_eq!(failure.status, Status::Refused);
+        assert_eq!(failure.code, "LANE_DEPTH");
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_and_parent() {
+        let parent = AttemptId::from_bytes([8; 16]);
+        let parent_text = parent.to_string();
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent_text);
+        let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2, state, Some(&child));
+        assert!(matches!(result, Ok((2, Some(found))) if found == parent));
+    }
+
+    #[test]
+    fn shared_submit_context_refuses_incomplete_or_zero_nested_context() {
+        let parent = AttemptId::from_bytes([9; 16]).to_string();
+        let state = Path::new("/state");
+        let child = state.join("children").join(&parent);
+        for (depth, parent_attempt) in [
+            (None, None),
+            (Some("2"), Some(parent.as_str())),
+            (Some("1"), Some("00000000000000000000000000000000")),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 3, state, Some(&child))
+                .expect_err("stripped or forged lineage must be refused");
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
+        for (depth, parent_attempt) in [
+            (Some("1"), None),
+            (None, Some(parent.as_str())),
+            (Some("0"), Some(parent.as_str())),
+        ] {
+            let failure = lane_dispatch_values(depth, parent_attempt, 2, Path::new("/state"), None)
+                .expect_err("incomplete or zero nested context must be refused");
+            assert_eq!(failure.status, Status::Refused);
+            assert_eq!(failure.code, "LANE_CONTEXT");
+        }
+    }
+
+    #[test]
+    fn shared_submit_context_assigns_root_depth_without_parent() {
+        assert!(matches!(
+            lane_dispatch_values(None, None, 2, Path::new("/state"), None),
+            Ok((1, None))
+        ));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use provenant_run::Providers;
@@ -1531,6 +1752,7 @@ mod tests {
         let registry = Registry {
             roots: None,
             home: None,
+            assets: None,
             cwd: None,
             state_root: None,
             project_id: None,

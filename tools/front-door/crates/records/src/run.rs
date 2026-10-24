@@ -17,6 +17,12 @@ pub struct CanonicalRequest {
     pub tasks: Vec<TaskRequest>,
     pub concurrency: u64,
     pub parent: Option<AttemptId>,
+    /// Depth assigned to this run when it was dispatched from a lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_depth: Option<u64>,
+    /// Attempt whose provider submitted this nested run, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
 }
 impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
@@ -159,7 +165,11 @@ pub struct RunRecord {
     pub operation_id: OperationId,
     pub request_digest: Digest,
     pub task_ids: Vec<TaskId>,
+    /// Continuation target, independently of nested dispatch metadata.
     pub parent: Option<AttemptId>,
+    /// Attempt that submitted this nested run; grants no cancellation authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
     pub children: Vec<RunId>,
     pub revision: u64,
     pub generation: u64,
@@ -337,4 +347,22 @@ pub struct RunCursor {
     pub actor_id: ActorId,
     pub selection: String,
     pub sequence: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_without_lane_metadata_retains_its_sealed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = serde_json::json!({
+            "schema_version": 1, "tasks": [], "concurrency": 1, "parent": null
+        });
+        let digest = CanonicalV1::record_digest("run-request", 1, &original)?;
+        let request: CanonicalRequest = serde_json::from_value(original.clone())?;
+        assert_eq!(request.digest()?, digest);
+        assert_eq!(serde_json::to_value(request)?, original);
+        Ok(())
+    }
 }

@@ -189,6 +189,17 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     tmp/                       # attempt-private provider/test temporary data
 ```
 
+For nested submission, the Run root is the submitting attempt's dedicated
+`<parent-run-state>/children/<AttemptId>/` store. Its database and the layout
+above are separate from the parent's database and attempt custody. The MCP
+retains shared Fabric identity/config on the original state root. Its explicit
+`PROVENANT_RUN_STATE_DIR` environment selects the child store for CLI/MCP Run
+queries and controls; host recovery sets that variable while retaining the original `--state-dir`
+for identity/config.
+The confinement grant covers only this child subtree, shared Fabric SQLite
+files and required lock/helper state. It never covers the parent `runs/` tree.
+See [lane MCP and nesting](execution-route.md#lane-mcp-hooks-and-nesting-2026-10-24).
+
 This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no
 `control.json`, `supervisor.json` or second events capture. Provider parsing
@@ -231,7 +242,8 @@ coordination store. Root/path safety and file publication use supervisor APIs.
 Run owns schema and transactions; shared typed records live in records:
 
 - `RunRecord`: schema version, run/project IDs, core actor, operation ID,
-  immutable request digest, task IDs, parent/children, revision/generation,
+  immutable request digest, task IDs, continuation parent/children, optional nested
+  `parent_attempt`, revision/generation,
   created/closed times and closure state. The run index is in this same store.
 - `AttemptRecord`: IDs, optional `delivery_id`, retry/continuation parent,
   requested/resolved/applied/observed route/effort, confinement and subject
@@ -455,8 +467,26 @@ the held files and directories before issuing `SettlementCommit`. Run retains
 writer exclusion through classified scratch settlement and fence clearing;
 missing, malformed or changed attestations keep the fence.
 
-Lineage uses explicit `AttemptRef` and a supervisor-verified inherited parent
-capability. Bad inherited ancestry is an error, not silently ignored metadata.
+The 2026-10-24 lane decision permits basic nested dispatch with a lightweight
+recursion guard: the shared CLI/Fabric submission edge reads
+`PROVENANT_LANE_DEPTH` and `PROVENANT_PARENT_ATTEMPT_ID`. With
+`PROVENANT_RUN_STATE_DIR` set, it derives the current depth and parent from the
+count and final ID of `children/<AttemptId>` pairs below `roots.state`, and
+refuses missing or disagreeing environment values. It refuses a child above
+`lanes.max_depth` (default 2), and records both depth and submitting parent in
+`CanonicalRequest`. Its optional `lane_depth` and `parent_attempt` fields are
+omitted when absent, so pre-lane version-1 requests still decode and retain
+their sealed canonical digest. Launch treats absent depth as a root lane (1).
+`RunRecord.parent` remains the continuation target; `RunRecord.parent_attempt`
+stores the nested submitting attempt independently. Run overwrites these
+environment values on each child launch. Continuations retain their original
+depth and nested parent separately
+from their continuation target. This metadata is not cancellation authority;
+the explicit user decision supersedes requiring the capability below merely
+to dispatch a nested lane.
+
+For descendant cancellation, lineage uses explicit `AttemptRef` and a
+supervisor-verified inherited parent capability. Bad inherited ancestry is an error, not silently ignored metadata.
 Register a child under the same lock that closes its parent; reject a child
 registration after closure. A parent's cancel fans out cooperative requests to
 its registered children via the facade, each child retaining its own custody.
@@ -800,8 +830,9 @@ scheduler daemon. Within that, the lane decided:
   exact credential source, purpose and expiry before the host token loader
   can run. The task request currently carries no such record.
 - **Launch storage** is allocated once per attempt before route fallback, under
-  its canonical `scratch/` and `provider-state/` paths. No candidate creates
-  random `tmp/` trees. Settlement removes empty scratch; provider history and
+  its canonical `scratch/` (writer), `tmp/` (read-only), and `provider-state/`
+  paths. Each fallback uses `candidate-N/` beneath the relevant roots so partial setup cannot poison a later
+  candidate. No candidate creates random `tmp/` trees. Settlement removes empty scratch; provider history and
   unclassified contents remain retained. Supervisor owns reservation listing:
   malformed entries are reported and remain fenced while valid entries can
   reconcile. Such diagnostics make the reconcile command non-successful.
@@ -926,9 +957,9 @@ so this does not yet implement the end-to-end cooldown in #1216. A free-tier
 repair hint is also deferred until the terminal record carries the proven pool;
 a generic quota refusal must not assert free-tier exhaustion.
 
-The holder still has no verified writer-worktree capability, and production
-writers remain refused. Wiring `check_writer_terminal` into that missing writer
-path (#1288) must land with writer launch/custody composition. Inferring a writer
-from the process cwd would not establish that authority. Post-launch route
-fallback also remains deferred: it needs a new attempt with retry-budget and
-publication ordering, rather than replaying an exited process in place.
+Writer dispatch now carries a verified `WriterLaunch` through confinement and
+supervisor custody; terminal publication checks the selected worktree with
+`check_writer_terminal`. The process cwd alone does not establish writer
+authority. Post-launch route fallback remains deferred: it needs a new attempt
+with retry-budget and publication ordering, rather than replaying an exited
+process in place.

@@ -212,6 +212,7 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: |
+          cargo test --test worktrees --locked -- --exact lane_prepare_isolates_nested_state
           cargo test --test worktrees --locked -- --exact writer_dispatch_edits_a_linked_worktree
           cargo test --test worktrees --locked -- --exact second_writer_is_refused_while_first_holds_the_worktree
           cargo test --test worktrees --locked -- --exact writer_terminal_refuses_sequencer_state

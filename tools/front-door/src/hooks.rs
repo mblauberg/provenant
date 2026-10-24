@@ -232,7 +232,7 @@ fn with_git<T>(
         &CancelToken,
     ) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let temp = std::fs::canonicalize("/tmp")?;
+    let temp = std::fs::canonicalize(std::env::temp_dir())?;
     let anchor = LocalFs.open_anchor(&temp)?;
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;

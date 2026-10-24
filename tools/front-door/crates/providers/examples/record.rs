@@ -72,6 +72,8 @@ struct Args {
     write: bool,
     skip_live: bool,
     executable: PathBuf,
+    provenant: PathBuf,
+    assets: PathBuf,
     endpoint: String,
 }
 
@@ -117,6 +119,19 @@ fn args() -> Result<Args> {
         write,
         skip_live,
         executable: std::fs::canonicalize(found)?,
+        provenant: std::fs::canonicalize(
+            flags
+                .remove("--provenant")
+                .map(PathBuf::from)
+                .or_else(|| which("provenant"))
+                .ok_or("--provenant or provenant on PATH")?,
+        )?,
+        assets: std::fs::canonicalize(
+            flags
+                .remove("--assets")
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?),
+        )?,
         endpoint: endpoint.into(),
     })
 }
@@ -313,6 +328,16 @@ fn setup(steps: &[SetupStep]) -> Result<()> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => private_dir(path)?,
+            SetupStep::WriteFile { path, bytes } => {
+                use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
             SetupStep::Symlink { link, target } => match std::fs::read_link(link) {
                 Ok(existing) if &existing == target => {}
                 Ok(_) => return Err("conflicting link".into()),
@@ -810,11 +835,8 @@ fn main() -> Result<()> {
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
     let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-    let runtime = UtilityRuntime::new(
-        fs,
-        std::fs::canonicalize(which("git").ok_or("git")?)?,
-        &layout.home_git,
-    )?;
+    let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
+    let runtime = UtilityRuntime::new(fs, git.clone(), &layout.home_git)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,
@@ -891,6 +913,11 @@ fn main() -> Result<()> {
         }
         _ => None,
     };
+    let state = args.root.join("provenant-state");
+    private_dir(&state)?;
+    for child in ["fabric", "projects", "runs", "workflow"] {
+        private_dir(&state.join(child))?;
+    }
     let route = route(&args);
     let mut records = Vec::new();
     let mut continuation = None;
@@ -926,6 +953,16 @@ fn main() -> Result<()> {
             token: token.as_ref(),
             cwd,
             nonce,
+            provenant: provenant_providers::LaneRuntime {
+                executable: &args.provenant,
+                git: &git,
+                state: &args.root.join("provenant-state"),
+                child_state: &args.root.join("provenant-state/children/recording"),
+                home: &home,
+                depth: 1,
+                attempt: provenant_core::AttemptId::from_bytes(nonce),
+                assets: &args.assets,
+            },
         })?;
         spec.profile.observations = expected(&spec.profile, args.writer);
         if args.skip_live {

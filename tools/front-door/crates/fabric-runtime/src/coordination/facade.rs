@@ -165,6 +165,8 @@ pub enum FacadeError {
     LaunchUnknown { operation_id: OperationId },
     #[error("run continuation is unsupported")]
     ContinuationUnsupported,
+    #[error("lane depth exceeds lanes.max_depth")]
+    LaneDepth,
     #[error("request violates confinement")]
     ConfinementRefused,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
@@ -196,6 +198,7 @@ impl FacadeError {
             Self::PeerVersion => "peer_version",
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
+            Self::LaneDepth => "lane_depth",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
             Self::OutputTooLarge => "output_too_large",

@@ -183,6 +183,8 @@ impl RunStore {
                 }],
                 concurrency: 1,
                 parent: Some(input.prior),
+                lane_depth: request.lane_depth,
+                parent_attempt: request.parent_attempt,
             },
             attempts: vec![NewAttempt {
                 attempt_id: input.attempt_id,

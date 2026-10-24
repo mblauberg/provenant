@@ -281,6 +281,7 @@ pub fn refresh_for_account(
 /// unreadable. Recorded writer-shell activation additionally denies keychain
 /// services and the security executable, and uses a private config directory.
 /// Until that proof is accepted, writers retain file tools only.
+/// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -312,7 +313,6 @@ fn prepare(
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "-p".as_ref(),
-        "--safe-mode".as_ref(),
         "--strict-mcp-config".as_ref(),
         "--disable-slash-commands".as_ref(),
         "--permission-prompts".as_ref(),
@@ -357,7 +357,10 @@ fn prepare(
     let transcript_dir = project.join(&session_id);
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
+    let mut setup = input.provenant.claude(scratch, &mut argv)?;
+
     let mut env = base_env(input, scratch, "/usr/bin:/bin");
+    input.provenant.environment(&mut env);
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -367,11 +370,9 @@ fn prepare(
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
-    let mut setup = if shell {
-        Vec::new()
-    } else {
-        vec![SetupStep::CreateDir(transcript_dir.clone())]
-    };
+    if !shell {
+        setup.push(SetupStep::CreateDir(transcript_dir.clone()));
+    }
     if shell {
         let config = plan
             .private_state
@@ -384,7 +385,7 @@ fn prepare(
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
@@ -424,7 +425,11 @@ fn prepare(
             observations: observations(OBSERVATIONS, access)?,
         },
         stream,
-    })
+    };
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, true);
+    Ok(spec)
 }
 
 /// Claude's per-project transcript directory name: every byte outside ASCII

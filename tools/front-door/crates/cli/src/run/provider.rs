@@ -5,7 +5,7 @@ use provenant_confinement::permissions::{
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
-use provenant_providers::{PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
+use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{Directory, entropy_128};
@@ -19,6 +19,26 @@ pub(super) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
 ) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        resolve_executable,
+        None,
+    )
+}
+
+fn prepare_with(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    executable: impl Fn(&str) -> Result<PathBuf, String>,
+    token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
     if resume.is_some() {
         return Err(
             "continuation needs a provider session; providers do not expose sessions yet".into(),
@@ -27,6 +47,10 @@ pub(super) fn prepare(
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let state_root = registry.state_root.ok_or("state root is unavailable")?;
+    let assets = registry.assets.ok_or("product assets are unavailable")?;
+    let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let provenant_executable = canonical(&provenant_executable)?;
+    let git = canonical(&crate::git::git_binary().ok_or("Git unavailable")?)?;
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
@@ -50,7 +74,7 @@ pub(super) fn prepare(
 
     let resolved = crate::route::resolve(&route_request(task)?, roots, task.account.as_deref())?;
     let mut reasons = Vec::new();
-    for route in candidates(resolved) {
+    for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let Some(registration) = REGISTRY
             .iter()
@@ -64,38 +88,40 @@ pub(super) fn prepare(
             reasons.push(format!("{label}: provider execution is disabled"));
             continue;
         }
-        if adapter.id() == "claude" {
+        if adapter.id() == "claude" && token.is_none() {
             reasons.push(format!(
                 "{label}: Claude credential authority is not available in this revision"
             ));
             continue;
         }
-        if adapter.id() != "codex" {
+        if !matches!(adapter.id(), "codex" | "claude") {
             reasons.push(format!("{label}: provider launch is not supported here"));
             continue;
         }
-        let executable = match resolve_executable("codex") {
+        let executable = match executable(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
                 reasons.push(format!("{label}: {error}"));
                 continue;
             }
         };
-        let provider_route = match adapter_route(&route) {
-            Ok(route) => route,
-            Err(error) => {
-                reasons.push(format!("{label}: {error}"));
-                continue;
-            }
-        };
-        // A read-only lane's scratch is its private temporary directory, which
-        // terminal commit and withdrawal remove; writer scratch keeps settlement.
-        let scratch = if writer.is_some() {
+        // A failed setup never poisons the next explicit fallback candidate.
+        let staging = if writer.is_some() {
             &paths.scratch
         } else {
             &paths.temporary
         };
-        let private_state = &paths.provider_state;
+        let scratch = staging.join(format!("candidate-{candidate}"));
+        let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
+        apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging])?;
+        apply_setup(
+            &[SetupStep::CreateDir(private_state.clone())],
+            &[&paths.provider_state],
+        )?;
+        let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let child_state = state_root
+            .join("children")
+            .join(paths.attempt_id.to_string());
         let plan = match confinement_plan(
             project_id,
             &cwd,
@@ -103,6 +129,7 @@ pub(super) fn prepare(
             scratch,
             private_state,
             writer.as_ref(),
+            (adapter.id() == "codex").then_some("login"),
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -113,7 +140,7 @@ pub(super) fn prepare(
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let spec = match adapter.prepare(PrepareInput {
-            route: &provider_route,
+            route: &route,
             confined: &plan,
             prompt: &prompt,
             continuation: None,
@@ -122,9 +149,19 @@ pub(super) fn prepare(
             home: &home,
             user: &user,
             account: None,
-            token: None,
+            token,
             cwd: &cwd,
             nonce,
+            provenant: LaneRuntime {
+                executable: &provenant_executable,
+                git: &git,
+                state: roots.state.as_path(),
+                child_state: &child_state,
+                home: &home,
+                depth: paths.lane_depth,
+                attempt: paths.attempt_id,
+                assets,
+            },
         }) {
             Ok(spec) => spec,
             Err(error) => {
@@ -132,13 +169,18 @@ pub(super) fn prepare(
                 continue;
             }
         };
-        if let Err(error) = apply_setup(&spec.setup, &[scratch, private_state]) {
+        let claude_config = home.join(".claude");
+        let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
+        if adapter.id() == "claude" {
+            setup_roots.push(&claude_config);
+        }
+        if let Err(error) = apply_setup(&spec.setup, &setup_roots) {
             reasons.push(format!("{label}: setup failed: {error}"));
             continue;
         }
         let provider = RouteRecord {
+            model: Some(format!("{}/{}", route.adapter, route.model)),
             provider: Some(route.adapter),
-            model: Some(route.model),
             effort: route.effort,
             account_label: None,
         };
@@ -191,18 +233,6 @@ fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> Res
     }
 }
 
-fn adapter_route(route: &ResolvedRoute) -> Result<ResolvedRoute, String> {
-    let prefix = format!("{}/", route.adapter);
-    let model = route
-        .model
-        .strip_prefix(&prefix)
-        .ok_or("resolved model does not match its provider")?;
-    let mut provider_route = route.clone();
-    provider_route.model = model.to_owned();
-    provider_route.alternatives = Default::default();
-    Ok(provider_route)
-}
-
 fn confinement_plan(
     project_id: ProjectId,
     cwd: &Path,
@@ -210,6 +240,7 @@ fn confinement_plan(
     scratch: &Path,
     private_state: &Path,
     writer: Option<&run::WriterLaunch>,
+    authentication: Option<&str>,
 ) -> Result<ConfinedPlan, String> {
     let mode = match writer {
         Some(writer) => AccessMode::WorktreeWrite(Box::new(
@@ -239,7 +270,7 @@ fn confinement_plan(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: Some("login".into()),
+            selected_authentication: authentication.map(str::to_owned),
             include_continuation: false,
             network: Vec::new(),
             capabilities: Vec::new(),
@@ -267,25 +298,25 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
     provenant_supervisor::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-/// Setup stays strictly below the run-owned scratch or private state roots.
-/// Traversal opens each component without following links.
+/// Generated files stay in scratch, links in scratch/private state; trusted
+/// shared-state directories use the final root. Traversal never follows links.
 fn apply_setup(steps: &[SetupStep], roots: &[&Path]) -> Result<(), String> {
     for step in steps {
         match step {
             SetupStep::CreateDir(path) => {
                 let (parent, name) = setup_parent(roots, path, true)?;
-                match parent.mkdir(name, 0o700) {
-                    Ok(()) => parent.sync().map_err(|error| error.to_string())?,
-                    // Fallback candidates share one attempt's paths.
-                    Err(error) if error.is_exists() => {}
-                    Err(error) => return Err(error.to_string()),
-                }
-                parent
-                    .open_verified_directory(name)
-                    .map_err(|error| error.to_string())?;
+                setup_directory(&parent, name)?;
+            }
+            SetupStep::WriteFile { path, bytes } => {
+                let (parent, name) = setup_parent(&roots[..1], path, false)?;
+                let mut file = parent.create_new(name).map_err(|error| error.to_string())?;
+                use std::io::Write;
+                file.write_all(bytes).map_err(|error| error.to_string())?;
+                file.sync().map_err(|error| error.to_string())?;
+                parent.sync().map_err(|error| error.to_string())?;
             }
             SetupStep::Symlink { link, target } => {
-                let (parent, name) = setup_parent(roots, link, false)?;
+                let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
                 parent
                     .symlink(target, name)
                     .map_err(|error| error.to_string())?;
@@ -315,18 +346,33 @@ fn setup_parent<'a>(
     let name = names.pop().ok_or("provider setup path names its root")?;
     let mut directory = Directory::open_anchor(root).map_err(|error| error.to_string())?;
     for component in names {
-        if create {
-            match directory.mkdir(component, 0o700) {
-                Ok(()) => directory.sync().map_err(|error| error.to_string())?,
+        directory = if create {
+            setup_directory(&directory, component)?
+        } else {
+            directory
+                .open_verified_directory(component)
+                .map_err(|error| error.to_string())?
+        };
+    }
+    Ok((directory, name))
+}
+
+// Existing shared ancestors need only read access in a confined MCP.
+fn setup_directory(parent: &Directory, name: &std::ffi::OsStr) -> Result<Directory, String> {
+    match parent.open_verified_directory(name) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.is_not_found() => {
+            match parent.mkdir(name, 0o700) {
+                Ok(()) => parent.sync().map_err(|error| error.to_string())?,
                 Err(error) if error.is_exists() => {}
                 Err(error) => return Err(error.to_string()),
             }
+            parent
+                .open_verified_directory(name)
+                .map_err(|error| error.to_string())
         }
-        directory = directory
-            .open_verified_directory(component)
-            .map_err(|error| error.to_string())?;
+        Err(error) => Err(error.to_string()),
     }
-    Ok((directory, name))
 }
 
 /// Fixture access to the production plan builder; installed builds omit it.
@@ -345,6 +391,28 @@ pub fn writer_fixture_plan(
         &paths.scratch,
         &paths.provider_state,
         Some(writer),
+        Some("login"),
+    )
+}
+
+/// Exercise production preparation against a fake external provider executable.
+#[cfg(feature = "fixture")]
+pub fn prepare_fixture(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt: &str,
+    paths: &run::LaunchPaths,
+    executable: &Path,
+    token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, String> {
+    prepare_with(
+        registry,
+        task,
+        prompt,
+        paths,
+        None,
+        |_| canonical(executable),
+        token,
     )
 }
 

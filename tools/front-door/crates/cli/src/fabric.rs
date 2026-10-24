@@ -1,6 +1,9 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 mod context;
 
+/// Shared identity/config setup for CLI leaves and the binary MCP transport.
+pub use context::{Context, publish};
+
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
     roots: provenant_core::Roots,
@@ -409,7 +412,7 @@ pub enum Landing {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum EdgeError {
+pub enum EdgeError {
     #[error(transparent)]
     Exec(#[from] provenant_supervisor::exec::ExecError),
     #[error(transparent)]

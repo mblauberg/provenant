@@ -10,6 +10,39 @@ use provenant_supervisor::{
 use std::cell::{Cell, RefCell};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn nested_lane_depth_stops_at_the_configured_maximum() {
+    assert!(matches!(next_lane_depth(0, 2), Ok(1)));
+    assert!(matches!(next_lane_depth(1, 2), Ok(2)));
+    assert!(matches!(
+        next_lane_depth(2, 2),
+        Err(RunError::DepthExceeded {
+            depth: 3,
+            max_depth: 2
+        })
+    ));
+}
+
+#[test]
+fn nested_dispatch_records_its_parent_attempt_and_depth() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    let record = store.create(&nested, &call)?;
+    assert_eq!(record.parent, None);
+    assert_eq!(record.parent_attempt, Some(parent));
+    assert_eq!(store.run(record.run_id, &call)?, record);
+    let saved = store.request(record.run_id, &call)?;
+    assert_eq!(saved.lane_depth, Some(2));
+    assert_eq!(saved.parent_attempt, Some(parent));
+    Ok(())
+}
+
 struct Host {
     available: u64,
 }
@@ -414,6 +447,9 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
+    let outer_parent = AttemptId::from_bytes([19; 16]);
+    run.request.lane_depth = Some(1);
+    run.request.parent_attempt = Some(outer_parent);
     run.request.tasks[0].account = Some("fixture-account".into());
     store.create(&run, &call)?;
     let prior = run.attempts[0].attempt_id;

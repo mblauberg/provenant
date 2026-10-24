@@ -18,10 +18,10 @@ use std::{
     time::Duration,
 };
 
-pub(super) struct Context {
+pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
-    pub(super) config: FabricConfig,
+    pub config: FabricConfig,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
@@ -55,12 +55,18 @@ fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
         .components()
     {
         if let Component::Normal(name) = part {
-            match dir.mkdir(name, 0o700) {
-                Ok(()) => dir.sync()?,
-                Err(error) if error.is_exists() => {}
+            dir = match dir.open_verified_directory(name) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => {
+                    match dir.mkdir(name, 0o700) {
+                        Ok(()) => dir.sync()?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    dir.open_verified_directory(name)?
+                }
                 Err(error) => return Err(error.into()),
-            }
-            dir = dir.open_verified_directory(name)?;
+            };
             if dir.metadata()?.mode & 0o077 != 0 {
                 return Err(EdgeError::Invalid);
             }
@@ -78,27 +84,28 @@ impl Context {
                 .domains
                 .fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
-        let utility_home = roots.state.as_path().join("tmp/git-home");
+        let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| roots.state.as_path().to_owned());
+        let utility_home = utility_root.join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-            "/bin/git",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
-        .ok_or(EdgeError::Invalid)?;
+        let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+            || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
+        let git = crate::git::git_binary().ok_or(EdgeError::Invalid)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),
-            canonical(git)?,
+            canonical(&git)?,
             &utility_home,
         )?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let binding = provenant_config::bind_project(&roots, discovered.location, &LocalFs)?;
+        let binding = if lane {
+            provenant_config::lookup_project(&roots, &discovered.location, &LocalFs)?
+                .ok_or(EdgeError::Invalid)?
+        } else {
+            provenant_config::bind_project(&roots, discovered.location, &LocalFs)?
+        };
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
                 Ok(key) => Some(key),
@@ -152,15 +159,16 @@ impl Context {
         Ok(lease.lease_seconds * 1000)
     }
 }
-pub(super) fn publish<T: Serialize>(
-    value: &CommandResult<T>,
-    roots: &Roots,
-) -> io::Result<AbsolutePath> {
+/// Publish a result in the selected lane or host result area.
+pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Result<AbsolutePath> {
     fn perform<T: Serialize>(
         value: &CommandResult<T>,
         roots: &Roots,
     ) -> Result<AbsolutePath, EdgeError> {
-        let path = roots.state.as_path().join("tmp/results");
+        let base = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| roots.state.as_path().to_owned());
+        let path = base.join("tmp/results");
         let dir = private_dir(roots.state.as_path(), &path)?;
         let name = provenant_supervisor::fs::temporary_name()?;
         let bytes = serde_json::to_vec(value)?;
