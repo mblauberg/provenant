@@ -1774,3 +1774,30 @@ fn claude_account_probe_carries_user_for_keychain_selection() {
     assert_eq!(calls.len(), 1);
     assert!(calls[0].1.iter().any(|entry| entry == "USER=u"));
 }
+
+#[test]
+fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
+    let home = std::env::temp_dir().join(format!("provenant-rollout-{}", std::process::id()));
+    let day = home.join("sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    let long = format!(
+        "{{\"type\":\"response_item\",\"payload\":{{\"output\":\"{}\"}}}}\n",
+        "x".repeat(3 * 1024 * 1024)
+    );
+    let rollout = format!(
+        "{}\n{long}not json\n{{\"type\":\"event_msg\",\"payload\":{{\"model\":7}}}}\n{}\n",
+        serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+        serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+    );
+    std::fs::write(
+        day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+        rollout,
+    )
+    .unwrap();
+    let observed = crate::codex_rollout::observe(&home, thread);
+    std::fs::remove_dir_all(&home).unwrap();
+    let turn = observed.unwrap();
+    assert_eq!(turn.model, "gpt-6-luna");
+    assert_eq!(turn.effort.as_deref(), Some("low"));
+}

@@ -8,6 +8,16 @@ use std::{
     path::Path,
 };
 
+/// Bound on one retained rollout line; longer lines are drained and skipped.
+const LINE_LIMIT: u64 = 1024 * 1024;
+
+/// The record kind alone; payloads of other kinds are never deserialised.
+#[derive(Deserialize)]
+struct Kind<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: std::borrow::Cow<'a, str>,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Record {
@@ -107,14 +117,32 @@ pub fn observe(home: &Path, thread: &str) -> Result<Turn, ProviderError> {
                     loop {
                         line.clear();
                         let count = (&mut reader)
-                            .take(1024 * 1024 + 1)
+                            .take(LINE_LIMIT + 1)
                             .read_until(b'\n', &mut line)
                             .map_err(|_| ProviderError::Malformed)?;
                         if count == 0 {
                             break;
                         }
-                        if count > 1024 * 1024 {
-                            return Err(ProviderError::Overflow);
+                        if u64::try_from(count).map_or(true, |count| count > LINE_LIMIT) {
+                            // Real rollouts carry multi-MiB tool output lines.
+                            while line.last() != Some(&b'\n') {
+                                line.clear();
+                                let more = (&mut reader)
+                                    .take(LINE_LIMIT)
+                                    .read_until(b'\n', &mut line)
+                                    .map_err(|_| ProviderError::Malformed)?;
+                                if more == 0 {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        // Other record kinds, including unparsable lines, are
+                        // skipped without deserialising their content.
+                        if !serde_json::from_slice::<Kind<'_>>(&line).is_ok_and(|record| {
+                            matches!(record.kind.as_ref(), "session_meta" | "turn_context")
+                        }) {
+                            continue;
                         }
                         match serde_json::from_slice::<Record>(&line)
                             .map_err(|_| ProviderError::Malformed)?
