@@ -133,6 +133,12 @@ impl LaneRuntime<'_> {
             exact(self.state.join("config.toml")),
             exact(self.state.join("host-id")),
         ]);
+        // Homebrew Git links pcre2 and gettext from sibling kegs.
+        profile.runtime_reads.extend(
+            crate::dylib::linked_libraries(self.git)
+                .into_iter()
+                .map(exact),
+        );
         profile.runtime_reads.extend([
             subtree(self.state.join("projects")),
             subtree(self.state.join("routing")),
@@ -156,7 +162,10 @@ impl LaneRuntime<'_> {
         if hooks {
             // Claude executes command hooks through its shell. This does not
             // enable the model's Bash tool.
-            profile.process_executables.push(exact("/bin/sh"));
+            // macOS /bin/sh re-executes the selected system shell variant.
+            profile
+                .process_executables
+                .extend(["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"].map(exact));
             let path = self.state.join("workflow");
             setup.push(SetupStep::CreateDir(path.clone()));
             profile.state_writes.push(subtree(path));

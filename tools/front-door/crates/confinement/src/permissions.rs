@@ -112,6 +112,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 "#;
 #[cfg(target_os = "macos")]
@@ -1671,6 +1672,11 @@ fn push_worktree_rule(
     let worktree = sbpl_path(&grants.worktree.path)?;
     let git_dir = sbpl_path(&grants.private_git_dir.path)?;
     let common_dir = sbpl_path(&grants.common_git_dir.path)?;
+    // Git in the lane reads its repository as read-only lanes do (#1061);
+    // writes stay limited to the exact grants below.
+    source.push_str(&format!(
+        "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
+    ));
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
