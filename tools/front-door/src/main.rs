@@ -280,6 +280,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             };
             #[cfg(test)]
             let holder = worktree_tests::FixtureHolder(holder);
+            let holder = provenant_cli::run::HostHolder::new(&holder);
             let hooks = provenant_supervisor::GuardianHooks {
                 holder: Some(&holder),
                 #[cfg(test)]

@@ -56,6 +56,7 @@ struct LaunchMessage {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
+    secret_input: Option<crate::exec::SecretInput>,
     holder_context: Vec<u8>,
     capture: CapturePlan,
 }
@@ -108,6 +109,7 @@ pub(crate) fn handoff(
             .collect(),
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
+        secret_input: owned.command.secret_input,
         holder_context: owned.command.holder_context,
         capture,
     };
@@ -171,6 +173,11 @@ pub struct GuardianHooks<'a> {
 /// guardian. An error publishes a never-spawned exit and still calls `terminal`.
 pub trait Holder {
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
+    /// Stop host-side submission services before descendant cleanup begins.
+    /// Failure is bookkeeping evidence, never a provider stop reason.
+    fn provider_exited(&self, _context: &[u8], _reason: Option<machine::StopReason>) -> Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -394,6 +401,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         exit_publisher,
         holder: hooks.holder,
         holder_context: message.holder_context,
+        secret_input: message.secret_input,
     };
     let result = driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks);
     #[cfg(target_os = "linux")]
@@ -419,6 +427,7 @@ struct Driver<'a> {
     exit_publisher: Option<&'a dyn ExitPublisher>,
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
+    secret_input: Option<crate::exec::SecretInput>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
@@ -545,6 +554,7 @@ impl Driver<'_> {
         let mut input_offset = 0;
         let mut stop_reason = None;
         let mut exit = None;
+        let mut host_closed = false;
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
@@ -579,6 +589,20 @@ impl Driver<'_> {
                     &mut omitted_warnings,
                     "child exit observation failed",
                 ),
+            }
+            if exit.is_some() && !host_closed {
+                host_closed = true;
+                if let Some(holder) = self.holder
+                    && holder
+                        .provider_exited(&self.holder_context, stop_reason)
+                        .is_err()
+                {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "host child launcher failed",
+                    );
+                }
             }
             out.read(&mut child.stdout);
             err.read(&mut child.stderr);
@@ -1019,11 +1043,15 @@ impl Driver<'_> {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
                 Ok(snapshot) if snapshot == self.executable_snapshot => {
                     crate::sys::provider::ProviderGroup::spawn(
-                        argv,
-                        env,
-                        cwd,
-                        !input.is_empty(),
-                        plan,
+                        crate::sys::raw_exec::SpawnSpec {
+                            argv,
+                            env: Some(env),
+                            cwd,
+                            input: !input.is_empty(),
+                            secret_input: self.secret_input.as_ref(),
+                            capture_stdout: plan.stdout.piped(),
+                            capture_stderr: plan.stderr.piped(),
+                        },
                         self.writer
                             .as_ref()
                             .ok_or_else(|| io::Error::other("writer custody missing"))?,

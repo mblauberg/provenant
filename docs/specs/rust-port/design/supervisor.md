@@ -271,6 +271,14 @@ rechecks the held cache's owner and mode. The cache gets read/write authority,
 with the same overlap and hard-link checks as provider state. No parent
 `Caches` or sibling cache grant is added. Child-created symlinks are denied
 with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
+Nested provider setup and launch run in the parent guardian's host-side worker,
+using each child's own grants. Parent profiles need no symlink exception. The
+holder's provider-exit callback joins that worker before descendant cleanup;
+errors become warnings and never provider stop reasons. Host-launched child
+guardians are siblings of the provider and retain their own custody; they do
+not enter its descendant sparing registry. The host holder forwards explicit
+parent stop requests to its own accepted child scopes. See execution-route.md
+for the queued submission path.
 
 Shell-capable Claude writers use the same Rust recipe as Codex: immutable
 `~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and

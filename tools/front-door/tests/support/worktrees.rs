@@ -782,6 +782,7 @@ impl provenant_run::Providers for WriterProvider {
             argv,
             environment: Vec::new(),
             stdin: Vec::new(),
+            secret_input: None,
             cwd: writer.worktree.path().to_owned(),
             route,
             confinement: Some(provenant_run::LaunchConfinement {
@@ -865,6 +866,7 @@ fn holder_context<'a>(
             run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
             host_delivery: None,
+            launch: None,
         }
         .encode()
     }
@@ -1195,6 +1197,17 @@ fn lane_prepare_isolates_nested_state() -> Result {
         &rig,
         &["worktree", "create", "writer", "--base", "HEAD", "--json"],
     )?;
+    ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "nested-child",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
     let worktree = rig.project.join(".worktrees/writer");
     let (roots, context) = writer_context(&rig)?;
     let identity = command(&rig, &["fabric", "identity", "--json"])?;
@@ -1266,7 +1279,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             provenant_run::resolve_writer(roots.state.as_path(), &rig.project, &worktree)?;
         let mut prepared = writer_run(
             request,
-            "lane-prepare",
+            &format!("lane-prepare-{adapter}-{writer}"),
             match (adapter, writer) {
                 ("codex", false) => 91,
                 ("codex", true) => 92,
@@ -1300,9 +1313,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
         };
-        for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-            fs::create_dir_all(path)?;
-        }
         let registry = provenant_cli::run::Registry {
             roots: Some(&roots),
             home: Some(&home),
@@ -1310,6 +1320,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             cwd: Some(&rig.project),
             state_root: Some(roots.state.as_path()),
             project_id: Some(context.project_id),
+            host: None,
         };
         // Simulate a partially written first candidate. Fallback must have
         // independent setup paths rather than failing on the same auth entry.
@@ -1325,6 +1336,15 @@ fn lane_prepare_isolates_nested_state() -> Result {
             ),
             ..Default::default()
         });
+        let clock = provenant_supervisor::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = writer_call(&clock, &cancel)?;
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        store.create(&prepared, &call)?;
+        let task = &prepared.request.tasks[0];
+        for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+            fs::create_dir_all(path)?;
+        }
         let staging = if writer {
             &paths.scratch
         } else {
@@ -1357,6 +1377,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &|| 1000,
             2000,
         )?;
+        // Prepared below lanes.max_depth, so its children may launch; the
+        // limit then drops to exercise refusal at dispatch time.
+        fs::write(rig.state.join("config.toml"), config(2))?;
         let mut launch = provenant_cli::run::prepare_fixture(
             &registry,
             task,
@@ -1366,6 +1389,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             Some(&token),
         )
         .map_err(|e| format!("prepare {adapter} writer={writer}: {e}"))?;
+        fs::write(rig.state.join("config.toml"), config(1))?;
         assert!(
             launch
                 .environment
@@ -1394,6 +1418,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let permissions = confinement.plan.permissions();
         assert_eq!(permissions.scratch.path, staging.join("candidate-1"));
+
         if adapter == "codex" {
             assert!(
                 fs::symlink_metadata(
@@ -1455,7 +1480,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6.1-sol\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
         );
         let mut options = provenant_supervisor::exec::ExecOptions::new(
             &launch.argv,
@@ -1488,7 +1513,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             result["structuredContent"]["code"], "lane_depth",
             "{result}"
         );
-        assert!(!roots.state.as_path().join("run.sqlite3").exists());
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(
             rig.state
@@ -1512,7 +1536,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             ""
         );
         // Raise the host limit only for a second call. It must create records
-        // in the configured child store while leaving the parent store absent.
+        // in the configured child store without launching in the lane.
         if adapter == "codex" && !writer {
             fs::write(rig.state.join("config.toml"), config(2))?;
             let mut options = provenant_supervisor::exec::ExecOptions::new(
@@ -1536,23 +1560,78 @@ fn lane_prepare_isolates_nested_state() -> Result {
                     .join("run.sqlite3")
                     .exists()
             );
-            assert!(!rig.state.join("run.sqlite3").exists());
+            let mut inputs = provenant_core::RootInputs::new(home.clone(), rig.project.clone());
+            inputs.state_dir = Some(
+                rig.state
+                    .join("children")
+                    .join(paths.attempt_id.to_string()),
+            );
+            let queued_context = provenant_run::ExecutionContext {
+                state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+                ..context.clone()
+            };
+            let queued = provenant_run::RunStore::open(&queued_context, &call)?;
+            assert_eq!(
+                queued.queued_runs(&call)?.len(),
+                1,
+                "lane launched its own child"
+            );
             fs::write(rig.state.join("config.toml"), config(1))?;
         }
+        let parent_context = provenant_run::HolderContext {
+            schema_version: 1,
+            roots: provenant_run::RootSeed {
+                home: home.clone(),
+                checkout: rig.project.clone(),
+                state_root: rig.state.clone(),
+            },
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            run_id: prepared.run_id,
+            attempt_id: paths.attempt_id,
+            host_delivery: None,
+            launch: Some(provenant_run::HostLaunchContext {
+                configuration_root: rig.state.clone(),
+                cwd: launch.cwd.clone(),
+                executables: [("codex".into(), executable.clone())].into(),
+                git: selected_git.clone(),
+                codex_home: None,
+                fixture_state_write: true,
+            }),
+        };
         verify_lane_profile(
             &mut launch,
             &attempt,
             roots.state.as_path(),
             frames.as_bytes(),
             &config,
+            &parent_context,
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
     Ok(())
 }
 
-/// Fake provider deliberately forwards no provider environment to its MCP child.
+/// Fake provider forwards no provider environment to its MCP child, only a
+/// baseline PATH as real providers do.
 pub(crate) fn lane_provider() -> Result {
+    if std::env::var(provenant_run::LANE_DEPTH_ENV).as_deref() == Ok("2") {
+        let mut prompt = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut prompt)?;
+        let state = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("child CODEX_HOME")?);
+        fs::write(
+            state.join("fake-child-launched"),
+            b"confined child executed",
+        )?;
+        writeln!(
+            std::io::stdout(),
+            "{{\"type\":\"thread.started\",\"thread_id\":\"fixture-child\"}}"
+        )?;
+        if prompt.contains("wait for host cancellation") {
+            thread::park_timeout(Duration::from_secs(5));
+        }
+        return Ok(());
+    }
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
     let mut entry = serde_json::Map::new();
     for arg in std::env::args().filter(|arg| arg.starts_with("mcp_servers.fabric.")) {
@@ -1599,6 +1678,21 @@ pub(crate) fn lane_provider() -> Result {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    // A real provider hands its MCP child a baseline PATH. Mirror that with
+    // this fake's own directory first, so the nested dispatch resolves it.
+    let mut env = env;
+    if env.iter().all(|(key, _)| key != "PATH") {
+        let mut directories = vec![
+            std::env::current_exe()?
+                .parent()
+                .ok_or("provider bin")?
+                .to_path_buf(),
+        ];
+        directories.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        env.push(("PATH".into(), std::env::join_paths(directories)?));
+    }
     let mut input = Vec::new();
     std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)?;
     let cwd = std::env::current_dir()?;
@@ -1669,6 +1763,7 @@ fn verify_lane_profile(
     state: &Path,
     frames: &[u8],
     config: &dyn Fn(u8) -> String,
+    parent: &provenant_run::HolderContext,
 ) -> Result {
     use provenant_confinement::permissions::{
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
@@ -1724,6 +1819,34 @@ fn verify_lane_profile(
     let compiled = confinement
         .plan
         .compile(backend.as_ref(), profile, &anchors)?;
+    // Start the same host holder used by internal supervise. This manually
+    // compiled parent has no guardian of its own, so its fixture holder has no
+    // admission or terminal work; all child handoff/custody remains real.
+    struct ParentFixture;
+    impl provenant_supervisor::Holder for ParentFixture {
+        fn admit(
+            &self,
+            _: &[u8],
+            _: &provenant_supervisor::fs::Directory,
+        ) -> provenant_supervisor::custody::Result<()> {
+            Ok(())
+        }
+        fn terminal(
+            &self,
+            _: &[u8],
+            _: &provenant_supervisor::fs::Directory,
+            _: &provenant_supervisor::custody::ExitObservation,
+            _: &provenant_supervisor::custody::Recovery,
+        ) -> provenant_supervisor::custody::Result<()> {
+            Ok(())
+        }
+    }
+    use provenant_supervisor::Holder;
+    let host = provenant_cli::run::HostHolder::new(&ParentFixture);
+    host.admit(
+        &parent.encode()?,
+        &provenant_supervisor::fs::Directory::open_anchor(attempt)?,
+    )?;
     let shell_writer = launch
         .argv
         .iter()
@@ -1806,11 +1929,27 @@ fn verify_lane_profile(
     fs::write(state.join("config.toml"), config(2))?;
     let nested_frames =
         String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
+    let cancel_child =
+        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
+    let nested_frames = if confinement.writer.is_some() {
+        nested_frames.replace(
+            "\"timeout_ms\":1000",
+            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
+        )
+    } else {
+        nested_frames
+    };
+    let nested_frames = if cancel_child {
+        nested_frames
+            .replace("read only", "wait for host cancellation")
+            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
+    } else {
+        nested_frames
+    };
     let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
     options.env = Some(&launch.environment);
     options.stdin = Some(nested_frames.as_bytes());
     let nested = executor.execute(options)?;
-    fs::write(state.join("config.toml"), config(1))?;
     assert_eq!(
         code(&nested),
         0,
@@ -1838,7 +1977,77 @@ fn verify_lane_profile(
         Some(1),
         "confined child was not admitted: {targets}"
     );
-    assert!(!state.join("run.sqlite3").exists());
+    // Admission is not launch: the host must reach the confined fake child,
+    // including when a Claude parent cannot read Codex credentials.
+    let attempt_id = provenant_core::AttemptId::parse(
+        targets[0]["attempt"].as_str().ok_or("child attempt id")?,
+    )?;
+    let mut inputs =
+        provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
+    inputs.state_dir = Some(child.clone());
+    let child_context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&LocalFs)?.state,
+        project_id: parent.project_id,
+        actor_id: parent.actor_id,
+        read_prompts: true,
+    };
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let call = writer_call(&clock, &cancel)?;
+    let store = provenant_run::RunStore::open(&child_context, &call)?;
+    if cancel_child {
+        let run = store.record(attempt_id, &call)?.run_id;
+        wait_for_path(
+            &child.join(format!(
+                "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
+            )),
+            Duration::from_secs(8),
+        )?;
+        host.provider_exited(
+            &parent.encode()?,
+            Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
+        )?;
+    }
+    let record = await_terminal(&store, attempt_id, &call)?;
+    if cancel_child {
+        assert_terminal_outcome(&record, provenant_run::Outcome::Cancelled)?;
+    }
+    let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
+        return Err("child attempt was not terminal".into());
+    };
+    let reason = reason.as_deref().unwrap_or_default();
+    // Host setup links the registered credential. The parent's profile has
+    // no symlink-create exception or cross-provider credential read.
+    assert!(!reason.contains("setup failed"), "{reason}");
+    if launch.route.provider.as_deref() == Some("codex") {
+        let candidates = child.join(format!(
+            "runs/{}/attempts/{attempt_id}/provider-state",
+            record.run_id
+        ));
+        let linked = fs::read_dir(&candidates)?
+            .map(|entry| Ok(fs::read_link(entry?.path().join("auth.json")).ok()))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(
+            linked.into_iter().flatten().collect::<Vec<_>>(),
+            vec![confinement.home.join(".codex/auth.json")],
+            "{reason}"
+        );
+        assert_eq!(record.provider_launched, Some(true), "{reason}");
+    }
+    assert_eq!(record.provider_launched, Some(true), "{reason}");
+    let provider_state = child.join(format!(
+        "runs/{}/attempts/{attempt_id}/provider-state",
+        record.run_id
+    ));
+    assert!(
+        provider_state
+            .join("candidate-0/fake-child-launched")
+            .exists(),
+        "{reason}"
+    );
+    host.provider_exited(&parent.encode()?, None)?;
+    fs::write(state.join("config.toml"), config(1))?;
+    // The parent store's own git-home is the host's, from preparing this lane.
+    assert!(child.join("tmp/git-home").is_dir());
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),

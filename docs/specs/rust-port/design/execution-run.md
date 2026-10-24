@@ -190,15 +190,20 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 ```
 
 For nested submission, the Run root is the submitting attempt's dedicated
-`<parent-run-state>/children/<AttemptId>/` store. Its database and the layout
-above are separate from the parent's database and attempt custody. The MCP
-retains shared Fabric identity/config on the original state root. Its explicit
-`PROVENANT_RUN_STATE_DIR` environment selects the child store for CLI/MCP Run
-queries and controls; host recovery sets that variable while retaining the original `--state-dir`
-for identity/config.
-The confinement grant covers only this child subtree, shared Fabric SQLite
-files and required lock/helper state. It never covers the parent `runs/` tree.
-See [lane MCP and nesting](execution-route.md#lane-mcp-hooks-and-nesting-2026-10-24).
+`<parent-run-state>/children/<AttemptId>/` store. Its database and layout above
+are separate from the parent's database and attempt custody. The lane MCP seals
+queued requests there; a host-side worker in its parent guardian launches them
+through the shared Run owner. The worker derives depth from the parent's sealed
+request and rejects mismatched parent/depth proposals before provider setup.
+
+The MCP retains shared Fabric identity/config on the original state root. Its
+explicit `PROVENANT_RUN_STATE_DIR` environment selects the child store for
+CLI/MCP queries and controls; host recovery sets that variable while retaining
+the original `--state-dir` for identity/config. The confinement grant covers
+only the child subtree, shared Fabric SQLite files and required lock/helper
+state, with no child-setup symlink exception or parent `runs/` write grant.
+The child store is lane-writable ingress, not independent evidence against its
+submitting lane. See [lane MCP and nesting](execution-route.md#lane-mcp-hooks-and-nesting-2026-10-24).
 
 This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no

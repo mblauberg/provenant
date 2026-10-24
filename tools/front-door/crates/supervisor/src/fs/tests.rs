@@ -902,12 +902,15 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
         let permit = reaper.reserve().unwrap();
         let mut child = crate::sys::raw_exec::OwnedPid::spawn(
             permit,
-            &argv,
-            Some(&env),
-            temp.path(),
-            false,
-            false,
-            false,
+            crate::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: temp.path(),
+                input: false,
+                secret_input: None,
+                capture_stdout: false,
+                capture_stderr: false,
+            },
         )
         .unwrap();
         let mut stream = crate::sys::fixture_accept(&listener, Duration::from_secs(5)).unwrap();

@@ -70,6 +70,10 @@ pub(crate) enum StoredWriterBinding {
     ReadOnly,
 }
 impl WriterBinding {
+    /// The binding of a read-only attempt, which holds no worktree.
+    pub fn read_only() -> Self {
+        Self(StoredWriterBinding::ReadOnly)
+    }
     pub fn from_verified(
         worktree: &dyn SafeDir,
         git: &dyn SafeDir,
@@ -524,6 +528,7 @@ pub struct ProviderCommand {
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
+    pub secret_input: Option<crate::exec::SecretInput>,
     /// Opaque, bounded reference for the composed terminal holder. It travels
     /// on the handoff pipe only and is never written to the launch summary.
     pub holder_context: Vec<u8>,

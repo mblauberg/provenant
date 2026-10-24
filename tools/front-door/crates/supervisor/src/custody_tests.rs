@@ -319,6 +319,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
                 environment: crate::fixture::environment(root.path()),
                 cwd: root.path().into(),
                 stdin: vec![],
+                secret_input: None,
                 holder_context: Vec::new(),
             },
             lease: &mut writer,

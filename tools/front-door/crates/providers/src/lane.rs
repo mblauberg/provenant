@@ -53,6 +53,7 @@ impl LaneRuntime<'_> {
         &self,
         scratch: &Path,
         argv: &mut Vec<OsString>,
+        allowed_tools: &str,
     ) -> Result<Vec<SetupStep>, ProviderError> {
         let mcp = serde_json::json!({"mcpServers": {"fabric": self.mcp(Harness::Claude)?}});
         let settings = provenant_config::claude_lane_settings(self.executable, self.state)
@@ -72,7 +73,7 @@ impl LaneRuntime<'_> {
             "--setting-sources".into(),
             "".into(),
             "--allowedTools".into(),
-            "mcp__fabric__*".into(),
+            allowed_tools.into(),
         ]);
         Ok(steps)
     }

@@ -44,6 +44,7 @@ pub(crate) struct SpawnSpec<'a> {
     pub(crate) env: Option<&'a [(OsString, OsString)]>,
     pub(crate) cwd: &'a Path,
     pub(crate) input: bool,
+    pub(crate) secret_input: Option<&'a crate::exec::SecretInput>,
     pub(crate) capture_stdout: bool,
     pub(crate) capture_stderr: bool,
 }
@@ -62,38 +63,19 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 impl OwnedPid {
-    pub(crate) fn spawn(
-        permit: Permit,
-        argv: &[OsString],
-        env: Option<&[(OsString, OsString)]>,
-        cwd: &Path,
-        input: bool,
-        capture_stdout: bool,
-        capture_stderr: bool,
-    ) -> io::Result<Self> {
-        Self::spawn_with_setup(
-            permit,
-            SpawnSpec {
-                argv,
-                env,
-                cwd,
-                input,
-                capture_stdout,
-                capture_stderr,
-            },
-            |result| {
-                if let Some(pipe) = &result.stdin {
-                    nonblocking(pipe)?;
-                }
-                if let Some(pipe) = &result.stdout {
-                    nonblocking(pipe)?;
-                }
-                if let Some(pipe) = &result.stderr {
-                    nonblocking(pipe)?;
-                }
-                Ok(())
-            },
-        )
+    pub(crate) fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
+        Self::spawn_with_setup(permit, spec, |result| {
+            if let Some(pipe) = &result.stdin {
+                nonblocking(pipe)?;
+            }
+            if let Some(pipe) = &result.stdout {
+                nonblocking(pipe)?;
+            }
+            if let Some(pipe) = &result.stderr {
+                nonblocking(pipe)?;
+            }
+            Ok(())
+        })
     }
     pub(crate) fn spawn_with_setup(
         permit: Permit,
@@ -126,8 +108,22 @@ impl OwnedPid {
         if let Some(env) = spec.env {
             command.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
         }
-        super::child::configure_command(&mut command, &[], spec.env, false)?;
+        let secret = spec
+            .secret_input
+            .map(super::child::SecretPipe::new)
+            .transpose()?;
+        let mut environment = spec
+            .env
+            .map(<[_]>::to_vec)
+            .unwrap_or_else(|| std::env::vars_os().collect());
+        let mut pass = Vec::new();
+        if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {
+            environment = pipe.environment(input, &environment);
+            pass.push(pipe.fd());
+        }
+        super::child::configure_command(&mut command, &pass, Some(&environment), false)?;
         let child = command.spawn()?;
+        drop(secret);
         let mut result = Self {
             child: Some(child),
             permit: Some(permit),

@@ -373,7 +373,7 @@ adds only its verified permission/config arguments; no raw caller argv.
 | Adapter | Current wire form and controls to fixture |
 | --- | --- |
 | Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={...} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` plus dispatch lineage; `PATH=~/.cargo/bin:/usr/bin:/bin`. `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
-| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN` plus dispatch lineage; default config directory, with the access token read by the host and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
+| Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` plus dispatch lineage; default config directory, with the access token read by the host and delivered through a pipe, and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
 | Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
@@ -417,14 +417,21 @@ store; host recovery selects it with `PROVENANT_RUN_STATE_DIR` while keeping the
 original `--state-dir` for identity/config.
 Parent custody/quarantine and other lanes' Run stores receive no write grant.
 The macOS state-write overlap check remains unchanged.
+Provider setup runs on the host, so lanes receive no child-setup symlink grant.
+Codex setup still links the registered `auth.json` on the host, preserving one
+source of truth for rotating credentials.
 
-This chooses narrow shared grants and isolated child storage. Fabric's existing
-`RunOwner` is an in-process composition seam, not a parent-host broker; reusing
-it as a broker would require a new IPC owner. Rust Fabric remains stdio/SQLite,
-with no daemon socket. Child storage is writable by its submitting lane and is
-not independent evidence against that lane. The submitting lane's own custody,
-quarantine and terminal publication stay with its host guardian under the
-parent Run root.
+The parent guardian hosts a child-launch worker through CLI's `HostHolder`
+composition. Fabric's `RunOwner` remains an in-process facade: it seals queued
+submissions in the child store and observes their state. The worker owns its
+SQLite connection and consumes that store without introducing a daemon or a
+second IPC transport. It uses the original config root, selected cwd, provider
+executables and Git from the host-only custody handoff. These inputs and all
+credential resolution stay outside the submitting lane. Each child receives
+its own confinement plan, provider credential grants and guardian custody.
+Child storage remains writable by the submitting lane and is not independent
+evidence against that lane. Parent custody, quarantine and terminal publication
+stay under the parent Run root.
 
 Run supplies the allocated attempt ID and depth before provider preparation.
 The adapter writes `PROVENANT_LANE_DEPTH` (root lanes are 1),
@@ -442,13 +449,34 @@ Nested parent metadata remains separate from continuation ancestry and
 grants no cancellation authority. This is a recursion limit, not an authority
 boundary.
 
-The MCP `fabric_submit` path seals child records and calls the shared launch
-owner, which attempts provider preparation and guardian handoff. The confined
-fixture proves child-store admission; a preparation refusal is permitted and
-it does not prove a nested provider ran. Live in-lane provider discovery,
-nested guardian/profile execution and cross-provider credential access remain
-unverified, subject to the activation gates below, with no additional grants.
-Host recovery selects the child store explicitly.
+The MCP `fabric_submit` path seals queued child records without preparing or
+launching providers. The host worker rechecks the request's parent AttemptId and
+depth against its own parent run's sealed request and the current
+`lanes.max_depth`; invalid proposals terminate as rejected before provider
+preparation. Environment and path checks provide early feedback but do not
+supply host launch authority.
+
+The guardian stops and joins its worker on observed provider exit, before
+cleanup, with a final bounded scan of queued submissions. Children already
+handed off retain independent custody. Host-launched guardians are siblings of
+the parent provider, so they do not enter its provider-descendant sparing
+registry. Explicit parent cancellation,
+wall deadline or supervisor signal sends cooperative cancel requests to only
+those child scopes accepted by this host worker. Normal parent completion
+leaves their independent custody intact. Worker failure records a guardian
+warning and cannot construct a provider stop reason. A provider-written parent
+ID or child journal confers no cancellation authority.
+
+The macOS fixture runs the configured MCP inside the parent's compiled profile
+and requires a launched fake Codex child and a marker written by that child,
+for read-only and writer parents from both Codex and Claude. Writer parents
+submit a writer child on another registered worktree. Registration validation
+and writer custody use the original host state root; the lane only resolves
+its requested project/worktree paths and queues the proposal. A held reader
+child also checks explicit parent cancellation after provider launch. Synthetic
+state-write evidence is confined to fixture builds. Live provider execution
+remains subject to the activation gates below; the fixture does not establish
+live-provider acceptance. Host recovery selects the child store explicitly.
 
 `STAGING` is `ATTEMPT/scratch/candidate-N/` for writers and
 `ATTEMPT/tmp/candidate-N/` for read-only tasks, following the attempt's temporary
@@ -460,7 +488,8 @@ replaced. Behaviour tests drive CLI preparation for read-only and writer tasks,
 including generated Claude files, poisoned first-candidate setup and a fake
 provider that clears inherited MCP environment. Required macOS CI compiles the
 real plan/profile with synthetic fake-provider state-write evidence and probes
-custody/quarantine denial and child-store admission below the depth limit.
+custody/quarantine denial and host-supervised child execution below the depth
+limit.
 Setup opens existing shared ancestors before attempting creation, so it does
 not request writes to read-only anchors. Claude transcript setup is restricted
 to its existing `.claude` config subtree, separately from Run state; generated
@@ -550,7 +579,9 @@ macOS 27.0.1 arm64, 2026-10-24):
   directory reads that service with its path-digest suffix and sets
   `CLAUDE_CONFIG_DIR`, so accounts never cross). Stdout is captured in memory
   and never logged or stored; only `accessToken` and `expiresAt` are kept, and
-  the token is passed as `CLAUDE_CODE_OAUTH_TOKEN`. If it expires within 15
+  the token is passed through an inherited pipe named by
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. No token value enters the child's
+  start environment. If it expires within 15
   minutes the host first runs the CLI once outside the sandbox (`claude -p x
   --model provenant-refresh-probe --max-turns 1`: the CLI refreshes its stored
   token, then the API rejects the model, so no usage is spent) and reads
@@ -621,33 +652,74 @@ The required macOS `lane_prepare_isolates_nested_state` case runs `git
 These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude writer Bash defaults on for fresh and resume modes through the existing
-activation matrix's `shell_enabled` knob. Setting that knob false restores
-file tools only. This explicit CLAUDE-SHELL decision supersedes the earlier
-recorder-only shell gate in #1425/#1428; access/session activation still uses
-its original live captures, which do not acquire shell-proof claims.
-The host-read `CLAUDE_CODE_OAUTH_TOKEN` stays in memory, with
-`CLAUDE_CONFIG_DIR` in retained private state. R7 takes precedence over
-#1414's credential-file suggestion. Writers use `bypassPermissions` and
-`Read,Grep,Glob,Edit,Write,Bash` inside the outer sandbox, denying
-`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`.
-Keychain files have no read grant. The shell observation rows describe the
-native profile contract exercised in macOS CI, not new live CLI captures.
+Claude writer Bash is default-off for fresh and resume modes through the
+activation matrix's `shell_enabled` knob. The earlier default-on decision is
+superseded by REVIEW-FIX-2: each enabled shell mode must cite its own live
+capture proving successful Bash execution, `subprocess_env_scrub: true` and
+an identified CLI version. Historical file-tool captures prove none of these.
+Recording builds can prepare the shell candidate without activating it.
+R7 takes precedence over #1414's credential-file suggestion.
 
-Writer launches set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. The
-[Claude environment reference](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
-documents credential scrubbing for Bash, hooks and stdio MCP servers, with
-broader name/value filtering from version 2.1.251. The inspected host install
-is 2.1.310; the native regression does not execute that CLI or prove its scrub.
-Host acceptance must check the actual Bash child has no selected OAuth token,
-without printing it, and record the CLI version. An old CLI may ignore or
-incompletely implement this control. It is defence in depth, not OS-level
-isolation of the parent credential: macOS process-environment inspection is
-not excluded by this profile's `sysctl-read` allowance. The parent still holds
-the selected token and HTTPS egress remains any-host TCP 443. Token theft and
-exfiltration therefore remain residual risks. Other credentials stay outside
-the grants. This authorised default remains behind `shell_enabled`; no
-allowed-client keychain IPC proof or perfect shell-token isolation is claimed.
+The host delivers the selected OAuth token through a dedicated pipe and sets
+only `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` to its read descriptor number.
+`CLAUDE_CODE_OAUTH_TOKEN` is absent from the complete child environment. The
+supervisor bounds the pipe input to 512 bytes, closes the write end before
+spawn, inherits only the read end alongside the existing custody descriptor,
+and closes its own reader after spawn. All other descriptors remain
+close-on-exec. Closing the provider's reader before it spawns Bash belongs to
+Claude; our pipe is already at EOF after its token has been consumed. The
+inspected 2.1.310 binary implements this descriptor interface. This removes the
+token from macOS `KERN_PROCARGS2` start-environment inspection: Seatbelt's
+`sysctl-read` and process-info denials do not prevent that same-user access,
+so changing the sysctl rule is not a credential boundary.
+
+Shell candidates set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. In 2.1.310 this
+forces permission mode to `default`, ignoring bypass mode. Candidates therefore
+pass `--allowedTools Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*` explicitly,
+as well as the corresponding `--tools` list. Read-only and file-tool lanes keep
+their narrower MCP allow-list and tool list. Shell candidates deny
+`/usr/bin/security`, `SecurityServer`, `securityd` and `securityd.xpc`; keychain
+files have no read grant. Live acceptance must record fresh and resume Bash
+results, confirm the child has neither OAuth environment variable and record
+the CLI version. Native tests prove the pipe/argv/profile contracts, not the
+installed CLI's handling of inherited descriptors or subprocess scrubbing.
+Claude still holds the token in memory and has any-host HTTPS egress, so this
+does not claim perfect credential isolation from a compromised provider.
+
+The private `CLAUDE_CONFIG_DIR` is within writable provider state: Bash can
+modify it, and terminal staging cleanup retains it. Adapter resume with that
+same private-state root can read those changes. `--setting-sources ""` and
+`--strict-mcp-config` mitigate settings/MCP injection; the directory is not an
+immutable trust boundary. The current dispatch composition refuses continuation
+until it has a provider session, so this is not a claim of working run resume.
+
+The per-worktree Cargo cache is both writable and executable, and subsequent
+lanes for the same worktree incarnation reuse it. A planted
+`cargo-home/config.toml` or executable can affect later lane builds. Host code
+only prepares and anchors the cache; it never runs Cargo with that home or
+executes cache contents. Lane children execute those contents inside their
+confinement profile. CLT `usr/libexec/git-core` is readable but has no exec
+grant. `git status`, `git diff` and `git commit` are built-ins and need no
+helpers there; commands needing external Git helpers remain outside this grant.
+
+After the chair approves the pro account, quota and throwaway-worktree run,
+record both shell sessions from the repository root (the recorder does not
+flip `shell_enabled`):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/private/tmp CARGO_BUILD_JOBS=4
+export RUSTUP_TOOLCHAIN=1.99.1
+export CARGO_TARGET_DIR=/private/tmp/provenant-cargo-target-fix-v1-review-2
+cargo build --manifest-path tools/front-door/Cargo.toml -p provenant
+record_root=$(mktemp -d /private/tmp/provenant-claude-shell.XXXXXX)
+cargo run --manifest-path tools/front-door/Cargo.toml -p provenant-providers \
+  --features recording --example record -- claude worktree_write \
+  --account pro --model claude-haiku-5-5 --root "$record_root" \
+  --provenant "$CARGO_TARGET_DIR/debug/provenant" --assets "$PWD" --write
+```
+
+Review the redacted captures and the recorder's separate keychain-IPC gate
+before enabling either mode. No live recording was made by REVIEW-FIX-2.
 
 The native regression checks actual security-tool execution and synthetic
 keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume

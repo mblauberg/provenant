@@ -17,13 +17,16 @@ pub use admission::{
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use delivery::HostDeliveryContext;
-pub use holder::{HolderContext, RootSeed, RunHolder};
+pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,
 };
 pub use plan::read_only_plan;
-pub use writer::{LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer};
+pub use writer::{
+    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
+    resolve_writer_proposal,
+};
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
