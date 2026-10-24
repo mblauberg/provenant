@@ -98,7 +98,10 @@ impl ConfinedPlan {
         if p.read_roots.len() + p.protected_roots.len() + p.secret_roots.len() > 128 {
             return Err(PlanError::InvalidRoots);
         }
-        for grant in p.read_roots.iter().chain(&p.protected_roots) {
+        for grant in &p.read_roots {
+            crate::permissions::validate_read_exec_grant(grant)?;
+        }
+        for grant in &p.protected_roots {
             crate::permissions::validate_noncredential_grant(grant)?;
         }
         for secret in &p.secret_roots {
