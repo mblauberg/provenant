@@ -149,6 +149,11 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
 
 #[test]
 fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
+    assert_legacy_git_hook_location(false)?;
+    assert_legacy_git_hook_location(true)
+}
+
+fn assert_legacy_git_hook_location(custom_hooks: bool) -> Result {
     use std::os::unix::fs::symlink;
     let rig = TestRig::new()?;
     let stage = staged(&rig)?;
@@ -166,6 +171,25 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
         None,
     )?;
     assert_eq!(code(&init), 0);
+    let hooks = if custom_hooks {
+        let hooks = legacy.join("custom-hooks");
+        fs::create_dir(&hooks)?;
+        let configured = rig.execute_os(
+            git,
+            &[
+                "-C".into(),
+                legacy.clone().into_os_string(),
+                "config".into(),
+                "core.hooksPath".into(),
+                hooks.clone().into_os_string(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&configured), 0);
+        hooks
+    } else {
+        legacy.join(".git/hooks")
+    };
     let source_alias = rig.root.join("legacy-source-alias");
     symlink(&legacy, &source_alias)?;
     let sensitive = legacy.join("sensitive-release");
@@ -190,9 +214,9 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
         "private manifest sentinel"
     );
     assert!(!rig.state.exists());
-    let old = legacy.join(".git/hooks/post-merge");
+    let old = hooks.join("post-merge");
     symlink(legacy.join("scripts/hooks/post-merge"), &old)?;
-    let retained = legacy.join(".git/hooks/pre-push");
+    let retained = hooks.join("pre-push");
     symlink(legacy.join("scripts/hooks/pre-push"), &retained)?;
     let project_hook = rig.project.join(".git/hooks/post-merge");
     symlink(legacy.join("scripts/hooks/post-merge"), &project_hook)?;
@@ -240,7 +264,7 @@ fn legacy_git_hook_location_comes_from_the_explicit_checkout() -> Result {
             .git_hooks_dir
             .ok_or("git hooks")?
             .to_path_buf()?,
-        legacy.join(".git/hooks")
+        hooks
     );
     rig.assert_legacy_unchanged()
 }
