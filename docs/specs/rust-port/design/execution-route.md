@@ -156,13 +156,15 @@ the whole config directory. These narrower grants and private Codex state follow
 the execution/confinement design over #1114's broader directory wording.
 Lane rows expose the applied account, or `unknown` when none was applied.
 
-Current acceptance boundary: production `cli::run::Registry::prepare` still
-refuses launches at the existing unwired launch-specification seam. The typed
+Current acceptance boundary: production `cli::run::Registry::prepare` launches
+default Codex through confinement, with a fake-provider integration case covering
+the real dispatch path. Selected-account placement remains unwired. The typed
 registration/preparation APIs and concurrent Codex stubs are covered, but durable
 registration discovery, launch-time Codex identity revalidation and end-to-end
 production placement are not complete. The concurrency test asserts generated
-grants and uses unconfined stubs; it does not establish OS-enforced isolation.
-#1114 stays open until that composition work and its confinement acceptance run.
+grants and uses unconfined stubs; it does not establish OS-enforced account
+isolation. #1114 stays open until that composition work and its confinement
+acceptance run.
 
 #1062 also remains open. Static inspection of the official Agy 1.4.7 macOS
 binary and matching call sites in the installed executable found Keychain
