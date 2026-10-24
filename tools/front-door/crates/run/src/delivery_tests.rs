@@ -142,6 +142,40 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         git(&lane, &["ls-remote", "origin", "refs/heads/published/lane"])?
             .starts_with(head_text.as_str())
     );
+    // A writer that made no commit reports `no_new_commits` and pushes nothing.
+    let idle_lane = root.join("idle");
+    git(
+        &writer.project,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "idle",
+            idle_lane.to_str().ok_or("idle")?,
+        ],
+    )?;
+    let idle_writer = WriterRequest {
+        project: writer.project.clone(),
+        worktree: idle_lane.clone(),
+    };
+    let idle_request = WriterDeliveryRequest {
+        branch: "published/idle".into(),
+        ..request.clone()
+    };
+    let idle_host =
+        HostDeliveryContext::new(environment.clone()).prepare(&idle_writer, &idle_request)?;
+    let mut idle = tests::input();
+    idle.run_id = provenant_core::RunId::from_bytes([17; 16]);
+    idle.operation_id = provenant_core::OperationId::parse("idle-delivery")?;
+    idle.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
+    idle.request.tasks[0].writer = Some(idle_writer.clone());
+    idle.request.tasks[0].deliver = Some(idle_request.clone());
+    store.create(&idle, &call)?;
+    let idle_attempt = store.attempt_dir(idle.run_id, idle.attempts[0].attempt_id, false)?;
+    let idle_receipt = deliver_once(&idle_host, &idle_writer, &idle_request, &idle_attempt)?;
+    assert_eq!(idle_receipt.state, WriterDeliveryState::NoNewCommits);
+    assert_eq!(idle_receipt.head, Some(GitOid::parse(&initial)?));
+    assert!(git(&lane, &["ls-remote", "origin", "refs/heads/published/idle"])?.is_empty());
     // An interrupted delivery is recorded during terminal recovery, with no push.
     let mut interrupted = tests::input();
     interrupted.run_id = provenant_core::RunId::from_bytes([14; 16]);
