@@ -1457,7 +1457,10 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         } else {
             assert_eq!(found, vec![(id, Reconciled::Queued)]);
         }
-        assert_eq!(std::fs::read_to_string(temporary.join("keep.lock"))?, "keep");
+        assert_eq!(
+            std::fs::read_to_string(temporary.join("keep.lock"))?,
+            "keep"
+        );
     }
     Ok(())
 }
