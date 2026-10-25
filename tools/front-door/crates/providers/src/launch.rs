@@ -208,9 +208,11 @@ pub(crate) fn rust_tools(
         ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
     ]);
-    // Cargo's system LibreSSL loads its public default configuration at start.
+    // Cargo's system LibreSSL reads its public default configuration
+    // (openssl.cnf) and the TLS trust roots (cert.pem, certs/) to download
+    // crates. Read-only; the whole public directory holds no secrets.
     #[cfg(target_os = "macos")]
-    runtime_reads.push(exact("/private/etc/ssl/openssl.cnf"));
+    runtime_reads.push(subtree("/private/etc/ssl"));
     // Rust's system linker also goes through xcrun. Select the real CLT
     // installation when present, rather than opening the selected Xcode app.
     #[cfg(target_os = "macos")]

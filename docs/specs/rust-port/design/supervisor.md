@@ -325,7 +325,7 @@ writable in place without census or anchors: `~/.cargo/registry`,
 `~/.cargo/git`, Cargo's package and global cache lock files,
 `~/Library/pnpm`, `~/Library/Caches/pnpm`, `~/.npm` and `~/.cache/node`. A
 lane can therefore poison a shared package cache; that risk is accepted for
-working builds. Executables stay immutable: `~/.cargo/bin` and
+working builds. On macOS `/private/etc/ssl` (TLS trust roots and `openssl.cnf`) is read-only so Cargo can download crates. Executables stay immutable: `~/.cargo/bin` and
 `~/.rustup/toolchains` are read and exec only. Homebrew prefixes are readable
 except `var/` (service data). `--write-root` adds project paths outside the
 worktree, such as a repository's `.agent-run` lock directory; roots must be
