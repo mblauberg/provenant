@@ -353,9 +353,12 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         Command::Dispatch(dispatch) => {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
-            if (access.mode == Mode::WorktreeWrite) != access.worktree.is_some() {
+            if (access.mode == Mode::WorktreeWrite)
+                != (access.worktree.is_some() || dispatch.branch.is_some())
+            {
                 return invalid(
-                    "--worktree is required with, and only valid for, --mode worktree-write",
+                    "--worktree, or a peer writer's --branch, is required with, and only valid \
+                     for, --mode worktree-write",
                 );
             }
             if access.mode == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
@@ -488,7 +491,7 @@ fn constraints(path: &str) -> Vec<String> {
             "single prompt requires exactly one of model or route",
             "manifest conflicts with per-task route, access, metadata and provider-timeout",
             "concurrency requires manifest",
-            "worktree is required with, and only valid for, worktree-write",
+            "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
             "fallback conflicts with a writer and has at most two distinct models",
             "prompt and manifest inputs are at most 1 MiB",
         ],

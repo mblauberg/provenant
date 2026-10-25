@@ -52,7 +52,40 @@ pub enum Reconciled {
     Uncertain { reason: String },
 }
 
+/// How long recovery waits after each of TERM and KILL for an orphan to go.
+const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl RunStore {
+    /// Writer exclusion for an attempt, taken without waiting: failure means a
+    /// guardian (or an inheritor of its lease) still holds custody.
+    fn orphan_recovery(
+        &self,
+        record: &AttemptRecord,
+        attempt: provenant_supervisor::fs::Directory,
+        call: &Request<'_>,
+    ) -> Result<custody::Recovery> {
+        let request = self.request(record.run_id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::Validation("recovery task missing"))?;
+        let directory = match &task.writer {
+            Some(writer) => {
+                let mut writer =
+                    crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
+                writer.custody.take().ok_or(RunError::UnsafePath)?.0
+            }
+            None => attempt,
+        };
+        custody::acquire_recovery(
+            directory,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        )
+        .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
+    }
     pub(crate) fn scope(record: &AttemptRecord) -> Scope {
         Scope {
             run: record.run_id,
@@ -334,24 +367,33 @@ impl RunStore {
                     Ok(Observation::Exited(exit))
                         if exit.unresolved_cleanup && !exit.unresolved_pids.is_empty() =>
                     {
-                        if custody::any_pid_alive(&exit.unresolved_pids) {
-                            return Ok(Reconciled::Escaped {
-                                pids: exit.unresolved_pids,
-                            });
-                        }
-                        // None of the named processes is alive. A live guardian
-                        // republishes the settled exit; the next pass commits it.
-                        // Without one, only chair recovery can clear the fence.
-                        match custody::acquire_recovery(
-                            dir()?,
-                            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                            call.cancel,
-                            call.clock,
-                        ) {
-                            Ok(_) => Ok(uncertain(
-                                &"descendants are gone but no guardian can settle the exit; chair recovery required",
-                            )),
-                            Err(_) => Ok(Reconciled::Held),
+                        let still_named = || {
+                            if custody::any_pid_alive(&exit.unresolved_pids) {
+                                Reconciled::Escaped {
+                                    pids: exit.unresolved_pids.clone(),
+                                }
+                            } else {
+                                // A live guardian republishes the settled exit;
+                                // the next pass commits it.
+                                Reconciled::Held
+                            }
+                        };
+                        // The writer lock is free only when no guardian remains
+                        // to settle this exit, so recovery ends the orphans.
+                        let Ok(mut recovery) = self.orphan_recovery(&record, dir()?, call) else {
+                            return Ok(still_named());
+                        };
+                        match recovery.end_orphans(&dir()?, ORPHAN_PATIENCE) {
+                            Ok(report) if report.survivors.is_empty() => {
+                                drop(recovery);
+                                // The exit is settled: commit it as any other.
+                                self.reconcile_attempt(id, providers, call)
+                            }
+                            Ok(report) => Ok(Reconciled::Escaped {
+                                pids: report.survivors.iter().map(|s| s.pid).collect(),
+                            }),
+                            Err(CustodyError::Fenced) => Ok(still_named()),
+                            Err(error) => Ok(uncertain(&error)),
                         }
                     }
                     Ok(Observation::Exited(exit)) => {

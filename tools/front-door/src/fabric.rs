@@ -914,8 +914,87 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
     }
 }
 
+/// Git variables that would redirect a fetch away from the peer's clone or
+/// let it prompt.
+const GIT_REDIRECTS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_TERMINAL_PROMPT",
+];
+/// Fetch every remote with this host's own Git authority, then require `base`
+/// on a remote-tracking ref, so a peer writer never starts from a commit only
+/// this clone has. Returns the pinned base commit.
+fn fetch_remote_base(
+    project: &Path,
+    base: &str,
+    timeout: std::time::Duration,
+) -> Result<provenant_core::GitOid, FacadeError> {
+    use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    let git = crate::roots::git_binary().ok_or(FacadeError::OwnerUnavailable)?;
+    let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
+        .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
+        .collect();
+    let executor = SystemExecutor::new(1).map_err(|_| FacadeError::Io)?;
+    let git_output = |args: &[&str]| -> Result<Vec<u8>, FacadeError> {
+        let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+            .chain(
+                [
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.fsmonitor=false",
+                ]
+                .iter()
+                .chain(args)
+                .map(std::ffi::OsString::from),
+            )
+            .collect();
+        let mut options = ExecOptions::new(&argv, project, timeout);
+        options.env = Some(&environment);
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: 4096 };
+        options.stderr = StreamPolicy::Discard;
+        let output = executor
+            .execute(options)
+            .map_err(|_| FacadeError::BaseUnreachable)?;
+        if output.termination != Termination::Exit(0) || output.timed_out {
+            return Err(FacadeError::BaseUnreachable);
+        }
+        Ok(output.stdout.bytes)
+    };
+    git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
+    let contains = format!("--contains={base}");
+    let refs = git_output(&[
+        "for-each-ref",
+        "--count=1",
+        "--format=%(refname)",
+        &contains,
+        "refs/remotes",
+    ])?;
+    if refs.iter().all(u8::is_ascii_whitespace) {
+        return Err(FacadeError::BaseUnreachable);
+    }
+    let commit = format!("{base}^{{commit}}");
+    let oid = git_output(&["rev-parse", "--verify", "--end-of-options", &commit])?;
+    std::str::from_utf8(&oid)
+        .ok()
+        .and_then(|oid| provenant_core::GitOid::parse(oid.trim()).ok())
+        .ok_or(FacadeError::BaseUnreachable)
+}
+
 struct BinaryRunOwner<'a> {
     factory: &'a Factory,
+    /// False only at peer ingress: no forwarding, and writers name a new
+    /// worktree instead of a path.
     allow_remote: bool,
     /// Replay submissions under this actor instead of the process's own.
     actor: Option<provenant_core::ActorId>,
@@ -1056,6 +1135,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)?;
         Ok(SubmissionReceipt {
+            worktree: None,
             operation_id,
             targets: page
                 .lanes
@@ -1199,7 +1279,7 @@ impl BinaryRunOwner<'_> {
             if !self.allow_remote {
                 return Err(FacadeError::ConfinementRefused);
             }
-            // Peer writers need worktree transport (#1457).
+            // MCP forwards read-only work only; a peer writer comes from `dispatch`.
             if tasks
                 .iter()
                 .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
@@ -1221,6 +1301,29 @@ impl BinaryRunOwner<'_> {
                 }
                 _ => Err(FacadeError::StateCorrupt),
             };
+        }
+        // Peer ingress creates a writer's worktree in this host's clone; a
+        // caller never names a path here, and a batch creates at most one.
+        let ingress = !self.allow_remote;
+        let mut tasks = tasks;
+        let mut created = None;
+        for task in &mut tasks {
+            let Some(spec) = task.new_worktree.take() else {
+                if ingress && task.worktree.is_some() {
+                    return Err(FacadeError::InvalidInput);
+                }
+                continue;
+            };
+            if !ingress
+                || created.is_some()
+                || task.worktree.is_some()
+                || task.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+            {
+                return Err(FacadeError::InvalidInput);
+            }
+            let worktree = self.peer_worktree(&operation_id, spec, budget, cancel)?;
+            task.worktree = Some(worktree.path.clone());
+            created = Some(worktree);
         }
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
@@ -1273,7 +1376,93 @@ impl BinaryRunOwner<'_> {
                 &call,
             )
         })?;
-        self.receipt(&session, operation_id, &run, &started, &call)
+        let mut receipt = self.receipt(&session, operation_id, &run, &started, &call)?;
+        receipt.worktree = created;
+        Ok(receipt)
+    }
+    /// The writer worktree a peer request names. A first request fetches every
+    /// remote, requires the base on a remote-tracking ref and creates the
+    /// branch at it. A retry adopts the branch's worktree while it is still
+    /// clean at that base; a replayed operation finds the one it created.
+    fn peer_worktree(
+        &self,
+        operation_id: &provenant_core::OperationId,
+        spec: NewWorktree,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
+        use provenant_confinement::worktrees::{
+            self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
+        };
+        let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
+            .map_err(|_| FacadeError::InvalidInput)?;
+        provenant_confinement::repo::GitRevision::new(&spec.base)
+            .map_err(|_| FacadeError::InvalidInput)?;
+        let replay = self
+            .store(budget, cancel)?
+            .operation(operation_id, &self.call(budget, cancel))
+            .map_err(run_error)?
+            .is_some();
+        // Fetch and create each take at most half of what remains, so the
+        // submission keeps a reserve; a retry adopts a create that ran late.
+        let half = || {
+            let micros = budget.remaining(self.factory.clock.mono_now()).as_micros() / 2;
+            std::time::Duration::from_micros(micros)
+        };
+        let project = &self.factory.cwd;
+        let base = if replay {
+            None
+        } else {
+            Some(fetch_remote_base(project, &spec.base, half())?)
+        };
+        let info = crate::worktrees::with_context(
+            &self.factory.context.roots,
+            project,
+            half(),
+            |context, cancel| {
+                let existing = worktrees::list(context, cancel)?
+                    .into_iter()
+                    .find(|w| w.branch.as_deref() == Some(branch.as_str()));
+                let Some(base) = base else {
+                    return existing.ok_or(WorktreeError::NotFound.into());
+                };
+                match existing {
+                    Some(info)
+                        if info.head == base
+                            && info.dirty == WorktreeCondition::Clean
+                            && info.writer != WriterState::Live =>
+                    {
+                        Ok(info)
+                    }
+                    Some(_) => Err(WorktreeError::InvalidRequest.into()),
+                    None => {
+                        let request = WorktreeCreate {
+                            branch: spec.branch.clone(),
+                            base: Some(base.to_string()),
+                        };
+                        Ok(worktrees::create(context, request, cancel)?)
+                    }
+                }
+            },
+        )
+        .map_err(|error| match error {
+            // The branch name is valid, so an invalid create means it exists.
+            crate::worktrees::Error::Worktree(WorktreeError::InvalidRequest) if !replay => {
+                FacadeError::BranchExists
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::NotFound) if replay => {
+                FacadeError::WorktreeMissing
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::NotFound) => {
+                FacadeError::BaseUnreachable
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
+            _ => FacadeError::Io,
+        })?;
+        Ok(provenant_fabric_runtime::runs::PeerWorktree {
+            path: info.path.to_str().ok_or(FacadeError::Io)?.to_owned(),
+            branch: spec.branch,
+        })
     }
     fn output(
         &mut self,
@@ -1771,6 +1960,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
                     delivery_id: None,
                     deliver: None,
+                    new_worktree: None,
                 }],
                 concurrency: Some(1),
                 knobs: vec![],

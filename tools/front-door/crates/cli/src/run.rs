@@ -616,7 +616,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
         None => Err(Fail::new(
             Status::Invalid,
             "WORKTREE_REQUIRED",
-            "worktree-write access needs --worktree",
+            "worktree-write access needs --worktree, or --branch and --base with a peer --host",
         )),
         Some(_) if !writer => Err(Fail::new(
             Status::Invalid,
@@ -779,7 +779,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         ))
     };
     worktree_access(
-        matches!(access.mode, Mode::WorktreeWrite),
+        matches!(access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
         access.worktree.as_deref(),
     )?;
     if matches!(access.network, Switch::On)
@@ -788,8 +788,9 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     {
         return unsupported("network, capability or read-root access");
     }
-    // Naming this host is ordinary local placement in any mode; a writer
-    // needs its worktree on this machine, so only a peer is refused.
+    // Naming this host is ordinary local placement in any mode. A peer writer
+    // names a new branch the peer creates, since --worktree is a local path.
+    let mut new_worktree = None;
     if let Some(host) = command.host.as_deref() {
         if remote::names_local_host(edge, host)? {
             command.host = None;
@@ -797,13 +798,16 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             if !remote::names_peer(edge, host)? {
                 return Err(remote::unknown_host(host));
             }
-            return Err(Fail::new(
-                Status::Refused,
-                "UNSUPPORTED",
-                "worktree-write dispatch to a peer host is not available in this build (#1457); \
-                 use --mode read-only",
-            ));
+            new_worktree = Some(remote::new_worktree(&command)?);
         }
+    }
+    if command.branch.is_some() && new_worktree.is_none() {
+        return Err(Fail::new(
+            Status::Invalid,
+            "INVALID",
+            "--branch and --base create a writer worktree on a peer --host with \
+             --mode worktree-write; on this host use `provenant worktree create` and --worktree",
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -962,6 +966,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 concurrency,
                 knobs: command.knobs,
                 provider_timeout: command.provider_timeout,
+                new_worktree,
             },
             command.wait,
         );
@@ -1740,6 +1745,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
+            let mut requested = false;
             for id in selected {
                 // One failure must not hide the receipts already earned.
                 let receipt = request(&clock, &cancel)
@@ -1749,6 +1755,10 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                         if matches!(receipt, run::CancelReceipt::Unobservable { .. }) {
                             status = Status::Failed;
                         }
+                        requested |= matches!(
+                            receipt,
+                            run::CancelReceipt::Requested | run::CancelReceipt::AlreadyRequested
+                        );
                         human.push_str(&format!("{id} {}\n", state_tag(&receipt)));
                         json!({ "attempt_id": id, "receipt": receipt })
                     }
@@ -1761,6 +1771,42 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 receipts.push(row);
             }
             let mut data = json!({ "operation_id": command.operation_id, "receipts": receipts });
+            if requested {
+                // A request has no actor once the guardian is gone, so recover
+                // the run now: ending proven orphans and settling is the same
+                // path `reconcile` takes, and a live guardian is left alone.
+                let registry = Registry {
+                    roots: Some(edge.roots),
+                    home: Some(edge.home),
+                    assets: Some(edge.assets),
+                    cwd: Some(edge.cwd),
+                    state_root: Some(session.context.state_root.as_path()),
+                    project_id: Some(session.context.project_id),
+                    host: None,
+                };
+                let recovered = request(&clock, &cancel)
+                    .and_then(|call| Ok(session.store.reconcile(target.run, &registry, &call)?));
+                match recovered {
+                    Ok(found) => {
+                        let mut rows = Vec::new();
+                        for (id, state) in &found {
+                            if matches!(
+                                state,
+                                run::Reconciled::Uncertain { .. } | run::Reconciled::Escaped { .. }
+                            ) {
+                                status = Status::Failed;
+                            }
+                            human.push_str(&format!("{id} {}\n", state_tag(state)));
+                            rows.push(json!({ "attempt_id": id, "found": state }));
+                        }
+                        data["recovered"] = Value::Array(rows);
+                    }
+                    Err(fail) => {
+                        status = Status::Failed;
+                        human.push_str(&format!("recovery error: {}\n", fail.message));
+                    }
+                }
+            }
             if let Some(seconds) = command.wait {
                 let (lanes, rendered, timed_out) =
                     wait_lanes(&session, &targets, Condition::All, seconds, edge)?;

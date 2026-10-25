@@ -661,14 +661,22 @@ The peer persists operation acceptance before spawning a run; the run owner's
 own idempotency key closes the database/process gap. Read timeouts return
 `Unknown`; neither reads nor writes use a peer snapshot cache.
 
-Writer lanes receive a committed base through a bounded Git bundle. Retain
-`refs/provenant/transport/<operation>` isolation, validated ref names, hardened
-Git environment, no hooks, no replace objects and no remote shell Git invocation.
-Receiver checks advertised object identity, bundle size, worktree cleanliness
-and writer lease before launch. Result binds base, head, host, run and worktree.
-The chair verifies the fetched head against that result before any local landing.
-Uncommitted changes are not transported. Retention of temporary refs and bundles
-is explicit new-state maintenance; it never touches old run directories.
+A peer writer gets its base from the shared remote, not from the caller
+(#1457). The submission names a new branch and a base instead of a worktree
+path; peer ingress refuses a caller-supplied path. The peer fetches every
+remote with its own Git authority and hooks disabled, refuses a base that no
+remote-tracking ref contains (`base_unreachable`), pins it to a commit and
+creates the branch's registered worktree at that commit through its worktree
+owner. Fetch and create each take at most half of the remaining peer budget,
+leaving a reserve for the submission. A retry adopts the branch's worktree
+while it is clean at the pinned commit with no live writer, so a create whose
+submission was lost does not strand the branch; otherwise an existing branch
+is `branch_exists`. A replayed operation finds its worktree instead of
+creating one.
+The writer then takes the ordinary local writer path on the peer, including
+host delivery with the peer's credentials. The receipt names the peer
+worktree, where undelivered commits stay. Uncommitted changes are never
+transported, and the caller keeps only its placement record.
 
 Landing runs entirely on the home host under a per-ref OS lock. Acquire a
 persistent generation/token bound to expected remote OID and candidate OID.
@@ -756,7 +764,7 @@ Libraries use thiserror enums with typed sources and relevant IDs/paths, without
 raw secret values. Expected contention, stale fences and uncertainty are data.
 Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `stale_fence`, `home_unavailable`, `peer_version`, `launch_unknown`,
-`continuation_unsupported`, `confinement_refused`, `lane_depth`, `worktree_missing`, `output_too_large`, `state_corrupt`,
+`continuation_unsupported`, `confinement_refused`, `lane_depth`, `worktree_missing`, `base_unreachable`, `branch_exists`, `output_too_large`, `state_corrupt`,
 `publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. Use CLI's exits: 0 success,
 1 failed/refused/findings, 2 invalid input/version, 3 cannot proceed (setup,

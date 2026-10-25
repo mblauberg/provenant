@@ -717,8 +717,13 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let id = entry.adapter.id();
         let mut route = route(id, "fixture-model");
         route.account_key = None;
-        // Only Codex reads a credential inside the sandbox.
-        let confined = read_only_plan("/fixture", (id == "codex").then_some("login"));
+        // Codex and Agy read a credential inside the sandbox.
+        let authentication = match id {
+            "codex" => Some("login"),
+            "agy" => Some("keychain"),
+            _ => None,
+        };
+        let confined = read_only_plan("/fixture", authentication);
         let token = (id == "claude").then_some(&token);
         let result = entry
             .adapter
@@ -733,6 +738,10 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
             continue;
         }
         let spec = result?;
+        // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
+        if id == "agy" {
+            continue;
+        }
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
         // Nothing is inherited: the environment is exactly the allow-list.
         let keys: Vec<_> = spec
@@ -945,6 +954,7 @@ fn recordings(adapter: &str) -> Vec<LiveCapture> {
     let text = match adapter {
         "codex" => fixture!("codex/recordings.json"),
         "claude" => fixture!("claude/recordings.json"),
+        "agy" => fixture!("agy/recordings.json"),
         _ => "[]",
     };
     serde_json::from_str(text).expect("recordings manifest")
@@ -1033,6 +1043,20 @@ live_replay!(
     "claude/live-worktree_write-fresh.jsonl"
 );
 live_replay!(live_claude_worktree_write_resume, claude::Claude, "claude-live-worktree_write-resume", "claude/live-worktree_write-resume.jsonl", after "claude/live-worktree_write-fresh.jsonl");
+live_replay!(
+    live_agy_read_only_fresh,
+    agy::Agy,
+    "agy-live-read_only-fresh",
+    "agy/live-read_only-fresh.jsonl"
+);
+live_replay!(live_agy_read_only_resume, agy::Agy, "agy-live-read_only-resume", "agy/live-read_only-resume.jsonl", after "agy/live-read_only-fresh.jsonl");
+live_replay!(
+    live_agy_worktree_write_fresh,
+    agy::Agy,
+    "agy-live-worktree_write-fresh",
+    "agy/live-worktree_write-fresh.jsonl"
+);
+live_replay!(live_agy_worktree_write_resume, agy::Agy, "agy-live-worktree_write-resume", "agy/live-worktree_write-resume.jsonl", after "agy/live-worktree_write-fresh.jsonl");
 live_replay!(
     live_claude_auth_required,
     claude::Claude,
@@ -1495,7 +1519,11 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
-                    (id == "codex").then_some("login"),
+                    match id {
+                        "codex" => Some("login"),
+                        "agy" => Some("keychain"),
+                        _ => None,
+                    },
                     session == Session::Resume,
                 );
                 let mut input = fixture_input(
@@ -1541,6 +1569,47 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 }
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "gemini-3.8-flash");
+    let cwd = std::path::Path::new("/fixture/repo");
+    for (access, edits) in [(Access::ReadOnly, false), (Access::WorktreeWrite, true)] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let spec = agy::Agy.prepare(fixture_input(&route, &plan, &prompt, cwd, None))?;
+        let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
+        // Headless mode auto-denies commands; only writers approve file edits.
+        assert_eq!(argv.iter().any(|arg| arg == "accept-edits"), edits);
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions" || arg == "--sandbox")
+        );
+        assert_eq!(spec.stdin, Stdin::Null);
+        let home = spec
+            .env
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .map(|(_, value)| std::path::Path::new(value));
+        assert_eq!(home, Some(std::path::Path::new("/fixture/state")));
+        let keychain = std::path::Path::new("/fixture/home/Library/Keychains/login.keychain-db");
+        assert!(spec.setup.contains(&SetupStep::Symlink {
+            link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
+            target: keychain.into(),
+        }));
+        // Nothing of the user's Gemini state is granted, and the keychain is read-only.
+        let spec = &spec.profile.spec;
+        assert_eq!(spec.authentication.len(), 1);
+        assert_eq!(
+            spec.authentication[0].roots,
+            [crate::launch::exact(keychain)]
+        );
+        assert!(spec.authentication[0].in_place_writes.is_empty());
+        assert!(spec.state_writes.is_empty() && spec.runtime_reads.is_empty());
     }
     Ok(())
 }

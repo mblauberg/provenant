@@ -318,6 +318,22 @@ impl RunStore {
                 _ => {}
             }
         }
+        // Recovery could not prove a leftover process was the attempt's, so it
+        // was left running. Name it; a clean success keeps its outcome.
+        if exit.settlement_evidence == custody::SettlementEvidence::LeftoverNotProven {
+            let pids: Vec<String> = exit.unresolved_pids.iter().map(i64::to_string).collect();
+            let note = format!(
+                "leftover process not proven to belong to this attempt and left running: pid {}",
+                pids.join(", ")
+            );
+            if decoded.outcome != Outcome::Succeeded {
+                decoded.outcome = Outcome::Lost;
+            }
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         let request = self.request(record.run_id, call)?;
         let task = request
             .tasks

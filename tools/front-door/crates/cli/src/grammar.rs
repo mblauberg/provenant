@@ -214,6 +214,7 @@ pub struct DispatchInput {
     pub manifest: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch"])))]
 pub struct Dispatch {
     #[command(flatten)]
     pub input: DispatchInput,
@@ -227,7 +228,7 @@ pub struct Dispatch {
     #[arg(long)]
     pub delivery_id: Option<DeliveryId>,
     /// Fetch and deliver this writer's final head on the host.
-    #[arg(long, requires_all = ["deliver_branch", "worktree"])]
+    #[arg(long, requires_all = ["deliver_branch", "writer_target"])]
     pub deliver_remote: Option<String>,
     /// Branch to push the writer's head to
     #[arg(long, requires = "deliver_remote")]
@@ -248,9 +249,15 @@ pub struct Dispatch {
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]
     pub knobs: Vec<String>,
-    /// Configured peer (label or host ID) to run a read-only dispatch on
+    /// Configured peer (label or host ID) to run the dispatch on
     #[arg(long)]
     pub host: Option<String>,
+    /// New branch for a peer writer; the peer creates its worktree
+    #[arg(long, requires_all = ["host", "base"])]
+    pub branch: Option<String>,
+    /// Commit or remote-tracking ref the peer writer's branch starts from
+    #[arg(long, requires = "branch")]
+    pub base: Option<String>,
     /// Wait up to this many seconds for the lane to settle
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,

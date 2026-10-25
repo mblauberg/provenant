@@ -24,8 +24,8 @@ general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
 the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the
-macOS LaunchAgent that runs it in the login session (see below). Read-only remote dispatch uses top-level
-`dispatch --host`; peer-host writers are refused. The Rust CLI grammar lives in
+macOS LaunchAgent that runs it in the login session (see below). Remote dispatch uses top-level
+`dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -138,11 +138,32 @@ the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
 keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
 takes the same placement as an optional `host` field.
 
-Only read-only placement is available on a peer. `--mode worktree-write` with
-`--host` naming a peer refuses with `UNSUPPORTED`, because peer writer worktrees need a transport this
-build lacks ([#1457](https://github.com/mblauberg/provenant/issues/1457)).
+A writer on a peer names a new branch and its base instead of `--worktree`,
+which is a path on the calling host:
+
+```sh
+provenant dispatch --host workshop --mode worktree-write \
+  --branch feat/x --base origin/main --model ADAPTER/ID \
+  --operation-id OP --prompt-file prompt.md \
+  [--deliver-remote origin --deliver-branch feat/x [--open-pr]]
+```
+
+The peer fetches every remote with its own Git credentials, then refuses with
+`BASE_UNREACHABLE` unless a remote-tracking ref contains the base, so push the
+base first. Use a remote-tracking ref or a pushed commit: a local branch name
+resolves in the peer's clone. The peer creates the branch's registered
+worktree with its own `worktree create`. A retry reuses that worktree while
+it is clean at the base with no live writer; any other existing branch is
+`BRANCH_EXISTS`. Delivery flags run host delivery on the peer with its Git and
+`gh` credentials. Without them, the writer's commits stay in the peer's
+worktree, and the dispatch receipt's `worktree` names its path and branch.
+Replaying the operation returns the same run and worktree. One writer per
+worktree, so a manifest cannot carry a peer writer. Status, wait, output and
+cancel work as for read-only peer runs.
+
 Naming this host (`local`, `localhost`, its host ID, or a peer label that resolves to it) is local
-placement in any mode: the flag is dropped and the task runs here. A writer naming any other unconfigured host gets `UNKNOWN_HOST`.
+placement in any mode: the flag is dropped and the task runs here, where
+`--branch` does not apply. A writer naming any other unconfigured host gets `UNKNOWN_HOST`.
 Other limits on a peer run:
 
 - explicit task IDs and route fallback are refused;
