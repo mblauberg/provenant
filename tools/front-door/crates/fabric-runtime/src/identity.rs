@@ -149,6 +149,20 @@ impl Identity {
 mod tests {
     use super::*;
     #[test]
+    fn lane_attempt_labels_are_valid_and_do_not_share_the_chair_actor() {
+        let host = HostId::from_bytes([1; 16]);
+        let chair = Address::new(host, "codex").unwrap();
+        let lanes = [1, 2].map(|byte| {
+            Address::new(
+                host,
+                &format!("lane-{}", provenant_core::AttemptId::from_bytes([byte; 16])),
+            )
+            .unwrap()
+        });
+        assert_ne!(lanes[0].actor, chair.actor);
+        assert_ne!(lanes[0].actor, lanes[1].actor);
+    }
+    #[test]
     fn keys_are_home_relative_and_local_ids_are_separate() {
         assert_eq!(
             CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo/.git"))
