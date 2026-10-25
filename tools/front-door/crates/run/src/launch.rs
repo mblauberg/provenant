@@ -2,12 +2,12 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{ActorId, AttemptId, OperationId, RunId};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
 use rusqlite::{OptionalExtension, params};
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 /// An explicit dispatch argument wins over the effective profile default.
 pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile) -> u64 {
@@ -172,7 +172,70 @@ fn child_access_within(
     Ok(())
 }
 
+#[derive(Default)]
+struct ChildAttempts {
+    counts: BTreeMap<TaskId, u64>,
+    refusals: BTreeMap<AttemptId, &'static str>,
+}
+
 impl RunStore {
+    fn child_attempt_reason(
+        &self,
+        run: RunId,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+    ) -> Option<&'static str> {
+        if record.run_id != run {
+            Some("child attempt run does not match")
+        } else if !request
+            .tasks
+            .iter()
+            .any(|task| task.task_id == record.task_id)
+        {
+            Some("child attempt task missing from request")
+        } else if record.state == AttemptState::Queued
+            && self
+                .launched_tasks
+                .borrow()
+                .contains(&(run, record.task_id))
+        {
+            Some("child task already launched")
+        } else {
+            None
+        }
+    }
+    /// Count lane-writable records, including terminal attempts. The task
+    /// index is untrusted and must not hide duplicate decoded task IDs.
+    fn child_attempts(
+        &self,
+        run: RunId,
+        request: &CanonicalRequest,
+        call: &Request<'_>,
+    ) -> Result<ChildAttempts> {
+        call.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT id,record FROM attempts WHERE run=?1 AND project=?2")?;
+            let mut rows = query.query(params![
+                run.to_string(),
+                self.context.project_id.to_string()
+            ])?;
+            let mut attempts = ChildAttempts::default();
+            while let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                let id =
+                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+                let raw: Vec<u8> = row.get(1)?;
+                let record: AttemptRecord = decode(&raw)?;
+                if let Some(reason) = self.child_attempt_reason(run, request, &record) {
+                    attempts.refusals.insert(id, reason);
+                    continue;
+                }
+                *attempts.counts.entry(record.task_id).or_insert(0) += 1;
+            }
+            Ok(attempts)
+        })
+    }
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks, and a
     /// lane cannot propose a writer or delivering child: the host has no
@@ -201,6 +264,13 @@ impl RunStore {
             return Err(RunError::Validation(
                 "a child run cannot continue an attempt",
             ));
+        }
+        let attempts = self.child_attempts(run, &request, call)?;
+        if let Some(reason) = attempts.refusals.values().next() {
+            return Err(RunError::Validation(reason));
+        }
+        if attempts.counts.values().any(|count| *count > 1) {
+            return Err(RunError::Validation("child task has more than one attempt"));
         }
         for task in &request.tasks {
             if task.writer.is_some() || task.deliver.is_some() {
@@ -419,8 +489,68 @@ impl RunStore {
         let mut started = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let record = self.record(id, call)?;
+            // The lane may have added or rewritten rows since validation.
+            // Treat bad ingress as a refusal, so the scan can finish.
+            let child_attempts = child
+                .map(|_| self.child_attempts(run, &request, call))
+                .transpose()?;
+            let child_reason = child_attempts
+                .as_ref()
+                .and_then(|attempts| attempts.refusals.get(&id))
+                .copied();
+            let record = match self.record(id, call) {
+                Ok(record) => record,
+                Err(RunError::Validation(reason)) if child.is_some() => {
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason: child_reason.unwrap_or(reason).into(),
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if record.state != AttemptState::Queued {
+                continue;
+            }
+            let now = || {
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))
+            };
+            let child_reason = child_reason.or_else(|| {
+                if child.is_none() {
+                    None
+                } else if let Some(reason) = self.child_attempt_reason(run, &request, &record) {
+                    Some(reason)
+                } else if child_attempts
+                    .as_ref()
+                    .and_then(|attempts| attempts.counts.get(&record.task_id))
+                    .is_some_and(|count| *count > 1)
+                {
+                    Some("child task has more than one attempt")
+                } else {
+                    None
+                }
+            });
+            if let Some(reason) = child_reason {
+                match self.withdraw(
+                    id,
+                    AttemptState::Queued,
+                    Outcome::Rejected,
+                    reason,
+                    now()?,
+                    call,
+                ) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
+                }
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: reason.into(),
+                    kind: RefusalKind::Preparation,
+                });
                 continue;
             }
             let (task_index, task) = request
@@ -446,11 +576,6 @@ impl RunStore {
                 stdout = directory.join("stdout.log").display(),
                 stderr = directory.join("stderr.log").display(),
             );
-            let now = || {
-                call.clock
-                    .wall_now()
-                    .map_err(|_| RunError::Validation("wall clock"))
-            };
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
@@ -513,13 +638,24 @@ impl RunStore {
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
-            let record =
-                match self.mark_starting(id, &plan.route, writable, plan.observed_head, call) {
-                    Ok(record) => record,
-                    // A concurrent start already took this attempt.
-                    Err(RunError::Conflict) => continue,
-                    Err(error) => return Err(error),
-                };
+            let record = match self.mark_starting(
+                &record,
+                &plan.route,
+                writable,
+                plan.observed_head,
+                call,
+            ) {
+                Ok(record) => record,
+                // A concurrent start already took this attempt.
+                Err(RunError::Conflict) => continue,
+                Err(error) => return Err(error),
+            };
+            // Consume the host's launch claim before invoking any handoff
+            // callback. Keep it for every outcome, including an uncertain
+            // launch: lane-owned rows cannot authorise another attempt.
+            if child.is_some() && !self.launched_tasks.borrow_mut().insert((run, task.task_id)) {
+                continue;
+            }
             started.push(
                 match self.hand_off(
                     task,
@@ -640,7 +776,10 @@ impl RunStore {
         })?;
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
-            Ok(now) if now.revision == record.revision => {}
+            Ok(now)
+                if now.revision == record.revision
+                    && now.run_id == record.run_id
+                    && now.task_id == record.task_id => {}
             Ok(_) => {
                 lease
                     .withdraw_unlaunched()

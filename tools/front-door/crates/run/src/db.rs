@@ -92,6 +92,10 @@ pub struct RunStore {
     pub(crate) sealed_requester: Option<ActorId>,
     /// Scopes and bounded custody handles this host view handed to a guardian.
     pub(crate) launched: std::cell::RefCell<Vec<Held>>,
+    /// Host-only launch claims survive deletion or rewriting of lane rows.
+    pub(crate) launched_tasks: std::cell::RefCell<
+        std::collections::BTreeSet<(provenant_core::RunId, provenant_core::TaskId)>,
+    >,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -241,6 +245,7 @@ impl RunStore {
             policy: Default::default(),
             sealed_requester: None,
             launched: Default::default(),
+            launched_tasks: Default::default(),
             _owner: PhantomData,
         }))
     }
@@ -258,6 +263,7 @@ impl RunStore {
             policy: Default::default(),
             sealed_requester: None,
             launched: Default::default(),
+            launched_tasks: Default::default(),
             _owner: PhantomData,
         };
         if schema_version < 4 {
