@@ -29,7 +29,7 @@ pub enum Route {
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
-    /// Limit pool members and provider readiness to this adapter.
+    /// Limit pool members to this adapter.
     #[arg(long)]
     pub adapter: Option<String>,
     /// Show only this effective pool.
@@ -238,9 +238,6 @@ fn with_context<T>(
         .domains
         .routing;
     let catalogue = Catalogue::bundled()?;
-    for record in availability {
-        provenant_routing::validate_availability(record, &record.adapter)?;
-    }
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
     let quota_records = match crate::quota::read_cache(roots) {
@@ -717,9 +714,6 @@ pub fn run(
             let (status, code) = match &error {
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => {
                     (Outcome::Error, "IO")
-                }
-                EdgeError::Routing(RoutingError::Availability) => {
-                    (Outcome::Invalid, "AVAILABILITY")
                 }
                 EdgeError::QuotaCache(crate::quota::EdgeError::Quota(_)) | EdgeError::Quota(_) => {
                     (Outcome::Invalid, "QUOTA")

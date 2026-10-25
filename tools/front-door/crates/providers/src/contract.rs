@@ -2,7 +2,7 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -31,8 +31,7 @@ pub enum ProviderError {
     CredentialUnavailable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
     pub adapter: String,

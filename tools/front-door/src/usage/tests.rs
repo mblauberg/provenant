@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use super::*;
 use provenant_core::{PathResolver, RootInputs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Resolver;
 impl PathResolver for Resolver {
