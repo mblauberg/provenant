@@ -496,6 +496,7 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 #[test]
 fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
@@ -550,7 +551,9 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
             node["attempts"]
         );
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
@@ -559,6 +562,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
     use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal};
     use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
     let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let identity = federated_identity(&mut rig)?;
     std::fs::write(
         rig.project.join("graph.json"),
@@ -607,7 +611,9 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
     );
     let cancelled: Value = serde_json::from_slice(&cancelled.stdout.bytes)?;
     assert_eq!(cancelled["data"]["status"], "cancelled");
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
@@ -1014,6 +1020,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Result {
     for (depth, child_store) in [(Some("1"), true), (None, true), (Some("1"), false)] {
         let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
+        let cleanup = rig.process_cleanup();
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         assert_eq!(code(&identity), 0);
         let parent = "11111111111111111111111111111111";
@@ -1146,6 +1153,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         drop(listener);
         std::fs::remove_dir_all(&agent)?;
         rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
     }
     Ok(())
 }
@@ -1216,6 +1224,7 @@ fn submitted_policy(
 #[test]
 fn submission_preserves_explicit_named_route_tier() -> Result {
     let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let (request, _) = submitted_policy(
         &rig,
         "named-tier",
@@ -1234,7 +1243,9 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
         request.tasks[0].profile.task_class.as_deref(),
         Some("mechanical")
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
@@ -1271,6 +1282,7 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
 #[test]
 fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
     let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
@@ -1316,12 +1328,15 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             }
         );
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
 fn silence_knob_controls_capture_plan_observations() -> Result {
     let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
@@ -1344,7 +1359,9 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         assert!(plan.silent(threshold, Some(0)));
         assert!(!plan.silent(threshold, Some(threshold)));
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 /// A loopback peer: the fake SSH executable runs this build's real
@@ -1424,6 +1441,7 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
 #[test]
 fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     // A provider the peer can launch: it answers the version probe, then
     // writes a known stderr line. The production read-only profile anchors
     // the host Rust runtime roots.
@@ -1545,7 +1563,9 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
         attempt.as_str()
     );
     assert_eq!(cancelled["data"]["host"], peer.to_string());
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
@@ -1651,6 +1671,7 @@ fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
 #[test]
 fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
     let project = rig.project.clone();
     let commit = [
@@ -1773,12 +1794,15 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
         unreachable["error"]["code"], "BASE_UNREACHABLE",
         "{unreachable}"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
 fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
     let task = json!({"prompt":"fixture","route":{"model":"codex/gpt-6-luna"},"timeout_ms":60000});
     let mut writer = task.clone();
@@ -1814,5 +1838,7 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
         status["structuredContent"]["attempt"]["attempt_id"],
         target["attempt"]
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }

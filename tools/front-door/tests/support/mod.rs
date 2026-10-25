@@ -162,6 +162,13 @@ impl TestRig {
         }
         Ok(rig)
     }
+    /// Keep this guard armed until the test's final successful assertion.
+    /// The rig root includes the local state, nested child stores and loopback peers.
+    /// A separate local guard drops before the rig removes its temporary directory.
+    pub fn process_cleanup(&self) -> provenant_supervisor::fixture::ProcessCleanupGuard {
+        provenant_supervisor::fixture::ProcessCleanupGuard::new(&self.root)
+    }
+
     pub fn command(&self, args: &[&str]) -> Result<ExecOutcome> {
         let mut arguments = vec![
             OsString::from("--state-dir"),
