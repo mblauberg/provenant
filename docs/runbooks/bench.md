@@ -1,4 +1,4 @@
-# Held-out replay bench
+# Replay bench
 
 The bench freezes small repository changes as replay tasks. Each file in
 `bench/tasks/` names the repository, parent and merge commits, task prompt,
@@ -35,3 +35,17 @@ Only verified tasks enter a run. Use acceptance tasks to select and compare a
 route. Keep held-out tasks frozen and do not run them during route selection;
 use them once to report the final replay score. A pass is the hidden test
 command succeeding after the task prompt is dispatched.
+
+## Splits, leakage and isolation
+
+- **Splits.** Each task names one split. Use `acceptance` tasks to tune and
+  compare routes. `held-out` tasks stay frozen: do not read their failures to
+  adjust a prompt or route, and run them once for the final score.
+- **Leakage.** The hidden test patch never enters the task worktree before the
+  run ends, and `verify` binds the receipt to the TOML and patch contents. The
+  prompt is the issue text only; it must not quote the tests or the merge diff.
+- **Isolation.** Every task runs in a disposable worktree cut from the parent
+  commit, so no task sees another's changes or the live checkout. Dispatch uses
+  the same route, access and confinement rules as any other worktree-write lane.
+- **Pairing.** Compare two routes or harness changes on the same tasks and
+  split. Attempts nest in tasks; do not pool them as independent samples.

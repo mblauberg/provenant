@@ -35,5 +35,5 @@ Opt-in account switching has a separate, cwd-scoped handoff: the new account's
 SessionStart consumes one unconsumed switch checkpoint within an hour and points to the source
 session's saved Markdown when present. The checkpoint lists existing lane IDs;
 inspect their current run-store state before continuing. See
-[chair account switching](../../../docs/runbooks/harness-profiles.md#chair-account-switching)
+[chair account switching](../../../docs/runbooks/configuration.md#chair-account-switching)
 for configuration and manual dry runs.

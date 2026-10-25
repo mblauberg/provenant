@@ -14,8 +14,7 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-All five adapters are enabled by default; recordings provide replay coverage.
-Use `provenant route list` to check current model availability.
+All five adapters are enabled by default. Use `provenant route list` to check current model availability.
 
 ## Advisory only
 
@@ -27,7 +26,7 @@ dispatch a leg.
 - Task-class knob presets affect configuration values; the Rust routing
   catalogue and current provider observations determine route availability.
 - The dossier only ranks options that are *already* admissible. It never widens
-  authority, never reaches a disabled adapter, and never blocks a dispatch.
+  authority, never reaches an unavailable route, and never blocks a dispatch.
 - If a preference here disagrees with a resolved route, the resolved route wins
   and the disagreement is a signal to fix the dossier, not the router.
 
@@ -217,16 +216,19 @@ and record it.
 
 ## Execution status
 
-Only the Claude and Codex adapters are enabled for dispatch. Catalogue entries
-for disabled adapters do not establish reachability or comparative model
-assessments.
+All five adapters are enabled for dispatch. A catalogue entry shows that a
+model is configured, not that it is reachable; readiness depends on the local
+sign-in and quota, which `provenant route list` reports.
 
-| Adapter | Current status |
+| Adapter | Models in the bundled pools |
 |---|---|
-| Claude | Enabled |
-| Codex | Enabled |
-| Agy, Cursor, OpenCode | Implemented but disabled |
-| Kiro, Copilot, Pi | No adapter |
+| Claude | Haiku 5.5, Sonnet 5.5, Opus 5.5 |
+| Codex | GPT-6 Luna, GPT-6.1 Sol, GPT-6 Astra |
+| Agy | Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking |
+| Cursor | Grok 4.7 |
+| OpenCode | DeepSeek V4.1 Flash and GLM 5.3 Flash (free models) |
+
+No other adapters exist.
 
 ## Recording the preference
 

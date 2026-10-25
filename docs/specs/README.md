@@ -33,7 +33,6 @@ legacy banners identify them as historical, not current product contracts.
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
 - [Graph runner: contract-driven plan graphs](harness/graph-runner.md)
 - [Harness profiles](harness/profiles.md)
-- [Held-out replay bench](harness/replay-bench.md)
 - [Replay bench studies](harness/replay-bench-studies.md)
 
 ## Observability
@@ -43,4 +42,4 @@ legacy banners identify them as historical, not current product contracts.
 ## Harness
 
 - [Rust rewrite plan and rulebook](rust-port/README.md)
-- [Switching and comparing profiles](../runbooks/harness-profiles.md)
+- [Switching and comparing profiles](../runbooks/configuration.md)

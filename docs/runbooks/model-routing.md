@@ -51,6 +51,5 @@ Dispatch uses the same route flags. Copy the resolved `adapter/model@effort`
 from the attempt record; never infer a model from a tier or a provider name.
 Quota observations use `provenant quota show` and `provenant quota tick`.
 
-The Python catalogue, account reset commands, cooldown files and routing
-wrappers are retired. The Rust routing/providers/quota owners define the
-current records and eligibility policy. Run `provenant help route` for flags.
+The routing, providers and quota crates define the records and eligibility
+policy. Run `provenant help route` for flags.

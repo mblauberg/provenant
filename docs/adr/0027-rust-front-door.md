@@ -8,7 +8,7 @@
 front door to Rust at once, on a separate branch)
 
 **Amends:** [ADR 0013](0013-thin-provenant-cli.md). Operations:
-[`docs/runbooks/front-door.md`](../runbooks/front-door.md).
+[`docs/runbooks/install.md`](../runbooks/install.md).
 
 ## Amendment — 2026-10-23
 

@@ -1,8 +1,5 @@
 # Provenant architecture
 
-The current product contract and Rust subsystem owners are listed in the
-[Rust design index](specs/rust-port/design/README.md).
-
 ## Purpose
 
 Provenant is an agent harness: a gated delivery lifecycle for coding agents.
@@ -16,6 +13,77 @@ retain scarce judgement at consequential gates.
 compact runtime constitution. Skills load procedural depth only when triggered.
 This document preserves the design intent so future maintainers can change the
 harness without rediscovering it from individual skills.
+
+## System map
+
+The `provenant` binary is the CLI and composition edge. Fifteen crates under
+`tools/front-door/crates/` each own one decision, and a crate may depend only on
+the crates beneath it.
+
+| Crate | Owns |
+|---|---|
+| `cli` | Argument parsing, help and bounded result rendering |
+| `core` | Identities, paths, time values and cancellation |
+| `records` | Record codecs, canonical digests and shared serialised facts |
+| `config` | The user-owned `config.toml`, release stamping, packaging and managed install |
+| `supervisor` | Process policy and the operating-system boundary, worktree custody |
+| `confinement` | Access plans, write roots and protected paths for each lane |
+| `providers` | Launch forms and output decoding for Claude, Codex, Cursor, Agy and OpenCode |
+| `quota` | Quota observations, account status and admission decisions |
+| `routing` | Named weighted pools, provider pacing and explicit resolution |
+| `run` | Dispatch, attempts, run records and reconcile |
+| `telemetry` | Usage and cost reduction, and trace export |
+| `workflow` | Review coverage, delivery receipts and session checkpoints |
+| `fabric-store` | Project-scoped mail, tasks and events in SQLite |
+| `fabric-runtime` | Fabric identity, home-host coordination and peer hosts |
+| `fabric-mcp` | The Fabric MCP stdio server |
+
+```mermaid
+flowchart TB
+    App["Quota menu bar app"] -->|"quota show, accounts set, quota display"| CLI["provenant CLI"]
+    CLI --> Run["run"]
+    CLI --> Workflow["workflow"]
+    CLI --> Telemetry["telemetry"]
+    CLI --> MCP["fabric-mcp"]
+    MCP --> Runtime["fabric-runtime"]
+    Runtime --> Run
+    Runtime --> FabricStore["fabric-store"]
+    Run --> Routing["routing"]
+    Run --> Quota["quota"]
+    Run --> Providers["providers"]
+    Run --> Confinement["confinement"]
+    Run --> Supervisor["supervisor"]
+    Run --> Records["records"]
+    Routing --> Quota
+    Routing --> Providers
+    Config["config"] -.-> Routing
+    Config -.-> Run
+    Config -.-> Workflow
+    Telemetry --> Records
+    Workflow --> Records
+    Records --> Core["core"]
+```
+
+### State root
+
+All machine-local state lives under one root, `~/.local/share/provenant/v1` by
+default. `--state-dir` or `PROVENANT_STATE_DIR` selects another absolute root.
+
+| Path | Owner |
+|---|---|
+| `config.toml` | The user; read by `config` |
+| `releases/<digest>/` and `install/receipt.json` | `config`: the immutable installed release and its receipt |
+| `runs/`, `run.sqlite3` | `run`: runs, attempts and output |
+| `worktrees/` | `supervisor` and `confinement`: writer leases and reservations |
+| `fabric/` | `fabric-store`: the Fabric database |
+| `quota/`, `routing/`, `projects/<id>/workflow/` | Their owning crates |
+| `usage.jsonl` | Local usage counters for `telemetry stats --usage` |
+
+Fabric MCP reaches the same run service as the CLI through the Fabric runtime.
+Confined lanes run through `confinement` and `supervisor`; the CLI never grants
+a lane more than its access plan. The menu bar app reads the CLI's reports and
+never reads credentials. The subsystem contracts are in the
+[Rust design index](specs/rust-port/design/README.md).
 
 ## Lifecycle and user gates
 
@@ -244,7 +312,6 @@ through Fabric, which carries the messages, shared tasks and activity log
 between them.
 It still has one chair and one active owner per stage, namespaced artifacts and
 non-overlapping write scopes. Pane transcripts are transport, not durable state.
-No Pi adapter is present in the Rust provider set.
 
 ## Routing, adapters and receipts
 
@@ -265,7 +332,7 @@ dispatch. Route names and model identifiers are explicit; the router does not
 infer a route from a task class or synonym.
 
 Run records retain requested and resolved model identity, effort, and any
-fallback substitution. No Pi adapter is present in the Rust provider set.
+fallback substitution.
 
 ## Review as a council, not a vote
 
@@ -314,8 +381,7 @@ excluded from context scans.
 
 ## Release and managed installation
 
-The `provenant-config` crate owns release identity and managed-file rules as a
-Rust library. It stamps the workspace source, packages a typed `release.json`,
+The `provenant-config` crate owns release identity and managed-file rules. It stamps the workspace source, packages a typed `release.json`,
 verifies its bytes and modes, then installs into the immutable
 `<state>/releases/<SourceDigest>/` directory. Under the install lock it applies
 managed entries and publishes the single `<state>/install/receipt.json` last.
@@ -326,9 +392,9 @@ install` compares the installed release digest without repairing it, and
 `uninstall` removes only unchanged receipt-owned entries. Unmanaged paths are
 preserved and conflicts are refused.
 
-The Rust CLI wires `install`, `check install` and `uninstall` to these library
+The CLI wires `install`, `check install` and `uninstall` to these library
 entrypoints. It handles explicit harness selection and client MCP, hook and
-skill edits. The library reads no old receipt or product-root pointer.
+skill edits. Operators follow the [install runbook](runbooks/install.md).
 Product files, instance-owned files and machine-local derived state retain
 separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
 
