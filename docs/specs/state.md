@@ -70,11 +70,10 @@ path component. Resolve existing ancestor aliases and append only a normal
 missing tail, because lexical checks cannot protect filesystem access. Do not
 open old-root contents to test containment.
 
-Reads, help and `root` create no state, though they still append to an existing
-root's usage log. Mutations initialise explicitly with directories 0700, files
-0600 and executables 0755. Config never opens SQLite.
-Each owner uses supervisor's locks and publication; no whole-root sweeper
-exists.
+Reads, help and `root` create no state, though they still append to an
+existing root's usage log. Mutations initialise explicitly with directories
+0700, files 0600 and executables 0755. Config never opens SQLite. Each owner
+uses supervisor's locks and publication; no whole-root sweeper exists.
 
 ### Identities and time
 

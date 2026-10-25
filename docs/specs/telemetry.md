@@ -127,12 +127,13 @@ an API-equivalent estimate, not a bill.
 
 ### Local demand counters
 
-The binary edge writes a best-effort `usage.jsonl` under an existing state root
-(it never creates one), shared by CLI completion and the Fabric MCP transport.
-Records have kind `cli.verb` or `mcp.tool`, the canonical verb or installed tool name (`unknown` for
-unrecognised tools), a timestamp, a duration in milliseconds, and the CLI exit
-code or MCP outcome. Argument, prompt and result text never enter the log, and
-skill loads and scripts are not counted.
+The binary edge writes a best-effort `usage.jsonl` under an existing state
+root (it never creates one), shared by CLI completion and the Fabric MCP
+transport. Records have kind `cli.verb` or `mcp.tool`, the canonical verb or
+installed tool name (`unknown` for unrecognised tools), a timestamp, a
+duration in milliseconds, and the CLI exit code or MCP outcome. Argument,
+prompt and result text never enter the log, and skill loads and scripts are
+not counted.
 
 Each line is at most 512 bytes and is one `O_APPEND` write with no lock, tail
 read or sync. Only rotation takes an exclusive nonblocking lock, and a busy

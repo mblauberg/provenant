@@ -537,7 +537,7 @@ write access to shared SQLite or `fabric/locks`, then remove those grants.
 | Task dependency API | Four task states and token-fenced ownership; the chair submits dependent runs explicitly |
 | Separate notes, activity, events and watch views | One append-only event stream with bounded cursor reads |
 | Terminal-run mail notices by default | Run completion emits an idempotent event; mail only when requested |
-| Fabric-owned routing pools, councils, rotation, provider catalogue and cooldown reset | `routing` resolves once and Fabric forwards; `route list` shows the bundled catalogue |
+| Fabric-owned routing pools, councils, rotation, provider catalogue and cooldown reset | `routing` resolves once and Fabric forwards; `route list` shows the effective catalogue and pools after config overrides |
 | Native-seat provider bans | No family is inferred from a seat; shared run policy governs dispatch |
 | Graph shell gates, gate workers and automatic task mirroring | Verification is an ordinary authorised task or chair action |
 | Host auto-placement and local fallback after an explicit choice | Placement is local by default and remote only when explicit |

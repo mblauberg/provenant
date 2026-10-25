@@ -29,16 +29,17 @@ provenant route resolve --model ADAPTER/ID --effort LEVEL
 
 The bundled catalogue defines weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools. The resolver draws among ready
-positive-weight members by weight multiplied by provider pacing.
-`route list` shows configured weights and pacing policy; dispatch applies the
-pacing factor and decides readiness. Zero-weight members are ordered
-fallbacks. Operation ID and task index seed the draw so retries repeat the
-same choice. The utility pool uses Claude Haiku@low at weight 4, Codex Luna@low
-at weight 2, then the two OpenCode `*-free` models at weight 1 each. Free
-members require `--allow-free` (default false); Agy Gemini Flash is a paid subscription model and is never marked free.
-`--confidential` excludes training or unclassified members and fallbacks. The
-Rust Fabric task schema has no per-task `confidential` field. For an explicit
-eligibility check, use `provenant route resolve --route NAME --confidential`.
+positive-weight members by weight multiplied by provider pacing. `route list`
+shows configured weights and pacing policy; dispatch applies the pacing factor
+and decides readiness. Zero-weight members are ordered fallbacks. Operation ID
+and task index seed the draw so retries repeat the same choice. The utility
+pool uses Claude Haiku@low at weight 4, Codex Luna@low at weight 2, then the
+two OpenCode `*-free` models at weight 1 each. Free members require
+`--allow-free` (default false); Agy Gemini Flash is a paid subscription model
+and is never marked free. `--confidential` excludes training or unclassified
+members and fallbacks. The Rust Fabric task schema has no per-task
+`confidential` field. For an explicit eligibility check, use `provenant route
+resolve --route NAME --confidential`.
 
 Named route and exact model selectors are mutually exclusive. An exact effort
 is accepted only when the catalogue records that control; unsupported effort
@@ -81,9 +82,9 @@ refreshes due accounts. Rust owners decide eligibility.
 
 Choose the simplest eligible route that can meet the task's objective checks.
 The [model dossier](../../../docs/model-dossier.md) is advisory; the current
-catalogue and actual attempt record decide availability and provenance.
-Use explicit effort on the request when required. Never enable fast or
-priority service tiers.
+catalogue and config define routes; dispatch and the attempt record decide
+availability and provenance. Use explicit effort on the request when required.
+Never enable fast or priority service tiers.
 
 ## Endpoint profiles
 

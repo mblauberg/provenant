@@ -22,8 +22,8 @@ effect.
 
 ## Boundaries
 
-- Routing never starts a process. `route list` and `route resolve` read the
-  bundled catalogue and cached quota snapshots.
+- Routing never starts a process. `route list` reads the bundled catalogue
+  and `[routing]` config; `route resolve` also reads cached quota snapshots.
 - Providers never signal a process or publish run completion. Terminal answer
   and process exit are separate facts.
 - Quota never imports providers. The binary injects the providers' registry of
