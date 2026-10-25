@@ -71,7 +71,7 @@ pub fn execute(
             .map_err(|e| e.to_string())?
             .ok_or("current user identity is unavailable")?
             .name;
-        let (key, org_fingerprint) = provenant_providers::accounts::detect_with_org(
+        let detected = provenant_providers::accounts::detect_with_org(
             &executor,
             adapter,
             &executable,
@@ -79,8 +79,16 @@ pub fn execute(
             &user,
             &directory,
             cwd,
-        )
-        .map_err(|e| e.to_string())?;
+        );
+        // Adapters without an identity probe are keyed by their label.
+        let (key, org_fingerprint) = match detected {
+            Err(provenant_providers::ProviderError::UnknownIdentity)
+                if !matches!(adapter.as_str(), "claude" | "codex" | "cursor") =>
+            {
+                (format!("{adapter}-{label}"), None)
+            }
+            other => other.map_err(|e| e.to_string())?,
+        };
         let mut entry = Registration {
             adapter: adapter.clone(),
             label: label.clone(),

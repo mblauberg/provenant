@@ -123,7 +123,8 @@ provenant worktree create fix/repo-runbook-mechanics
 ```
 
 Use `provenant worktree list` to inspect worktrees and
-`provenant worktree remove NAME` to remove an eligible one.
+`provenant worktree remove NAME` to remove an eligible one; its branch goes
+too once merged. `--discard` also deletes an unmerged branch.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).

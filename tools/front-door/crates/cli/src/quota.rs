@@ -353,8 +353,9 @@ fn detections(
                     _ if configured.iter().any(|a| a.adapter == r.adapter.id()) => {
                         QuotaStatus::Available
                     }
-                    _ if r.quota_source.is_none() => QuotaStatus::Unsupported,
-                    _ => QuotaStatus::Unknown,
+                    // An adapter with no registered account is never probed; say so
+                    // rather than leaving it silently unknown.
+                    _ => QuotaStatus::Unsupported,
                 },
             }
         })

@@ -509,13 +509,17 @@ pub enum Worktree {
 #[derive(Debug, Args)]
 pub struct Remove {
     /// Worktree to remove
-    #[arg(required_unless_present = "merged", conflicts_with_all = ["merged", "integration", "branch", "since"])]
+    #[arg(required_unless_present = "merged", conflicts_with_all = ["merged", "branch", "since"])]
     pub name: Option<String>,
+    /// With NAME: also delete the branch when it is not merged (clean worktree only)
+    #[arg(long, conflicts_with = "merged")]
+    pub discard: bool,
     /// Remove worktrees already merged into the integration branch
     #[arg(long, requires_all = ["integration", "remove_scope"])]
     pub merged: bool,
-    /// Integration branch to check merges against
-    #[arg(long, requires = "merged")]
+    /// Integration ref to check merges against: a branch or a remote-tracking
+    /// ref such as origin/main (NAME: the primary's branch when omitted)
+    #[arg(long)]
     pub integration: Option<String>,
     /// Limit to this branch (repeatable)
     #[arg(long, requires = "merged", conflicts_with = "since")]

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "command": "lanes",
+  "status": "ok",
+  "error": null,
+  "data": {
+    "lanes": [
+      {"run_id": "run-input", "attempt_id": "att-input", "state": "input_required", "applied_route": {"model": "claude-opus"},
+       "queued_at": "2030-03-14T00:10:00Z", "started_at": "2030-03-14T00:11:00Z", "finished_at": "2030-03-14T00:48:00Z", "last_output_at": null},
+      {"run_id": "run-failed", "attempt_id": "att-failed", "state": "failed", "applied_route": {"model": "gpt-5-codex"},
+       "queued_at": "2030-03-14T00:20:00Z", "started_at": "2030-03-14T00:21:00Z", "finished_at": "2030-03-14T00:35:00Z", "last_output_at": null},
+      {"run_id": "run-quiet", "attempt_id": "att-quiet", "state": "running", "applied_route": {"model": "gemini-pro"},
+       "queued_at": "2030-03-14T00:30:00Z", "started_at": "2030-03-14T00:31:00Z", "finished_at": null, "last_output_at": "2030-03-14T00:44:00Z"}
+    ],
+    "next_cursor": null
+  }
+}

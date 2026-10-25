@@ -59,6 +59,12 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     assert_eq!(tick["data"]["accounts"].as_array().unwrap().len(), 1);
     assert_eq!(tick["data"]["accounts"][0]["status"], "unknown");
     assert_eq!(tick["data"]["accounts"][0]["error"], "missing_cli");
+    let sources = tick["data"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 4);
+    for source in sources {
+        assert_ne!(source["status"], "unknown", "{source}");
+        assert_eq!(source["error"], "disabled", "{source}");
+    }
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
     assert_eq!(disk, tick["data"]);
