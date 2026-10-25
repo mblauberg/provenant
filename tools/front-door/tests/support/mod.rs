@@ -13,6 +13,15 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempdir_in(&std::env::temp_dir())
+}
+
+fn tempdir_in(parent: &Path) -> std::io::Result<tempfile::TempDir> {
+    // Canonical roots avoid macOS temp aliases while honouring the lane's writable TMPDIR.
+    tempfile::tempdir_in(fs::canonicalize(parent)?)
+}
+
 pub fn register_account(
     rig: &TestRig,
     adapter: &str,
@@ -79,7 +88,7 @@ impl TestRig {
         Self::with_object_format(parent, "sha1")
     }
     pub fn with_object_format(parent: &Path, format: &str) -> Result<Self> {
-        let temp = tempfile::tempdir_in(parent)?;
+        let temp = tempdir_in(parent)?;
         let root = fs::canonicalize(temp.path())?;
         let home = root.join("home");
         let project = root.join("project");

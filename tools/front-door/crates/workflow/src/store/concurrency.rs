@@ -35,7 +35,8 @@ fn concurrent_process_writers_on_one_revision_have_one_winner() {
     )
     .unwrap();
 
-    let socket_path = base.join("writer-ready.sock");
+    let sockets = crate::test_support::short_tempdir("writer-ready.sock").unwrap();
+    let socket_path = sockets.path().join("writer-ready.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut children = Vec::new();

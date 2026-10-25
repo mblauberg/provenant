@@ -442,7 +442,7 @@ mod tests {
 
     impl DisclosureFixture {
         fn new() -> Self {
-            let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
+            let temp = crate::test_support::tempdir().expect("temporary disclosure root");
             let work = temp.path().join("work");
             fs::create_dir(&work).expect("work directory");
             let prompt = temp.path().join("prompt.txt");
@@ -498,8 +498,11 @@ mod tests {
     fn noncanonical_grant_is_refused_before_overlap_checks() {
         let fixture = DisclosureFixture::new();
         let canonical_prompt = &fixture.prompt;
+        // Keep the noncanonical grant explicit instead of relying on macOS's /tmp alias.
+        let alias = fixture._temp.path().join("work-alias");
+        std::os::unix::fs::symlink(&fixture.work, &alias).expect("work alias");
         let cwd = PathGrant {
-            path: fixture.work.clone(),
+            path: alias,
             scope: PathScope::Subtree,
         };
         assert_ne!(

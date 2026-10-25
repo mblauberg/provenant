@@ -1272,7 +1272,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let root = crate::test_support::tempdir().unwrap();
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
             Self {
                 root,
@@ -1567,17 +1567,19 @@ mod tests {
         let head = setup.head(&repo, &fixture.cancel).unwrap();
         let transport = GitTransport::discover_with_policy(&executor, None, None, 1).unwrap();
 
-        assert!(matches!(
-            transport.create_bundle(
-                &repo,
-                &fixture.area("bundles"),
-                &OperationId::parse("small-limit").unwrap(),
-                base,
-                head,
-                &fixture.cancel,
-            ),
-            Err(GitTransportError::BundleTooLarge)
-        ));
+        let result = transport.create_bundle(
+            &repo,
+            &fixture.area("bundles"),
+            &OperationId::parse("small-limit").unwrap(),
+            base,
+            head,
+            &fixture.cancel,
+        );
+        assert!(
+            matches!(result, Err(GitTransportError::BundleTooLarge)),
+            "{:?}",
+            result.err()
+        );
     }
 
     #[test]

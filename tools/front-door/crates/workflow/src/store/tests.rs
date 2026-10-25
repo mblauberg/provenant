@@ -11,7 +11,7 @@ impl provenant_core::PathResolver for Resolver {
     }
 }
 fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
-    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let home = base.join("home");
     let state = base.join("state");

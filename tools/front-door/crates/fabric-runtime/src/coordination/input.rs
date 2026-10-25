@@ -584,8 +584,7 @@ mod tests {
 
     #[test]
     fn coordination_api_rejects_directly_constructed_out_of_bounds_input() {
-        let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").expect("tmp path"))
-            .expect("temp root");
+        let temp = crate::test_support::tempdir().expect("temp root");
         let base = temp.path().canonicalize().expect("canonical temp root");
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));

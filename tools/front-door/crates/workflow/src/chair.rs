@@ -224,7 +224,7 @@ mod tests {
     }
     #[test]
     fn chair_handoff_preserves_pending_source_and_consumes_once_for_target_only() {
-        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let state = base.join("state");
         std::fs::create_dir(&state).unwrap();

@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn install_binds_digest_and_inode_and_verify_rejects_replacement() -> Result<(), Box<dyn Error>>
     {
-        let root = tempfile::tempdir_in("/tmp")?;
+        let root = crate::test_support::tempdir()?;
         std::fs::write(root.path().join("source"), b"complete output")?;
         let fs = LocalFs;
         let parent = fs.open_anchor(root.path())?;
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn install_refuses_oversize_and_linked_sources() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir_in("/tmp")?;
+        let root = crate::test_support::tempdir()?;
         std::fs::write(root.path().join("large"), b"0123456789")?;
         std::fs::write(root.path().join("target"), b"x")?;
         std::fs::hard_link(root.path().join("target"), root.path().join("linked"))?;

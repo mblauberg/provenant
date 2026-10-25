@@ -521,7 +521,7 @@ mod tests {
     }
     impl RemoteFixture {
         fn new() -> Self {
-            let temporary = tempfile::tempdir_in("/tmp").unwrap();
+            let temporary = crate::test_support::tempdir().unwrap();
             std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
             let base = temporary.path().canonicalize().unwrap();
