@@ -14,8 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
-    // Canonical roots avoid macOS temp aliases while honouring the lane's writable TMPDIR.
-    tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir())?)
+    provenant_supervisor::fixture::tempdir(".tmp")
 }
 
 pub(crate) struct Fixture {

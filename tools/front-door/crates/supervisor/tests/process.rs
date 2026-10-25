@@ -1,6 +1,3 @@
-#[path = "../src/test_support.rs"]
-mod test_support;
-
 use provenant_core::CancelToken;
 use provenant_supervisor::{exec::*, fixture};
 use std::error::Error;
@@ -436,7 +433,7 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = test_support::short_tempdir("s1-", "parent-exit.sock")?;
+    let root = fixture::short_tempdir("s1-", "parent-exit.sock")?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let result = match name {
         "captures_bytes_and_text_validation" => captures_bytes_and_text_validation(root.path()),
