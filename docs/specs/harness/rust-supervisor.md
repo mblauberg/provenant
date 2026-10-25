@@ -460,9 +460,9 @@ its 397 lines of tests stay until that fallback retires.
 - [Deletable test inventory](rust-supervisor-tests.md).
 - [ADR 0027](../../adr/0027-rust-front-door.md): Rust front door; amended here
   for the `libc` dependency and a macOS CI job.
-- [Provider execution core](provider-execution-core.md): the non-goals this
+- [Provider execution core](https://github.com/mblauberg/provenant/blob/cfe1084619a93cfbb898efd4c347fbf177f354dc/docs/specs/harness/provider-execution-core.md): the non-goals this
   keeps.
-- [Graph runner](graph-runner.md): consumes run-registry liveness, whose call
+- [Graph runner](https://github.com/mblauberg/provenant/blob/cfe1084619a93cfbb898efd4c347fbf177f354dc/docs/specs/harness/graph-runner.md): consumes run-registry liveness, whose call
   sites S4 preserves.
 - [Fabric v2 design history](../../archive/specs/fabric-v2.md): attempt states, statuses and the cleanup rules
   ported in S2.

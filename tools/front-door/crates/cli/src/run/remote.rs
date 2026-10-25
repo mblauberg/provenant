@@ -4,7 +4,10 @@
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
 use super::{Condition, Edge, Fail, Reply, Status, condition_met, render_lanes, reply, state_name};
-use crate::{Cancel, Dispatch, Lanes, Output, Part, fabric::Context};
+use crate::{
+    Cancel, Dispatch, Lanes, Output, Part,
+    fabric::{Context, PeerFailure},
+};
 use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, HostId, OperationId, Roots, RunId, TaskId,
     WaitBudget, WallTime,
@@ -121,8 +124,14 @@ fn unsupported(what: &str) -> Fail {
 }
 /// Map a peer refusal to the CLI's stable codes. Unknown launches keep their
 /// operation ID: replaying the same command recovers the receipt.
-fn peer_fail(error: FacadeError) -> Fail {
-    let message = error.to_string();
+/// A transport failure names the peer and cause in the message; the stable
+/// code is unchanged.
+fn peer_failure_fail(failure: PeerFailure) -> Fail {
+    let PeerFailure { error, detail } = failure;
+    let message = match detail {
+        Some(detail) => format!("{error} ({detail})"),
+        None => error.to_string(),
+    };
     let (status, code) = match &error {
         FacadeError::LaunchUnknown { operation_id } => {
             return Fail::new(
@@ -262,7 +271,7 @@ impl Peer {
         .map_err(io_fail)?;
         self.context
             .peer(&self.clock, host, action, budget, &self.cancel)
-            .map_err(peer_fail)
+            .map_err(peer_failure_fail)
     }
     /// Current owner records, one batched status read per host.
     fn records(&self, selected: &[(HostId, AttemptId)]) -> Result<Vec<run::AttemptRecord>, Fail> {
@@ -304,22 +313,47 @@ impl Peer {
             .ok_or_else(corrupt)
     }
     /// Poll the owner until the condition holds or the reader deadline passes.
-    /// Expiry never stops a provider; an unreachable peer is an error, not done.
+    /// Expiry never stops a provider. A transient peer failure is retried within
+    /// the budget; the last cause is reported only if the budget runs out on it.
     fn wait(
         &self,
         selected: &[(HostId, AttemptId)],
         condition: Condition,
         seconds: u64,
     ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
-        loop {
-            let lanes = self.records(selected)?;
-            let met = condition_met(&lanes, condition);
-            if met || Instant::now() >= deadline {
-                return Ok((lanes, met));
+        poll_until(
+            || self.records(selected),
+            condition,
+            Duration::from_secs(seconds),
+            POLL,
+        )
+    }
+}
+
+/// Poll `fetch` until the condition holds or `budget` passes.
+fn poll_until(
+    mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    condition: Condition,
+    budget: Duration,
+    poll: Duration,
+) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match fetch() {
+            Ok(lanes) => {
+                let met = condition_met(&lanes, condition);
+                if met || Instant::now() >= deadline {
+                    return Ok((lanes, met));
+                }
             }
-            std::thread::park_timeout(POLL.min(deadline.saturating_duration_since(Instant::now())));
+            Err(fail) if fail.code == "PEER_UNAVAILABLE" => {
+                if Instant::now() >= deadline {
+                    return Err(fail);
+                }
+            }
+            Err(fail) => return Err(fail),
         }
+        std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
@@ -807,12 +841,90 @@ mod tests {
 
     #[test]
     fn unknown_launch_names_the_operation_to_replay() -> Result {
-        let fail = peer_fail(FacadeError::LaunchUnknown {
-            operation_id: OperationId::parse("place")?,
-        });
+        let fail = peer_failure_fail(
+            FacadeError::LaunchUnknown {
+                operation_id: OperationId::parse("place")?,
+            }
+            .into(),
+        );
         assert_eq!(fail.code, "LAUNCH_UNKNOWN");
         assert!(fail.message.contains("--operation-id place"));
-        assert_eq!(peer_fail(FacadeError::PeerVersion).code, "PEER_VERSION");
+        assert_eq!(
+            peer_failure_fail(FacadeError::PeerVersion.into()).code,
+            "PEER_VERSION"
+        );
         Ok(())
+    }
+    fn unavailable(detail: &str) -> Fail {
+        peer_failure_fail(PeerFailure {
+            error: FacadeError::HomeUnavailable,
+            detail: Some(detail.to_owned()),
+        })
+    }
+
+    #[test]
+    fn peer_failure_names_the_peer_and_cause_on_the_stable_code() {
+        let fail = unavailable("workshop: ssh exited with status 255: Connection refused");
+        assert_eq!(fail.code, "PEER_UNAVAILABLE");
+        assert!(fail.message.contains("workshop"), "{}", fail.message);
+        assert!(
+            fail.message.contains("Connection refused"),
+            "{}",
+            fail.message
+        );
+    }
+
+    #[test]
+    fn wait_retries_a_transient_peer_failure_within_budget() {
+        let mut calls = 0;
+        let out = poll_until(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(unavailable("workshop: ssh timed out"))
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            Condition::All,
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(out, Ok((_, true))));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn wait_reports_the_last_cause_when_the_budget_runs_out() {
+        let mut calls = 0;
+        let out = poll_until(
+            || {
+                calls += 1;
+                Err(unavailable(&format!("workshop: failure {calls}")))
+            },
+            Condition::All,
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+        );
+        let fail = out.expect_err("budget exhausted");
+        assert_eq!(fail.code, "PEER_UNAVAILABLE");
+        assert!(calls > 1);
+        assert!(fail.message.contains(&format!("failure {calls}")));
+    }
+
+    #[test]
+    fn wait_does_not_retry_a_non_transient_failure() {
+        let mut calls = 0;
+        let out = poll_until(
+            || {
+                calls += 1;
+                Err(corrupt())
+            },
+            Condition::All,
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
+        assert_eq!(out.err().map(|f| f.code), Some("STATE_CORRUPT"));
+        assert_eq!(calls, 1);
     }
 }

@@ -1235,14 +1235,17 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<PeerResult, FacadeError> {
-        self.factory.context.peer_with(
-            &self.factory.executor,
-            &self.factory.clock,
-            host,
-            action,
-            budget,
-            cancel,
-        )
+        self.factory
+            .context
+            .peer_with(
+                &self.factory.executor,
+                &self.factory.clock,
+                host,
+                action,
+                budget,
+                cancel,
+            )
+            .map_err(|failure| failure.error)
     }
 }
 impl BinaryRunOwner<'_> {

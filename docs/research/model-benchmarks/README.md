@@ -9,13 +9,6 @@ dataset ([`benchmarks.json`](benchmarks.json), fields in
 - **Priors for routing and effort.** An agent considering catalogue models
   or a task class's default effort reads this first to see which effort tiers
   look worth their cost and which look dominated.
-- **Stage 0 of the replay bench studies.** The spec
-  `docs/specs/harness/replay-bench-studies.md` (PR #1082) names
-  `docs/research/effort-priors.md` as its Stage 0 output. That path is now a
-  short pointer to this registry, which is the rename: the registry supersedes a
-  single prose file, and the spec's row fields (model, effort, benchmark, score,
-  cost or tokens, source URL, date, confidence, class) are all present here, the
-  class as `task_class_hint`.
 
 ## Rule: priors only
 

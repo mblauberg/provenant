@@ -345,10 +345,6 @@ _merge_catalog = "_merge_catalog"
 load_catalog = "load_catalog"
 model_route_catalog = "model_route_catalog"
 
-[type.apple-console]
-extend-glob = ["observability-console-design.md"]
-extend-ignore-re = ["Control Center"]
-
 [type.legal-argument]
 extend-glob = ["argument-structure-and-paragraphing.md"]
 extend-ignore-re = ["Columbia Law School Writing Center"]

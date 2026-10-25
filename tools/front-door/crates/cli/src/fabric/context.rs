@@ -177,7 +177,7 @@ impl Context {
         action: PeerAction,
         budget: WaitBudget,
         cancel: &CancelToken,
-    ) -> Result<PeerResult, FacadeError> {
+    ) -> Result<PeerResult, PeerFailure> {
         self.peer_with(&self.executor, clock, host, action, budget, cancel)
     }
     /// [`Context::peer`] through a caller-owned executor.
@@ -189,15 +189,17 @@ impl Context {
         action: PeerAction,
         budget: WaitBudget,
         cancel: &CancelToken,
-    ) -> Result<PeerResult, FacadeError> {
+    ) -> Result<PeerResult, PeerFailure> {
         let peer = self
             .config
             .peers
             .values()
             .find(|p| p.host == host)
-            .ok_or(FacadeError::HomeUnavailable)?;
+            .ok_or_else(|| {
+                PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
+            })?;
         let project = ProjectLocator::new(&self.identity, &self.home)
-            .map_err(|_| FacadeError::ConfinementRefused)?;
+            .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused))?;
         let request = PeerRequest {
             version: 1,
             target_host: host,
@@ -206,8 +208,10 @@ impl Context {
             project,
             action,
         };
-        let executable = discover_ssh_executable(self.config.ssh_executable.as_deref())
-            .map_err(|_| FacadeError::HomeUnavailable)?;
+        let executable =
+            discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {
+                PeerFailure::new(FacadeError::HomeUnavailable, "no usable ssh executable")
+            })?;
         let transport = SshTransport {
             executor,
             clock,
@@ -218,17 +222,11 @@ impl Context {
         };
         match transport
             .exchange(peer, &request, budget, cancel)
-            .map_err(|error| {
-                let operation_id = match &error {
-                    PeerError::Unknown { operation_id } => Some(operation_id.clone()),
-                    _ => None,
-                };
-                FacadeError::from_code(error.code(), operation_id)
-            })?
+            .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
             PeerResult::Error { code, operation_id } => {
-                Err(FacadeError::from_code(&code, operation_id))
+                Err(FacadeError::from_code(&code, operation_id).into())
             }
             value => Ok(value),
         }
@@ -238,6 +236,46 @@ impl Context {
             return Err(EdgeError::Invalid);
         }
         Ok(lease.lease_seconds * 1000)
+    }
+}
+/// A peer call failure: the stable error plus, for transport failures, the
+/// peer and cause. The detail is message text only; the wire codes are unchanged.
+#[derive(Debug)]
+pub struct PeerFailure {
+    pub error: FacadeError,
+    pub detail: Option<String>,
+}
+impl PeerFailure {
+    fn new(error: FacadeError, detail: impl Into<String>) -> Self {
+        Self {
+            error,
+            detail: Some(detail.into()),
+        }
+    }
+}
+impl From<FacadeError> for PeerFailure {
+    fn from(error: FacadeError) -> Self {
+        Self {
+            error,
+            detail: None,
+        }
+    }
+}
+/// Map a transport error, naming the peer and, when known, the cause.
+pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
+    let operation_id = match error {
+        PeerError::Unknown { operation_id } => Some(operation_id.clone()),
+        _ => None,
+    };
+    let detail = match error {
+        PeerError::Failed(cause) => Some(format!("{destination}: {cause}")),
+        PeerError::Unavailable => Some(format!("{destination}: peer is unavailable")),
+        PeerError::Frame => Some(format!("{destination}: invalid peer frame")),
+        _ => None,
+    };
+    PeerFailure {
+        error: FacadeError::from_code(error.code(), operation_id),
+        detail,
     }
 }
 /// Publish a result in the selected lane or host result area.
