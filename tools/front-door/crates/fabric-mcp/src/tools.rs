@@ -300,6 +300,19 @@ impl ToolCall {
             self.validate_limits(limits)
                 .map_err(ServiceError::Invalid)?;
         }
+        if service.in_lane
+            && self.is_mutation()
+            && matches!(
+                &self,
+                Self::Mail(..)
+                    | Self::Task(..)
+                    | Self::Events(..)
+                    | Self::Claim(..)
+                    | Self::Landing(..)
+            )
+        {
+            return Err(CoordinationError::LaneMutation.into());
+        }
         let mutation = self.is_mutation();
         let output = matches!(&self, Self::Output(_));
         let tool_name = self.name();
@@ -542,6 +555,9 @@ impl ServiceError {
     pub fn structured_error(&self) -> Value {
         match self {
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
+            Self::Coordination(CoordinationError::LaneMutation) => {
+                serde_json::json!({"code":self.code(),"message":self.to_string()})
+            }
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
             }
@@ -570,6 +586,7 @@ pub struct Service<'a, F> {
     pub facade: F,
     clock: &'a dyn Clock,
     limits: Option<Limits>,
+    in_lane: bool,
 }
 
 impl<'a, F> Service<'a, F> {
@@ -579,12 +596,21 @@ impl<'a, F> Service<'a, F> {
             facade,
             clock,
             limits: None,
+            in_lane: false,
         }
     }
 
     /// Apply validated profile limits at the MCP owner boundary.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = Some(limits);
+        self
+    }
+
+    /// The composition edge captures this from the host-set MCP environment.
+    /// Tool arguments cannot change it. Lanes still have direct SQLite writes;
+    /// this guards the tool surface pending lane-store-isolation (Fabric spec).
+    pub fn with_lane_restrictions(mut self, in_lane: bool) -> Self {
+        self.in_lane = in_lane;
         self
     }
 

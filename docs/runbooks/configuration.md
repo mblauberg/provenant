@@ -76,8 +76,8 @@ entry overlaps the state directory's protected parts or Git metadata.
 
 Routing changes are stored per state root and apply on the next route command.
 To change routing, run `provenant route set` or `provenant route pacing`.
-Inspect effective weights, pacing factors and readiness with
-`provenant route list --pool NAME`. Remove a member with
+Inspect configured weights with `provenant route list --pool NAME`; pacing and
+readiness apply at dispatch. Remove a member with
 `provenant route remove POOL MODEL`; restore the bundled pool with
 `provenant route reset POOL`.
 

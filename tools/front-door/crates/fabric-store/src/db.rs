@@ -18,7 +18,59 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/004-claim-lookup.sql"),
     include_str!("migrations/005-coordination-operations.sql"),
     include_str!("migrations/006-federation.sql"),
+    include_str!("migrations/007-remove-legacy-import.sql"),
 ];
+// Index of 007, which may drop only the always-null legacy members and the
+// traces of an import that brought nothing over. Anything the removed import
+// actually wrote would be lost or would stop decoding, so the upgrade refuses
+// it instead, naming the table and its row count.
+const REMOVE_LEGACY_IMPORT: usize = 6;
+const LEGACY_IMPORT_DATA: &[(&str, &str)] = &[
+    (
+        "imports",
+        "SELECT count(*) FROM imports WHERE tasks<>0 OR messages<>0",
+    ),
+    // An empty import still appended one `imported` event, which 007 deletes.
+    (
+        "events",
+        "SELECT count(*) FROM events e \
+         WHERE json_extract(CAST(record AS TEXT),'$.kind')='imported' \
+         AND NOT EXISTS(SELECT 1 FROM imports i \
+         WHERE i.project=e.project AND i.tasks=0 AND i.messages=0)",
+    ),
+    (
+        "messages",
+        "SELECT count(*) FROM messages WHERE \
+         json_type(CAST(record AS TEXT),'$.legacy')<>'null' \
+         OR json_type(CAST(record AS TEXT),'$.legacy_output_path')<>'null' \
+         OR 'legacy' IN (json_extract(CAST(record AS TEXT),'$.conversation.scope'), \
+         json_extract(CAST(record AS TEXT),'$.reply_to.scope'), \
+         json_extract(CAST(record AS TEXT),'$.task.scope'))",
+    ),
+    (
+        "tasks",
+        "SELECT count(*) FROM tasks WHERE json_type(CAST(record AS TEXT),'$.legacy')<>'null'",
+    ),
+    (
+        "coordination_operations",
+        "SELECT count(*) FROM coordination_operations \
+         WHERE json_type(CAST(result AS TEXT),'$.task.legacy')<>'null'",
+    ),
+    (
+        "peer_operations",
+        "SELECT count(*) FROM peer_operations WHERE CASE WHEN json_valid(CAST(response AS TEXT)) \
+         THEN json_type(CAST(response AS TEXT),'$.result.data.result.task.legacy')<>'null' END",
+    ),
+];
+fn refuse_legacy_import_data(db: &Connection) -> Result<()> {
+    for (table, sql) in LEGACY_IMPORT_DATA {
+        let rows = db.query_row(sql, [], |row| row.get::<_, i64>(0))?;
+        if rows != 0 {
+            return Err(Error::LegacyImportData { table, rows });
+        }
+    }
+    Ok(())
+}
 fn schema_version(db: &Connection) -> Result<usize> {
     // One statement reads both values from one snapshot, so a concurrent first
     // migration cannot show tables without their version.
@@ -204,6 +256,9 @@ impl Store {
                 let Some(sql) = MIGRATIONS.get(version) else {
                     return Ok(true);
                 };
+                if version == REMOVE_LEGACY_IMPORT {
+                    refuse_legacy_import_data(tx)?;
+                }
                 tx.execute_batch(sql)?;
                 tx.pragma_update(None, "user_version", (version + 1) as i64)?;
                 Ok(false)

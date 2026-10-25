@@ -142,42 +142,6 @@
             {
               "additionalProperties": false,
               "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "type": "string"
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "type": "string"
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
                 "id": {
                   "$ref": "#/$defs/Id"
                 },

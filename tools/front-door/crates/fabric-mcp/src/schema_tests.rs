@@ -733,10 +733,10 @@ fn relaxed_wire_text_still_reports_strict_invalid_paths() {
         invalid_path("fabric_events", &value).as_deref(),
         Some("arguments.note")
     );
-    let value = json!({"op":"send", "recipients":["00000000000000000000000000000001"], "kind":"note", "body":"body", "artifacts":[], "reply_to":{"scope":"legacy", "reference":{"source":"\0", "project":"project", "id":"id"}}});
+    let value = json!({"op":"send", "recipients":["00000000000000000000000000000001"], "kind":"note", "body":"body", "artifacts":[{"digest":null, "path":{"encoding":"utf8", "path":"\0"}}]});
     assert_eq!(
         invalid_path("fabric_mail", &value).as_deref(),
-        Some("arguments.reply_to.reference.source")
+        Some("arguments.artifacts[0].path.path")
     );
 }
 

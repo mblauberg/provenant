@@ -272,7 +272,10 @@ fn listen(state: &Path) -> Result<UnixListener, AgentError> {
 }
 
 fn serve_state(state: &Path) -> Result<(), AgentError> {
-    let listener = listen(state)?;
+    serve_listener(listen(state)?, state)
+}
+
+fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError> {
     let program = std::env::current_exe()?;
     let cwd = crate::roots::home().map_err(|error| io::Error::other(error.to_string()))?;
     let active = Arc::new(AtomicUsize::new(0));
@@ -305,6 +308,11 @@ fn serve_state(state: &Path) -> Result<(), AgentError> {
 /// The LaunchAgent's long-running entrypoint, `fabric peer-agent`.
 pub fn serve(globals: &provenant_cli::Globals) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err(
+                provenant_fabric_runtime::coordination::CoordinationError::LaneMutation.into(),
+            );
+        }
         let home = crate::roots::home()?;
         let assets = crate::roots::product_root()?;
         let state = crate::roots::roots(globals, &assets, &home)?.state;
@@ -571,29 +579,18 @@ mod tests {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().to_path_buf();
+        // Listen before serving, so no readiness probe takes a transient slot.
+        let listener = listen(&state).unwrap();
         let server_state = state.clone();
         std::thread::spawn(move || {
-            let _ = serve_state(&server_state);
+            let _ = serve_listener(listener, &server_state);
         });
         let socket = directory(&state).join(SOCKET);
-        for _ in 0..200 {
-            if UnixStream::connect(&socket).is_ok() {
-                break;
-            }
-            std::thread::park_timeout(Duration::from_millis(25));
-        }
-        // Hold the cap with connections that never finish their request.
+        // Hold the cap with connections that never finish their request. The
+        // server accepts its queue in order, so each later request is refused.
         let held: Vec<UnixStream> = (0..CONCURRENT)
             .map(|_| UnixStream::connect(&socket).unwrap())
             .collect();
-        // Until the server has accepted every held connection, a probe may be
-        // served (and fail, as the test binary is not provenant), so retry.
-        for _ in 0..200 {
-            if matches!(forward(&state, b"x"), Ok(Forward::Busy)) {
-                break;
-            }
-            std::thread::park_timeout(Duration::from_millis(25));
-        }
         assert_eq!(forward(&state, b"x").unwrap(), Forward::Busy);
         // A request beyond the socket buffers must not lose the busy reply.
         assert_eq!(

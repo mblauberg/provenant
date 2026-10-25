@@ -21,7 +21,6 @@ tempfile = { workspace = true }
 
 [features]
 fixture = []
-test-fixtures = ["fixture"]
 
 [[test]]
 name = "process"

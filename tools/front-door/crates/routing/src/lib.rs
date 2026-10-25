@@ -30,7 +30,7 @@ pub enum RoutingError {
     UnsupportedEffort,
     #[error("invalid catalogue")]
     Catalogue,
-    #[error("invalid cached availability record")]
+    #[error("invalid availability record")]
     Availability,
     #[error("invalid review demand")]
     ReviewDemand,

@@ -927,6 +927,30 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
+fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    let spacing: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(spacing, 0);
+    Ok(())
+}
+
+#[test]
 fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -936,13 +960,60 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     // Shape the store exactly as version 1 left it.
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("DROP TABLE cancellations; PRAGMA user_version=1;")?;
+        .execute_batch(
+            "DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+        )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
     store.bind_cancel(&op, "attempt", &call)?;
     assert!(matches!(
         store.bind_cancel(&op, "other", &call),
         Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 2 left it, with the unused table back.
+    RunStore::open(&context, &call)?.db.execute_batch(
+        "CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+    )?;
+    let store = RunStore::open(&context, &call)?;
+    let remaining: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(remaining, 0);
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    Ok(())
+}
+
+#[test]
+fn a_store_newer_than_version_three_is_refused() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("PRAGMA user_version=4;")?;
+    assert!(matches!(
+        RunStore::open(&context, &call),
+        Err(RunError::Version(4))
     ));
     Ok(())
 }

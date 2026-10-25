@@ -13,6 +13,7 @@ fixture = ["provenant-run/fixture"]
 provenant-quota = { workspace = true }
 clap = { workspace = true }
 jiff = { workspace = true }
+libc = { workspace = true }
 provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
