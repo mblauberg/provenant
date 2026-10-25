@@ -13,9 +13,11 @@ not maintain a parallel queue or lease ledger.
 ## Resume and recovery
 
 After interruption, run `provenant reconcile --id RUN`, inspect the existing
-tasks and outputs, and resume the exact attempt with
-`fabric_run`'s `resume` operation (`target: { attempt }`, `expected_generation`, `operation_id`, `prompt`). Preserve useful partial work and verify results against
-their owners.
+tasks and outputs, and resume the exact attempt with `fabric_run`'s `resume`
+operation (`target: { attempt }`, `expected_generation: 0`, `operation_id`,
+`prompt`). `expected_generation` counts earlier continuations, so pass 0; it is
+not the attempt record's `generation`. Preserve useful partial work and verify
+results against their owners.
 
 ## Session checkpoint
 

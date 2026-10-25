@@ -95,8 +95,8 @@ access. Prefer per-dispatch controls over global provider configuration edits.
 
 ## Default stack & fallback chains
 
-Use `provenant dispatch` with a prompt file or stdin, operation ID, route and
-explicit access settings. A writer needs a registered linked worktree and
+Use `fabric_submit` (`operation_id`, `tasks` with route, access and prompt file)
+for a dispatch. A writer needs a registered linked worktree and
 one active writer. Do not launch providers directly to bypass confinement.
 Consult `provenant help dispatch` for current flags and bounded timeout limits.
 Rust run owns retries, admission and terminal publication; providers owns wire

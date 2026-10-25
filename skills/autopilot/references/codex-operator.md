@@ -10,12 +10,14 @@ loop driver.
 - Read the user-owned goal, current scope, and authority before acting. Check
   `STATUS` at the start and end of each work iteration.
 - Use `provenant lanes` and Fabric tasks to see what is active, ready, blocked,
-  or complete. Dispatch bounded work with `provenant dispatch` through
+  or complete. Dispatch bounded work with `fabric_submit` through
   `orchestrate`; read results with `provenant output`.
 - After an interruption, run `provenant reconcile --id RUN`, inspect the exact
-  task and artifact, and resume the exact attempt with
-  `fabric_run`'s `resume` operation (`target: { attempt }`, `expected_generation`, `operation_id`, `prompt`). Preserve partial work and retry only missing or failed
-  tasks within their owner's retry bounds.
+  task and artifact, and resume the exact attempt with `fabric_run`'s `resume`
+  operation (`target: { attempt }`, `expected_generation: 0`, `operation_id`,
+  `prompt`). `expected_generation` counts earlier continuations, so pass 0; it
+  is not the attempt record's `generation`. Preserve partial work and retry
+  only missing or failed tasks within their owner's retry bounds.
 - Use native subagents for independent work when the governing orchestration
   contract allows it. Preserve task scope, write authority, artifact paths,
   checks, and return format. Synthesis and acceptance stay with the accountable

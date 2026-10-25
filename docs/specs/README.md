@@ -22,7 +22,8 @@ state, owner, dependencies and user gates. Operator procedures live in the
 Fabric across the user's own hosts is specified in
 [fabric.md](fabric.md#peer-hosts); setup is in the
 [host runbook](../runbooks/fabric-hosts.md). The [landing lease
-runbook](../runbooks/landing-lease.md) covers acquiring a lease, and fencing a push with it.
+runbook](../runbooks/landing-lease.md) covers acquiring a lease and fencing a
+push with it.
 
 ## Harness
 

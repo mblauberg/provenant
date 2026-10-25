@@ -7,7 +7,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Quickstart
 
-One surface per action. Fabric MCP tools cover submit, graph, status, resume, cancel, claim, landing leases and bounded stdout or stderr reads (`fabric_output`). Mail, identity and activity events use `fabric_mail`, `fabric_identity` and `fabric_events`. CLI only: `provenant lanes` (list and wait), `provenant route list`, `provenant output` (`--part events|result|prompt`, `--tail`), `provenant reconcile` and `provenant fabric landing push|reconcile`. A terminal without MCP cancels with `provenant cancel`.
+One surface per action. Fabric MCP tools cover submit, graph, status, resume, cancel, claim, landing leases and bounded stdout or stderr reads (`fabric_output`). Mail, identity and activity events use `fabric_mail`, `fabric_identity` and `fabric_events`. CLI only: `provenant lanes` (list and wait), `provenant route list`, `provenant output` (`--part events|result|prompt`, `--tail`), `provenant reconcile` and `provenant fabric landing push|reconcile`. A terminal without MCP cancels with `provenant cancel RUN/TASK`, which cancels every attempt of the task (`fabric_run` cancels one).
 
 1. [Native first](references/routing-and-tiers.md#native-first): use native subagents for your own provider when the native tool supports the work. Claude callers use native Claude subagents; Claude models remain in the route pools for non-Claude chairs. Use Fabric for other providers, detached work and sandboxed worktree writers.
 2. Call `fabric_submit` with its `submission` operation; each task has one route choice. Use `provenant route list --adapter <id>` to inspect model ids, pool membership and cached availability.

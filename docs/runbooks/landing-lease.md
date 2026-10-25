@@ -19,15 +19,22 @@ A terminal without MCP uses the same operations through
 Only the CLI fences a push: `provenant fabric landing push` and
 `provenant fabric landing reconcile` settle its recorded outcome. Both take
 `--reference`, `--id`, `--generation` and `--operation-id`, copied from the
-lease `proof` and a unique operation ID. The proof `token` is a JSON array of
-16 integers; the CLI needs it as 32 lowercase hex digits in
-`PROVENANT_LANDING_TOKEN`, so it never enters the command arguments. Convert
-and run, with `PROOF` holding the proof object as JSON:
+lease `proof` plus a unique operation ID. `renew`, `verify` and `release` on
+the CLI take the same fence flags. All of them read the lease token from
+`PROVENANT_LANDING_TOKEN`, so it never enters the command arguments. The proof
+`token` is a JSON array of 16 integers; the CLI needs 32 lowercase hex digits.
+With `PROOF` holding the proof object as JSON:
 
 ```sh
-export PROVENANT_LANDING_TOKEN=$(printf '%s' "$PROOF" |
+set -e
+REF=$(printf '%s' "$PROOF" | jq -r .reference)
+ID=$(printf '%s' "$PROOF" | jq -r .id)
+GEN=$(printf '%s' "$PROOF" | jq -r .generation)
+TOKEN=$(printf '%s' "$PROOF" |
   jq -r '.token | map("0123456789abcdef"[(./16|floor):(./16|floor)+1]
     + "0123456789abcdef"[(.%16):(.%16)+1]) | join("")')
+[ "${#TOKEN}" -eq 32 ] || { echo "bad landing token" >&2; exit 1; }
+export PROVENANT_LANDING_TOKEN=$TOKEN
 provenant fabric landing push --reference "$REF" --id "$ID" \
   --generation "$GEN" --operation-id "$OP"
 ```

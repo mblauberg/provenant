@@ -133,7 +133,9 @@ The valid envelope is retained as `status=blocked`, `outcome=question` and
 response continues it through a new provider invocation and new attempt; it
 never mutates or resumes the blocked attempt in place.
 
-Cross-terminal cancellation uses `provenant cancel RUN/TASK --operation-id ID`.
+Cross-terminal cancellation uses `fabric_run`'s `cancel` (one attempt); a
+terminal without MCP uses `provenant cancel RUN/TASK --operation-id ID`, which
+cancels every attempt of the task.
 Run records own the target; supervisor keeps custody through publication and
 settlement. A transport disconnect does not authorise a PID signal.
 

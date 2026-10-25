@@ -221,7 +221,7 @@ means integration or detection is not yet reliable.
 For answer-bearing Fabric work, read the correlated reply with
 `fabric_mail`'s `read` operation (`after`, `limit`) and verify its artifact.
 When there is no local work, observe the project activity events with
-`fabric_events`'s `read` operation (`after`, `wait_ms`), then read the inbox
+`fabric_events`'s `read` operation (`after`, `limit`, `wait_ms`), then read the inbox
 again. Each wait has an explicit budget. A deadline does not cancel work;
 pane state remains advisory and never proves completion.
 
