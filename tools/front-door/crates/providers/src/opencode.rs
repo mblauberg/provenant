@@ -82,6 +82,9 @@ fn prepare(
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
     let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    if access == Access::WorktreeWrite {
+        runtime_reads.extend(crate::launch::git_global_files(&config_home));
+    }
     let config_dir = config_home.join("opencode");
     if config_dir.is_dir() {
         runtime_reads.push(subtree(config_dir));

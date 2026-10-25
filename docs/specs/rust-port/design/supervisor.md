@@ -329,7 +329,14 @@ lane can therefore poison a shared package cache; that risk is accepted for
 working builds. On macOS `/private/etc/ssl` (TLS trust roots and `openssl.cnf`) is read-only so Cargo can download crates. Executables stay immutable: `~/.cargo/bin` and
 `~/.rustup/toolchains` are read and exec only. The one exception is
 `~/.cache/node/corepack`, which is also executable, because Corepack runs the
-package managers it downloads from there. Homebrew prefixes are readable
+package managers it downloads from there. The other exception is a writer's
+`--write-root` and `domains.run.writer_writes` roots, which are also executable
+for writer lanes, because a build run there (a `CARGO_TARGET_DIR` outside the
+worktree) executes the build scripts it compiles; lanes can already run code
+they write in the worktree, so this adds no capability. Lanes also read Git's
+default XDG global files, `~/.config/git/ignore` and `~/.config/git/attributes`
+(when present, with no credentials), because Cargo's built-in Git library
+fails hard listing a path dependency when it cannot read them. Homebrew prefixes are readable
 except `var/` (service data). `--write-root` adds project paths outside the
 worktree, such as a repository's `.agent-run` lock directory; roots must be
 uncensused, noncredential and clear of Git directories, secrets, scratch,
