@@ -165,6 +165,9 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             );
         }
         let executable = crate::run::provider_executable(adapter)?;
+        // The probe root must exist first. The config lock is taken later and
+        // is not held over the probe, which can run for seconds.
+        ensure_state_directory(roots.state.as_path())?;
         // The probe runs in a fresh private directory under the host state
         // root, never the caller's cwd, which may hold lane-written settings.
         let system = SystemExecutor::new(1).map_err(|e| e.to_string())?;
