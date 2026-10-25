@@ -56,6 +56,7 @@ owns account eligibility, and run records the resolved account label.
 | Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor and confinement own locks, leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database |
 | Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/` |
+| Usage counters | `<state>/usage.jsonl`, `usage.jsonl.1` and `usage.lock`; appended only when the root already exists |
 | Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |
 
 There is no telemetry ledger subtree. `telemetry stats` reduces run's terminal
@@ -69,7 +70,8 @@ path component. Resolve existing ancestor aliases and append only a normal
 missing tail, because lexical checks cannot protect filesystem access. Do not
 open old-root contents to test containment.
 
-Reads, help and `root` create no state. Mutations initialise explicitly with
+Reads, help and `root` create no state, though they still append to an existing
+root's usage log. Mutations initialise explicitly with
 directories 0700, files 0600 and executables 0755. Config never opens SQLite.
 Each owner uses supervisor's locks and publication; no whole-root sweeper
 exists.

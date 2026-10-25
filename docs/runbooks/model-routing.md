@@ -1,8 +1,9 @@
 # Model routing
 
-Run `provenant route list` to inspect the catalogue, effective pool weights,
-and pacing factors. Use `provenant --json route list` for
-records, `--adapter NAME` to narrow it, or `--pool NAME` for one pool. Resolve a pool with
+Run `provenant route list` to inspect the catalogue, configured pool weights
+and pacing policy; pacing and readiness apply at dispatch. Use
+`provenant --json route list` for records, `--adapter NAME` to narrow it, or
+`--pool NAME` for one pool. Resolve a pool with
 `provenant route resolve --route NAME`, or select an exact model with
 `--model ADAPTER/ID` and optional `--effort LEVEL`.
 

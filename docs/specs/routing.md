@@ -112,7 +112,7 @@ the flag lists.
 
 | Command | Behaviour |
 | --- | --- |
-| `route list` | Catalogue revision, exact models and efforts, pools with weight, factor, pacing and `unknown_availability` readiness. No probe; dispatch decides readiness. |
+| `route list` | Catalogue revision, exact models and efforts, pools with configured weight and pacing policy. No probe; dispatch applies pacing and decides readiness. |
 | `route resolve` | Pure preview of one `--model` or `--route`, with `--effort`, `--fallback`, `--confidential` and `--allow-free`. No admission or state mutation. Dispatch uses the same fields. |
 | `route set`, `remove`, `reset`, `pacing` | Edit user pool overrides in `config.toml`: add or update a member (weight 0 to 100, effort), remove one, restore a bundled pool, set a provider's pacing policy. |
 | `quota show` | Cached windows, reset, source, age and coverage. No refresh. |
@@ -140,7 +140,8 @@ closed. Every adapter with a launch form is enabled by default.
 
 Stored snapshots are typed, versioned serde records. Facts built only at the
 edge (verified lineage, review availability) are `Serialize` only. Persist
-a separate family-evidence projection and revalidate it on recovery; stored bytes never assert fresh availability or admission.
+a separate family-evidence projection and revalidate it on recovery; stored
+bytes never assert fresh availability or admission.
 Percentages are basis points, money is checked scaled integers, and no integer
 passes through `f64`. Clocks are injected; reset times use `jiff`, and
 ambiguous local times are rejected.

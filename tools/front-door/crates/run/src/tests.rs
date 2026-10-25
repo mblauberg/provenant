@@ -927,6 +927,30 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
+fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    let spacing: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(spacing, 0);
+    Ok(())
+}
+
+#[test]
 fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

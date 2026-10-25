@@ -29,7 +29,7 @@ pub enum Route {
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
-    /// Limit pool members to this adapter.
+    /// Limit models and pool members to this adapter.
     #[arg(long)]
     pub adapter: Option<String>,
     /// Show only this effective pool.

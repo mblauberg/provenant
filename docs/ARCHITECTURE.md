@@ -324,7 +324,8 @@ decisions. `provenant-run` owns dispatch and records the resolved route and
 provider result. `provenant-providers` supplies the Claude, Codex, Cursor, Agy,
 and OpenCode adapters.
 
-`provenant route list` shows pool membership, weights and pacing; it does not probe readiness.
+`provenant route list` shows pool membership and configured weights; it does not probe, and pacing
+and readiness apply at dispatch.
 `provenant route set`, `remove`, and `reset` manage pool overrides;
 `provenant route pacing` selects a provider policy (`pace`, `spend`, or
 `max`). Ready candidates are selected using their configured weight and

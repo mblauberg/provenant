@@ -18,7 +18,8 @@ or chrome://tracing; no collector is needed.
 tools, including installed units with zero calls. Omit `--since` for all retained
 calls; dates and RFC3339 timestamps also work. Counts cover this host's
 `usage.jsonl` and `usage.jsonl.1` under the selected Provenant state directory.
-The report includes its own call on the next invocation.
+A fresh host counts nothing until the state root exists. The report includes its
+own call on the next invocation.
 
 Each CLI invocation records `cli.verb`, its canonical verb path, exit code,
 duration in milliseconds and UTC timestamp. Parse failures use `parse`, help

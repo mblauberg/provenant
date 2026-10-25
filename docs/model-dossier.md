@@ -170,8 +170,8 @@ Use `utility` for mechanical work: Claude Haiku has no explicit effort, Codex
 Luna uses its recorded `low` control, and the OpenCode free models come last.
 Use the named junior, senior or principal pools for increasing judgement, or
 the writing and design pools for those crafts. Check `route list` for pool
-membership and weights. Task-class presets adjust knobs; they do not map task classes to
-routes.
+membership and weights. Task-class presets adjust knobs; they do not map
+task classes to routes.
 
 ### Human-facing final polish
 
