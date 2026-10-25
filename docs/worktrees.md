@@ -65,6 +65,12 @@ parent to belong to the effective user with mode 0700, and refuses mismatches.
 Host builds must use separate target directories outside this lane namespace;
 see the [release build example](runbooks/install.md#build-a-staged-release).
 
+`provenant worktree remove` deletes only the removed worktree's own lane cache,
+derived from its verified identity before Git removes it. Cache cleanup holds
+the writer lock and uses verified detachment before deletion. A cleanup failure
+emits a warning; the worktree stays removed. Other orphaned caches and
+interrupted cleanup tombstones remain for `provenant gc`.
+
 ## Writer dispatch
 
 Agents use `fabric_submit`; this is the terminal path for a shell without MCP.

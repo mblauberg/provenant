@@ -306,6 +306,12 @@ authority over unrelated Git actors.
 | `worktree remove --merged` | Needs explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`) and `--branch` or `--since`. Ordinary merges are proved by ancestry. A squash needs a recorded merged PR in this repository whose head OID equals the branch tip and whose merge OID is an ancestor of the integration tip. A `gh` failure or malformed output keeps the branch unless ancestry alone proves it. The integration branch and a branch at its tip are never pruned. The branch OID is rechecked and the ref is deleted with that expected old OID. Remote deletion is not offered. |
 | `hook claude pre-tool-use` | The lane-safety guard, a row in cli's `HookSpec` table. Stdin is bounded to 1 MiB. Unreadable, malformed, oversized or timed-out input emits deny JSON with exit 0, and only a failure to write the denial exits 2. |
 
+For each removed worktree, removal derives its lane cache from the verified
+worktree before Git deletes it, then deletes only that cache through the
+detach-and-verify path while holding writer exclusion. Cache cleanup failures
+emit a warning after the worktree has been removed. Removal leaves other
+orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
+
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes
 only its just-merged scope. The guard forbids name- and pattern-based kills

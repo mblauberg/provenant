@@ -429,6 +429,31 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheG
     gc_worktree_cargo_caches(home, &CacheGcPolicy::default()).map(|report| report.removed.len())
 }
 
+/// Remove only the cache derived from a worktree before its removal. The caller
+/// holds that worktree's writer lock until this returns. Other orphaned caches
+/// and interrupted GC tombstones are left for `provenant gc`.
+pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<(), PermissionError> {
+    validate_absolute(home)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    if cache.parent() != Some(cache_root.as_path()) {
+        return Err(PermissionError::InvalidPath);
+    }
+    let name = cache.file_name().ok_or(PermissionError::InvalidPath)?;
+    if !name.to_str().is_some_and(is_cache_digest) {
+        return Err(PermissionError::InvalidPath);
+    }
+    let Some(root) = open_cache_root(&cache_root)? else {
+        return Ok(());
+    };
+    prune_worktree_cache(
+        root.as_ref(),
+        &cache_root,
+        name,
+        &CacheGcPolicy::default(),
+        &mut CacheGcReport::default(),
+    )
+}
+
 /// Sweep the lane cache root: orphaned caches always, idle ones when the policy
 /// sets a threshold and lists the owner in this project. Retry GC tombstones
 /// too. Directories are opened without following symlinks or crossing devices.
@@ -454,25 +479,34 @@ fn sweep_worktree_cargo_caches(
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
 ) -> Result<(), PermissionError> {
+    validate_absolute(home)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    let Some(root) = open_cache_root(&cache_root)? else {
+        return Ok(());
+    };
+    sweep_cache_root(root.as_ref(), &cache_root, policy, report)
+}
+
+fn open_cache_root(
+    cache_root: &Path,
+) -> Result<Option<Box<dyn provenant_supervisor::fs::SafeDir>>, PermissionError> {
     use provenant_supervisor::fs::LocalFs;
     use std::io;
 
-    validate_absolute(home)?;
-    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
-    match std::fs::symlink_metadata(&cache_root) {
+    match std::fs::symlink_metadata(cache_root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
-            return Ok(());
+            return Ok(None);
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(cache_io_error("stat cache root", Path::new("."), error)),
     }
     let root = LocalFs
-        .open_anchor(&cache_root)
+        .open_anchor(cache_root)
         .map_err(cache_fs_error("open cache root", Path::new(".")))?;
-    sweep_cache_root(root.as_ref(), &cache_root, policy, report)
+    Ok(Some(root))
 }
 
 fn sweep_cache_root(
