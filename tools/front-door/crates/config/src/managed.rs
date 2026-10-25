@@ -495,9 +495,6 @@ impl Snapshots {
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
-                if !permitted_entry(entry, previous, targets.roots.state.as_path())? {
-                    return Err(InstallError::Conflict(entry.path.to_path_buf()?));
-                }
                 if entry.selector == "binary"
                     || entry.selector == "git-hook:pre-push"
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
@@ -1807,10 +1804,7 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
         if !paths.insert((entry.path.to_path_buf()?, entry.selector.clone())) {
             return Err(InstallError::Manifest("duplicate receipt path"));
         }
-        // A moved home's peer receipt is readable so uninstall can relinquish
-        // it. Reading it grants no authority to inspect or remove that path.
-        if !permitted_entry(entry, &receipt, state_root)? && !foreign_peer_agent(entry, state_root)?
-        {
+        if !permitted_entry(entry, &receipt, state_root)? {
             return Err(InstallError::Manifest(
                 "receipt entry outside resolved targets",
             ));
@@ -1877,21 +1871,6 @@ fn asset_target(target: &Path, state_root: &Path, expected_tail: &Path) -> bool 
         tail.push(part.as_os_str());
     }
     tail == expected_tail
-}
-fn foreign_peer_agent(entry: &OwnedEntry, state_root: &Path) -> Result<bool, InstallError> {
-    if entry.selector != "peer-agent" || entry.harness.is_some() {
-        return Ok(false);
-    }
-    let path = entry.path.to_path_buf()?;
-    normal_absolute(&path)?;
-    Ok(peer_agent_plist(state_root).as_ref() != Some(&path)
-        && matches!(
-            entry.expected,
-            OwnedValue::File {
-                mode: 0o600 | 0o644,
-                ..
-            }
-        ))
 }
 fn permitted_entry(
     entry: &OwnedEntry,
@@ -2256,13 +2235,6 @@ pub fn uninstall(
     let mut selector_files = BTreeMap::new();
     for (entry, owner) in receipt.entries.iter().zip(&owners) {
         if !removed(entry, owner) {
-            continue;
-        }
-        if foreign_peer_agent(entry, state_root)? {
-            findings.push(InstallFinding {
-                rule: "relinquished_foreign_peer_agent".into(),
-                path: entry.path.clone(),
-            });
             continue;
         }
         if !permitted_entry(entry, &receipt, state_root)? {
