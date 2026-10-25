@@ -159,6 +159,17 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         );
         if modified {
             fs::write(&plist, b"user edited plist\n").unwrap();
+            let release = f.release();
+            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(plist.to_str().unwrap()), "{error}");
+            assert!(error.contains("move it aside"), "{error}");
+            assert!(
+                error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
+                "{error}"
+            );
         }
         struct StopReporter(usize);
         impl InstallReporter for StopReporter {
@@ -236,6 +247,198 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
 }
 
 #[test]
+fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
+    for (edit_command, move_bin) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut f = Fixture::new();
+        f.targets.harnesses =
+            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+        f.targets.hooks = true;
+        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            fs: &LocalFs,
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
+        let entry = read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| {
+                entry.selector.starts_with("hook:") && entry.selector.contains("PreToolUse")
+            })
+            .unwrap();
+        let mut edited = crate::hooks::get(&fs::read(&hook).unwrap(), &entry.selector)
+            .unwrap()
+            .unwrap();
+        if edit_command {
+            edited["command"] = serde_json::json!("user edited command");
+        } else {
+            edited["timeout"] = serde_json::json!(123);
+        }
+        let bytes =
+            crate::hooks::set(&fs::read(&hook).unwrap(), &entry.selector, Some(&edited)).unwrap();
+        fs::write(&hook, &bytes).unwrap();
+        if !edit_command {
+            let receipt_before = fs::read(f.receipt()).unwrap();
+            let release = f.release();
+            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
+                .unwrap_err();
+            assert!(error.to_string().contains("--hooks off"), "{error}");
+            assert_eq!(fs::read(f.receipt()).unwrap(), receipt_before);
+            assert_eq!(fs::read(&hook).unwrap(), bytes);
+        }
+
+        f.targets.hooks = false;
+        if move_bin {
+            f.targets.bin_dir = f.home.join("new-bin");
+        }
+        for attempt in 0..2 {
+            let outcome =
+                install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+            if attempt == 0 {
+                assert!(
+                    outcome
+                        .findings
+                        .iter()
+                        .any(|finding| finding.rule == "relinquished_modified_entry"
+                            && finding.path == entry.path)
+                );
+            }
+            let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+            assert!(
+                !receipt
+                    .entries
+                    .iter()
+                    .any(|owned| owned.selector.starts_with("hook:")
+                        && owned.selector.contains("PreToolUse"))
+            );
+            assert!(
+                receipt
+                    .entries
+                    .iter()
+                    .any(|owned| owned.selector.starts_with("hook:"))
+            );
+            if !move_bin {
+                assert_eq!(fs::read(&hook).unwrap(), bytes);
+            }
+        }
+        uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+        let selector = if edit_command {
+            let (event, matcher, _): (String, Option<String>, String) =
+                serde_json::from_str(entry.selector.strip_prefix("hook:").unwrap()).unwrap();
+            crate::hooks::selector(&event, matcher.as_deref(), "user edited command").unwrap()
+        } else {
+            entry.selector
+        };
+        assert_eq!(
+            crate::hooks::get(&fs::read(&hook).unwrap(), &selector).unwrap(),
+            Some(edited)
+        );
+    }
+}
+
+#[test]
+fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migration() {
+    for missing in [false, true] {
+        let mut f = Fixture::new();
+        f.targets.harnesses =
+            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+        f.targets.hooks = true;
+        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        f.targets.hook_specs.push(HookRegistration {
+            harness: None,
+            event: "pre-push",
+            matcher: None,
+            timeout: None,
+            command: &["hook", "git", "pre-push"],
+        });
+        let checkout = f.home.join("old-checkout");
+        let hooks = checkout.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let launcher = hooks.join("pre-push");
+        symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
+        f.targets.legacy_checkout = Some(checkout);
+        f.targets.git_hooks_dir = Some(hooks);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert!(
+            read_receipt(&f.targets, &LocalFs)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "git-hook:pre-push")
+        );
+        if missing {
+            fs::remove_file(&launcher).unwrap();
+        } else {
+            fs::write(&launcher, b"user launcher\n").unwrap();
+        }
+        f.targets.hooks = false;
+        f.targets.legacy_checkout = None;
+        f.targets.git_hooks_dir = None;
+        let outcome = install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert_eq!(
+            outcome
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "relinquished_modified_entry"
+                    && finding.path.to_path_buf().unwrap() == launcher),
+            !missing
+        );
+        assert!(
+            !read_receipt(&f.targets, &LocalFs)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "git-hook:pre-push")
+        );
+        let inspection = inspect_install(
+            &f.targets,
+            Some(&f.release()),
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &cancel,
+        )
+        .unwrap();
+        assert!(inspection.error.is_none());
+        assert!(
+            !inspection
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "owned_entry_drift"),
+            "{:?}",
+            inspection.findings
+        );
+        let other = f.home.join("other-checkout");
+        let hooks = other.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        symlink(other.join("scripts/hooks/pre-push"), hooks.join("pre-push")).unwrap();
+        f.targets.hooks = true;
+        f.targets.legacy_checkout = Some(other);
+        f.targets.git_hooks_dir = Some(hooks.clone());
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert!(hooks.join("pre-push").is_file());
+        if missing {
+            assert!(!launcher.exists());
+        } else {
+            assert_eq!(fs::read(launcher).unwrap(), b"user launcher\n");
+        }
+    }
+}
+
+#[test]
 fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
     for (upgrade, recognised) in [(true, true), (true, false), (false, true), (false, false)] {
         let mut f = Fixture::new();
@@ -284,7 +487,13 @@ fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
                         .any(|entry| entry.selector == "peer-agent")
                 );
             } else {
-                assert!(matches!(plan, Err(InstallError::Conflict(_))));
+                let error = plan.unwrap_err().to_string();
+                assert!(error.contains(plist.to_str().unwrap()), "{error}");
+                assert!(error.contains("move it aside"), "{error}");
+                assert!(
+                    error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
+                    "{error}"
+                );
                 assert_eq!(fs::read(&plist).unwrap(), b"historical plist\n");
             }
         } else {

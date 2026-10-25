@@ -298,6 +298,7 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
             (Outcome::Refused, "HOOKS_UNAVAILABLE")
         }
         InstallError::Conflict(_)
+        | InstallError::PeerAgentConflict(_)
         | InstallError::Drift(_)
         | InstallError::Tampered(_)
         | InstallError::ReleaseConflict { .. } => (Outcome::Refused, "INSTALL_REFUSED"),

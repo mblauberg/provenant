@@ -452,6 +452,7 @@ pub(crate) fn capture(
                 mode: hook_mode,
             };
             let mut removed_changes = Vec::new();
+            let mut inherited = BTreeSet::new();
             if let Some(previous) = previous {
                 for entry in &previous.entries {
                     if entry.harness != Some(target.harness)
@@ -460,6 +461,11 @@ pub(crate) fn capture(
                     {
                         continue;
                     }
+                    if hooks && !targets.hooks && !entry_matches(&base, entry)? {
+                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                        continue;
+                    }
+                    inherited.insert(entry.selector.clone());
                     // Keep current registrations in place so re-install is a no-op.
                     let still_desired = hooks
                         && targets.hook_specs.iter().any(|spec| {
@@ -491,7 +497,11 @@ pub(crate) fn capture(
                 return Err(InstallError::ConfigFile(hook.clone()));
             };
             let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
-                crate::hooks::register(&base, targets)?
+                let registration = crate::hooks::register(&base, targets, &inherited)?;
+                if registration.relinquished_modified {
+                    add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                }
+                (registration.bytes, registration.changes, registration.owned)
             } else {
                 (base, Vec::new(), Vec::new())
             };
@@ -616,10 +626,7 @@ pub(crate) fn capture(
                     }
                 } else {
                     add_finding(&mut plan.findings, "relinquished_modified_entry", &path)?;
-                    plan.owned.push(entry.clone());
                 }
-            } else {
-                plan.owned.push(entry.clone());
             }
         }
     }

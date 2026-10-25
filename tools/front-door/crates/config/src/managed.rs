@@ -49,6 +49,10 @@ pub enum InstallError {
     Tampered(PathBuf),
     #[error("unmanaged destination conflicts: {0}")]
     Conflict(PathBuf),
+    #[error(
+        "peer-agent plist conflicts: {0}; move it aside, run launchctl bootout gui/$UID/dev.provenant.peer, then rerun install"
+    )]
+    PeerAgentConflict(PathBuf),
     #[error("destination changed since preview: {0}")]
     Drift(PathBuf),
     #[error("select at least one harness explicitly, without duplicates")]
@@ -933,6 +937,9 @@ pub fn plan_install(
                     && !legacy_peer
                     && want.selector != "config"
                 {
+                    if want.selector == "peer-agent" {
+                        return Err(InstallError::PeerAgentConflict(path.clone()));
+                    }
                     return Err(InstallError::Conflict(path.clone()));
                 }
             }

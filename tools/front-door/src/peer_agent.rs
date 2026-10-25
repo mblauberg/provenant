@@ -632,6 +632,50 @@ pub fn status(state: &Path, home: &Path) -> Status {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn historical_plist_recognises_current_release_golden_bytes() {
+        // A plist written by the released installer, with only HOME rewritten.
+        // Keep these bytes independent of render(), including the final newline.
+        let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.provenant.peer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/example/.local/bin/provenant</string>
+    <string>fabric</string>
+    <string>peer-agent</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/example/.local/bin:/Users/example/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/Applications/Obsidian.app/Contents/MacOS</string>
+    <key>PROVENANT_STATE_DIR</key>
+    <string>/Users/example/.local/share/provenant/v1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/example/.local/share/provenant/v1/peer-agent/agent.log</string>
+</dict>
+</plist>
+"#;
+        assert_eq!(
+            super::historical_plist(
+                bytes,
+                std::path::Path::new("/Users/example/.local/bin/provenant"),
+                std::path::Path::new("/Users/example/.local/share/provenant/v1"),
+            ),
+            Some(bytes.to_vec())
+        );
+    }
+
+    #[test]
     fn historical_plist_requires_the_exact_template_and_known_binary_and_state() {
         use super::*;
         let program = Path::new("/home/test/.local/bin/provenant");

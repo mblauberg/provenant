@@ -234,9 +234,12 @@ matching the environment's home, or else every recorded target of the harness.
 No cross-file or cross-host atomicity is claimed.
 
 Omitting `--hooks` on re-install retains and refreshes the selected target's
-owned hook registrations and the shared legacy Git pre-push launcher. The
-legacy checkout flag need not be repeated. Explicit `--hooks off` removes
-exact owned matches, relinquishes modified entries and reports them.
+unchanged owned hook registrations and the shared legacy Git pre-push launcher.
+Edited hooks and launchers are preserved, relinquished from the receipt and
+reported. Missing launchers also leave the receipt. The legacy checkout flag
+need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
+names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
+matches, relinquishes modified entries and reports them.
 
 On macOS, installation into the account's default state root also owns
 `~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in

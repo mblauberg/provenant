@@ -105,18 +105,22 @@ reached the agent is never retried in process; a lost reply surfaces as an
 error and, for a mutation, as `launch_unknown`.
 
 Re-running install is idempotent: it rewrites the plist only when it changed
-and restarts the agent so it serves the new binary. The plist captures the
-installer's `PATH`, so run install from a shell whose `PATH` finds `claude`
-and the other provider CLIs. Installs with another home or `--state-dir` skip
+and restarts the agent so it serves the new binary. The plist's PATH starts
+with fixed system directories, then the install bin directory and existing
+absolute directories holding resolved Claude, Codex and Git executables.
+Run install from a shell whose PATH finds those executables; other PATH
+entries are dropped. Installs with another home or `--state-dir` skip
 the agent. The agent logs failed requests to
 `~/.local/share/provenant/v1/peer-agent/agent.log`.
 
 Check it with `provenant hosts doctor` locally or `provenant hosts doctor
 workshop` from the other host: the `peer agent` line reads `running`,
 `stopped` (plist present, socket not answering), `not_installed` or
-`unsupported` (not macOS). To remove it, run
-`launchctl bootout gui/$(id -u)/dev.provenant.peer` and delete the plist. Doctor uses a separate remote command, so a key forced to the peer
-entrypoint cannot also run remote doctor.
+`unsupported` (not macOS). Use receipt-aware `provenant uninstall --harness NAME`
+for each installed harness. Removing the last recorded target boots out the
+agent and removes its unchanged plist; edited plists are preserved and
+reported. See the [install runbook](install.md). Doctor uses a separate remote
+command, so a key forced to the peer entrypoint cannot also run remote doctor.
 
 `fabric peer` is a hidden machine entrypoint, not an interactive operator
 command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
