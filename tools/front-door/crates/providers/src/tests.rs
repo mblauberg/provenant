@@ -2186,6 +2186,45 @@ fn writer_git_core_helpers_are_readable_and_executable_only_for_writers()
 }
 
 #[test]
+fn lanes_read_git_global_ignore_and_attributes_only_when_present()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::PathScope;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let git = home.join(".config/git");
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let granted = |access: Access| -> Result<Vec<std::path::PathBuf>, ProviderError> {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.home = home;
+        let launch = crate::codex::Codex.prepare(input)?;
+        Ok(launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .filter(|grant| grant.path.starts_with(&git))
+            .inspect(|grant| assert_eq!(grant.scope, PathScope::Exact))
+            .map(|grant| grant.path.clone())
+            .collect())
+    };
+    // Absent files are not granted, so a missing path cannot break a launch.
+    assert!(granted(Access::WorktreeWrite)?.is_empty());
+    std::fs::create_dir_all(&git)?;
+    std::fs::write(git.join("ignore"), "")?;
+    std::fs::write(git.join("attributes"), "")?;
+    std::fs::write(git.join("config"), "")?;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let mut paths = granted(access)?;
+        paths.sort();
+        assert_eq!(paths, [git.join("attributes"), git.join("ignore")]);
+    }
+    Ok(())
+}
+
+#[test]
 fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let prefix = temp.path();

@@ -79,7 +79,14 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                runtime_reads: vec![subtree(package)],
+                runtime_reads: [subtree(package)]
+                    .into_iter()
+                    .chain(if access == Access::WorktreeWrite {
+                        crate::launch::git_global_files(&input.home.join(".config"))
+                    } else {
+                        Vec::new()
+                    })
+                    .collect(),
                 authentication: vec![AuthenticationProfile {
                     mechanism: "login".into(),
                     roots: authentication,

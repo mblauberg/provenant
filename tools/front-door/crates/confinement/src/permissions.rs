@@ -1785,6 +1785,14 @@ fn render_profile(
             PathScope::Subtree,
         )?;
     }
+    // A writer may run what it builds into a configured write root (build
+    // scripts under a shared CARGO_TARGET_DIR). It can already run code it
+    // writes in the worktree, so this adds no capability.
+    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+        for root in &plan.write_roots {
+            push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
+        }
+    }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
     }
@@ -2722,6 +2730,10 @@ mod tests {
             "(allow file-write* (subpath \"{}\"))",
             root.join(".agent-run/locks").display()
         )));
+        assert!(!source.contains(&format!(
+            "(allow process-exec (subpath \"{}\"))",
+            root.join(".agent-run/locks").display()
+        )));
         for tool in [home.join(".cargo/bin"), home.join(".rustup/toolchains")] {
             assert!(source.contains(&format!(
                 "(allow file-read* (subpath \"{}\"))",
@@ -3424,6 +3436,11 @@ mod tests {
         let sbpl = String::from_utf8(compiled.profile)?;
         assert!(sbpl.contains("(deny file-link)"));
         assert!(sbpl.contains("(allow sysctl-read)"));
+        // A writer may run what it builds into a write root.
+        assert!(sbpl.contains(&format!(
+            "(allow process-exec (subpath \"{}\"))",
+            project_locks.display()
+        )));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -3741,6 +3758,8 @@ mod tests {
             String::from_utf8(bytes).expect("UTF-8 SBPL")
         };
         let provider = render(&plan);
+        // Read-only lanes never exec from write roots.
+        assert!(!provider.contains("(allow process-exec (subpath \"/work/repo/.agent-run\"))"));
         assert!(!provider.contains("localhost"));
         assert!(!provider.contains("PGSQL"));
         assert!(!provider.contains("\"*:*\""));

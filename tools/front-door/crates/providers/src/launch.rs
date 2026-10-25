@@ -185,6 +185,7 @@ pub(crate) fn rust_tools(
         cache
     }));
     runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
+    runtime_reads.extend(git_global_files(&input.home.join(".config")));
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
@@ -249,6 +250,19 @@ pub(crate) fn rust_tools(
     // Children inherit this profile, so exec stays confined; read and write
     // grants and the protected and credential denials are unchanged.
     tool_exec_roots.push(subtree(input.cwd));
+}
+
+/// Git's default XDG global ignore and attributes files, read-only. Cargo's
+/// built-in Git library lists files of path dependencies outside the
+/// workspace and fails hard when it cannot read them. They hold no
+/// credentials. Granted only when present, as a grant needs an existing path.
+pub(crate) fn git_global_files(config_home: &Path) -> Vec<PathGrant> {
+    ["git/ignore", "git/attributes"]
+        .map(|name| config_home.join(name))
+        .into_iter()
+        .filter(|path| path.is_file())
+        .map(exact)
+        .collect()
 }
 
 /// A Homebrew Node toolchain (node, npm, pnpm, corepack) for every
