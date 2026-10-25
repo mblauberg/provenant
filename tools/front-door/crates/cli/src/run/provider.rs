@@ -857,6 +857,17 @@ pub(super) fn observe_codex_rollout(
     observed
 }
 
+fn detect_failure(
+    entry: &provenant_providers::accounts::Registration,
+    error: &provenant_providers::ProviderError,
+) -> String {
+    let mut message = format!("{} account {}: {error}", entry.adapter, entry.label);
+    if !matches!(error, provenant_providers::ProviderError::ProbeDirectory(_)) {
+        message.push_str("; re-register the signed-in identity");
+    }
+    message
+}
+
 fn observe_account(
     entry: &provenant_providers::accounts::Registration,
     executable: &Path,
@@ -892,12 +903,7 @@ fn observe_account(
             &directory,
             executor.root(),
         )
-        .map_err(|e| {
-            format!(
-                "{} account {}: {e}; re-register the signed-in identity",
-                entry.adapter, entry.label
-            )
-        })?
+        .map_err(|error| detect_failure(entry, &error))?
     };
     if detected != entry.key {
         return Err(format!(
@@ -1418,6 +1424,30 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_failure_distinguishes_probe_directory_from_unknown_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_providers::{ProviderError, accounts::Registration};
+
+        let entry: Registration = serde_json::from_value(serde_json::json!({
+            "adapter": "claude",
+            "label": "fixture",
+            "key": "fixture-key",
+            "directory": "/home/test/.claude-fixture",
+        }))?;
+        let error = ProviderError::ProbeDirectory("fixture host state fault".into());
+        let message = detect_failure(&entry, &error);
+        assert_eq!(message, format!("claude account fixture: {error}"));
+        assert!(!message.contains("re-register"));
+
+        let error = ProviderError::UnknownIdentity;
+        assert_eq!(
+            detect_failure(&entry, &error),
+            format!("claude account fixture: {error}; re-register the signed-in identity")
+        );
+        Ok(())
+    }
 
     #[test]
     fn writer_plan_stages_scratch_in_private_temporary_directory()

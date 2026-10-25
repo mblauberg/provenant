@@ -1533,6 +1533,73 @@ fn agy_account_probe_removes_its_log_directory_when_the_command_fails() {
 }
 
 #[test]
+fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
+    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Count(AtomicUsize);
+    impl Executor for Count {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ExecError::Busy)
+        }
+    }
+    let state = tempfile::tempdir().unwrap();
+    let host_root = state.path().canonicalize().unwrap();
+    let missing = host_root.join("missing");
+    let executor = Count(AtomicUsize::new(0));
+    let error = crate::accounts::detect(
+        &executor,
+        "agy",
+        Path::new("/bin/agy"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        Path::new("/home/test/.agy"),
+        &missing,
+    )
+    .unwrap_err();
+    assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
+    assert!(error.to_string().contains(missing.to_str().unwrap()));
+    assert_eq!(executor.0.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+}
+
+#[test]
+fn registration_reports_probe_directory_failures_from_the_executor() {
+    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+
+    struct Fail;
+    impl Executor for Fail {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            Err(ExecError::Io {
+                operation: crate::host::PROBE_DIR_OPERATION,
+                source: std::io::Error::other("fixture probe failure"),
+            })
+        }
+    }
+    let state = tempfile::tempdir().unwrap();
+    let host_root = state.path().canonicalize().unwrap();
+    for adapter in ["claude", "cursor", "agy"] {
+        let error = crate::accounts::detect_with_org(
+            &Fail,
+            adapter,
+            Path::new("/bin/provider"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test/identity"),
+            &host_root,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::ProbeDirectory(_)),
+            "{adapter}: {error}"
+        );
+        assert!(error.to_string().contains("fixture probe failure"));
+        assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn registration_names_probe_directory_failures() {
     use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
     use std::os::unix::fs::PermissionsExt;
@@ -1546,7 +1613,7 @@ fn registration_names_probe_directory_failures() {
     let state = tempfile::tempdir().unwrap();
     let executor = crate::host::HostProbeExecutor::new(&Never, state.path()).unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    for adapter in ["claude", "cursor"] {
+    for adapter in ["claude", "cursor", "agy"] {
         let error = crate::accounts::detect_with_org(
             &executor,
             adapter,
@@ -1569,29 +1636,38 @@ fn registration_names_probe_directory_failures() {
 
 #[test]
 fn registration_keeps_other_executor_failures_as_unknown_identity() {
-    let state = tempfile::tempdir().unwrap();
     use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
-    struct Fail;
+    struct Fail {
+        busy: bool,
+    }
     impl Executor for Fail {
         fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-            Err(ExecError::Io {
-                operation: "spawn",
-                source: std::io::Error::other("provider unavailable"),
+            Err(if self.busy {
+                ExecError::Busy
+            } else {
+                ExecError::Io {
+                    operation: "spawn",
+                    source: std::io::Error::other("provider unavailable"),
+                }
             })
         }
     }
-    for adapter in ["claude", "cursor"] {
-        let result = crate::accounts::detect_with_org(
-            &Fail,
-            adapter,
-            Path::new("/bin/provider"),
-            Path::new("/home/test"),
-            OsStr::new("test"),
-            Path::new("/home/test/identity"),
-            state.path(),
-        );
-        assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+    let state = tempfile::tempdir().unwrap();
+    for adapter in ["claude", "cursor", "agy"] {
+        for busy in [false, true] {
+            let result = crate::accounts::detect_with_org(
+                &Fail { busy },
+                adapter,
+                Path::new("/bin/provider"),
+                Path::new("/home/test"),
+                OsStr::new("test"),
+                Path::new("/home/test/identity"),
+                state.path(),
+            );
+            assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+        }
     }
 }
 

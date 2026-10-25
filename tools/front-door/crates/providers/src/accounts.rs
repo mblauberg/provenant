@@ -309,9 +309,7 @@ fn detect_agy(
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Discard;
     options.stop_on_output_limit = true;
-    let out = executor
-        .execute(options)
-        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let out = executor.execute(options).map_err(exec_error)?;
     if out.termination != Termination::Exit(0)
         || out.stdout.truncated
         || out.stdout.read_failed
