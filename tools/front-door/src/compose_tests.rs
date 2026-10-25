@@ -18,6 +18,8 @@ fn fixture() -> Result<TestRig> {
         ".cargo/registry",
         ".cargo/git",
         "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
         ".rustup/toolchains",
         ".codex",
         ".claude/hooks",
@@ -230,6 +232,8 @@ pub(crate) fn provider() -> Result {
             ".cargo/bin/compose",
             ".cargo/compose-home",
             ".npm/compose",
+            "Library/Caches/pnpm/compose",
+            ".cache/node/compose",
             "Library/pnpm/compose",
         ] {
             denied(&home.join(shared))?;

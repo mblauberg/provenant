@@ -198,11 +198,20 @@ pub(crate) fn rust_tools(
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
     ]);
+    let cargo_home = cache.join("cargo-home");
+    if access == Access::ReadOnly {
+        // Offline builds from the already-extracted shared sources. The
+        // links point at stores the lane cannot write, so it cannot alter
+        // them; Cargo's lock files and downloads need writes, so it cannot
+        // fetch either.
+        setup.push(SetupStep::CreateDir(cargo_home.clone()));
+        setup.extend(["registry", "git"].map(|name| SetupStep::Symlink {
+            link: cargo_home.join(name),
+            target: cargo.join(name),
+        }));
+    }
     env.extend([
-        (
-            "CARGO_HOME".into(),
-            cache.join("cargo-home").into_os_string(),
-        ),
+        ("CARGO_HOME".into(), cargo_home.into_os_string()),
         ("RUSTUP_HOME".into(), rustup.into_os_string()),
         ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
@@ -265,9 +274,13 @@ pub(crate) fn git_global_files(config_home: &Path) -> Vec<PathGrant> {
 
 /// A Homebrew Node toolchain (node, npm, pnpm, corepack) for every
 /// shell-capable lane. The host's pnpm home and store, npm cache and Corepack
-/// cache are never granted: the host later runs what they hold unconfined.
-/// Each is redirected into the lane-private cache, so installs download there.
+/// cache are never writable: the host later runs what they hold unconfined.
+/// Writers redirect each into the lane-private cache, so installs download
+/// there. Read-only lanes get a scratch npm and pnpm cache, and read and exec
+/// (no write) on the host's existing Corepack cache so pnpm runs.
 pub(crate) fn node_tools(
+    home: &Path,
+    access: Access,
     cache: &Path,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
@@ -276,28 +289,27 @@ pub(crate) fn node_tools(
     for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
         if prefix.join("bin/node").exists() {
             homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
-            let corepack = cache.join("corepack");
+            let host_corepack = home.join(".cache/node/corepack");
+            let corepack = if access == Access::ReadOnly && host_corepack.is_dir() {
+                runtime_reads.push(subtree(&host_corepack));
+                tool_exec_roots.push(subtree(&host_corepack));
+                host_corepack
+            } else {
+                cache.join("corepack")
+            };
+            // pnpm 12 reads the pnpm_config_* names; older pnpm and npm read
+            // npm_config_*. Set both so every version stays in the lane cache.
+            let store = cache.join("pnpm-store");
+            let pnpm_cache = cache.join("pnpm-cache");
             env.extend([
                 ("npm_config_cache".into(), cache.join("npm").into()),
                 ("PNPM_HOME".into(), cache.join("pnpm-home").into()),
-                (
-                    "npm_config_store_dir".into(),
-                    cache.join("pnpm-store").into(),
-                ),
-                (
-                    "npm_config_cache_dir".into(),
-                    cache.join("pnpm-cache").into(),
-                ),
-                ("COREPACK_HOME".into(), corepack.clone().into()),
+                ("npm_config_store_dir".into(), store.clone().into()),
+                ("pnpm_config_store_dir".into(), store.into()),
+                ("npm_config_cache_dir".into(), pnpm_cache.clone().into()),
+                ("pnpm_config_cache_dir".into(), pnpm_cache.into()),
+                ("COREPACK_HOME".into(), corepack.into()),
             ]);
-            // Corepack downloads package managers (pnpm's native binary) into
-            // its private cache and runs them from there. Lanes can already
-            // run code they write in the worktree, so this adds no
-            // capability. Exec roots must exist, so skip it until Corepack
-            // has run once.
-            if corepack.is_dir() {
-                tool_exec_roots.push(subtree(corepack));
-            }
             return;
         }
     }

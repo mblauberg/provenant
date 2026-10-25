@@ -330,11 +330,16 @@ host's next build. Instead the lane cache (a writer's
 `Library/Caches/provenant-lane-cargo/<sha256>`, or a read-only lane's scratch)
 holds private copies: `CARGO_HOME=<cache>/cargo-home`, `npm_config_cache=<cache>/npm`,
 `PNPM_HOME=<cache>/pnpm-home`, `npm_config_store_dir=<cache>/pnpm-store`,
-`npm_config_cache_dir=<cache>/pnpm-cache` and `COREPACK_HOME=<cache>/corepack`.
-Fetches and installs download into them, so they start cold. On macOS `/private/etc/ssl` (TLS trust roots and `openssl.cnf`) is read-only so Cargo can download crates. Executables stay immutable: `~/.cargo/bin` and
+`npm_config_cache_dir=<cache>/pnpm-cache` (with the `pnpm_config_*` twins pnpm 12
+reads) and `COREPACK_HOME=<cache>/corepack`. Writers download into them, so they
+start cold. Read-only lanes keep a scratch `CARGO_HOME` whose `registry` and
+`git` link to the shared stores, read-only, so offline builds use extracted
+sources, and read and exec the host's existing `~/.cache/node/corepack` without
+write. On macOS `/private/etc/ssl` (TLS trust roots and `openssl.cnf`) is read-only so Cargo can download crates. Executables stay immutable: `~/.cargo/bin` and
 `~/.rustup/toolchains` are read and exec only. The one exception is
-`<cache>/corepack` (once it exists), which is also executable, because Corepack
-runs the package managers it downloads from there. The other exception is a writer's
+the Corepack cache (a writer's `<cache>/corepack`, or a read-only lane's host
+`~/.cache/node/corepack`), which is also executable, because Corepack runs the
+package managers it downloads from there. The other exception is a writer's
 `--write-root` and `domains.run.writer_writes` roots, which are also executable
 for writer lanes, because a build run there (a `CARGO_TARGET_DIR` outside the
 worktree) executes the build scripts it compiles; lanes can already run code

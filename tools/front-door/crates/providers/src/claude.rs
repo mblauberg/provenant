@@ -557,6 +557,8 @@ fn prepare(
             &mut setup,
         );
         crate::launch::node_tools(
+            input.home,
+            access,
             crate::launch::lane_cache(input),
             &mut runtime_reads,
             &mut tool_exec_roots,

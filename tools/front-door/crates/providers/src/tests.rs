@@ -814,7 +814,9 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     "npm_config_cache",
                     "PNPM_HOME",
                     "npm_config_store_dir",
+                    "pnpm_config_store_dir",
                     "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
                     "COREPACK_HOME",
                 ],
             );
@@ -1470,7 +1472,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
 }
 
 #[test]
-fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
+fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_stores() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1505,12 +1507,18 @@ fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
     // lane-private home. Installed binaries and toolchains stay read-only.
     assert!(spec.profile.spec.tool_writes.is_empty());
     assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
-    assert!(
-        !spec
-            .setup
-            .iter()
-            .any(|step| matches!(step, crate::launch::SetupStep::Symlink { link, .. } if link.starts_with("/fixture/scratch/cargo-home")))
-    );
+    // The registry and Git checkouts are linked read-only, never granted.
+    for name in ["registry", "git"] {
+        assert!(
+            spec.setup.iter().any(|step| matches!(
+                step,
+                crate::launch::SetupStep::Symlink { link, target }
+                    if link == &std::path::Path::new("/fixture/scratch/cargo-home").join(name)
+                        && target == &std::path::Path::new("/fixture/home/.cargo").join(name)
+            )),
+            "{name}"
+        );
+    }
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -1605,7 +1613,9 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                 ("npm_config_cache", "npm"),
                 ("PNPM_HOME", "pnpm-home"),
                 ("npm_config_store_dir", "pnpm-store"),
-                ("COREPACK_HOME", "corepack"),
+                ("pnpm_config_store_dir", "pnpm-store"),
+                ("npm_config_cache_dir", "pnpm-cache"),
+                ("pnpm_config_cache_dir", "pnpm-cache"),
             ] {
                 if let Some(value) = env(key) {
                     assert_eq!(value, cache.join(leaf), "{id} {access:?} {key}");
