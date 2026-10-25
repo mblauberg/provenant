@@ -324,7 +324,8 @@ line with `hookSpecificOutput.hookEventName="PreToolUse"`,
 cannot be written, exit 2 with a bounded stderr block reason as Claude's
 blocking-error fallback; recorded fixtures must verify both paths. Allow emits
 nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
-“Direct process control is refused. Use `provenant cancel TARGET` for owned
+“Pattern and group process control is refused; targeted `kill [-SIGNAL] PID`
+with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
@@ -332,11 +333,11 @@ The same handler then applies the workflow guard rules (#1319) to the simple
 commands the shell-command lexer reports, so there is no second parser. Rule
 ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
 `-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
-`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`--force-with-lease` passes), `no-verify` (opt-in), `primary-checkout` (`git switch`, and
 `git checkout` of a branch or revision, when the directory is a repository
 whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
 (`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
-closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default except `no-verify`;
 omitting an id disables that rule and an unknown id is a schema error. Unreadable
 config keeps every rule on. Input the lexer cannot parse is denied by the
 process-control check above, not by these rules. Codex and OpenCode have no
