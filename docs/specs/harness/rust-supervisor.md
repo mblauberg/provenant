@@ -2,9 +2,9 @@
 
 > Legacy source references below describe the pre-rewrite implementation.
 > Use `provenant help` for current Rust commands and the accepted
-> [Rust designs](../rust-port/design/README.md) for owners.
+> [Rust designs](../README.md) for owners.
 
-Status: **superseded** by PORTING.md version 7 and the accepted Rust area
+Status: **superseded** by docs/specs/rust-workspace.md and the accepted Rust area
 designs. The rollout below is historical, not an operator procedure.
 
 Original proposal: 2026-10-23, revised after a cross-family review. Builds
@@ -385,7 +385,7 @@ config crate currently supplies the typed release and managed-file APIs.
 S1a (#1231) completed the front-door switch. S2 (#1379) removes the legacy
 `lane` route and exposes `internal supervise` for the Rust supervisor. The
 historical slice plan below is superseded by the
-[current supervisor design](../rust-port/design/supervisor.md).
+[current supervisor design](../supervisor.md).
 
 ## Slices
 

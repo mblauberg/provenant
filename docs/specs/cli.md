@@ -10,9 +10,9 @@ People, skills, hooks and CI use one executable to start work, inspect durable
 results and apply policy checks. `cli` parses arguments and renders typed
 results; the binary composes library owners and selects the transport.
 Provider execution, custody, storage and Fabric policy stay in their libraries.
-[PORTING.md v7](../PORTING.md), the [rewrite plan](../README.md) and the
-[Cross-area decisions](README.md#cross-area-decisions) bind this design.
-[ADR 0028](../../../adr/0028-rust-port-dependencies.md) supplies the dependency
+[PORTING.md v7](rust-workspace.md), the [rewrite plan](README.md) and the
+[Cross-area decisions](README.md#cross-cutting-decisions) bind this design.
+[ADR 0028](../adr/0028-rust-port-dependencies.md) supplies the dependency
 allowlist. This document owns the command contract every area cites.
 
 | Keep | Drop / replacement |
@@ -489,8 +489,8 @@ retains names solely as exact installer removal/replacement evidence.
 ## State and crate seams
 
 CLI has no private database, cache, run registry or approval store.
-[Cross-area decisions](README.md#cross-area-decisions) binds root/layout;
-the [state design](https://github.com/mblauberg/provenant/blob/e0a3cf839757df0afd7e2efe8f7a87aec7f76bb4/docs/specs/rust-port/design/state.md)
+[Cross-area decisions](README.md#cross-cutting-decisions) binds root/layout;
+the [state design](state.md)
 owns detailed paths, subject to that binding table: one host root, top-level
 `runs/`, `fabric/`, `install/`, `releases/` and `config.toml`, never per-project
 roots. The global state-dir override applies to CLI, MCP and hooks. Runtime

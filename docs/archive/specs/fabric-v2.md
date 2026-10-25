@@ -1,6 +1,6 @@
 # Fabric v2 contract
 
-> Pre-rewrite design history. The [accepted Rust designs](../../specs/rust-port/design/README.md)
+> Pre-rewrite design history. The [accepted Rust designs](../../specs/README.md)
 > own current behaviour; use `provenant help` for executable commands.
 
 Status: design record, 2026-09-23. Source: the reviewed Fabric v2 design in the project research run. The integration gate in that design controls rollout; this document records the durable interface and operating decisions.
@@ -15,7 +15,7 @@ On observed provider death, a failed attempt best-effort retains `wip-checkpoint
 
 The supervisor snapshots the provider's descendant tree about once per second during the watchdog wait and again before termination. Linux walks `/proc/<pid>/task/*/children` from the provider and known children when available; macOS reuses one libproc handle. It retains PID plus process start time, so an observed child remains attributable after reparenting without treating a reused PID as the same process. An inherited attempt marker does not prove ancestry: shared hosts can retain it while serving other lanes. A reparented process remains attributable only if its ancestry was observed before reparenting. Cancellation, startup timeout, wall timeout and normal provider exit terminate surviving attributed descendants: SIGTERM, then SIGKILL after 0.5 seconds for descendants and up to 2 seconds for the provider's original group to flush session state. Only after observed provider exit does the supervisor allow up to 1.5 seconds for children closing on stdin EOF. A terminal event from a still-live provider skips that wait. Its direct children that exit within a 0.5-second shutdown window are not reported as leftovers; direct children in another group receive SIGTERM after that window if still alive, then SIGKILL after another 0.5 seconds. It signals attributed descendants individually, never their other process groups, or the direct provider group held by its `Popen` handle. A `codex-code-mode-host` and its subtree are spared even when their ancestry was observed; when the host shares the original group, cleanup uses individual PIDs for that group too. On Linux it best-effort enables child subreaping for adopted orphans. A normal exit that left children running records `reaped: [{pid, command}]` in the attempt and adds `! reaped N leftover process(es)` to the digest. A failed process census is warned in the attempt and cannot prevent the direct provider group kill or terminal record. A nested Fabric owner is spared with its observed descendants only when its `PROVENANT_RUN_DIR/dispatch-owner.json` matches that live process's PID, start time and `PROVENANT_RUN_TOKEN`; tracked children are rechecked before signalling to cover fork followed by exec. The outer provider does not inherit the run token. A nonzero `spared` count is recorded in the outer attempt. A child that enters another session and reparents before its ancestry is observed cannot be attributed safely by this polling supervisor; eliminating that race requires an operating-system process containment facility.
 
-The current MCP surface is defined by the [Rust Fabric contract](../../specs/rust-port/design/fabric.md#cli-and-mcp-surfaces).
+The current MCP surface is defined by the [Rust Fabric contract](../../specs/fabric.md#cli-and-mcp-surfaces).
 Use `fabric_submit` with `op: submission`, a `tasks` list and `operation_id`.
 Use `fabric_run` with `op: status|wait|cancel|resume|list` and explicit attempt
 and host targets. Cancellation and resume require an operation ID; resume also
@@ -348,7 +348,7 @@ A selected path matching an enabled configured
 Otherwise the provider's default directory resolves to `default`, and another
 resolved path to `path-<sha256 prefix>`. Paths, emails and tokens are never used
 as account keys. An unresolved identity is `null` and matches only `null`.
-For current routing behaviour, see the [Rust routing design](../../specs/rust-port/design/execution-route.md). The legacy model-routing commands described here are retired.
+For current routing behaviour, see the [Rust routing design](../../specs/routing.md). The legacy model-routing commands described here are retired.
 Host is the telemetry host id (`local_host` in `.agent-fabric/hosts.json`, else
 hostname). Neither account nor host acts as a wildcard.
 
