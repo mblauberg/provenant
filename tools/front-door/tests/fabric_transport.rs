@@ -90,7 +90,7 @@ fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
 fn hosts_probe_only_the_requested_page() -> Result {
     let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
     let identity = federated_identity(&mut rig)?;
-    let cli = rig.command(&["fabric", "host", "list", "--json"])?;
+    let cli = rig.command(&["hosts", "--json"])?;
     assert_eq!(code(&cli), 0);
     let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
     assert_eq!(cli["data"].as_array().ok_or("CLI host list")?.len(), 1);
