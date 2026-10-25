@@ -27,8 +27,10 @@ companions of an existing store while reading its live index.
 
 3. Interpret classifications using the [disk specification](../specs/disk.md).
    A lane entry with `reclaim: "gc"` names the existing GC owner; the report
-   does not run it. Foreign, legacy, refused and unmarked caches require owner
-   investigation. An `attempt_tmp` entry with `leak: true` belongs to an indexed
+   does not run it. V1 markers with missing owners are orphaned and eligible for
+   GC; existing project owners stay legacy and never become idle. Foreign,
+   legacy, refused and unmarked caches require owner investigation.
+   An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. Scratch, provider state, quarantine and logs are retained
    output, so their presence alone is not a leak. Retained output and other run
    metadata and child stores are rolled up into one row per class. Each

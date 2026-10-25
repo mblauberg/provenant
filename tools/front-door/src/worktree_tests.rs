@@ -44,6 +44,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
+            "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -80,6 +81,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
+                }
+                "remove_a_managed_worktree_deletes_its_legacy_lane_cache" => {
+                    remove_a_managed_worktree_deletes_its_legacy_lane_cache()
                 }
                 "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
                     merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
@@ -1159,6 +1163,25 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     ok(&rig, &["gc", "--json"])?;
     assert!(!orphan.exists(), "gc must still sweep orphaned caches");
+    rig.assert_legacy_unchanged()
+}
+
+fn remove_a_managed_worktree_deletes_its_legacy_lane_cache() -> Result {
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "legacy", "--json"])?;
+    let worktree = rig.project.join(".worktrees/legacy");
+    let cache = prepare_lane_cache(&rig, &worktree, "legacy")?;
+    fs::write(
+        cache.join(".provenant-worktree-owner"),
+        [
+            b"provenant-lane-cargo-owner-v1\n".as_slice(),
+            fs::canonicalize(&worktree)?.as_os_str().as_encoded_bytes(),
+        ]
+        .concat(),
+    )?;
+    ok(&rig, &["worktree", "remove", "legacy", "--json"])?;
+    assert!(!worktree.exists());
+    assert!(!cache.exists(), "legacy lane cache remains after removal");
     rig.assert_legacy_unchanged()
 }
 
