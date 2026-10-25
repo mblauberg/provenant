@@ -2,7 +2,7 @@
 
 > Legacy source references below describe the pre-rewrite implementation.
 > Use `provenant help` for current Rust commands and the accepted
-> [Rust designs](../specs/rust-port/design/README.md) for owners.
+> [Rust designs](../specs/README.md) for owners.
 
 **Status:** Accepted 2026-07-30 (user, issue #530); amended 2026-07-31 (user,
 issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
@@ -12,7 +12,7 @@ issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
 > current, but its daemon-era paths and command examples are a pre-ADR-0020
 > implementation snapshot. Do not use them as operational guidance. Current
 > Fabric commands and configuration are owned by
-> [Fabric Rust design](../specs/rust-port/design/fabric.md); ADR 0020 records
+> [Fabric Rust design](../specs/fabric.md); ADR 0020 records
 > the runtime retirement.
 
 ## Context

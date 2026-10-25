@@ -1,9 +1,9 @@
 # Telemetry and quota
 
 `provenant telemetry stats` reduces retained terminal attempt facts with prices
-from `config/telemetry-prices.toml`. Optional `--since DATE`, `--until DATE` and `--detail` bound the report.
-Use `--json` for structured output. The old ledger, transcript readers, timer
-wrappers, manual credit store and Python quota plugins are retired.
+from `config/telemetry-prices.toml`. Optional `--since DATE`, `--until DATE`,
+`--run-id ID` and `--detail` bound or extend the report. Use `--json` for
+structured output. The contract is in the [telemetry spec](../specs/telemetry.md).
 
 ## Offline timeline
 
@@ -43,9 +43,10 @@ state is created by these counters.
 ## Quota
 
 `provenant quota show` reads cached observations. `provenant quota tick`
-refreshes due accounts through the Rust providers/quota owners; use
-`--trigger` and `--power` to record why the refresh ran and the current power
-source. `provenant telemetry stats --usage` reports local invocation counts.
+refreshes due accounts; use `--trigger` and `--power` to record why the
+refresh ran and the current power source. `provenant quota display
+[--headline auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu
+bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation counts.
 Quota is admission advice; a reset or bookkeeping failure never grants
 permission to stop a healthy provider.
 

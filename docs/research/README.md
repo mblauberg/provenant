@@ -31,7 +31,7 @@ The frozen lifecycle routing dataset used by the ADR 0014 procedure lives at
 | Harness policy and topology | [`HARNESS.md`](../../HARNESS.md) |
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | Skill names and catalogue | [Skill catalogue](../../skills/) and `skills/*/SKILL.md` |
-| Fabric | [Fabric Rust design](../specs/rust-port/design/fabric.md) |
+| Fabric | [Fabric Rust design](../specs/fabric.md) |
 | Provider launch and replay coverage | [Provider recordings](../../tools/front-door/tests/fixtures/providers/README.md) |
 | Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |
 | Live work, dependencies and user gates | [GitHub issues and Project Status](https://github.com/mblauberg/provenant/issues) |
