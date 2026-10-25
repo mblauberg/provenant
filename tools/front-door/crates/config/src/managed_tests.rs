@@ -749,7 +749,7 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     assert_eq!(remaining[0].selector, "receipt");
     assert_eq!(
         source.to_string(),
-        "filesystem publish failed for \"receipt.json\""
+        "filesystem publish failed for \"receipt.json\": injected receipt publication failure (Other)"
     );
     assert!(!f.receipt().exists());
 
