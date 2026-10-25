@@ -458,6 +458,20 @@ pub struct Reconcile {
 pub enum Telemetry {
     /// Summarise local attempts, usage and cost
     Stats(Stats),
+    /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
+    Trace(Trace),
+}
+#[derive(Debug, Args)]
+pub struct Trace {
+    /// Output file (default `provenant-trace.json`)
+    #[arg(long, default_value = "provenant-trace.json")]
+    pub out: std::path::PathBuf,
+    /// Include attempts finished from this date, timestamp or day count such as `7d`
+    #[arg(long, value_parser = stats_timestamp)]
+    pub since: Option<jiff::Timestamp>,
+    /// Restrict the trace to one run.
+    #[arg(long)]
+    pub run: Option<RunId>,
 }
 #[derive(Debug, Args)]
 pub struct Stats {

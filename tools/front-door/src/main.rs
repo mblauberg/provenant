@@ -410,6 +410,11 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 })
             }
         }
+        Command::Telemetry(provenant_cli::Telemetry::Trace(cmd)) => {
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::run::trace(cmd, edge)
+            })
+        }
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Quota(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {

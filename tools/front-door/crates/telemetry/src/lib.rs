@@ -3,8 +3,10 @@
 
 mod prices;
 mod reducer;
+mod trace;
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, PriceError, PriceIdentity,
     PriceTable, Rates, validate_prices,
 };
 pub use reducer::*;
+pub use trace::trace;

@@ -5,6 +5,13 @@ from `config/telemetry-prices.toml`. Optional `--since DATE`, `--until DATE` and
 Use `--json` for structured output. The old ledger, transcript readers, timer
 wrappers, manual credit store and Python quota plugins are retired.
 
+## Offline timeline
+
+`provenant telemetry trace [--out FILE] [--since 7d] [--run ID]` writes retained
+attempts as Chrome Trace Event JSON (default `provenant-trace.json`), with one
+process per task and one thread per attempt. Open the file in ui.perfetto.dev
+or chrome://tracing; no collector is needed.
+
 ## Local usage counters
 
 `provenant telemetry stats --usage --since 30d` counts CLI verbs and Fabric MCP

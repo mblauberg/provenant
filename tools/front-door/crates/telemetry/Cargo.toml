@@ -12,9 +12,9 @@ provenant-records = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 jiff = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 toml_edit = { workspace = true }
 
 [lints]
