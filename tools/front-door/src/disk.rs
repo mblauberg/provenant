@@ -343,6 +343,14 @@ mod tests {
             rig.project.join(".worktrees/disk-fixture/payload"),
             vec![1; 8192],
         )?;
+        for root in [
+            &rig.project,
+            &rig.project.join(".worktrees/disk-fixture"),
+            &rig.state,
+        ] {
+            fs::create_dir_all(root.join("target"))?;
+            fs::write(root.join("target/CACHEDIR.TAG"), "cache")?;
+        }
         fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/tmp"))?;
         fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/scratch"))?;
         fs::write(
@@ -391,6 +399,34 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(json["command"], "disk report");
         assert_eq!(json["data"]["schema_version"], 1);
+        let entries = json["data"]["entries"].as_array().ok_or("entries")?;
+        let targets: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry["class"] == "host_target")
+            .collect();
+        assert_eq!(targets.len(), 3);
+        for target in targets {
+            let path = Path::new(target["path"].as_str().ok_or("target path")?);
+            assert!(target.get("reclaim").is_none());
+            if path == rig.state.join("target") {
+                assert!(target.get("owner").is_none());
+                assert!(target.get("writer").is_none());
+            } else {
+                let worktree = entries
+                    .iter()
+                    .find(|entry| {
+                        entry["class"] == "worktree"
+                            && entry["path"].as_str().map(Path::new) == path.parent()
+                    })
+                    .ok_or("target's worktree")?;
+                assert_eq!(target["owner"], worktree["path"]);
+                assert!(matches!(
+                    worktree["writer"].as_str(),
+                    Some("live" | "free" | "unknown")
+                ));
+                assert_eq!(target["writer"], worktree["writer"]);
+            }
+        }
         assert!(json["data"]["volume"]["available_bytes"].is_u64());
         for key in ["method", "volume", "entries", "totals", "errors"] {
             assert!(!json["data"][key].is_null(), "missing {key}");
