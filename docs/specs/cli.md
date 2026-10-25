@@ -42,7 +42,8 @@ it by the grammar tests.
 
 One spelling per name: no aliases, abbreviated long options or short flags
 other than what clap generates. Every leaf takes `--help`, and `help [COMMAND]`
-shows a top-level command's help. Unknown, duplicate singleton or conflicting
+shows a top-level command's help. `help --json` lists the whole surface, and
+`help COMMAND --json` lists only that command and its subcommands. Unknown, duplicate singleton or conflicting
 options fail. Only options marked repeatable may repeat.
 
 ```text

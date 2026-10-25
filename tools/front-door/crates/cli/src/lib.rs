@@ -116,9 +116,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     };
     if let Command::Help { command } = &invocation.command {
         let mut selected = &mut model;
+        let mut scope = String::from("provenant");
         for component in command {
             selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() => child,
+                Some(child) if !child.is_hide_set() => {
+                    scope = format!("{scope} {}", child.get_name());
+                    child
+                }
                 _ => {
                     return ParseOutcome::Invalid {
                         error: CliError::Invalid("unknown help command".into()),
@@ -129,7 +133,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         }
         return ParseOutcome::Help {
             text: selected.render_long_help().to_string(),
-            catalog: catalog(&command_model()),
+            catalog: scoped(catalog(&command_model()), &scope),
             globals: invocation.globals,
         };
     }
@@ -390,6 +394,16 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         _ => {}
     }
     Ok(())
+}
+/// Keep the named command and its descendants; `help` alone keeps all.
+fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
+    catalogue.commands.retain(|command| {
+        command
+            .command
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    });
+    catalogue
 }
 fn catalog(model: &clap::Command) -> HelpCatalogue {
     fn walk(command: &clap::Command, path: String, commands: &mut Vec<HelpCommand>) {
@@ -939,6 +953,7 @@ mod tests {
         else {
             panic!("reconcile help")
         };
+        assert_eq!(catalog.commands.len(), 1);
         assert!(!text.contains("--abandon-uncertain"));
         let reconcile = catalog
             .commands
