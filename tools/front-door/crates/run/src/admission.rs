@@ -143,18 +143,22 @@ impl RunStore {
     /// checkout HEAD the host observed for a read-only lane; never lane output.
     pub(crate) fn mark_starting(
         &self,
-        id: AttemptId,
+        expected: &AttemptRecord,
         route: &RouteRecord,
         writable: &[String],
         head: Option<GitOid>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
+        let id = expected.attempt_id;
         if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
         }
         self.write(call, |tx| {
             let old = self.record(id, call)?;
-            if old.state != AttemptState::Queued {
+            if old.state != AttemptState::Queued
+                || old.run_id != expected.run_id
+                || old.task_id != expected.task_id
+            {
                 return Err(RunError::Conflict);
             }
             let mut ticket = self.ticket(tx, id)?;

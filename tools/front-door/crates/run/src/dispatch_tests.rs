@@ -366,7 +366,7 @@ fn host_refuses_child_attempt_records_outside_the_request() -> TestResult {
         let expected = if wrong_run {
             "child attempt run does not match"
         } else {
-            "child task has more than one attempt"
+            "child attempt task missing from request"
         };
         assert!(matches!(result, Err(RunError::Validation(reason)) if reason == expected));
     }
@@ -462,7 +462,7 @@ fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResul
     )?;
     let id = nested.attempts[0].attempt_id;
     let mut extra = store.record(id, &call)?;
-    let held = store.mark_starting(id, &route(), &[], None, &call)?;
+    let held = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     hold_child_fixture(
         &store,
         store.attempt_dir(nested.run_id, id, false)?,
@@ -492,6 +492,274 @@ fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResul
     );
     assert_eq!(store.held_attempts(), vec![id]);
     assert!(store.launched.borrow()[0].handle.is_some());
+    Ok(())
+}
+
+#[test]
+fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([2; 16]));
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    store.create(&nested, &call)?;
+    let validated = store.validate_child(
+        nested.run_id,
+        parent,
+        &input().request.tasks[0],
+        1,
+        2,
+        &call,
+    )?;
+    let id = nested.attempts[0].attempt_id;
+    let mut replacement = store.record(id, &call)?;
+    let handed_off = Cell::new(0);
+    store.start_child(
+        nested.run_id,
+        &validated,
+        &Ready,
+        &|_, _| {
+            handed_off.set(handed_off.get() + 1);
+            Err(RunError::Validation("fixture observed handoff"))
+        },
+        &call,
+    )?;
+    assert_eq!(handed_off.get(), 1);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    // The lane owns this database, including its immutability triggers.
+    store
+        .db
+        .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_delete")?;
+    store
+        .db
+        .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])?;
+    replacement.attempt_id = AttemptId::from_bytes([22; 16]);
+    replacement.prompt.path = artifacts::artifact_path(replacement.attempt_id, "prompt.txt")?;
+    insert_child_attempt(&store, &replacement, replacement.task_id)?;
+    // Make the replacement fully launchable, including its prompt and ticket.
+    let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
+    artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
+    store.queue_ticket(&store.db, &replacement, 1, 0)?;
+    let revalidated = store.validate_child(
+        nested.run_id,
+        parent,
+        &input().request.tasks[0],
+        1,
+        2,
+        &call,
+    );
+    let fake = Fake {
+        refuse: true,
+        ..Default::default()
+    };
+    let started = store.start_child(
+        nested.run_id,
+        &validated,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert_eq!(
+        fake.prepared.get(),
+        0,
+        "deleted rows must not reset launch history"
+    );
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, .. }]
+        if *attempt == replacement.attempt_id)
+    );
+    assert!(matches!(
+        revalidated,
+        Err(RunError::Validation("child task already launched"))
+    ));
+    Ok(())
+}
+
+/// Mutate lane-owned ingress at the provider preparation boundary.
+struct PrepareHook<'a>(&'a dyn Fn() -> TestResult);
+impl Providers for PrepareHook<'_> {
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        (self.0)().map_err(|error| error.to_string())?;
+        Ready.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("no guardian runs a provider in these tests")
+    }
+}
+
+#[test]
+fn host_refuses_child_identity_swap_during_preparation() -> TestResult {
+    for wrong_run in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?
+            .with_sealed_requester(provenant_core::ActorId::from_bytes([2; 16]));
+        let parent = AttemptId::from_bytes([9; 16]);
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        store.create(&nested, &call)?;
+        let validated = store.validate_child(
+            nested.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        )?;
+        let mut swapped = store.record(nested.attempts[0].attempt_id, &call)?;
+        if wrong_run {
+            let mut other = input();
+            other.run_id = provenant_core::RunId::from_bytes([24; 16]);
+            other.operation_id = provenant_core::OperationId::parse("other-run")?;
+            other.attempts[0].attempt_id = AttemptId::from_bytes([25; 16]);
+            store.create(&other, &call)?;
+            swapped.run_id = other.run_id;
+            swapped.operation_id = other.operation_id;
+            swapped.attempt_number = 2;
+        } else {
+            swapped.task_id = TaskId::from_bytes([23; 16]);
+            // Keep record(), including its run association check, valid.
+            let mut run = store.run(nested.run_id, &call)?;
+            run.task_ids.push(swapped.task_id);
+            store.db.execute(
+                "UPDATE runs SET record=?1 WHERE id=?2",
+                rusqlite::params![crate::db::bytes(&run)?, run.run_id.to_string()],
+            )?;
+        }
+        let rewrite = || {
+            store.db.execute(
+                "UPDATE attempts SET task=?1,run=?2,record=?3,number=?5 WHERE id=?4",
+                rusqlite::params![
+                    swapped.task_id.to_string(),
+                    swapped.run_id.to_string(),
+                    crate::db::bytes(&swapped)?,
+                    swapped.attempt_id.to_string(),
+                    crate::db::sql_int(swapped.attempt_number)?
+                ],
+            )?;
+            // Prove this coherent mutation passes the existing reader checks.
+            store.record(swapped.attempt_id, &call)?;
+            Ok(())
+        };
+        let handed_off = Cell::new(0);
+        store.start_child(
+            nested.run_id,
+            &validated,
+            &PrepareHook(&rewrite),
+            &|_, _| {
+                handed_off.set(handed_off.get() + 1);
+                Err(RunError::Validation("fixture observed handoff"))
+            },
+            &call,
+        )?;
+        assert_eq!(
+            handed_off.get(),
+            0,
+            "identity swap must stop before handoff"
+        );
+        assert_eq!(
+            store.record(swapped.attempt_id, &call)?.state,
+            AttemptState::Queued
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_invalid_child_rows_added_after_validation_without_aborting_scan() -> TestResult {
+    for wrong_run in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?
+            .with_sealed_requester(provenant_core::ActorId::from_bytes([2; 16]));
+        let parent = AttemptId::from_bytes([9; 16]);
+        let mut nested = two_tasks(2);
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        store.create(&nested, &call)?;
+        let validated = store.validate_child(
+            nested.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        )?;
+        let mut extra = store.record(nested.attempts[0].attempt_id, &call)?;
+        extra.attempt_id = AttemptId::from_bytes([22; 16]);
+        extra.task_id = TaskId::from_bytes([23; 16]);
+        extra.prompt.path = artifacts::artifact_path(extra.attempt_id, "prompt.txt")?;
+        insert_child_attempt(&store, &extra, extra.task_id)?;
+        // Encounter the bad row first, before either valid sibling.
+        store.db.execute(
+            "UPDATE attempts SET sequence=0 WHERE id=?1",
+            [extra.attempt_id.to_string()],
+        )?;
+        if wrong_run {
+            extra.run_id = provenant_core::RunId::from_bytes([24; 16]);
+            extra.task_id = nested.request.tasks[0].task_id;
+            store.db.execute(
+                "UPDATE attempts SET record=?1 WHERE id=?2",
+                rusqlite::params![crate::db::bytes(&extra)?, extra.attempt_id.to_string()],
+            )?;
+        } else {
+            // An unknown task can still pass record() if the lane also rewrites its run.
+            let mut run = store.run(nested.run_id, &call)?;
+            run.task_ids.push(extra.task_id);
+            store.db.execute(
+                "UPDATE runs SET record=?1 WHERE id=?2",
+                rusqlite::params![crate::db::bytes(&run)?, run.run_id.to_string()],
+            )?;
+            store.record(extra.attempt_id, &call)?;
+        }
+        let fake = Fake {
+            refuse: true,
+            ..Default::default()
+        };
+        let started = store.start_child(
+            nested.run_id,
+            &validated,
+            &fake,
+            &|_, _| unreachable!(),
+            &call,
+        )?;
+        assert_eq!(fake.prepared.get(), 2);
+        assert_eq!(started.len(), 3);
+        let expected = if wrong_run {
+            "child attempt run does not match"
+        } else {
+            "child attempt task missing from request"
+        };
+        assert!(started.iter().any(|result| matches!(result,
+            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+                if *attempt == extra.attempt_id && reason == expected
+        )));
+        for attempt in &nested.attempts {
+            assert_eq!(
+                terminal(&store, attempt.attempt_id, &call)?,
+                Outcome::Rejected
+            );
+        }
+    }
     Ok(())
 }
 
@@ -749,7 +1017,7 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
         let run = input();
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
-        let started = store.mark_starting(id, &route(), &[], None, &call)?;
+        let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
         let ticket: Vec<u8> = store.db.query_row(
             "SELECT record FROM admission WHERE attempt=?1",
             [id.to_string()],
@@ -826,7 +1094,7 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: run.run_id,
         attempt: id,
@@ -1176,7 +1444,7 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
     let [queued, late] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
     // The parent's scan accepted only the queued child. A start launched
     // the other after that snapshot, so only hand-off holds it.
-    let started = store.mark_starting(late, &route(), &[], None, &call)?;
+    let started = store.mark_starting(&store.record(late, &call)?, &route(), &[], None, &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: late,
@@ -1214,7 +1482,7 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     // Before hand-off the host only stamped the owner; nothing is held yet.
     let mut record = store.record(id, &call)?;
     record.verified_owner = Some(forged);
@@ -1366,7 +1634,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
         detail: "account work: sign in again".into(),
     }];
     store.record_skipped_routes(id, &skipped, &call)?;
-    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     assert_eq!(started.skipped_routes, skipped);
     assert_eq!(store.record(id, &call)?.skipped_routes, skipped);
     Ok(())
@@ -1388,7 +1656,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     store.create(&serial, &call)?;
     let [first, second] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
     for id in [first, second] {
-        store.mark_starting(id, &route(), &[], None, &call)?;
+        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     }
     let running = store
         .claim(first, now, &call)?
@@ -1408,7 +1676,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
     store.create(&spaced, &call)?;
     let id = spaced.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
 
     let attempt = store.attempt_dir(spaced.run_id, id, false)?;
@@ -1422,7 +1690,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     let starved = Host { available: 1 };
     assert!(matches!(
         store.admit(id, &attempt, &starved, &clock, &cancel),
@@ -1456,7 +1724,13 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     for (store, run) in stores.iter().zip(&batches) {
         store.create(run, &call)?;
         for attempt in &run.attempts {
-            store.mark_starting(attempt.attempt_id, &route(), &[], None, &call)?;
+            store.mark_starting(
+                &store.record(attempt.attempt_id, &call)?,
+                &route(),
+                &[],
+                None,
+                &call,
+            )?;
             store
                 .claim(attempt.attempt_id, now, &call)?
                 .ok_or("within the host limit")?;
@@ -1466,7 +1740,13 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     let extra = batch(3, 1);
     let waiting = extra.attempts[0].attempt_id;
     stores[1].create(&extra, &call)?;
-    stores[1].mark_starting(waiting, &route(), &[], None, &call)?;
+    stores[1].mark_starting(
+        &stores[1].record(waiting, &call)?,
+        &route(),
+        &[],
+        None,
+        &call,
+    )?;
     assert!(
         stores[1].claim(waiting, now, &call)?.is_none(),
         "both child stores count against one project limit"
@@ -1581,7 +1861,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     };
     for (index, code) in [(0, 0), (1, 1)] {
         let id = batch.attempts[index].attempt_id;
-        store.mark_starting(id, &route(), &[], None, &call)?;
+        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
         store.claim(id, now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
@@ -1626,7 +1906,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let run = input();
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     let mut observed = exit();
     observed.scope.generation = 1;
     observed.never_spawned = true;
@@ -1795,7 +2075,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         CancelReceipt::AlreadyTerminal
     );
 
-    store.mark_starting(starting, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(starting, &call)?, &route(), &[], None, &call)?;
     // Before the handoff publishes its launch summary there is nothing to
     // stop; cancel retries until its budget ends, then says so.
     let system = provenant_supervisor::clock::SystemClock::new();
@@ -1990,7 +2270,7 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let batch = two_tasks(1);
     store.create(&batch, &call)?;
     let orphan = batch.attempts[0].attempt_id;
-    store.mark_starting(orphan, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(orphan, &call)?, &route(), &[], None, &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -2311,7 +2591,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         let temporary = store.temporary_path(id, &call)?;
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         if reserved {
-            store.mark_starting(id, &route(), &[], None, &call)?;
+            store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
             store.withdraw(
                 id,
                 AttemptState::Starting,
@@ -2361,7 +2641,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
-        store.mark_starting(id, &route(), &[], None, &call)?;
+        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
         let custody = context
             .state_root
             .as_path()
@@ -2428,7 +2708,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let candidate = temporary.join("candidate-0");
     std::fs::create_dir(&candidate)?;
     std::fs::write(candidate.join("x.lock"), "keep")?;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     let custody = context
         .state_root
         .as_path()
@@ -2546,7 +2826,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
 
     // The guardian sealed an exit but died before its terminal commit.
-    store.mark_starting(exited, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(exited, &call)?, &route(), &[], None, &call)?;
     store
         .claim(exited, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -2565,7 +2845,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     seal_exit(&store, &observed)?;
 
     // A handoff whose reservation never reached a guardian.
-    store.mark_starting(orphan, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(orphan, &call)?, &route(), &[], None, &call)?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -2611,7 +2891,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     });
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     store
         .claim(id, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -2678,7 +2958,7 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    store.mark_starting(id, &route(), &[], None, &call)?;
+    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
     let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -2718,7 +2998,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     );
     let observed = provenant_core::GitOid::Sha1([7; 20]);
     store.mark_starting(
-        first,
+        &store.record(first, &call)?,
         &route(),
         &[".agent-run/locks".into()],
         Some(observed),
