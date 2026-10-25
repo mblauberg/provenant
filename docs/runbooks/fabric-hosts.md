@@ -228,7 +228,8 @@ On the calling host the command:
    checkpoint is cut to fit with a note saying so. Attachments are capped at
    512 KiB in total;
 3. checks that each registered worktree of the project is clean and pushed
-   to `origin`. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
+   to `origin/<branch>`. Ignored files, such as build output, do not count as
+   changes. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
    problem trees. `--wip` commits the tracked changes in each dirty or
    unpushed linked worktree as `WIP: session hand-off` and pushes it. It
    refuses the primary checkout, a detached tree, a tree with a live writer

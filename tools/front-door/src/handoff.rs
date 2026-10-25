@@ -185,6 +185,25 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     Ok((ok, text))
 }
 
+/// The branch name of a full `refs/heads/` ref.
+fn short_branch(reference: &str) -> String {
+    reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(reference)
+        .to_owned()
+}
+
+/// Whether a worktree has tracked changes or untracked, unignored files. A
+/// failed status counts as dirty.
+fn uncommitted(path: &Path) -> Result<bool, Refusal> {
+    let (ok, status) = git(
+        path,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+        GIT_TIMEOUT,
+    )?;
+    Ok(!ok || !status.is_empty())
+}
+
 /// One worktree of this project, as the hand-off sees it.
 #[derive(Debug, Clone, Serialize)]
 struct Tree {
@@ -248,7 +267,9 @@ fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, R
     let mut trees = Vec::with_capacity(infos.len());
     for info in infos {
         let head = info.head.to_string();
-        let (upstream, pushed) = match info.branch.as_deref() {
+        // Worktree listings carry full refs; the hand-off speaks branch names.
+        let branch = info.branch.as_deref().map(short_branch);
+        let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
                 let remote = format!("refs/remotes/origin/{branch}");
                 let (found, oid) = git(
@@ -275,12 +296,15 @@ fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, R
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
+        // The listing counts ignored files as dirty, which suits removal but
+        // not a hand-off: build output and `.worktrees/` are not lost work.
+        let dirty = info.dirty == WorktreeCondition::Dirty && uncommitted(&path)?;
         trees.push(Tree {
             primary: primary.as_deref() == Some(path.as_path()),
             path,
-            branch: info.branch,
+            branch,
             head,
-            dirty: info.dirty == WorktreeCondition::Dirty,
+            dirty,
             unknown: matches!(
                 info.dirty,
                 WorktreeCondition::Unknown | WorktreeCondition::GitOperationInProgress
@@ -1307,7 +1331,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 |context, cancel| {
                     if let Some(info) = worktrees::list(context, cancel)?
                         .into_iter()
-                        .find(|w| w.branch.as_deref() == Some(branch.as_str()))
+                        .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
                     {
                         return Ok((info, false));
                     }
@@ -1660,6 +1684,43 @@ mod tests {
             pushed,
         }
     }
+    #[test]
+    fn listed_refs_become_branch_names() {
+        assert_eq!(short_branch("refs/heads/feat/x"), "feat/x");
+        assert_eq!(short_branch("main"), "main");
+    }
+
+    #[test]
+    fn ignored_files_are_not_uncommitted_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let run = |args: &[&str]| {
+            let config = [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ];
+            let argv: Vec<&str> = config.iter().chain(args).copied().collect();
+            let (ok, text) = git(repo, &argv, GIT_TIMEOUT).unwrap();
+            assert!(ok, "git {args:?}: {text}");
+        };
+        run(&["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "target/\n.worktrees/\n").unwrap();
+        run(&["add", ".gitignore"]);
+        run(&["commit", "-q", "-m", "init"]);
+        fs::create_dir_all(repo.join("target")).unwrap();
+        fs::write(repo.join("target/out"), "built").unwrap();
+        assert!(!uncommitted(repo).unwrap());
+        fs::write(repo.join("notes.md"), "draft").unwrap();
+        assert!(uncommitted(repo).unwrap());
+        fs::remove_file(repo.join("notes.md")).unwrap();
+        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        assert!(uncommitted(repo).unwrap());
+    }
+
     fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
         Delivery {
             dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),
