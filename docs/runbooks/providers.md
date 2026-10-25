@@ -22,7 +22,8 @@ and web access according to the access mode. The adapter sets
 
 A confined writer's environment is built from scratch and sets `CARGO_TARGET_DIR`
 and `CARGO_BUILD_BUILD_DIR` to its per-lane cache's `target` directory. Read-only
-lanes set both to `target` under their scratch directory. Pinning build-dir
+lanes set both to `target` under their scratch directory, and build offline
+(`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache clean-up. Pinning build-dir
 overrides inherited Cargo configuration and keeps intermediate artefacts in the
 lane. Share a target only within one worktree; across
 worktrees keep per-lane targets (`provenant worktree remove` and

@@ -225,7 +225,8 @@ home or tmp grants.
   directories (with both the `npm_config_*` and `pnpm_config_*` store and
   cache names set), so writers download cold. A read-only lane keeps a scratch
   `CARGO_HOME` whose `registry` and `git` link to the shared stores read-only,
-  so offline builds use extracted sources. Both lane kinds set `CARGO_TARGET_DIR`
+  so offline builds use extracted sources; it also sets `CARGO_NET_OFFLINE=true`
+  and `CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never`. Both lane kinds set `CARGO_TARGET_DIR`
   and `CARGO_BUILD_BUILD_DIR` to the lane cache's `target` directory (scratch
   for read-only lanes), overriding inherited Cargo build-dir configuration.
   A read-only lane reads and executes the host's
