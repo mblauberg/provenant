@@ -42,3 +42,4 @@ historical evidence; the current Fabric owner is
 | [0027](0027-rust-front-door.md) | Replace the two-layer Python front door with one Rust binary | Accepted |
 | [0028](0028-rust-port-dependencies.md) | Port the whole project to Rust with a small crate allowlist | Accepted; landing method superseded by ADR 0029 |
 | [0029](0029-rust-rewrite-in-one-pass.md) | Rewrite in Rust in one pass, with no transition period | Accepted |
+| [0030](0030-defer-apfs-seeding-and-vm-backend.md) | Defer APFS clone seeding and a VM sandbox backend | Proposed |
