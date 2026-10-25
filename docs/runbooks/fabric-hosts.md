@@ -124,14 +124,12 @@ command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
 
-Upgrade a project's home before the hosts that call it. Releases after the
-legacy import's removal no longer send the always-null `legacy` member of tasks
-and messages, and they refuse a reply that still carries it. Until its home is
-upgraded, a newer caller's task and mail reads report `home_unavailable` and its
-task mutations report `launch_unknown`; once the home is upgraded, retrying with
-the same operation ID recovers each one from the home's receipt. An older caller accepts a newer
-home's replies. The peer protocol version stays 1 because it is part of every
-journalled request's digest, so a bump would strand in-flight operations.
+Hosts on either side of the legacy import's removal work together, in either
+direction, with the peer protocol still at version 1. Older releases write the
+removed `legacy` members of tasks and messages as null. Newer releases accept a
+null member, drop it on read and never write it, and refuse a non-null one. The
+same holds for a store an older binary, such as a long-running MCP server, keeps
+writing after the upgrade.
 
 ## Dispatch and recovery
 

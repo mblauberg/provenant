@@ -568,6 +568,8 @@ impl CoordinationApi for LocalCoordination<'_> {
                     reply_to,
                     task,
                     created_at: self.clock.wall_now()?,
+                    legacy_output_path: (),
+                    legacy: (),
                 };
                 self.store.send(&message, &request)?;
                 Ok(MailResult::Sent { id })
@@ -618,6 +620,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     expires_at: None,
                     created_at: now,
                     updated_at: now,
+                    legacy: (),
                 };
                 self.store.create_task(&task, &request)?;
                 Ok(TaskResult::Created { task })

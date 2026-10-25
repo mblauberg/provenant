@@ -86,6 +86,8 @@ fn message(f: &Fixture, n: u8) -> Message {
         task: None,
         conversation: None,
         created_at: f.now(),
+        legacy_output_path: (),
+        legacy: (),
     }
 }
 fn task(f: &Fixture) -> Task {
@@ -101,6 +103,7 @@ fn task(f: &Fixture) -> Task {
         expires_at: None,
         created_at: f.now(),
         updated_at: f.now(),
+        legacy: (),
     }
 }
 fn claim(f: &Fixture, who: u8) -> TaskClaim {
@@ -943,23 +946,10 @@ fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
     (m, t)
 }
 
-#[test]
-fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (m, t) = seed_records(&f, &store);
-    let before = stored_records(&store.db);
-    // Rewrite each row as version 6 wrote it. Canonical records sort `legacy`
-    // and `legacy_output_path` into place; the peer reply's Task had `legacy`
-    // as its last field.
-    let null_members = |bytes: Vec<u8>, pointer: &str, names: &[&str]| {
-        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
-        for name in names {
-            object.insert((*name).into(), serde_json::Value::Null);
-        }
-        encode(&value).unwrap()
-    };
+// Rewrite each seeded row as a version 6 binary writes it, with the removed
+// members null. Canonical records sort `legacy` and `legacy_output_path` into
+// place; the peer reply's Task has `legacy` as its last field.
+fn write_null_members(store: &Store, t: &Task) {
     let rows = [
         (
             "messages",
@@ -980,7 +970,12 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
             .db
             .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
             .unwrap();
-        let old = null_members(bytes, pointer, names);
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
+        for name in names {
+            object.insert((*name).into(), serde_json::Value::Null);
+        }
+        let old = encode(&value).unwrap();
         assert!(
             String::from_utf8(old.clone())
                 .unwrap()
@@ -991,7 +986,7 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
             .execute(&format!("UPDATE {table} SET {column}=?1"), [old])
             .unwrap();
     }
-    let task_json = serde_json::to_string(&t).unwrap();
+    let task_json = serde_json::to_string(t).unwrap();
     let old_reply = peer_reply(&format!(
         "{},\"legacy\":null}}",
         task_json.strip_suffix('}').unwrap()
@@ -1000,6 +995,15 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
         .db
         .execute("UPDATE peer_operations SET response=?1", [old_reply])
         .unwrap();
+}
+
+#[test]
+fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (m, t) = seed_records(&f, &store);
+    let before = stored_records(&store.db);
+    write_null_members(&store, &t);
     downgrade_to_six(&store, "");
     assert_ne!(stored_records(&store.db), before);
     drop(store);
@@ -1055,6 +1059,80 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     assert_eq!(stored_records(&store.db), before);
     drop(store);
     drop(f.open());
+}
+
+#[test]
+fn null_members_an_old_binary_writes_after_migration_read_and_are_never_written() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (m, t) = seed_records(&f, &store);
+    // A binary from before migration 7, still running, writes each record kind.
+    write_null_members(&store, &t);
+    let request = f.request();
+    assert_eq!(store.task(project(), t.id, &request).unwrap(), t);
+    let mail = store
+        .read_mail(project(), actor(3), Some(0), 100, &request)
+        .unwrap();
+    assert_eq!(mail.items[0].message, m);
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    assert_eq!(
+        store
+            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
+            .unwrap(),
+        Some(TaskReceipt::Created { task: t.clone() })
+    );
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let operation = store
+        .prepare_peer(
+            project(),
+            actor(2),
+            &peer,
+            provenant_core::Digest::from_bytes([7; 32]),
+            b"{}",
+            &request,
+        )
+        .unwrap();
+    let reply: serde_json::Value = provenant_records::decode(
+        operation.response.as_deref().unwrap(),
+        provenant_records::Limits::CONFIG,
+    )
+    .unwrap();
+    let task: Task = serde_json::from_value(reply.pointer(PEER_TASK).unwrap().clone()).unwrap();
+    assert_eq!(task, t);
+    // A rewrite drops the members.
+    let fence = store.claim_task(&claim(&f, 3), &request).unwrap();
+    store
+        .update_task(project(), &fence, "Ship F2", None, &request)
+        .unwrap();
+    let record: Vec<u8> = store
+        .db
+        .query_row("SELECT record FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert!(!String::from_utf8(record).unwrap().contains("legacy"));
+    for value in [
+        serde_json::to_string(&t).unwrap(),
+        serde_json::to_string(&m).unwrap(),
+    ] {
+        assert!(!value.contains("legacy"), "{value}");
+    }
+    // A non-null member is still refused.
+    store
+        .db
+        .execute_batch(
+            "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',\
+             json('{\"id\":\"i\",\"project\":\"p\",\"source\":\"s\"}')) AS BLOB); \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),\
+             '$.legacy_output_path','out.md') AS BLOB);",
+        )
+        .unwrap();
+    assert!(matches!(
+        store.task(project(), t.id, &request),
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        store.read_mail(project(), actor(3), Some(0), 100, &request),
+        Err(Error::Decode(_))
+    ));
 }
 
 #[test]

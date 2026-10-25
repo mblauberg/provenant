@@ -110,7 +110,8 @@ Migration 4 adds persistent counters and indexed path lookup/pruning.
 Migration 7 drops the removed legacy import's table and strips its always-null
 `legacy` members from messages, tasks, coordination receipts and committed peer
 replies. Opening refuses it, and changes nothing, while any data that import
-wrote remains.
+wrote remains. Records still read a null `legacy` or `legacy_output_path`, which
+a binary from before migration 7 may write after it, drop it and never write it.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.
