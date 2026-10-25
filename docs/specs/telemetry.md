@@ -158,6 +158,12 @@ belong to [routing](routing.md). An authentication failure retains the last
 snapshot and marks its row stale; the menu bar projects retained deadlines
 against the current time and never reads staleness as zero usage.
 
+If the stored `display.icon` account ID is no longer registered, `quota show`
+returns `display.icon = "most_constrained"` and a `display_icon_warning` field
+in the JSON report. Human output includes one warning line. Resolution uses
+all registrations, regardless of the adapter filter, and does not change config.
+Reports omit `display_icon_warning` when the icon choice is valid.
+
 ## External contracts
 
 - Chrome Trace Event format for the trace file, opened in a third-party viewer.

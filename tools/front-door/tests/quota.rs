@@ -704,3 +704,32 @@ fn show_carries_display_blocks_and_display_command_persists() -> Result {
     assert_eq!(disk["accounts"][0]["display"]["name"], "Work");
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn show_warns_when_display_icon_account_is_not_registered() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = TestRig::in_directory(&std::env::temp_dir())?;
+    std::fs::create_dir(&rig.state)?;
+    std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
+    let path = rig.state.join("config.toml");
+    let before = "schema_version = 1\n[domains.quota.display]\nicon = 'codex-removed'\n";
+    std::fs::write(&path, before)?;
+    let shown = rig.command(&["quota", "show", "--json"])?;
+    assert_eq!(code(&shown), 0);
+    let shown = json(&shown)?;
+    let warning = "display.icon names unregistered account 'codex-removed'; using most_constrained";
+    assert_eq!(shown["data"]["display_icon_warning"], warning);
+    assert_eq!(shown["data"]["display"]["icon"], "most_constrained");
+    let human = rig.command(&["quota", "show"])?;
+    assert_eq!(code(&human), 0);
+    let warning_line = format!("Warning: {warning}");
+    assert_eq!(
+        String::from_utf8_lossy(&human.stdout.bytes)
+            .lines()
+            .filter(|line| *line == warning_line)
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read_to_string(path)?, before);
+    rig.assert_legacy_unchanged()
+}

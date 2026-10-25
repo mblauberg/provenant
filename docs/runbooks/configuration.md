@@ -96,6 +96,9 @@ most_constrained|<account>]` writes `[domains.quota.display]` and returns the
 quota report. Reports carry a top-level `display` block and a per-row `display`
 block (`id`, `name`, `hidden`, `order`, `headline`). Hidden accounts and order
 are not applied by the CLI; the app does that.
+If `display.icon` names an unregistered account, `quota show` reports a
+`display_icon_warning` field in JSON and one warning line in human output.
+The report uses `most_constrained` for the icon without changing config.
 
 ## Chair account switching
 
