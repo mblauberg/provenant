@@ -597,6 +597,42 @@ fn completed(id: &Id) -> Event {
 }
 
 #[test]
+fn late_guards_unblock_when_the_full_events_queue_is_disconnected() {
+    for completion in [false, true] {
+        let (send, events) = mpsc::sync_channel(1);
+        send.send(Event::Oversize).unwrap();
+        let (started, start) = mpsc::sync_channel(1);
+        let (finished, finish) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            started.send(()).unwrap();
+            if completion {
+                drop(CompletionGuard::new(
+                    Id::Text("late".into()),
+                    false,
+                    send,
+                    "fabric_identity",
+                    Instant::now(),
+                ));
+            } else {
+                drop(WorkerExitGuard(send));
+            }
+            finished.send(()).unwrap();
+        });
+
+        start.recv_timeout(TEST_WAIT).unwrap();
+        assert!(matches!(
+            finish.recv_timeout(SHORT_TIMEOUTS.cancel_grace),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(events);
+        finish
+            .recv_timeout(TEST_WAIT)
+            .expect("late guard stayed blocked");
+        worker.join().unwrap();
+    }
+}
+
+#[test]
 fn shutdown_deadline_cancels_a_straggler_and_never_writes_its_late_reply() {
     let gate = Arc::new(Gate::default());
     let server = Server::start_with_timeouts(FakeFactory::new(gate.clone()), false, SHORT_TIMEOUTS);
@@ -678,7 +714,10 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
     );
     assert!(tokens.iter().all(CancelToken::is_cancelled));
     assert!(live.is_empty());
-    assert!(workers.threads.is_empty());
+    drop(events);
+    for worker in workers.threads {
+        worker.join().unwrap();
+    }
     assert_eq!(
         output.0, 1,
         "late completions must not attempt another write"
