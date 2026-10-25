@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use super::*;
 use provenant_core::{PathResolver, RootInputs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Resolver;
 impl PathResolver for Resolver {
@@ -16,9 +16,23 @@ fn roots(path: &Path) -> Result<Roots> {
     Ok(inputs.resolve(&Resolver)?)
 }
 #[test]
+fn recording_on_a_missing_root_creates_nothing() -> Result {
+    let temp = tempfile::tempdir_in("/tmp")?;
+    let roots = roots(temp.path())?;
+    record_cli(&roots, "root", 0, 4);
+    record_tool(&roots, "fabric_identity", "ok", 1);
+    assert!(!roots.state.as_path().exists());
+    Ok(())
+}
+#[test]
 fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
     let temp = tempfile::tempdir_in("/tmp")?;
     let roots = roots(temp.path())?;
+    std::fs::create_dir(roots.state.as_path())?;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )?;
     record_cli(&roots, "root", 0, 4);
     let log = roots.state.as_path().join(LOG);
     assert!(!roots.state.as_path().join(LOCK).exists());

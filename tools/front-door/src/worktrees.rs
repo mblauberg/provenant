@@ -37,6 +37,8 @@ pub(crate) enum Error {
     #[error(transparent)]
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
+    CacheGc(#[from] provenant_confinement::permissions::CacheGcError),
+    #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
@@ -103,11 +105,11 @@ pub fn run(command: Worktree, globals: &Globals) -> u8 {
     };
     let read_only = matches!(command, Worktree::List);
     match execute(command, globals) {
-        Ok(data) => match serde_json::to_string_pretty(&data) {
-            Ok(human) => emit(
+        Ok(data) => match serde_json::to_value(&data) {
+            Ok(value) => emit(
                 &CommandResult::new(name, Outcome::Ok, data),
                 globals,
-                &(human + "\n"),
+                &provenant_cli::terse(&value),
                 read_only,
             ),
             Err(_) => fail(
@@ -177,7 +179,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 if let Err(error) =
                     provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(&home)
                 {
-                    warn_cache_sweep(&error);
+                    warn_cache_sweep(&format!("{error}\n{}", gc_summary(&error.report)));
                 }
             }
             Err(error) => warn_cache_sweep(&error),
@@ -198,32 +200,7 @@ struct GcData {
 pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
     match gc(&command, globals) {
         Ok(data) => {
-            let mut human = String::new();
-            let verb = if data.report.dry_run {
-                "would remove"
-            } else {
-                "removed"
-            };
-            for entry in &data.report.removed {
-                human.push_str(&format!(
-                    "{verb} {} ({} bytes, {})\n",
-                    entry.path.display(),
-                    entry.bytes,
-                    serde_json::to_string(&entry.reason)
-                        .unwrap_or_default()
-                        .trim_matches('"')
-                ));
-            }
-            human.push_str(&format!(
-                "{} cache(s), {} bytes {}\n",
-                data.report.removed.len(),
-                data.report.bytes_freed,
-                if data.report.dry_run {
-                    "reclaimable"
-                } else {
-                    "freed"
-                }
-            ));
+            let human = gc_summary(&data.report);
             emit(
                 &CommandResult::new("gc", Outcome::Ok, data),
                 globals,
@@ -231,8 +208,63 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
                 command.dry_run,
             )
         }
+        Err(Error::CacheGc(error)) => {
+            let human = gc_summary(&error.report);
+            let message = format!("{error}\n{human}");
+            let mut result = CommandResult::new(
+                "gc",
+                Outcome::Error,
+                GcData {
+                    report: error.report,
+                    idle_days: command.idle_days,
+                },
+            );
+            result.error = Some(provenant_records::CommandError {
+                code: "GC".into(),
+                message,
+                cause: None,
+                repair: None,
+            });
+            emit(&result, globals, "", command.dry_run)
+        }
         Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
     }
+}
+
+fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> String {
+    let mut human = String::new();
+    let verb = if report.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    for entry in &report.removed {
+        human.push_str(&format!(
+            "{verb} {} ({} bytes, {})\n",
+            entry.path.display(),
+            entry.bytes,
+            match entry.reason {
+                provenant_confinement::permissions::CacheGcReason::Orphaned => "orphaned",
+                provenant_confinement::permissions::CacheGcReason::Idle => "idle",
+                provenant_confinement::permissions::CacheGcReason::Tombstone => "tombstone",
+                provenant_confinement::permissions::CacheGcReason::Foreign => "foreign",
+            }
+        ));
+    }
+    for entry in &report.kept {
+        human.push_str(&format!("kept {} (foreign)\n", entry.path.display()));
+    }
+    human.push_str(&format!(
+        "{} cache(s), {} bytes {}\n",
+        report.removed.len(),
+        report.bytes_freed,
+        if report.dry_run {
+            "reclaimable"
+        } else {
+            "freed"
+        }
+    ));
+    human
 }
 
 fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
@@ -247,9 +279,9 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         Ok(worktrees::list(context, cancel)?)
     })?;
     let protected_owners = listed
-        .into_iter()
+        .iter()
         .filter(|info| info.writer != WriterState::Free)
-        .map(|info| info.path)
+        .map(|info| info.path.clone())
         .collect();
     let now_ns = SystemClock
         .wall_now()
@@ -260,6 +292,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         idle_before_ns: Some(now_ns - idle_ns),
         dry_run: command.dry_run,
         protected_owners,
+        project_owners: listed.into_iter().map(|info| info.path).collect(),
     };
     Ok(GcData {
         report: gc_worktree_cargo_caches(&home, &policy)?,

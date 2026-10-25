@@ -116,11 +116,71 @@ pub enum RefusalKind {
     WorktreeBusy,
 }
 
+/// A child's network reach may not exceed its parent's, each write root must
+/// sit inside a parent write root and each read root inside any parent root.
+/// The lane wrote the child's roots, so the host repeats the submission
+/// edge's checks against its own filesystem view: a root counts only while it
+/// is an existing directory, already canonical and clear of the state root.
+fn child_access_within(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+) -> Result<()> {
+    let reach = |network| match network {
+        NetworkAccess::Provider => 0,
+        NetworkAccess::Local => 1,
+        NetworkAccess::Open => 2,
+    };
+    if reach(child.access.network(child.writer.is_some()))
+        > reach(parent.access.network(parent.writer.is_some()))
+    {
+        return Err(RunError::Validation("child network exceeds parent access"));
+    }
+    let state = provenant_supervisor::fs::canonicalize(state_root)
+        .unwrap_or_else(|_| state_root.to_path_buf());
+    let resolve = |root: &PathBuf| {
+        provenant_supervisor::fs::canonicalize(root)
+            .ok()
+            .filter(|canonical| {
+                canonical == root
+                    && canonical.is_dir()
+                    && !canonical.starts_with(&state)
+                    && !state.starts_with(canonical)
+            })
+    };
+    let writes: Vec<PathBuf> = parent
+        .access
+        .write_roots
+        .iter()
+        .filter_map(resolve)
+        .collect();
+    let reads: Vec<PathBuf> = parent
+        .access
+        .read_roots
+        .iter()
+        .filter_map(resolve)
+        .chain(writes.iter().cloned())
+        .collect();
+    let within = |roots: &[PathBuf], granted: &[PathBuf]| {
+        roots.iter().all(|root| {
+            resolve(root).is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
+        })
+    };
+    if !within(&child.access.write_roots, &writes) || !within(&child.access.read_roots, &reads) {
+        return Err(RunError::Validation("child root exceeds parent access"));
+    }
+    Ok(())
+}
+
 impl RunStore {
     /// Validate lane-writable ingress against the host's recorded parent and
-    /// its sealed task. A child never gains authority its parent lacks: a
-    /// read-only parent cannot propose a writer, and delivery must already be
-    /// granted to the parent for the same remote, branch and pull request.
+    /// its sealed task. A child never gains authority its parent lacks, and a
+    /// lane cannot propose a writer or delivering child: the host has no
+    /// sealed list of worktrees a lane may delegate, and a writer child in any
+    /// registered worktree could plant code that later runs unconfined. Access
+    /// must sit within the parent's. A child cannot continue an attempt, whose
+    /// retained state the host would copy. The lane can rewrite its store at
+    /// any time, so launch only the request returned here.
     pub fn validate_child(
         &self,
         run: RunId,
@@ -129,7 +189,7 @@ impl RunStore {
         parent_depth: u64,
         maximum: u64,
         call: &Request<'_>,
-    ) -> Result<()> {
+    ) -> Result<CanonicalRequest> {
         let expected = next_lane_depth(parent_depth, maximum)?;
         let request = self.request(run, call)?;
         if request.parent_attempt != Some(parent) || request.lane_depth != Some(expected) {
@@ -137,26 +197,18 @@ impl RunStore {
                 "child request does not match host parent record",
             ));
         }
-        for task in &request.tasks {
-            if task.writer.is_some() && parent_task.writer.is_none() {
-                return Err(RunError::Validation(
-                    "read-only parent cannot launch a writer child",
-                ));
-            }
-            if let Some(deliver) = &task.deliver {
-                let granted = parent_task.deliver.as_ref().is_some_and(|parent| {
-                    parent.remote == deliver.remote
-                        && parent.branch == deliver.branch
-                        && (parent.open_pr || !deliver.open_pr)
-                });
-                if !granted {
-                    return Err(RunError::Validation(
-                        "child delivery exceeds parent delivery authority",
-                    ));
-                }
-            }
+        if request.parent.is_some() {
+            return Err(RunError::Validation(
+                "a child run cannot continue an attempt",
+            ));
         }
-        Ok(())
+        for task in &request.tasks {
+            if task.writer.is_some() || task.deliver.is_some() {
+                return Err(RunError::Validation("a lane cannot propose a writer child"));
+            }
+            child_access_within(parent_task, task, self.context.state_root.as_path())?;
+        }
+        Ok(request)
     }
     /// Refuse queued proposals without touching any launched provider.
     pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
@@ -260,6 +312,36 @@ impl RunStore {
                     call.clock,
                 )
             },
+            None,
+            call,
+        )
+    }
+    /// Start a child run from the request `validate_child` returned. The lane
+    /// may have rewritten its store since, so a request whose digest no longer
+    /// matches is refused rather than launched.
+    pub fn start_child(
+        &self,
+        run: RunId,
+        validated: &CanonicalRequest,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(
+            run,
+            providers,
+            context,
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            Some(validated.digest()?),
             call,
         )
     }
@@ -276,9 +358,11 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
+        validated: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        self.start_inner(run, providers, context, acquire_writer, call)
+        let validated = validated.map(CanonicalRequest::digest).transpose()?;
+        self.start_inner(run, providers, context, acquire_writer, validated, call)
     }
     fn start_inner(
         &self,
@@ -290,9 +374,18 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
+        validated: Option<provenant_core::Digest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
+        // Every later use reads this one value, never the store again.
         let request = self.request(run, call)?;
+        if let Some(digest) = validated
+            && request.digest()? != digest
+        {
+            return Err(RunError::Validation(
+                "child request changed after validation",
+            ));
+        }
         let resume = request
             .parent
             .map(|prior| self.record(prior, call))

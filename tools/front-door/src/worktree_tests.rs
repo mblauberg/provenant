@@ -652,6 +652,7 @@ fn start_writer(
                 call.clock,
             )
         },
+        None,
         call,
     )?)
 }
@@ -895,6 +896,7 @@ fn holder_context<'a>(
             attempt_id: attempt.attempt_id,
             host_delivery: None,
             launch: None,
+            sealed: None,
         }
         .encode()
     }
@@ -1582,7 +1584,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &home,
             "fixture".as_ref(),
             &directory,
-            &rig.root,
         )?;
         if adapter == "claude" {
             claude_key.clone_from(&key);
@@ -1697,7 +1698,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 home: &home,
                 user: "fixture".as_ref(),
                 config_dir: &home.join(".claude-fixture"),
-                scratch: &paths.scratch,
             },
             &provenant_providers::identity::RegisteredAccount::new(
                 "claude",
@@ -1846,10 +1846,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("MCP reply")?["result"];
-        assert_eq!(
-            result["structuredContent"]["code"], "lane_depth",
-            "{result}"
-        );
+        assert_eq!(mcp_error_code(result), "lane_depth", "{result}");
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(
             rig.state
@@ -1934,6 +1931,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 git: selected_git.clone(),
                 codex_home: None,
                 fixture_state_write: true,
+            }),
+            sealed: Some(provenant_run::SealedTask {
+                request_digest: prepared.request.digest()?,
+                task_id: task.task_id,
             }),
         };
         verify_lane_profile(
@@ -2074,7 +2075,8 @@ pub(crate) fn lane_provider() -> Result {
         reply
             .iter()
             .find(|reply| reply["id"] == 1)
-            .ok_or("stripped MCP reply")?["result"]["structuredContent"]["code"],
+            .map(|reply| mcp_error_code(&reply["result"]))
+            .ok_or("stripped MCP reply")?,
         "invalid_input"
     );
     // Exercise the same publisher used by CLI overflow under confinement.
@@ -2251,7 +2253,8 @@ fn verify_lane_profile(
         replies
             .iter()
             .find(|reply| reply["id"] == 1)
-            .ok_or("confined MCP reply")?["result"]["structuredContent"]["code"],
+            .map(|reply| mcp_error_code(&reply["result"]))
+            .ok_or("confined MCP reply")?,
         "lane_depth"
     );
     // Admission below the limit must also open the isolated child store under
@@ -2269,7 +2272,6 @@ fn verify_lane_profile(
             Err(error) => Err(error.into()),
         }
     };
-    let before = run_count()?;
     // Startup spacing is host-wide: the child would otherwise wait out the
     // default 20 s after the parent's own start, past this test's deadline.
     // Clear only the last-start time; the lease counts stay real.
@@ -2280,61 +2282,6 @@ fn verify_lane_profile(
         db.execute("DELETE FROM spacing", [])?;
     }
     fs::write(state.join("config.toml"), config(2))?;
-    let nested_frames =
-        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
-    let cancel_child =
-        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
-    let nested_frames = if confinement.writer.is_some() {
-        nested_frames.replace(
-            "\"timeout_ms\":1000",
-            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
-        )
-    } else {
-        nested_frames
-    };
-    let nested_frames = if cancel_child {
-        nested_frames
-            .replace("read only", "wait for host cancellation")
-            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
-    } else {
-        nested_frames
-    };
-    let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
-    options.env = Some(&launch.environment);
-    options.stdin = Some(nested_frames.as_bytes());
-    let nested = executor.execute(options)?;
-    assert_eq!(
-        code(&nested),
-        0,
-        "{}",
-        String::from_utf8_lossy(&nested.stderr.bytes)
-    );
-    assert!(
-        run_count()? > before,
-        "confined child admission created no run"
-    );
-    // The child must be admitted as a target, not merely leave a record.
-    let accepted = nested
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let targets = &accepted
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
-    assert_eq!(
-        targets.as_array().map(Vec::len),
-        Some(1),
-        "confined child was not admitted: {targets}"
-    );
-    // Admission is not launch: the host must reach the confined fake child,
-    // including when a Claude parent cannot read Codex credentials.
-    let attempt_id = provenant_core::AttemptId::parse(
-        targets[0]["attempt"].as_str().ok_or("child attempt id")?,
-    )?;
     let mut inputs =
         provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
     inputs.state_dir = Some(child.clone());
@@ -2346,6 +2293,79 @@ fn verify_lane_profile(
     };
     let clock = provenant_supervisor::clock::SystemClock::new();
     let call = writer_call(&clock, &cancel)?;
+    // Admission is not launch: the host decides from its sealed parent task.
+    let admit = |frames: &str| -> Result<provenant_core::AttemptId> {
+        let before = run_count()?;
+        let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
+        options.env = Some(&launch.environment);
+        options.stdin = Some(frames.as_bytes());
+        let nested = executor.execute(options)?;
+        assert_eq!(
+            code(&nested),
+            0,
+            "{}",
+            String::from_utf8_lossy(&nested.stderr.bytes)
+        );
+        assert!(
+            run_count()? > before,
+            "confined child admission created no run"
+        );
+        // The child must be admitted as a target, not merely leave a record.
+        let accepted = nested
+            .stdout
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let targets = &accepted
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
+        assert_eq!(
+            targets.as_array().map(Vec::len),
+            Some(1),
+            "confined child was not admitted: {targets}"
+        );
+        Ok(provenant_core::AttemptId::parse(
+            targets[0]["attempt"].as_str().ok_or("child attempt id")?,
+        )?)
+    };
+    let nested_frames =
+        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
+    if confinement.writer.is_some() {
+        // A writer lane cannot hand a writer child any registered worktree:
+        // the host refuses the proposal before any provider launches.
+        let proposal = admit(&nested_frames.replace("confined-child", "confined-writer").replace(
+            "\"timeout_ms\":1000",
+            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
+        ))?;
+        let store = provenant_run::RunStore::open(&child_context, &call)?;
+        let refused = await_terminal(&store, proposal, &call)?;
+        assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
+        assert_ne!(refused.provider_launched, Some(true));
+        let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
+            return Err("writer proposal was not terminal".into());
+        };
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
+            "{reason:?}"
+        );
+    }
+    let cancel_child =
+        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
+    let nested_frames = if cancel_child {
+        nested_frames
+            .replace("read only", "wait for host cancellation")
+            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
+    } else {
+        nested_frames
+    };
+    // The host must reach the confined fake child, including when a Claude
+    // parent cannot read Codex credentials.
+    let attempt_id = admit(&nested_frames)?;
     let store = provenant_run::RunStore::open(&child_context, &call)?;
     if cancel_child {
         let run = store.record(attempt_id, &call)?.run_id;
@@ -2399,8 +2419,15 @@ fn verify_lane_profile(
     );
     host.provider_exited(&parent.encode()?, None)?;
     fs::write(state.join("config.toml"), config(1))?;
-    // The parent store's own git-home is the host's, from preparing this lane.
+    // The child store's git-home is the in-lane fabric context's own, not the
+    // host's: its preparation keeps its git home under the host root.
     assert!(child.join("tmp/git-home").is_dir());
+    // Host probes leave no directory or lease behind once the child launched.
+    let probes: Vec<_> = fs::read_dir(state)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("probe-"))
+        .collect();
+    assert!(probes.is_empty(), "{probes:?}");
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),
@@ -2467,4 +2494,16 @@ impl Executor for FixtureCredential {
             elapsed_micros: 0,
         })
     }
+}
+
+/// Identity and submit report errors in text; other tools keep structured codes.
+fn mcp_error_code(result: &Value) -> &str {
+    result["structuredContent"]["code"]
+        .as_str()
+        .unwrap_or_else(|| {
+            result["content"][0]["text"]
+                .as_str()
+                .and_then(|text| text.split_once(':'))
+                .map_or("", |(code, _)| code)
+        })
 }

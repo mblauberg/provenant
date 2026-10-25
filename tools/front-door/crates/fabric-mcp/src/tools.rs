@@ -177,6 +177,23 @@ impl ToolCall {
     /// Strict runtime serde contracts own argument validation. The catalogue
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        // The shared serde record accepts peer-ingress worktree creation.
+        // MCP cannot request it; reject the field (including null) at its edge.
+        if schema::tool_kind(name) == Some(schema::ToolKind::Submit)
+            && let Some(index) =
+                arguments
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .and_then(|tasks| {
+                        tasks
+                            .iter()
+                            .position(|task| task.get("new_worktree").is_some())
+                    })
+        {
+            return Err(InvalidInput::Arguments {
+                path: format!("arguments.tasks[{index}].new_worktree"),
+            });
+        }
         let mut arguments = arguments;
         if let Some(operation) = schema::sole_operation(name)
             && let Some(object) = arguments.as_object_mut()
@@ -282,6 +299,19 @@ impl ToolCall {
         if let Some(limits) = &service.limits {
             self.validate_limits(limits)
                 .map_err(ServiceError::Invalid)?;
+        }
+        if service.in_lane
+            && self.is_mutation()
+            && matches!(
+                &self,
+                Self::Mail(..)
+                    | Self::Task(..)
+                    | Self::Events(..)
+                    | Self::Claim(..)
+                    | Self::Landing(..)
+            )
+        {
+            return Err(CoordinationError::LaneMutation.into());
         }
         let mutation = self.is_mutation();
         let output = matches!(&self, Self::Output(_));
@@ -472,7 +502,18 @@ impl ToolCall {
             Self::Submit(input) => call!(facade, submit, input),
             Self::Run(input) => call!(facade, run, input),
             Self::Output(input) => call!(facade, output, input),
-            Self::Hosts(input) => call!(facade, hosts, input),
+            Self::Hosts(input) => {
+                #[derive(Serialize)]
+                struct Hosts<T> {
+                    hosts: T,
+                }
+                response(
+                    tool_name,
+                    Hosts {
+                        hosts: service.facade.hosts(input, budget, cancel)?,
+                    },
+                )
+            }
             Self::Graph(input) => call!(facade, graph, input),
         };
         service.limit_response(result, mutation, output)
@@ -514,6 +555,9 @@ impl ServiceError {
     pub fn structured_error(&self) -> Value {
         match self {
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
+            Self::Coordination(CoordinationError::LaneMutation) => {
+                serde_json::json!({"code":self.code(),"message":self.to_string()})
+            }
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
             }
@@ -542,6 +586,7 @@ pub struct Service<'a, F> {
     pub facade: F,
     clock: &'a dyn Clock,
     limits: Option<Limits>,
+    in_lane: bool,
 }
 
 impl<'a, F> Service<'a, F> {
@@ -551,12 +596,21 @@ impl<'a, F> Service<'a, F> {
             facade,
             clock,
             limits: None,
+            in_lane: false,
         }
     }
 
     /// Apply validated profile limits at the MCP owner boundary.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = Some(limits);
+        self
+    }
+
+    /// The composition edge captures this from the host-set MCP environment.
+    /// Tool arguments cannot change it. Lanes still have direct SQLite writes;
+    /// this guards the tool surface pending lane-store-isolation (Fabric spec).
+    pub fn with_lane_restrictions(mut self, in_lane: bool) -> Self {
+        self.in_lane = in_lane;
         self
     }
 
@@ -639,9 +693,18 @@ pub struct ToolResponse {
     pub structured_content: Value,
 }
 
-/// One shared construction for all MCP tool errors.
-pub fn tool_error(code: &str, detail: Value) -> Value {
-    serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"structuredContent":detail,"isError":true})
+/// Schema-bearing tools report error details in text, because those details
+/// cannot satisfy their success schemas. Unknown-tool fallbacks do the same.
+pub fn tool_error(tool: Option<&str>, code: &str, detail: Value) -> Value {
+    let mut result = serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"isError":true});
+    if tool.is_some_and(|name| {
+        schema::tool_kind(name)
+            .and_then(schema::output_schema)
+            .is_none()
+    }) {
+        result["structuredContent"] = detail;
+    }
+    result
 }
 
 pub fn catalogue() -> &'static [Value] {

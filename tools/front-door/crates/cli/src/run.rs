@@ -9,6 +9,7 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
+use provenant_fabric_runtime::hosts::plain_text;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
@@ -1195,15 +1196,17 @@ pub fn launch(
     }
     launch_on_host(session, run, edge, call, None)
 }
+/// `child` carries a lane's child launch: the inherited host context and the
+/// request `validate_child` returned, which is the only copy launched from.
 fn launch_on_host(
     session: &Session,
     run: RunId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
-    inherited: Option<&run::HostLaunchContext>,
+    child: Option<(&run::HostLaunchContext, &run::CanonicalRequest)>,
 ) -> Result<Vec<run::Started>, Fail> {
-    let host = match inherited {
-        Some(host) => host.clone(),
+    let host = match child {
+        Some((host, _)) => host.clone(),
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
@@ -1223,17 +1226,25 @@ fn launch_on_host(
             fixture_state_write: false,
         },
     };
-    let submission = session.store.request(run, call)?;
+    let validated = child.map(|(_, request)| request);
+    let read;
+    let request = match validated {
+        Some(request) => request,
+        None => {
+            read = session.store.request(run, call)?;
+            &read
+        }
+    };
+    let request_digest = request.digest().map_err(run::RunError::from)?;
     let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
-    let request = session.store.request(run, call)?;
     let holder = |attempt: &run::AttemptRecord| {
         let mut host = host.clone();
-        if let Some(writer) = submission
+        if let Some(writer) = request
             .tasks
             .iter()
             .find(|task| task.task_id == attempt.task_id)
@@ -1255,6 +1266,10 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
+            sealed: Some(run::SealedTask {
+                request_digest,
+                task_id: attempt.task_id,
+            }),
         }
         .encode()
     };
@@ -1285,10 +1300,16 @@ fn launch_on_host(
                     call.clock,
                 )
             },
+            validated,
             call,
         )?);
     }
-    Ok(session.store.start(run, &registry, &holder, call)?)
+    Ok(match validated {
+        Some(request) => session
+            .store
+            .start_child(run, request, &registry, &holder, call)?,
+        None => session.store.start(run, &registry, &holder, call)?,
+    })
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
     started
@@ -1400,27 +1421,32 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 .as_ref()
                 .and_then(|r| r.account_label.as_deref())
                 .unwrap_or("unknown");
+            // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{} {state} {route} account={account}{}\n",
+                "{}/{}/{} {state} {} account={}{}\n",
                 lane.run_id,
                 lane.task_id,
                 lane.attempt_id,
+                plain_text(&route, usize::MAX),
+                plain_text(account, usize::MAX),
                 reason
                     .as_deref()
-                    .map(|r| format!(" ({r})"))
+                    .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
                     .unwrap_or_default()
             ));
             for skipped in &lane.skipped_routes {
                 human.push_str(&format!(
                     "  skipped {} {:?}: {}\n",
-                    skipped.route, skipped.kind, skipped.detail
+                    plain_text(&skipped.route, usize::MAX),
+                    skipped.kind,
+                    plain_text(&skipped.detail, usize::MAX)
                 ));
             }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {:?} head={}\n",
-                    delivery.remote,
-                    delivery.branch,
+                    plain_text(&delivery.remote, usize::MAX),
+                    plain_text(&delivery.branch, usize::MAX),
                     delivery.state,
                     delivery
                         .head
@@ -1982,13 +2008,6 @@ fn reconcile_inner(
     edge: &Edge<'_>,
     fenced: &mut bool,
 ) -> Result<(Value, String), Fail> {
-    if command.abandon_uncertain {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "abandoning uncertain custody is not available in this build",
-        ));
-    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
@@ -2315,6 +2334,63 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "\x1b[31mreason\x1b[0m";
+        let account = "\x1b]0;account\x07";
+        let detail = "skip\n\r\t\u{0008}\u{202e}detail";
+        let remote = "or\x1bigin";
+        let branch = "main\u{009b}line";
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "peer-lane-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "applied_route": {"model":"fixture/\x1b[32mmodel","account_label":account},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":reason},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            },
+            "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
+            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
+        }))?;
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert_eq!(
+            human,
+            format!(
+                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+                RunId::from_bytes([2; 16]),
+                TaskId::from_bytes([4; 16]),
+                AttemptId::from_bytes([1; 16])
+            )
+        );
+        assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
+        assert!(!human.contains('\u{202e}'));
+        assert_eq!(data["lanes"][0]["reason"], json!(reason));
+        assert_eq!(data["lanes"][0]["account"], json!(account));
+        assert_eq!(
+            data["lanes"][0]["skipped_routes"][0]["detail"],
+            json!(detail)
+        );
+        assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
+        assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        Ok(())
+    }
     #[test]
     fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

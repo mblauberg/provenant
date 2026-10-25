@@ -85,9 +85,9 @@ fn message(f: &Fixture, n: u8) -> Message {
         reply_to: None,
         task: None,
         conversation: None,
-        legacy_output_path: None,
         created_at: f.now(),
-        legacy: None,
+        legacy_output_path: (),
+        legacy: (),
     }
 }
 fn task(f: &Fixture) -> Task {
@@ -103,7 +103,7 @@ fn task(f: &Fixture) -> Task {
         expires_at: None,
         created_at: f.now(),
         updated_at: f.now(),
-        legacy: None,
+        legacy: (),
     }
 }
 fn claim(f: &Fixture, who: u8) -> TaskClaim {
@@ -529,213 +529,6 @@ fn busy_and_cancellation_are_bounded_and_leave_no_mutation() {
         0
     );
 }
-fn old_snapshot(f: &Fixture) -> (PathBuf, rusqlite::Connection) {
-    let path = f.temp.path().join("old-snapshot.sqlite3");
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/old-schema.sql"
-    )))
-    .unwrap();
-    (path, db)
-}
-fn plan(f: &Fixture, path: PathBuf) -> ImportPlan {
-    ImportPlan {
-        snapshot: path,
-        source: "cutover-1".into(),
-        legacy_project: "legacy-project".into(),
-        project: project(),
-        actors: std::collections::BTreeMap::from([
-            ("sender".into(), actor(2)),
-            ("a".into(), actor(3)),
-            ("b".into(), actor(4)),
-        ]),
-        cutover: f.now(),
-    }
-}
-fn old_message(
-    db: &rusqlite::Connection,
-    id: &str,
-    at: i64,
-    kind: &str,
-    read: Option<i64>,
-    task: Option<&str>,
-    reply: Option<&str>,
-) {
-    db.execute("INSERT INTO messages VALUES(?,'legacy-project','sender','request body',?,'outside',?,?,NULL,?)",params![id,kind,reply,task,at]).unwrap();
-    for recipient in ["a", "b"] {
-        db.execute(
-            "INSERT INTO deliveries VALUES(?,'legacy-project',?,?)",
-            params![id, recipient, read],
-        )
-        .unwrap();
-    }
-}
-#[test]
-fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    let cutoff = f.now().as_micros() / 1000 - 14 * 86_400_000;
-    for (id, state) in [
-        ("open", "open"),
-        ("blocked", "blocked"),
-        ("closed", "done"),
-        ("claimed", "claimed"),
-    ] {
-        db.execute(
-            "INSERT INTO tasks VALUES('legacy-project',?,'old objective','someone',?,?,?)",
-            params![id, state, cutoff, cutoff],
-        )
-        .unwrap();
-    }
-    old_message(
-        &db,
-        "boundary",
-        cutoff,
-        "request",
-        None,
-        Some("blocked"),
-        None,
-    );
-    old_message(
-        &db,
-        "recent",
-        cutoff + 1,
-        "request",
-        None,
-        Some("closed"),
-        Some("boundary"),
-    );
-    old_message(&db, "expired", cutoff - 1, "request", None, None, None);
-    old_message(
-        &db,
-        "acked",
-        cutoff + 1,
-        "request",
-        Some(cutoff + 2),
-        None,
-        None,
-    );
-    old_message(&db, "response", cutoff + 1, "response", None, None, None);
-    db.execute(
-        "UPDATE deliveries SET read_at=? WHERE message_id='recent' AND recipient_id='b'",
-        [cutoff + 3],
-    )
-    .unwrap();
-    drop(db);
-    let before = std::fs::read(&path).unwrap();
-    let plan = plan(&f, path.clone());
-    let receipt = store.import_snapshot(&plan, &f.request()).unwrap();
-    assert_eq!(
-        receipt,
-        ImportReceipt {
-            tasks: 2,
-            messages: 2,
-            skipped: false,
-            skipped_rows: Default::default(),
-        }
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_eq!(std::fs::read_dir(f.temp.path()).unwrap().count(), 2);
-    assert!(
-        store
-            .read_mail(project(), actor(3), None, 100, &f.request())
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    let mail = store
-        .read_mail(project(), actor(3), Some(0), 100, &f.request())
-        .unwrap()
-        .items;
-    assert_eq!(mail.len(), 2);
-    assert_eq!(
-        store
-            .read_mail(project(), actor(4), Some(0), 100, &f.request())
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    assert!(matches!(mail[0].message.task, Some(TaskRef::Local { .. })));
-    assert!(matches!(mail[1].message.task, Some(TaskRef::Legacy { .. })));
-    assert!(matches!(
-        mail[1].message.reply_to,
-        Some(MessageRef::Local { .. })
-    ));
-    assert!(matches!(
-        mail[0].message.conversation,
-        Some(MessageRef::Legacy { .. })
-    ));
-    let tasks = store
-        .tasks(project(), None, None, 100, &f.request())
-        .unwrap()
-        .items;
-    assert!(
-        tasks
-            .iter()
-            .all(|t| t.state == TaskState::Open && t.owner.is_none())
-    );
-    assert!(tasks.iter().any(|t| t.note.is_some()));
-    std::fs::remove_file(path).unwrap();
-    assert!(store.import_snapshot(&plan, &f.request()).unwrap().skipped);
-}
-#[test]
-fn failed_import_is_atomic_retryable_and_refuses_live_sidecars() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    old_message(
-        &db,
-        "request",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    drop(db);
-    let plan = plan(&f, path.clone());
-    store.db.execute_batch("CREATE TRIGGER fail_cursor BEFORE INSERT ON mail_cursors BEGIN SELECT RAISE(ABORT,'injected cursor failure'); END").unwrap();
-    assert!(store.import_snapshot(&plan, &f.request()).is_err());
-    for table in [
-        "imports",
-        "messages",
-        "deliveries",
-        "mail_cursors",
-        "events",
-    ] {
-        assert_eq!(
-            store
-                .db
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    store.db.execute_batch("DROP TRIGGER fail_cursor").unwrap();
-    assert!(!store.import_snapshot(&plan, &f.request()).unwrap().skipped);
-    let db = rusqlite::Connection::open(path).unwrap();
-    db.pragma_update(None, "journal_mode", "WAL").unwrap();
-    old_message(
-        &db,
-        "live",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    let mut different = plan;
-    different.source = "other-source".into();
-    assert!(matches!(
-        store.import_snapshot(&different, &f.request()),
-        Err(Error::ImportNotQuiescent)
-    ));
-}
-
 #[test]
 fn cold_open_race_serialises_schema_setup() {
     let f = Fixture::new();
@@ -826,15 +619,6 @@ fn input_bounds_and_malformed_persisted_records_fail_without_panics() {
 }
 
 #[test]
-fn historical_task_states_only_map_importable_rows() {
-    assert_eq!(TaskState::from_old("open").unwrap(), TaskState::Open);
-    assert_eq!(TaskState::from_old("blocked").unwrap(), TaskState::Open);
-    for state in ["claimed", "active", "done", "cancelled", "unknown"] {
-        assert!(TaskState::from_old(state).is_err(), "accepted {state}");
-    }
-}
-
-#[test]
 fn delivery_sequences_are_local_to_each_project_and_never_wrap() {
     let f = Fixture::new();
     let store = f.open();
@@ -879,73 +663,6 @@ fn delivery_sequences_are_local_to_each_project_and_never_wrap() {
             .items
             .len(),
         1
-    );
-}
-
-#[test]
-fn import_keeps_old_open_work_but_excludes_future_tasks_and_requests() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    let now = f.now().as_micros() / 1000;
-    for (id, created) in [("old", now - 30 * 86_400_000), ("future", now + 1)] {
-        db.execute(
-            "INSERT INTO tasks VALUES('legacy-project',?,'objective',NULL,'open',?,?)",
-            params![id, created, created],
-        )
-        .unwrap();
-    }
-    old_message(&db, "future", now + 1, "request", None, None, None);
-    drop(db);
-    assert_eq!(
-        store
-            .import_snapshot(&plan(&f, path), &f.request())
-            .unwrap(),
-        ImportReceipt {
-            tasks: 1,
-            messages: 0,
-            skipped: false,
-            skipped_rows: Default::default(),
-        }
-    );
-    assert_eq!(
-        store
-            .tasks(project(), None, None, 100, &f.request())
-            .unwrap()
-            .items[0]
-            .legacy
-            .as_ref()
-            .unwrap()
-            .id,
-        "old"
-    );
-}
-#[test]
-fn large_source_and_malformed_row_do_not_block_a_bounded_import() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    db.execute(
-        "INSERT INTO tasks VALUES('legacy-project','bad','objective',NULL,'open',1.5,0)",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO tasks VALUES('legacy-project','good','objective',NULL,'open',1,0)",
-        [],
-    )
-    .unwrap();
-    drop(db);
-    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    file.set_len(67_108_865).unwrap();
-    drop(file);
-    let receipt = store
-        .import_snapshot(&plan(&f, path), &f.request())
-        .unwrap();
-    assert_eq!(receipt.tasks, 1);
-    assert_eq!(
-        receipt.skipped_rows,
-        std::collections::BTreeMap::from([(ImportSkipReason::InvalidValue, 1)])
     );
 }
 
@@ -1103,214 +820,6 @@ fn task_pages_report_byte_truncation_and_resume_without_loss() {
 }
 
 #[test]
-fn cleanly_closed_wal_source_imports_without_changing_old_root() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    db.pragma_update(None, "journal_mode", "WAL").unwrap();
-    old_message(
-        &db,
-        "wal",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    drop(db);
-    assert_eq!(&std::fs::read(&path).unwrap()[18..20], &[2, 2]);
-    let before = std::fs::read(&path).unwrap();
-    let names = || {
-        std::fs::read_dir(f.temp.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-    let entries = names();
-    assert_eq!(
-        store
-            .import_snapshot(&plan(&f, path.clone()), &f.request())
-            .unwrap()
-            .messages,
-        1
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_eq!(names(), entries);
-}
-
-#[test]
-fn invalid_legacy_row_does_not_abort_valid_import() {
-    let f = Fixture::new();
-    let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    old_message(
-        &db,
-        "bad",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    old_message(
-        &db,
-        "good",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    db.execute("UPDATE messages SET body=NULL WHERE message_id='bad'", [])
-        .unwrap();
-    drop(db);
-    assert_eq!(
-        store
-            .import_snapshot(&plan(&f, path), &f.request())
-            .unwrap()
-            .messages,
-        1
-    );
-}
-
-#[test]
-fn import_counts_each_row_validation_reason_and_replays_the_receipt() {
-    for reason in [
-        ImportSkipReason::NullValue,
-        ImportSkipReason::InvalidValue,
-        ImportSkipReason::EmptyText,
-        ImportSkipReason::OversizeText,
-        ImportSkipReason::Nul,
-        ImportSkipReason::UnmappedActor,
-        ImportSkipReason::DuplicateRecipient,
-        ImportSkipReason::TooManyRecipients,
-        ImportSkipReason::RecordSize,
-    ] {
-        let f = Fixture::new();
-        let store = f.open();
-        let (path, db) = old_snapshot(&f);
-        old_message(
-            &db,
-            "bad",
-            f.now().as_micros() / 1000,
-            "request",
-            None,
-            None,
-            None,
-        );
-        old_message(
-            &db,
-            "good",
-            f.now().as_micros() / 1000,
-            "request",
-            None,
-            None,
-            Some("bad"),
-        );
-        let mut plan = plan(&f, path);
-        match reason {
-            ImportSkipReason::NullValue => {
-                db.execute("UPDATE messages SET body=NULL WHERE message_id='bad'", [])
-                    .unwrap();
-            }
-            ImportSkipReason::InvalidValue => {
-                db.execute(
-                    "UPDATE messages SET created_at=created_at-0.5 WHERE message_id='bad'",
-                    [],
-                )
-                .unwrap();
-            }
-            ImportSkipReason::EmptyText => {
-                db.execute("UPDATE messages SET body='' WHERE message_id='bad'", [])
-                    .unwrap();
-            }
-            ImportSkipReason::OversizeText => {
-                db.execute(
-                    "UPDATE messages SET body=? WHERE message_id='bad'",
-                    ["x".repeat(MAX_BODY_BYTES + 1)],
-                )
-                .unwrap();
-            }
-            ImportSkipReason::Nul => {
-                db.execute(
-                    "UPDATE messages SET body=? WHERE message_id='bad'",
-                    ["a\0b"],
-                )
-                .unwrap();
-            }
-            ImportSkipReason::UnmappedActor => {
-                db.execute(
-                    "UPDATE messages SET sender_id='unknown' WHERE message_id='bad'",
-                    [],
-                )
-                .unwrap();
-            }
-            ImportSkipReason::DuplicateRecipient => {
-                plan.actors.insert("alias".into(), actor(3));
-                db.execute(
-                    "INSERT INTO deliveries VALUES('bad','legacy-project','alias',NULL)",
-                    [],
-                )
-                .unwrap();
-            }
-            ImportSkipReason::TooManyRecipients => {
-                for n in 0..99_u8 {
-                    let label = format!("recipient-{n}");
-                    plan.actors.insert(label.clone(), actor(n + 5));
-                    db.execute(
-                        "INSERT INTO deliveries VALUES('bad','legacy-project',?,NULL)",
-                        [label],
-                    )
-                    .unwrap();
-                }
-            }
-            ImportSkipReason::RecordSize => {
-                db.execute(
-                    "UPDATE messages SET body=? WHERE message_id='bad'",
-                    ["\u{1}".repeat(MAX_BODY_BYTES)],
-                )
-                .unwrap();
-            }
-        }
-        drop(db);
-        let receipt = store.import_snapshot(&plan, &f.request()).unwrap();
-        let retained = matches!(
-            reason,
-            ImportSkipReason::DuplicateRecipient | ImportSkipReason::TooManyRecipients
-        );
-        assert_eq!(receipt.messages, if retained { 2 } else { 1 }, "{reason:?}");
-        assert_eq!(
-            receipt.skipped_rows,
-            std::collections::BTreeMap::from([(reason, 1)])
-        );
-        let mail = store
-            .read_mail(project(), actor(3), Some(0), 100, &f.request())
-            .unwrap();
-        let good = mail
-            .items
-            .iter()
-            .find(|row| row.message.legacy.as_ref().unwrap().id == "good")
-            .unwrap();
-        assert_eq!(
-            matches!(good.message.reply_to, Some(MessageRef::Local { .. })),
-            retained
-        );
-        if retained {
-            let bad = mail
-                .items
-                .iter()
-                .find(|row| row.message.legacy.as_ref().unwrap().id == "bad")
-                .unwrap();
-            assert!(bad.message.recipients.contains(&actor(3)));
-            assert!(bad.message.recipients.contains(&actor(4)));
-        }
-        let replay = store.import_snapshot(&plan, &f.request()).unwrap();
-        assert!(replay.skipped);
-        assert_eq!(replay.skipped_rows, receipt.skipped_rows);
-    }
-}
-
-#[test]
 fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
     let mut f = Fixture::new();
     let store = f.open();
@@ -1354,13 +863,151 @@ fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
     ));
 }
 
+// The TaskResult shape a coordination receipt stores, without the runtime crate.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+enum TaskReceipt {
+    Created { task: Task },
+}
+const PEER_TASK: &str = "/result/data/result/task";
+// A committed PeerResponse is plain serde_json in field order, not canonical.
+fn peer_reply(task: &str) -> Vec<u8> {
+    format!(
+        r#"{{"version":1,"host":"{0}","project":"{0}","result":{{"result":"coordination","data":{{"domain":"task","result":{{"result":"created","task":{task}}}}}}}}}"#,
+        "07".repeat(16)
+    )
+    .into_bytes()
+}
+// Every column that holds a serialised Task, Message or Event, as text.
+fn stored_records(db: &rusqlite::Connection) -> Vec<String> {
+    let mut result = Vec::new();
+    for query in [
+        "SELECT record FROM messages ORDER BY id",
+        "SELECT record FROM tasks ORDER BY id",
+        "SELECT record FROM events ORDER BY seq",
+        "SELECT result FROM coordination_operations ORDER BY id",
+        "SELECT response FROM peer_operations ORDER BY id",
+    ] {
+        let mut stmt = db.prepare(query).unwrap();
+        result.extend(
+            stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+                .unwrap()
+                .map(|r| String::from_utf8(r.unwrap()).unwrap()),
+        );
+    }
+    result
+}
+// Versions 1 to 6 carry the imports table that migration 7 drops.
+const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
+     project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
+     tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
+     skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
+fn downgrade_to_six(store: &Store, rows: &str) {
+    store
+        .db
+        .execute_batch(&format!("{IMPORTS_TABLE} {rows} PRAGMA user_version=6;"))
+        .unwrap();
+}
+// Seed each record kind that carried the removed members: a message, a task,
+// its coordination receipt and a committed peer reply carrying that task.
+fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
+    let request = f.request();
+    let mut m = message(f, 5);
+    m.body = "Review \"this\"\tnow é".into();
+    let mut t = task(f);
+    t.objective = "Ship \"F1\"\n é".into();
+    store.send(&m, &request).unwrap();
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let receipt = store
+        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
+            store.create_task(&t, &request)?;
+            Ok::<_, Error>(TaskReceipt::Created { task: t.clone() })
+        })
+        .unwrap();
+    assert_eq!(receipt, TaskReceipt::Created { task: t.clone() });
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let digest = provenant_core::Digest::from_bytes([7; 32]);
+    store
+        .prepare_peer(project(), actor(2), &peer, digest, b"{}", &request)
+        .unwrap();
+    store
+        .peer_phase(project(), actor(2), &peer, PeerPhaseChange::Sent, &request)
+        .unwrap();
+    let response = peer_reply(&serde_json::to_string(&t).unwrap());
+    store
+        .peer_phase(
+            project(),
+            actor(2),
+            &peer,
+            PeerPhaseChange::Committed { response },
+            &request,
+        )
+        .unwrap();
+    (m, t)
+}
+
+// Rewrite each seeded row as a version 6 binary writes it, with the removed
+// members null. Canonical records sort `legacy` and `legacy_output_path` into
+// place; the peer reply's Task has `legacy` as its last field.
+fn write_null_members(store: &Store, t: &Task) {
+    let rows = [
+        (
+            "messages",
+            "record",
+            "",
+            &["legacy", "legacy_output_path"][..],
+        ),
+        ("tasks", "record", "", &["legacy"][..]),
+        (
+            "coordination_operations",
+            "result",
+            "/task",
+            &["legacy"][..],
+        ),
+    ];
+    for (table, column, pointer, names) in rows {
+        let bytes: Vec<u8> = store
+            .db
+            .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
+        for name in names {
+            object.insert((*name).into(), serde_json::Value::Null);
+        }
+        let old = encode(&value).unwrap();
+        assert!(
+            String::from_utf8(old.clone())
+                .unwrap()
+                .contains(r#""legacy":null,"#)
+        );
+        store
+            .db
+            .execute(&format!("UPDATE {table} SET {column}=?1"), [old])
+            .unwrap();
+    }
+    let task_json = serde_json::to_string(t).unwrap();
+    let old_reply = peer_reply(&format!(
+        "{},\"legacy\":null}}",
+        task_json.strip_suffix('}').unwrap()
+    ));
+    store
+        .db
+        .execute("UPDATE peer_operations SET response=?1", [old_reply])
+        .unwrap();
+}
+
 #[test]
 fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
-    drop(f.open());
-    let db = rusqlite::Connection::open(f.path()).unwrap();
-    db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE operations; DROP TABLE claim_paths; DROP TABLE claims; DROP TABLE claim_counters; ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
-    drop(db);
+    let store = f.open();
+    let (m, t) = seed_records(&f, &store);
+    let before = stored_records(&store.db);
+    write_null_members(&store, &t);
+    downgrade_to_six(&store, "");
+    assert_ne!(stored_records(&store.db), before);
+    drop(store);
+
     let store = f.open();
     assert_eq!(
         store
@@ -1369,136 +1016,266 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
             .unwrap(),
         crate::db::MIGRATIONS.len() as i64
     );
+    let imports: i64 = store
+        .db
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='imports'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(imports, 0);
+    // Each replay succeeds only if the stored bytes match a fresh encode, or
+    // for receipts, only if the stored reply still decodes.
+    let request = f.request();
+    store.send(&m, &request).unwrap();
+    store.create_task(&t, &request).unwrap();
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let replayed = store
+        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
+            Err::<TaskReceipt, Error>(Error::Invalid("receipt replay reran its effect"))
+        })
+        .unwrap();
+    assert_eq!(replayed, TaskReceipt::Created { task: t.clone() });
     assert_eq!(
         store
-            .db
-            .query_row(
-                "SELECT skipped_rows FROM imports WHERE source='prior'",
-                [],
-                |r| r.get::<_, Vec<u8>>(0)
-            )
+            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
             .unwrap(),
-        b"{}"
+        Some(TaskReceipt::Created { task: t.clone() })
     );
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let digest = provenant_core::Digest::from_bytes([7; 32]);
+    let operation = store
+        .prepare_peer(project(), actor(2), &peer, digest, b"{}", &request)
+        .unwrap();
+    assert_eq!(operation.phase, PeerPhase::Committed);
+    let reply: serde_json::Value = provenant_records::decode(
+        operation.response.as_deref().unwrap(),
+        provenant_records::Limits::CONFIG,
+    )
+    .unwrap();
+    let task: Task = serde_json::from_value(reply.pointer(PEER_TASK).unwrap().clone()).unwrap();
+    assert_eq!(task, t);
+    assert_eq!(stored_records(&store.db), before);
     drop(store);
     drop(f.open());
 }
 
 #[test]
-fn import_filename_cannot_inject_sqlite_uri_options() {
+fn null_members_an_old_binary_writes_after_migration_read_and_are_never_written() {
     let f = Fixture::new();
     let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    db.pragma_update(None, "journal_mode", "WAL").unwrap();
-    old_message(
-        &db,
-        "encoded",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    drop(db);
-    let encoded = f.temp.path().join("old ?mode=rwc#é%.sqlite3");
-    std::fs::rename(path, &encoded).unwrap();
-    let before = std::fs::read(&encoded).unwrap();
+    let (m, t) = seed_records(&f, &store);
+    // A binary from before migration 7, still running, writes each record kind.
+    write_null_members(&store, &t);
+    let request = f.request();
+    assert_eq!(store.task(project(), t.id, &request).unwrap(), t);
+    let mail = store
+        .read_mail(project(), actor(3), Some(0), 100, &request)
+        .unwrap();
+    assert_eq!(mail.items[0].message, m);
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
     assert_eq!(
         store
-            .import_snapshot(&plan(&f, encoded.clone()), &f.request())
-            .unwrap()
-            .messages,
-        1
+            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
+            .unwrap(),
+        Some(TaskReceipt::Created { task: t.clone() })
     );
-    assert_eq!(std::fs::read(encoded).unwrap(), before);
-    assert_eq!(std::fs::read_dir(f.temp.path()).unwrap().count(), 2);
-}
-
-#[test]
-fn invalid_individual_deliveries_preserve_valid_recipients() {
-    for (recipient, reason) in [
-        (None, ImportSkipReason::NullValue),
-        (Some(String::new()), ImportSkipReason::EmptyText),
-        (
-            Some("x".repeat(MAX_BODY_BYTES + 1)),
-            ImportSkipReason::OversizeText,
-        ),
-        (Some("a\0b".into()), ImportSkipReason::Nul),
-        (Some("unknown".into()), ImportSkipReason::UnmappedActor),
-    ] {
-        let f = Fixture::new();
-        let store = f.open();
-        let (path, db) = old_snapshot(&f);
-        old_message(
-            &db,
-            "message",
-            f.now().as_micros() / 1000,
-            "request",
-            None,
-            None,
-            None,
-        );
-        db.execute(
-            "INSERT INTO deliveries VALUES('message','legacy-project',?,NULL)",
-            [recipient],
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let operation = store
+        .prepare_peer(
+            project(),
+            actor(2),
+            &peer,
+            provenant_core::Digest::from_bytes([7; 32]),
+            b"{}",
+            &request,
         )
         .unwrap();
-        drop(db);
-        let receipt = store
-            .import_snapshot(&plan(&f, path), &f.request())
-            .unwrap();
-        assert_eq!(receipt.messages, 1);
-        assert_eq!(
-            receipt.skipped_rows,
-            std::collections::BTreeMap::from([(reason, 1)])
-        );
-        let mail = store
-            .read_mail(project(), actor(3), Some(0), 100, &f.request())
-            .unwrap();
-        assert_eq!(mail.items[0].message.recipients, vec![actor(3), actor(4)]);
-        assert_eq!(
-            store
-                .read_mail(project(), actor(4), Some(0), 100, &f.request())
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
+    let reply: serde_json::Value = provenant_records::decode(
+        operation.response.as_deref().unwrap(),
+        provenant_records::Limits::CONFIG,
+    )
+    .unwrap();
+    let task: Task = serde_json::from_value(reply.pointer(PEER_TASK).unwrap().clone()).unwrap();
+    assert_eq!(task, t);
+    // A rewrite drops the members.
+    let fence = store.claim_task(&claim(&f, 3), &request).unwrap();
+    store
+        .update_task(project(), &fence, "Ship F2", None, &request)
+        .unwrap();
+    let record: Vec<u8> = store
+        .db
+        .query_row("SELECT record FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert!(!String::from_utf8(record).unwrap().contains("legacy"));
+    for value in [
+        serde_json::to_string(&t).unwrap(),
+        serde_json::to_string(&m).unwrap(),
+    ] {
+        assert!(!value.contains("legacy"), "{value}");
     }
+    // A non-null member is still refused.
+    store
+        .db
+        .execute_batch(
+            "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',\
+             json('{\"id\":\"i\",\"project\":\"p\",\"source\":\"s\"}')) AS BLOB); \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),\
+             '$.legacy_output_path','out.md') AS BLOB);",
+        )
+        .unwrap();
+    assert!(matches!(
+        store.task(project(), t.id, &request),
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        store.read_mail(project(), actor(3), Some(0), 100, &request),
+        Err(Error::Decode(_))
+    ));
 }
 
 #[test]
-fn oversized_legacy_id_is_skipped_without_exhausting_selected_text_budget() {
+fn empty_legacy_import_upgrades_and_leaves_no_trace() {
     let f = Fixture::new();
     let store = f.open();
-    let (path, db) = old_snapshot(&f);
-    old_message(
-        &db,
-        &"x".repeat(8_388_609),
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
+    let (_, t) = seed_records(&f, &store);
+    let events = store.events(project(), 0, 100, &f.request()).unwrap().items;
+    // An import that brought nothing over left its receipt and one event.
+    downgrade_to_six(
+        &store,
+        &format!(
+            "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,0,0,X'7B7D'); \
+             INSERT INTO events(project,dedup,record) SELECT project,NULL,\
+             CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+             FROM events WHERE seq=1;",
+            project()
+        ),
     );
-    old_message(
-        &db,
-        "good",
-        f.now().as_micros() / 1000,
-        "request",
-        None,
-        None,
-        None,
-    );
-    drop(db);
-    let receipt = store
-        .import_snapshot(&plan(&f, path), &f.request())
+    drop(store);
+    let store = f.open();
+    let imports: i64 = store
+        .db
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='imports'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(receipt.messages, 1);
+    assert_eq!(imports, 0);
     assert_eq!(
-        receipt.skipped_rows,
-        std::collections::BTreeMap::from([(ImportSkipReason::OversizeText, 2)])
+        store.events(project(), 0, 100, &f.request()).unwrap().items,
+        events
     );
+    assert_eq!(store.task(project(), t.id, &f.request()).unwrap(), t);
+}
+
+#[test]
+fn empty_committed_peer_response_upgrades_unchanged() {
+    let f = Fixture::new();
+    let store = f.open();
+    seed_records(&f, &store);
+    downgrade_to_six(&store, "UPDATE peer_operations SET response=X'';");
+    drop(store);
+    let store = f.open();
+    let response: Vec<u8> = store
+        .db
+        .query_row("SELECT response FROM peer_operations", [], |r| r.get(0))
+        .unwrap();
+    assert!(response.is_empty());
+}
+
+#[test]
+fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
+    let reference = r#"json('{"id":"i","project":"p","source":"s"}')"#;
+    let cases = [
+        (
+            "imports",
+            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D');".to_owned(),
+        ),
+        (
+            "events",
+            "UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+             WHERE seq=1;"
+                .to_owned(),
+        ),
+        (
+            "messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "messages",
+            "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','out.md') AS BLOB);"
+                .to_owned(),
+        ),
+        (
+            "messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.conversation',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "tasks",
+            format!(
+                "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "coordination_operations",
+            format!(
+                "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.task.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "peer_operations",
+            format!(
+                "UPDATE peer_operations SET response=CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+    ];
+    for (table, rows) in cases {
+        let f = Fixture::new();
+        let store = f.open();
+        seed_records(&f, &store);
+        downgrade_to_six(&store, &rows);
+        let before = stored_records(&store.db);
+        drop(store);
+        let refused = Store::open(&f.root, &f.request());
+        let error = refused.err().unwrap();
+        assert!(
+            matches!(error, Error::LegacyImportData { table: found, rows: 1 } if found == table),
+            "{table}: {error:?}"
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains(&format!("1 row(s) of legacy import data in table {table}"))
+                && text.contains("docs/runbooks/fabric-hosts.md"),
+            "{text}"
+        );
+        let db = rusqlite::Connection::open(f.path()).unwrap();
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6, "{table}");
+        assert_eq!(stored_records(&db), before, "{table}");
+    }
 }
 
 #[test]

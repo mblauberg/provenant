@@ -8,7 +8,7 @@ peer model and boundaries.
 
 ```sh
 provenant help
-provenant fabric host list
+provenant hosts
 provenant hosts doctor
 provenant fabric peer
 provenant fabric peer-agent
@@ -17,7 +17,7 @@ provenant lanes --host workshop
 provenant workflow session handoff --help
 ```
 
-`fabric host list` reads local and configured peer health. `hosts doctor`
+`hosts` reads local and configured peer health. `hosts doctor`
 probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
@@ -105,24 +105,37 @@ reached the agent is never retried in process; a lost reply surfaces as an
 error and, for a mutation, as `launch_unknown`.
 
 Re-running install is idempotent: it rewrites the plist only when it changed
-and restarts the agent so it serves the new binary. The plist captures the
-installer's `PATH`, so run install from a shell whose `PATH` finds `claude`
-and the other provider CLIs. Installs with another home or `--state-dir` skip
+and restarts the agent so it serves the new binary. The plist's PATH starts
+with fixed system directories, then the install bin directory and existing
+absolute directories holding resolved Claude, Codex and Git executables.
+Run install from a shell whose PATH finds those executables; other PATH
+entries are dropped. Installs with another home or `--state-dir` skip
 the agent. The agent logs failed requests to
 `~/.local/share/provenant/v1/peer-agent/agent.log`.
 
 Check it with `provenant hosts doctor` locally or `provenant hosts doctor
 workshop` from the other host: the `peer agent` line reads `running`,
 `stopped` (plist present, socket not answering), `not_installed` or
-`unsupported` (not macOS). To remove it, run
-`launchctl bootout gui/$(id -u)/dev.provenant.peer` and delete the plist. Doctor uses a separate remote command, so a key forced to the peer
-entrypoint cannot also run remote doctor.
+`unsupported` (not macOS). Use receipt-aware `provenant uninstall --harness NAME`
+for each installed harness. Removing the last recorded target boots out the
+agent and removes its unchanged plist; edited plists are preserved and
+reported. See the [install runbook](install.md). Doctor uses a separate remote
+command, so a key forced to the peer entrypoint cannot also run remote doctor.
 
 `fabric peer` is a hidden machine entrypoint, not an interactive operator
 command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 `tools/front-door/crates/fabric-runtime/src/hosts.rs` own the wire format.
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
+
+Hosts on either side of the legacy import's removal work together, in either
+direction, with the peer protocol still at version 1. Older releases write the
+removed `legacy` members of tasks and messages as null. Newer releases accept a
+null member, drop it on read and never write it, and refuse a non-null one.
+An older binary that already had the store open keeps working, but one that
+opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
+The MCP server reopens the store for each events call, so restart MCP servers
+and running workers after upgrading.
 
 ## Dispatch and recovery
 
@@ -137,7 +150,8 @@ keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
 takes the same placement as an optional `host` field.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
-which is a path on the calling host:
+which is a path on the calling host. This is the terminal path; agents use
+`fabric_submit`:
 
 ```sh
 provenant dispatch --host workshop --mode worktree-write \
@@ -228,7 +242,9 @@ On the calling host the command:
    checkpoint is cut to fit with a note saying so. Attachments are capped at
    512 KiB in total;
 3. checks that each registered worktree of the project is clean and pushed
-   to `origin`. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
+   to `origin/<branch>`. Ignored files, such as build output, do not count as
+   changes; they stay on the source and are not transferred. Files ignored
+   only by a global excludes file still count. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
    problem trees. `--wip` commits the tracked changes in each dirty or
    unpushed linked worktree as `WIP: session hand-off` and pushes it. It
    refuses the primary checkout, a detached tree, a tree with a live writer
@@ -244,8 +260,8 @@ refuses with the valid labels when it does not match. It then claims
 `handoff/<project-id>/op-<operation-id>/` in its state directory, fetches
 `origin` and recreates each branch's worktree from `origin/<branch>`. An
 existing worktree, or an existing local branch, is reused; when its commit
-differs from origin or it has uncommitted changes, the receipt and the
-prompt say so. The peer writes `prompt.md`, the attachments and
+differs from origin or it has uncommitted changes other than ignored files,
+the receipt and the prompt say so. The peer writes `prompt.md`, the attachments and
 `launch.command` into the operation directory and runs
 `open -a Terminal launch.command`. The script runs
 `claude -- "$(cat prompt.md)"` with `CLAUDE_CONFIG_DIR` set to the account's
@@ -298,6 +314,42 @@ provenant workflow session handoff --to workshop --account work \
 
 Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
 with `provenant lanes --host workshop`.
+
+## Legacy import data
+
+A newer release cannot upgrade a store that still holds data from the removed
+legacy import. Opening it fails with `upgrade_refused`; the message names the
+table and its row count, and the store stays at a version the previous release
+still opens. An import that brought nothing over does not block the upgrade.
+When the refusing store is a project's home, peers do not see this code: their
+calls report the home as unavailable, and the reason and remedy are in the
+home's `~/.local/share/provenant/v1/peer-agent/agent.log`.
+
+Keep the previous release while you need that data. To move to the newer
+release, archive the store and let Fabric create a fresh one:
+
+1. On the previous release, record what you still need from
+   `provenant fabric task list` and `provenant fabric mail read`, settle every
+   unresolved landing push with `provenant fabric landing reconcile`, and
+   resolve any peer operation that still reports `launch_unknown`. Active claims
+   and landing leases do not survive the archive.
+2. Stop every process that holds the store: MCP servers in open sessions, the
+   `fabric peer-agent` LaunchAgent and running lanes.
+3. Move the store files out of the state directory (here the default):
+
+   ```sh
+   state=~/.local/share/provenant/v1
+   archive=~/fabric-store-archive-$(date +%Y%m%d)
+   mkdir -m 700 "$archive"
+   mv "$state"/fabric/fabric.sqlite3* "$archive"/
+   ```
+
+4. Run the newer release. It starts with no tasks, mail, events, claims or peer
+   journal; create again any work you still need.
+
+On a project's home host, the archive removes that project's tasks and mail for
+every peer, and their in-flight operations against it report `launch_unknown`.
+Archive the home only when its peers have no work in flight.
 
 ## Verify targeted changes
 

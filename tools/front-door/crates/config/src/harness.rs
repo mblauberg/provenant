@@ -430,17 +430,82 @@ pub(crate) fn capture(
             selector: sel.into(),
             expected: OwnedValue::Selector { value: want },
         });
+        let inherited_hooks = !targets.remove_hooks
+            && previous.is_some_and(|receipt| {
+                receipt.entries.iter().any(|entry| {
+                    entry.harness == Some(target.harness)
+                        && entry.selector.starts_with("hook:")
+                        && target.hook_file.as_ref().is_some_and(|hook| {
+                            entry.path.to_path_buf().is_ok_and(|path| &path == hook)
+                        })
+                })
+            });
+        let hooks = targets.hooks || inherited_hooks;
         if let Some(hook) = &target.hook_file
-            && (checkout.is_some() || (targets.hooks && target.harness == Harness::Claude))
+            && (checkout.is_some()
+                || ((hooks || targets.remove_hooks) && target.harness == Harness::Claude))
         {
             let hook_snapshot = capture_one(hook, entries, fs)?;
             let (old, hook_mode) = file(&hook_snapshot, hook)?;
-            let (mut updated, mut changes, owned) =
-                if targets.hooks && target.harness == Harness::Claude {
-                    crate::hooks::register(&old, targets)?
-                } else {
-                    (old.clone(), Vec::new(), Vec::new())
-                };
+            let mut base = Value::File {
+                bytes: old.clone(),
+                mode: hook_mode,
+            };
+            let mut removed_changes = Vec::new();
+            let mut inherited = BTreeSet::new();
+            if let Some(previous) = previous {
+                for entry in &previous.entries {
+                    if entry.harness != Some(target.harness)
+                        || !entry.path.to_path_buf().is_ok_and(|path| &path == hook)
+                        || !entry.selector.starts_with("hook:")
+                    {
+                        continue;
+                    }
+                    if hooks && !targets.hooks && !entry_matches(&base, entry)? {
+                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                        continue;
+                    }
+                    inherited.insert(entry.selector.clone());
+                    // Keep current registrations in place so re-install is a no-op.
+                    let still_desired = hooks
+                        && targets.hook_specs.iter().any(|spec| {
+                            spec.harness == Some(target.harness)
+                                && crate::hooks::value(spec, targets).is_ok_and(|value| {
+                                    value.get("command").and_then(Json::as_str).is_some_and(
+                                        |command| {
+                                            crate::hooks::selector(
+                                                spec.event,
+                                                spec.matcher,
+                                                command,
+                                            )
+                                            .is_ok_and(|selector| selector == entry.selector)
+                                        },
+                                    ) && entry.expected == OwnedValue::Selector { value }
+                                })
+                        });
+                    if !still_desired {
+                        if let Some((value, changes)) = remove_selector(&base, entry)? {
+                            base = value;
+                            removed_changes.extend(changes);
+                        } else {
+                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                        }
+                    }
+                }
+            }
+            let Value::File { bytes: base, .. } = base else {
+                return Err(InstallError::ConfigFile(hook.clone()));
+            };
+            let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
+                let registration = crate::hooks::register(&base, targets, &inherited)?;
+                if registration.relinquished_modified {
+                    add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                }
+                (registration.bytes, registration.changes, registration.owned)
+            } else {
+                (base, Vec::new(), Vec::new())
+            };
+            changes.extend(removed_changes);
             if let Some(checkout) = checkout.as_deref() {
                 let (cleaned, removals, unresolved) = crate::legacy::clean_hooks_at_home(
                     &updated,
@@ -517,8 +582,53 @@ pub(crate) fn capture(
         }
     }
     if let Some(checkout) = checkout.as_deref() {
-        legacy_links(release, targets, checkout, entries, &mut plan, fs)?;
+        legacy_links(release, targets, checkout, previous, entries, &mut plan, fs)?;
         instruction_rewrite(release, targets, checkout, previous, entries, &mut plan, fs)?;
+    }
+    if let Some(previous) = previous {
+        for entry in &previous.entries {
+            if entry.selector != "git-hook:pre-push"
+                || plan.owned.iter().any(|current| current.path == entry.path)
+            {
+                continue;
+            }
+            let path = entry.path.to_path_buf()?;
+            let snap = capture_one(&path, entries, fs)?;
+            if targets.remove_hooks {
+                if snap
+                    .as_ref()
+                    .is_some_and(|current| !managed::matches_owned(&current.value, &entry.expected))
+                {
+                    add_finding(&mut plan.findings, "relinquished_modified_entry", &path)?;
+                }
+                continue;
+            }
+            if let Some(current) = snap {
+                if managed::matches_owned(&current.value, &entry.expected) {
+                    let spec = targets
+                        .hook_specs
+                        .iter()
+                        .find(|spec| spec.harness.is_none() && spec.event == "pre-push")
+                        .ok_or(InstallError::HooksUnavailable)?;
+                    let value = Value::File {
+                        bytes: format!(
+                            "#!/bin/sh\nexec {} \"$@\"\n",
+                            crate::hooks::command(spec, targets)?
+                        )
+                        .into_bytes(),
+                        mode: 0o755,
+                    };
+                    let mut owned = entry.clone();
+                    owned.expected = managed::owned(&value)?;
+                    plan.owned.push(owned);
+                    if current.value != value {
+                        plan.files.insert(path, value);
+                    }
+                } else {
+                    add_finding(&mut plan.findings, "relinquished_modified_entry", &path)?;
+                }
+            }
+        }
     }
     Ok(plan)
 }
@@ -1009,6 +1119,7 @@ fn legacy_links(
     release: &Release,
     targets: &Targets,
     checkout: &Path,
+    previous: Option<&InstallReceipt>,
     entries: &mut BTreeMap<PathBuf, Option<Snapshot>>,
     plan: &mut HarnessPlan,
     fs: &dyn SafeFs,
@@ -1028,6 +1139,16 @@ fn legacy_links(
                 s
             };
             if link.area == LegacyArea::GitHook {
+                // Receipt ownership supersedes the one-time link migration.
+                // Refresh and explicit removal are reconciled by capture.
+                if previous.is_some_and(|receipt| {
+                    receipt.entries.iter().any(|entry| {
+                        entry.selector == "git-hook:pre-push"
+                            && entry.path.to_path_buf().is_ok_and(|owned| owned == path)
+                    })
+                }) {
+                    continue;
+                }
                 match snap {
                     Some(Snapshot {
                         value: Value::Link(actual),
@@ -1268,10 +1389,11 @@ pub(crate) fn check_legacy(
                     add_finding(findings, "legacy_entry", &path)?;
                 }
                 Some(current)
-                    if !receipt.entries.iter().any(|entry| {
-                        entry.path.to_path_buf().is_ok_and(|p| p == path)
-                            && managed::matches_owned(&current.value, &entry.expected)
-                    }) =>
+                    if !legacy.relinquished_hooks.contains(&link.name)
+                        && !receipt.entries.iter().any(|entry| {
+                            entry.path.to_path_buf().is_ok_and(|p| p == path)
+                                && managed::matches_owned(&current.value, &entry.expected)
+                        }) =>
                 {
                     add_finding(findings, "legacy_hook_conflict", &path)?;
                 }

@@ -18,6 +18,8 @@ pub const MAX_FETCH_CHUNKS: usize = 4096;
 pub const MAX_FETCH_MANIFEST_BYTES: usize = 1024 * 1024;
 const FETCH_VERSION: u8 = 1;
 const DIRECTORY_MODE: u32 = 0o700;
+const MAX_CLEANUP_DEPTH: usize = 64;
+const MAX_CLEANUP_DIRECTORY_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,6 +158,7 @@ fn manifest_digest(version: u8, files: &[FetchFile]) -> Result<Digest> {
 fn validate_relative_file(path: &str) -> Result<()> {
     if path.is_empty()
         || path.len() > 4096
+        || path.split('/').count() > MAX_CLEANUP_DEPTH
         || path.contains('\\')
         || path.contains(':')
         || path.bytes().any(|byte| byte.is_ascii_control())
@@ -343,13 +346,19 @@ fn write_file(parent: &Directory, components: &[&str], bytes: &[u8]) -> Result<(
 /// Remove only a private staging tree. Symlinks are unlinked without following
 /// them; unexpected entry types stop cleanup rather than widening traversal.
 fn remove_tree(parent: &Directory, name: &OsStr) -> Result<()> {
+    remove_tree_at(parent, name, 0)
+}
+
+fn remove_tree_at(parent: &Directory, name: &OsStr, depth: usize) -> Result<()> {
+    if depth >= MAX_CLEANUP_DEPTH {
+        return Err(FetchError::Invalid("cleanup depth"));
+    }
     let directory = parent.open_verified_directory(name)?;
     require_private(&directory)?;
-    for entry in directory.entries()? {
-        let entry = entry?;
+    for entry in fs::entry_names(&directory, MAX_CLEANUP_DIRECTORY_ENTRIES)? {
         let metadata = directory.metadata_at(&entry, false)?;
         match metadata.kind {
-            FileKind::Directory => remove_tree(&directory, &entry)?,
+            FileKind::Directory => remove_tree_at(&directory, &entry, depth + 1)?,
             FileKind::Regular if metadata.links == 1 => directory.unlink(&entry)?,
             FileKind::Symlink => directory.unlink(&entry)?,
             _ => return Err(FetchError::UnsafeDirectory),
@@ -372,7 +381,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let root = tempfile::tempdir().unwrap();
             host_fs::set_permissions(root.path(), host_fs::Permissions::from_mode(0o700)).unwrap();
             let directory = Directory::open_anchor(root.path()).unwrap();
             Self { root, directory }
@@ -393,6 +402,71 @@ mod tests {
             offset,
             bytes: bytes.to_vec(),
         }
+    }
+
+    #[test]
+    fn manifest_depth_fits_cleanup_limit() {
+        let deepest = format!("{}file", "d/".repeat(MAX_CLEANUP_DEPTH - 1));
+        assert!(FetchManifest::new(vec![file(&deepest, b"payload")]).is_ok());
+        let too_deep = format!("d/{deepest}");
+        assert!(matches!(
+            FetchManifest::new(vec![file(&too_deep, b"payload")]),
+            Err(FetchError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn cleanup_removes_large_tree_without_following_symlinks() {
+        let fixture = Fixture::new();
+        let stage = fixture.root.path().join("stage");
+        host_fs::create_dir(&stage).unwrap();
+        host_fs::set_permissions(&stage, host_fs::Permissions::from_mode(0o700)).unwrap();
+        for index in 0..2048 {
+            host_fs::write(stage.join(format!("artifact-{index:04}")), b"payload").unwrap();
+        }
+        let outside = fixture.root.path().join("keep");
+        host_fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("link")).unwrap();
+
+        remove_tree(&fixture.directory, OsStr::new("stage")).unwrap();
+        assert!(!stage.exists());
+        assert_eq!(host_fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn cleanup_refuses_hard_links() {
+        let fixture = Fixture::new();
+        let stage = fixture.root.path().join("stage");
+        host_fs::create_dir(&stage).unwrap();
+        host_fs::set_permissions(&stage, host_fs::Permissions::from_mode(0o700)).unwrap();
+        let outside = fixture.root.path().join("keep");
+        host_fs::write(&outside, b"outside").unwrap();
+        host_fs::hard_link(&outside, stage.join("hard-link")).unwrap();
+        assert!(matches!(
+            remove_tree(&fixture.directory, OsStr::new("stage")),
+            Err(FetchError::UnsafeDirectory)
+        ));
+        assert_eq!(host_fs::read(&outside).unwrap(), b"outside");
+        assert!(stage.join("hard-link").is_file());
+    }
+
+    #[test]
+    fn cleanup_refuses_excessive_depth() {
+        let fixture = Fixture::new();
+        let mut nested = fixture.root.path().join("stage");
+        host_fs::create_dir(&nested).unwrap();
+        host_fs::set_permissions(&nested, host_fs::Permissions::from_mode(0o700)).unwrap();
+        for _ in 0..MAX_CLEANUP_DEPTH {
+            nested.push("nested");
+            host_fs::create_dir(&nested).unwrap();
+            host_fs::set_permissions(&nested, host_fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        host_fs::write(nested.join("keep"), b"too deep").unwrap();
+        assert!(matches!(
+            remove_tree(&fixture.directory, OsStr::new("stage")),
+            Err(FetchError::Invalid("cleanup depth"))
+        ));
+        assert_eq!(host_fs::read(nested.join("keep")).unwrap(), b"too deep");
     }
 
     #[test]

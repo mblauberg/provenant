@@ -21,9 +21,9 @@ pub struct Install {
     /// Directory for the installed binary
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub bin_dir: Option<PathBuf>,
-    /// Install harness hooks
-    #[arg(long, value_enum, default_value = "off")]
-    pub hooks: Switch,
+    /// Enable hooks, or remove unchanged owned hooks (omission keeps ownership)
+    #[arg(long, value_enum)]
+    pub hooks: Option<Switch>,
     /// Adopt matching existing files instead of refusing
     #[arg(long)]
     pub adopt_existing: bool,
@@ -81,7 +81,8 @@ pub fn execute_install(
         .collect();
     targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
     targets.adopt_existing = args.adopt_existing;
-    targets.hooks = matches!(args.hooks, Switch::On);
+    targets.hooks = matches!(args.hooks, Some(Switch::On));
+    targets.remove_hooks = matches!(args.hooks, Some(Switch::Off));
     targets.legacy_checkout = args.legacy_checkout.clone();
     targets.validate()?;
     if targets

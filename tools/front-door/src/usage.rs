@@ -2,13 +2,12 @@
 use provenant_cli::{Globals, Stats};
 use provenant_core::Roots;
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::fs::{Directory, FsError, LockMode};
+use provenant_supervisor::fs::{Directory, LockMode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
     io::{Read, Write},
-    path::Path,
 };
 
 pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
@@ -40,32 +39,6 @@ pub fn selected_roots(globals: &Globals) -> Option<Roots> {
     crate::roots::roots(globals, &assets, &project).ok()
 }
 
-fn directory(path: &Path) -> Result<Directory, FsError> {
-    match Directory::open_anchor(path) {
-        Ok(directory) => Ok(directory),
-        Err(error) if error.is_not_found() => {
-            let Some((parent, name)) = path.parent().zip(path.file_name()) else {
-                return Err(error);
-            };
-            let parent = directory(parent)?;
-            match parent.mkdir(name, 0o700) {
-                Ok(()) => {}
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error),
-            }
-            parent.open_verified_directory(name)?.into_anchor()
-        }
-        Err(error) => Err(error),
-    }
-}
-
-// Tests and operators can isolate demand counters from other owner state.
-fn state_path(roots: &Roots) -> std::path::PathBuf {
-    std::env::var_os("PROVENANT_USAGE_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| roots.state.as_path().to_owned())
-}
-
 fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
     let size = || {
         directory
@@ -92,7 +65,7 @@ fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
 
 /// Called by existing MCP workers, never by the transport event loop.
 pub fn maintain_tools(roots: &Roots) {
-    if let Ok(directory) = Directory::open_anchor(&state_path(roots)) {
+    if let Ok(directory) = Directory::open_anchor(roots.state.as_path()) {
         let _ = rotate(&directory, LINE_CAP as u64);
     }
 }
@@ -103,7 +76,8 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     if line.len() > LINE_CAP {
         return None;
     }
-    let directory = directory(&state_path(roots)).ok()?;
+    // Counting never creates the state root: reads and help create no state.
+    let directory = Directory::open_anchor(roots.state.as_path()).ok()?;
     if rotate_log {
         let _ = rotate(&directory, line.len() as u64);
     }
@@ -180,7 +154,7 @@ fn inventory() -> BTreeMap<(String, String), u64> {
 }
 fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Error>> {
     let mut units = inventory();
-    let directory = match Directory::open_anchor(&state_path(roots)) {
+    let directory = match Directory::open_anchor(roots.state.as_path()) {
         Ok(directory) => Some(directory),
         Err(error) if error.is_not_found() => None,
         Err(error) => return Err(error.into()),
