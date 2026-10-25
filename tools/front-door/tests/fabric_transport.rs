@@ -170,6 +170,70 @@ fn hosts_probe_only_the_requested_page() -> Result {
 }
 
 #[test]
+fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let seeded = rig.command(&[
+        "fabric",
+        "events",
+        "note",
+        "--note",
+        "seed store",
+        "--operation-id",
+        "seed-1",
+    ])?;
+    assert_eq!(code(&seeded), 0);
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    db.execute_batch(
+        "CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
+         legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
+         tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
+         skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; \
+         INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D'); \
+         PRAGMA user_version=6;",
+    )?;
+    drop(db);
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let request = json!({
+        "version": 1,
+        "target_host": host,
+        "source_host": host,
+        "agent": "fixture",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "action": {"action":"coordination","input":{
+            "domain":"events","input":{"op":"read","after":null,"limit":10,"wait_ms":null}
+        },"operation_id":null}
+    });
+    // The home pulls events before opening coordination, unlike the CLI read.
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+            "--in-process".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(
+        response["result"],
+        json!({"result":"error","data":{"code":"upgrade_refused","operation_id":null}})
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
