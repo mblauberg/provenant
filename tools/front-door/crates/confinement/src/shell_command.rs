@@ -752,9 +752,9 @@ impl Lexer {
 fn is_signal(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())
 }
-/// A literal positive PID; zero and negatives address process groups.
+/// A literal PID above 1; zero and negatives address process groups, and 1 is init.
 fn is_pid(text: &str) -> bool {
-    text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u32>().is_ok_and(|pid| pid > 0)
+    text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u32>().is_ok_and(|pid| pid > 1)
 }
 /// Durations and counts such as `timeout 5s` stay in wrapper position.
 fn duration(text: &str) -> bool {
@@ -1002,6 +1002,8 @@ mod tests {
             "kill -9",
             "kill -s KILL",
             "kill 0",
+            "kill 1",
+            "sudo kill -9 1",
             "kill -1",
             "kill -- -1",
             "kill 1 -1",
@@ -1081,10 +1083,10 @@ mod tests {
             "while kill -0 \"$PID\"; do sleep 1; done",
             "kill 84322",
             "kill -9 123 456",
-            "kill -TERM 1",
-            "kill -s KILL 1",
-            "kill -s -HUP 1",
-            "sudo kill -HUP 1 && echo ok",
+            "kill -TERM 42",
+            "kill -s KILL 42",
+            "kill -s -HUP 42",
+            "sudo kill -HUP 42 && echo ok",
         ] {
             assert!(check(command).is_ok(), "{command}");
         }
