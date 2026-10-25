@@ -130,9 +130,17 @@ One host-local SQLite database holds all coordination state: bundled rusqlite,
 WAL, `foreign_keys=ON`, `synchronous=FULL`, a 250 ms busy timeout per attempt
 inside the request deadline, a private 0700 root and 0600 database files, and
 numbered embedded migrations (a future `user_version` is refused before any
-mutation). Symlinked state components are refused. `-wal`/`-shm` companions must
-be private regular files with one link; a zero-link observation is re-read,
-never accepted. A connection belongs to one worker.
+mutation). Symlinked state components are refused. The database and any `-wal`,
+`-shm` or `-journal` companions must be private regular files with one link,
+owned by the effective UID; a zero-link observation is re-read, never accepted.
+A connection belongs to one worker.
+
+SQLite can create a rollback journal while `PRAGMA journal_mode=WAL` changes
+the database header, before Fabric runs migrations. Migrations and transaction
+rollback then use WAL. Fabric has no read-only open: even reads open a writable
+connection and check migrations. Like run's writable store, Fabric validates
+journal metadata and allows a safe journal for recovery. Run's disk-report-only
+refusal of non-empty journals does not apply here.
 
 | Table | Meaning |
 |---|---|

@@ -5,6 +5,10 @@ Supply a validated, local-filesystem state root, a core clock, cancellation toke
 and bounded `WaitBudget` in `Request`. The store starts no threads. It creates
 private directories and files through supervisor, refuses observed symlinks and
 non-private components, and uses SQLite WAL, FULL sync and foreign keys.
+The database and any `-wal`, `-shm` or `-journal` companions must be private
+regular files with one link, owned by the effective UID. Zero-link observations
+are re-read. SQLite can create a rollback journal while switching to WAL before
+migrations, so a journal with safe metadata is allowed for recovery.
 
 `send` freezes a typed message and its explicit recipients. The message ID is
 its idempotency key: an identical replay succeeds, changed content conflicts.

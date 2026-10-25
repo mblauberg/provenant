@@ -380,7 +380,8 @@ fn companion(
     request: &Request<'_>,
     mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
 ) -> Result<()> {
-    // Mirrored in crates/fabric-store/src/db.rs::companion; keep unlink handling in sync.
+    // Mirrored in crates/fabric-store/src/db.rs::companion; keep metadata checks
+    // and unlink handling in sync.
     request.wait(|| match metadata() {
         Ok(m)
             if m.kind == FileKind::Regular
