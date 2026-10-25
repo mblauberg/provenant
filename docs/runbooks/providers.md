@@ -3,7 +3,7 @@
 Per-adapter launch notes. All five adapters (Claude, Codex, Cursor, Agy and
 OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
-to inspect the catalogue and current availability.
+to inspect the catalogue; readiness is decided at dispatch.
 
 ## OpenCode
 

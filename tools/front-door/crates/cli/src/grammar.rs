@@ -457,9 +457,6 @@ pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
     pub id: Vec<RunId>,
-    /// Abandon uncertain custody (not available in this build)
-    #[arg(long, requires = "id", hide = true)]
-    pub abandon_uncertain: bool,
 }
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {

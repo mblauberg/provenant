@@ -64,19 +64,6 @@ macro_rules! adapter {
                     crate::AccountDetection::Unknown
                 })
             }
-            fn preflight(
-                &self,
-                _: &crate::PreflightInput,
-            ) -> Result<crate::PreflightPlan, crate::ProviderError> {
-                Err(crate::ProviderError::UnsupportedPolicy)
-            }
-            fn decode_preflight(
-                &self,
-                plan: &crate::PreflightPlan,
-                _: &[u8],
-            ) -> Result<crate::AvailabilityRecord, crate::ProviderError> {
-                match *plan {}
-            }
             fn prepare(
                 &self,
                 input: crate::PrepareInput<'_>,

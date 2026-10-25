@@ -259,6 +259,7 @@ fn is_definitive_refusal(code: &str) -> bool {
             | "conflict"
             | "stale_fence"
             | "peer_version"
+            | "upgrade_refused"
             | "home_unavailable"
     )
 }

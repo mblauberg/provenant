@@ -3,7 +3,7 @@ use crate::ConfigError;
 use provenant_core::{CancelToken, Clock, ProjectId, Roots, WaitBudget};
 use provenant_supervisor::clock::SystemClock;
 use provenant_supervisor::fs::{
-    FileKind, LockMode, Metadata, PublishMode, SafeDir, SafeFs, effective_uid,
+    FileKind, LockMode, Metadata, PublishMode, SafeDir, SafeFs, effective_uid, entry_names,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -130,8 +130,7 @@ fn remove_stale_stages(projects: &dyn SafeDir) -> Result<(), ConfigError> {
 fn remove_stale_stage(projects: &dyn SafeDir, stage: &OsStr) -> Result<(), ConfigError> {
     let directory = projects.open_verified_directory(stage)?;
     verify_directory(&*directory, true)?;
-    for entry in directory.entries()? {
-        let entry = entry?;
+    for entry in entry_names(directory.as_ref(), MAX_PROJECTS)? {
         if entry != OsStr::new(RECORD) && !is_staging_record(&entry) {
             return Err(ConfigError::InvalidProjectBinding);
         }
@@ -543,6 +542,12 @@ mod tests {
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
+        for index in 0..1024 {
+            let name = format!(".project-.provenant-staging.{index:024x}.tmp");
+            let file = stage.join(name);
+            fs::write(&file, b"partial staging file").unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
         fs::create_dir_all(location.common_dir()).unwrap();

@@ -84,9 +84,8 @@ Global options are accepted before or after the subcommand:
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
-Environment inputs are `PROVENANT_STATE_DIR`, `PROVENANT_AGENT_LABEL`,
-`PROVENANT_LANDING_TOKEN` for landing authentication and
-`PROVENANT_USAGE_STATE_DIR` for usage-state lookup. A development binary that
+Environment inputs are `PROVENANT_STATE_DIR`, `PROVENANT_AGENT_LABEL` and
+`PROVENANT_LANDING_TOKEN` for landing authentication. A development binary that
 is not installed also needs an absolute `PROVENANT_ROOT` for its assets.
 Provider and harness variables pass through as those tools define them.
 
