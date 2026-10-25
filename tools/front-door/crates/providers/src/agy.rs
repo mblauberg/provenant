@@ -1,20 +1,136 @@
-use crate::{ProviderError, ProviderEvent as E, stream::wire};
+use crate::launch::{
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations,
+};
+use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
+use provenant_confinement::permissions::{
+    AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
+};
 use serde::Deserialize;
+use std::ffi::OsString;
 pub struct Agy;
-crate::adapter!(Agy, "agy", crate::launch::unrecorded);
+crate::adapter!(Agy, "agy", prepare);
 const MODEL_ON_WIRE: bool = true;
+
+const OBSERVATIONS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/providers/agy/confinement.json"
+));
+
+/// The CLI's own turn limit; the supervisor's deadline is the real bound.
+const PRINT_TIMEOUT: &str = "900s";
+const SECURITY: &str = "/usr/bin/security";
+const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
+
+/// Agy runs with the attempt's private state as `HOME`, so it sees none of the
+/// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
+/// sidecars or knowledge: its state lives and dies in the private home. Its
+/// sign-in is in the login keychain, so the private home links only that one
+/// file, read-only. Headless mode auto-denies every tool permission it cannot
+/// prompt for; writers add `--mode accept-edits`, which approves file edits
+/// only, so commands stay denied. Its own sandbox cannot nest inside ours.
+fn prepare(
+    input: &PrepareInput<'_>,
+    access: Access,
+    session: Session,
+    stream: StreamState,
+) -> Result<LaunchSpec, ProviderError> {
+    let plan = input.confined.permissions();
+    // Agy has no signed-in identity source: a registered account is unsupported.
+    if plan.selected_authentication.as_deref() != Some("keychain") || input.account.is_some() {
+        return Err(ProviderError::UnsupportedPolicy);
+    }
+    input.prompt.check_argv()?;
+    let home = &plan
+        .private_state
+        .as_ref()
+        .ok_or(ProviderError::UnsupportedPolicy)?
+        .path;
+    let keychain = input.home.join(KEYCHAIN);
+    let mut argv: Vec<OsString> = [
+        input.executable.as_os_str(),
+        "--output-format".as_ref(),
+        "stream-json".as_ref(),
+        "--disable-slash-commands".as_ref(),
+        "--print-timeout".as_ref(),
+        PRINT_TIMEOUT.as_ref(),
+    ]
+    .map(OsString::from)
+    .to_vec();
+    if access == Access::WorktreeWrite {
+        argv.extend(["--mode".into(), "accept-edits".into()]);
+    }
+    if session == Session::Resume {
+        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        argv.extend(["--conversation".into(), continuation.session().into()]);
+    }
+    argv.extend(["--model".into(), input.route.model.as_str().into()]);
+    if let Some(effort) = &input.route.effort {
+        argv.extend(["--effort".into(), effort.into()]);
+    }
+    argv.extend(["--print".into(), input.prompt.text().into()]);
+
+    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    for (key, value) in &mut env {
+        if key == "HOME" {
+            *value = home.into();
+        }
+    }
+    let keychains = home.join("Library/Keychains");
+    Ok(LaunchSpec {
+        argv,
+        env,
+        stdin: Stdin::Null,
+        secret_input: None,
+        cwd: input.cwd.to_owned(),
+        setup: vec![
+            SetupStep::CreateDir(keychains.clone()),
+            SetupStep::Symlink {
+                link: keychains.join("login.keychain-db"),
+                target: keychain.clone(),
+            },
+        ],
+        profile: ProviderProfile {
+            spec: ProviderProfileSpec {
+                // The keyring library reads its token through Apple's `security`.
+                process_executables: vec![exact(input.executable), exact(SECURITY)],
+                allow_process_fork: true,
+                authentication: vec![AuthenticationProfile {
+                    mechanism: "keychain".into(),
+                    roots: vec![exact(&keychain)],
+                    in_place_writes: Vec::new(),
+                }],
+                provider_api: vec![NetworkEndpoint {
+                    address: "*".into(),
+                    port: 443,
+                }],
+                // Its agent runs behind a local server on a loopback port.
+                loopback_server: true,
+                ..ProviderProfileSpec::default()
+            },
+            observations: observations(OBSERVATIONS, access)?,
+        },
+        stream,
+    })
+}
 crate::quota_source!(Agy, "agy");
 #[derive(Deserialize)]
 #[serde(tag = "event")]
 enum Event {
     #[serde(rename = "init")]
-    Init { conversation_id: String },
+    Init {
+        conversation_id: String,
+        init: InitWire,
+    },
     #[serde(rename = "step_update")]
     Step { step_update: Step },
     #[serde(rename = "result")]
     Result { result: ResultWire },
     #[serde(other)]
     Other,
+}
+#[derive(Deserialize)]
+struct InitWire {
+    model: String,
 }
 #[derive(Deserialize)]
 struct Step {
@@ -37,7 +153,10 @@ struct Usage {
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
-        Event::Init { conversation_id } => vec![E::Session(conversation_id)],
+        Event::Init {
+            conversation_id,
+            init,
+        } => vec![E::Session(conversation_id), E::Model(init.model)],
         Event::Step { step_update } => {
             let mut events = vec![E::Session(step_update.conversation_id)];
             if step_update.step_type == "agent_response"

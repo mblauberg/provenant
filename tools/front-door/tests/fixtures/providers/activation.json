@@ -143,44 +143,40 @@
       "adapter": "agy",
       "access_mode": "read_only",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "agy-success",
-        "agy-error"
+        "agy-live-read_only-fresh"
       ]
     },
     {
       "adapter": "agy",
       "access_mode": "read_only",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "agy-success",
-        "agy-error"
+        "agy-live-read_only-resume"
       ]
     },
     {
       "adapter": "agy",
       "access_mode": "worktree_write",
       "session_mode": "fresh",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "agy-success",
-        "agy-error"
+        "agy-live-worktree_write-fresh"
       ]
     },
     {
       "adapter": "agy",
       "access_mode": "worktree_write",
       "session_mode": "resume",
-      "enabled": false,
-      "reason": "missing_complete_invocation_and_confinement_recording",
+      "enabled": true,
+      "reason": "live_confined_recording",
       "capture_refs": [
-        "agy-success",
-        "agy-error"
+        "agy-live-worktree_write-resume"
       ]
     },
     {
