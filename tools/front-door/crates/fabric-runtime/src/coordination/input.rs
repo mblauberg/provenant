@@ -2,11 +2,9 @@ use super::facade::{
     GraphInput, HostsInput, IdentityInput, OutputInput, RoutePreference, RunInput, SubmitInput,
 };
 use super::{
-    ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, MessageRef, TaskInput, TaskRef,
-    TaskState, WorkScope,
+    ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, TaskInput, TaskState, WorkScope,
 };
 use provenant_core::WaitTransport;
-use provenant_fabric_store::LegacyRef;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -140,34 +138,6 @@ fn artifacts(values: &[ArtifactRef], path: &str) -> Result<(), InputError> {
     Ok(())
 }
 
-fn legacy(reference: &LegacyRef, path: &str) -> Result<(), InputError> {
-    bounded_text(
-        &reference.source,
-        &format!("{path}.source"),
-        MAX_REFERENCE_BYTES,
-    )?;
-    bounded_text(
-        &reference.project,
-        &format!("{path}.project"),
-        MAX_REFERENCE_BYTES,
-    )?;
-    bounded_text(&reference.id, &format!("{path}.id"), MAX_REFERENCE_BYTES)
-}
-
-fn message_ref(reference: &MessageRef, path: &str) -> Result<(), InputError> {
-    if let MessageRef::Legacy { reference } = reference {
-        legacy(reference, &format!("{path}.reference"))?;
-    }
-    Ok(())
-}
-
-fn task_ref(reference: &TaskRef, path: &str) -> Result<(), InputError> {
-    if let TaskRef::Legacy { reference } = reference {
-        legacy(reference, &format!("{path}.reference"))?;
-    }
-    Ok(())
-}
-
 fn path_text(path: &std::path::Path, field_path: &str) -> Result<(), InputError> {
     let value = path.to_str().ok_or_else(|| field(field_path))?;
     bounded_text(value, field_path, MAX_ARTIFACT_PATH_BYTES)
@@ -218,8 +188,6 @@ impl ValidateInput for MailInput {
                 recipients,
                 body,
                 artifacts: values,
-                reply_to,
-                task,
                 ..
             } => {
                 if recipients.is_empty()
@@ -233,12 +201,6 @@ impl ValidateInput for MailInput {
                 }
                 task_text(body, "body")?;
                 artifacts(values, "artifacts")?;
-                if let Some(reference) = reply_to {
-                    message_ref(reference, "reply_to")?;
-                }
-                if let Some(reference) = task {
-                    task_ref(reference, "task")?;
-                }
                 Ok(())
             }
             Self::Read { after, limit } => {
@@ -470,7 +432,7 @@ mod tests {
     use super::super::facade::{OutputInput, RunInput, SubmitInput};
     use super::super::{
         ClaimInput, CoordinationApi, CoordinationError, CoordinationService, LandingInput,
-        MailInput, TaskInput,
+        TaskInput,
     };
     use provenant_core::{
         ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
@@ -567,18 +529,6 @@ mod tests {
             }),
             "artifact.path.path",
         );
-        for name in ["source", "project", "id"] {
-            let mut reference = json!({"source":"s","project":"p","id":"i"});
-            reference[name] = json!("r".repeat(1_025));
-            rejects::<MailInput>(
-                json!({
-                    "op":"send","recipients":["00000000000000000000000000000001"],
-                    "kind":"note","body":"ok","artifacts":[],
-                    "reply_to":{"scope":"legacy","reference":reference}
-                }),
-                &format!("reply_to.reference.{name}"),
-            );
-        }
         rejects::<LandingInput>(
             json!({
                 "op":"verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",

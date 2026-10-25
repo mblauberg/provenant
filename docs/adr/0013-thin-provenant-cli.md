@@ -165,3 +165,8 @@ The front door adds no lease logic, retry or fallback. It exists so a
 repository's landing script has a stable command instead of speaking MCP to
 an internal server path. The [landing lease
 runbook](../runbooks/landing-lease.md) states the contract.
+
+*Note, 2026-10-26:* the `lease` verb is no longer a command. Agents acquire a
+lease through the `fabric_landing` MCP tool, and `provenant fabric landing`
+remains for `push` and `reconcile`, and for terminals without MCP. The runbook
+states the current contract.

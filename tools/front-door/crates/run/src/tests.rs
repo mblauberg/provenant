@@ -158,6 +158,90 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     Ok(())
 }
 #[test]
+fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
+    use provenant_supervisor::fs::LockMode;
+    use std::ffi::OsStr;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let store = RunStore::open(&context, &call(&clock, &cancel))?;
+    let _held = store
+        .root
+        .try_lock(OsStr::new("run.sqlite3.lock"), LockMode::Exclusive)?;
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::nonblocking(MonoTime::from_micros(0)),
+        cancel: &cancel,
+    };
+    let contended = matches!(
+        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+        Err(RunError::Contention)
+    );
+    cancel.cancel();
+    let cancelled = matches!(
+        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+        Err(RunError::Cancelled)
+    );
+    assert_eq!((contended, cancelled), (true, true));
+    Ok(())
+}
+
+#[test]
+fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
+    use provenant_core::Clock;
+    use provenant_supervisor::clock::SystemClock;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 1)?,
+        cancel: &cancel,
+    };
+    let writer = RunStore::open(&context, &request)?;
+    writer.db.execute_batch("BEGIN IMMEDIATE")?;
+    let reader = RunStore::open(&context, &request)?;
+    assert!(!reader.has_runs(&request)?);
+    writer.db.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn concurrent_first_opens_create_a_ready_store() -> TestResult {
+    // Repeated fresh directories exercise both file creation and WAL setup.
+    for _ in 0..16 {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| -> std::result::Result<(), String> {
+                        let clock = clock();
+                        let cancel = CancelToken::new();
+                        let call = call(&clock, &cancel);
+                        barrier.wait();
+                        let store = RunStore::open(&context, &call)
+                            .map_err(|error| format!("open: {error:?}"))?;
+                        assert!(!store.has_runs(&call).map_err(|error| error.to_string())?);
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().map_err(|_| "open worker panicked")??;
+            }
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -843,6 +927,30 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
+fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    let spacing: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(spacing, 0);
+    Ok(())
+}
+
+#[test]
 fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -852,13 +960,60 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     // Shape the store exactly as version 1 left it.
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("DROP TABLE cancellations; PRAGMA user_version=1;")?;
+        .execute_batch(
+            "DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+        )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
     store.bind_cancel(&op, "attempt", &call)?;
     assert!(matches!(
         store.bind_cancel(&op, "other", &call),
         Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 2 left it, with the unused table back.
+    RunStore::open(&context, &call)?.db.execute_batch(
+        "CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+    )?;
+    let store = RunStore::open(&context, &call)?;
+    let remaining: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(remaining, 0);
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    Ok(())
+}
+
+#[test]
+fn a_store_newer_than_version_three_is_refused() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("PRAGMA user_version=4;")?;
+    assert!(matches!(
+        RunStore::open(&context, &call),
+        Err(RunError::Version(4))
     ));
     Ok(())
 }

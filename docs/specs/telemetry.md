@@ -127,9 +127,9 @@ an API-equivalent estimate, not a bill.
 
 ### Local demand counters
 
-The binary edge writes a best-effort `usage.jsonl` under the state root, shared
-by CLI completion and the Fabric MCP transport. Records have kind `cli.verb`
-or `mcp.tool`, the canonical verb or installed tool name (`unknown` for
+The binary edge writes a best-effort `usage.jsonl` under an existing state root
+(it never creates one), shared by CLI completion and the Fabric MCP transport.
+Records have kind `cli.verb` or `mcp.tool`, the canonical verb or installed tool name (`unknown` for
 unrecognised tools), a timestamp, a duration in milliseconds, and the CLI exit
 code or MCP outcome. Argument, prompt and result text never enter the log, and
 skill loads and scripts are not counted.
@@ -145,7 +145,6 @@ discard the event without changing the call.
 tolerates a missing backup, then sorts units by call count. The CLI grammar and
 MCP catalogue supply zero-call rows. Retention is bounded by size, not days, so
 counts are observed demand, not proof of inactivity beyond the retained logs.
-`PROVENANT_USAGE_STATE_DIR` isolates the counters from other state.
 
 ### Quota display
 
@@ -209,7 +208,7 @@ makes a count approximate and never fails the command.
 - `crates/telemetry/src/tests.rs` covers grouping, the attempt, group and key bounds, overflow and exact rounding, and
   missingness against unknown prices and usage.
 - `tools/front-door/tests/usage.rs` covers the demand log: record kinds,
-  rotation, torn lines and isolation through `PROVENANT_USAGE_STATE_DIR`.
+  rotation and torn lines.
 - `tools/front-door/tests/quota.rs` covers `quota show`, `display` and `tick`.
 - Evaluations of two configurations run both arms through run, then read
   `telemetry stats --since START --json` once for the project and window.

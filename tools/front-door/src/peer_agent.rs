@@ -272,7 +272,10 @@ fn listen(state: &Path) -> Result<UnixListener, AgentError> {
 }
 
 fn serve_state(state: &Path) -> Result<(), AgentError> {
-    let listener = listen(state)?;
+    serve_listener(listen(state)?, state)
+}
+
+fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError> {
     let program = std::env::current_exe()?;
     let cwd = crate::roots::home().map_err(|error| io::Error::other(error.to_string()))?;
     let active = Arc::new(AtomicUsize::new(0));
@@ -305,6 +308,11 @@ fn serve_state(state: &Path) -> Result<(), AgentError> {
 /// The LaunchAgent's long-running entrypoint, `fabric peer-agent`.
 pub fn serve(globals: &provenant_cli::Globals) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err(
+                provenant_fabric_runtime::coordination::CoordinationError::LaneMutation.into(),
+            );
+        }
         let home = crate::roots::home()?;
         let assets = crate::roots::product_root()?;
         let state = crate::roots::roots(globals, &assets, &home)?.state;
@@ -330,8 +338,7 @@ fn xml(text: &str) -> String {
 }
 
 /// The agent's property list. `AbandonProcessGroup` keeps lanes running when
-/// launchd restarts the agent; `PATH` is the installer's, so the relayed
-/// request finds the same provider executables as an SSH session would.
+/// launchd restarts the agent. Composition supplies a fixed absolute PATH.
 pub fn render(program: &Path, state: &Path, path: &OsStr) -> Result<String, AgentError> {
     let program = xml(utf8(program)?);
     let log = xml(utf8(&directory(state).join(LOG))?);
@@ -371,7 +378,7 @@ pub fn render(program: &Path, state: &Path, path: &OsStr) -> Result<String, Agen
     ))
 }
 
-fn plist(home: &Path) -> PathBuf {
+pub fn plist(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{LABEL}.plist"))
 }
@@ -396,28 +403,13 @@ fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError>
     ))
 }
 
-/// Write the agent's plist and (re)start it in this user's GUI domain. Repeat
-/// runs restart the agent so it serves the newly installed binary.
-fn bootstrap(program: &Path, state: &Path, home: &Path) -> Result<(), AgentError> {
-    let rendered = render(
-        program,
-        state,
-        &std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into()),
-    )?;
+/// Start the receipt-owned plist after managed publication has succeeded.
+fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(directory(state))?;
     let plist = plist(home);
-    if let Some(parent) = plist.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let changed = fs::read(&plist).ok().as_deref() != Some(rendered.as_bytes());
-    if changed {
-        let staged = plist.with_extension("plist.tmp");
-        fs::write(&staged, &rendered)?;
-        fs::rename(&staged, &plist)?;
-    }
     let domain = format!("gui/{}", provenant_supervisor::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = launchctl(&["print".as_ref(), service.as_ref()], home)?.0;
@@ -475,9 +467,9 @@ impl Installed {
 /// The installer's step. Only an install for this account's home and default
 /// state root owns the single per-user agent, so test and worktree installs
 /// with their own roots leave it alone.
-pub fn install(program: &Path, state: &Path, home: &Path) -> Installed {
+pub fn eligible(state: &Path, home: &Path) -> bool {
     let Ok(home) = fs::canonicalize(home) else {
-        return Installed::Skipped;
+        return false;
     };
     let home = home.as_path();
     let account_home =
@@ -489,14 +481,134 @@ pub fn install(program: &Path, state: &Path, home: &Path) -> Installed {
         || account_home.as_deref() != Some(home)
         || state != home.join(".local/share/provenant/v1")
     {
+        return false;
+    }
+    true
+}
+
+pub fn install(state: &Path, home: &Path, changed: bool) -> Installed {
+    if !eligible(state, home) {
         return Installed::Skipped;
     }
-    match bootstrap(program, state, home) {
+    match bootstrap(state, home, changed) {
         Ok(()) => Installed::Started,
         Err(error) => Installed::Failed {
             message: error.to_string(),
         },
     }
+}
+
+/// Only fixed system directories, the install bin and known executable parents
+/// enter the agent environment. Relative, empty and missing directories vanish.
+fn sanitised_path(bin: &Path, executables: &[PathBuf]) -> Result<OsString, AgentError> {
+    let mut directories: Vec<PathBuf> = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    for directory in std::iter::once(bin).chain(
+        executables
+            .iter()
+            .filter_map(|path| path.is_absolute().then(|| path.parent()).flatten()),
+    ) {
+        if directory.is_absolute()
+            && (directory == bin || directory.is_dir())
+            && !directory.as_os_str().as_encoded_bytes().contains(&b':')
+            && !directories.iter().any(|existing| existing == directory)
+        {
+            directories.push(directory.to_path_buf());
+        }
+    }
+    std::env::join_paths(directories).map_err(|error| io::Error::other(error).into())
+}
+
+fn provider_executables(search: &OsStr) -> Vec<PathBuf> {
+    let mut executables = Vec::new();
+    // Resolve only through absolute PATH directories. Never turn a relative
+    // shell entry into an absolute agent search directory by canonicalising it.
+    for name in ["claude", "codex"] {
+        if let Some(program) = std::env::split_paths(search)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file() && provenant_supervisor::sys::is_executable(path))
+        {
+            executables.push(program);
+        }
+    }
+    executables
+}
+
+pub fn install_plist(program: &Path, state: &Path) -> Result<Vec<u8>, AgentError> {
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    let mut executables = provider_executables(&search);
+    executables.extend(crate::roots::git_binary());
+    let bin = program
+        .parent()
+        .ok_or_else(|| AgentError::Path(program.into()))?;
+    Ok(render(program, state, &sanitised_path(bin, &executables)?)?.into_bytes())
+}
+
+fn historical_plist(bytes: &[u8], program: &Path, state: &Path) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let (_, value) = text.split_once("<key>PATH</key>\n    <string>")?;
+    let (path, _) = value.split_once("</string>")?;
+    let path = path
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&");
+    (render(program, state, OsStr::new(&path)).ok()?.as_bytes() == bytes).then(|| bytes.to_vec())
+}
+
+/// Recognise only the historical template for the validated installed binary
+/// and this state root. Read through held no-follow directory capabilities.
+pub fn previous_plist(
+    program: &Path,
+    state: &Path,
+    home: &Path,
+) -> Result<Option<Vec<u8>>, AgentError> {
+    let path = plist(home);
+    let parent = path
+        .parent()
+        .ok_or_else(|| AgentError::Path(path.clone()))?;
+    let dir = match provenant_config::private_directory(
+        parent,
+        false,
+        &provenant_supervisor::fs::LocalFs,
+    ) {
+        Ok(dir) => dir,
+        Err(provenant_config::InstallError::Fs(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(io::Error::other(error).into()),
+    };
+    let file = match dir.open_read(OsStr::new("dev.provenant.peer.plist")) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(io::Error::other(error).into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 {
+        return Ok(None);
+    }
+    Ok(historical_plist(&bytes, program, state))
+}
+
+/// The managed-file owner calls this only for an exact plist match, under its
+/// install lock. A missing service needs no bootout; a failure keeps the plist.
+pub fn stop(home: &Path) -> Result<(), AgentError> {
+    stop_with(home, launchctl)
+}
+
+fn stop_with(
+    home: &Path,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<(), AgentError> {
+    let service = format!("gui/{}/{LABEL}", provenant_supervisor::fs::effective_uid());
+    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
+        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
+        if !ok {
+            return Err(AgentError::Launchctl("bootout", error));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -527,6 +639,168 @@ pub fn status(state: &Path, home: &Path) -> Status {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn historical_plist_recognises_current_release_golden_bytes() {
+        // A plist written by the released installer, with only HOME rewritten.
+        // Keep these bytes independent of render(), including the final newline.
+        let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.provenant.peer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/example/.local/bin/provenant</string>
+    <string>fabric</string>
+    <string>peer-agent</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/example/.local/bin:/Users/example/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/Applications/Obsidian.app/Contents/MacOS</string>
+    <key>PROVENANT_STATE_DIR</key>
+    <string>/Users/example/.local/share/provenant/v1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/example/.local/share/provenant/v1/peer-agent/agent.log</string>
+</dict>
+</plist>
+"#;
+        assert_eq!(
+            super::historical_plist(
+                bytes,
+                std::path::Path::new("/Users/example/.local/bin/provenant"),
+                std::path::Path::new("/Users/example/.local/share/provenant/v1"),
+            ),
+            Some(bytes.to_vec())
+        );
+    }
+
+    #[test]
+    fn historical_plist_requires_the_exact_template_and_known_binary_and_state() {
+        use super::*;
+        let program = Path::new("/home/test/.local/bin/provenant");
+        let state = Path::new("/home/test/.local/share/provenant/v1");
+        let rendered = render(program, state, OsStr::new(":relative:/a&b:/c<d:/e>f")).unwrap();
+        assert_eq!(
+            historical_plist(rendered.as_bytes(), program, state),
+            Some(rendered.as_bytes().to_vec())
+        );
+        assert!(historical_plist(format!("{rendered}\n").as_bytes(), program, state).is_none());
+        assert!(
+            historical_plist(rendered.as_bytes(), Path::new("/foreign/provenant"), state).is_none()
+        );
+        assert!(
+            historical_plist(rendered.as_bytes(), program, Path::new("/foreign/state")).is_none()
+        );
+    }
+
+    #[test]
+    fn provider_path_preserves_a_symlinked_command_name_and_drops_other_search_entries() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("tools");
+        fs::create_dir(&bin).unwrap();
+        let target = root.path().join("version-1.2.3");
+        fs::write(&target, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&target, bin.join("claude")).unwrap();
+        let search = OsString::from(format!(
+            ":relative:{}:{}",
+            root.path().display(),
+            bin.display()
+        ));
+        let tools = provider_executables(&search);
+        assert_eq!(tools, vec![bin.join("claude")]);
+        let path = sanitised_path(Path::new("/install/bin"), &tools).unwrap();
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert!(entries.contains(&bin));
+        assert!(!entries.contains(&root.path().to_path_buf()));
+        assert!(entries.iter().all(|entry| entry.is_absolute()));
+    }
+
+    #[test]
+    fn agent_path_keeps_only_absolute_known_directories_in_fixed_order() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("new-bin");
+        let providers = root.path().join("providers");
+        fs::create_dir(&providers).unwrap();
+        let executables = [
+            providers.join("claude"),
+            providers.join("codex"),
+            PathBuf::from("relative/bin/claude"),
+            PathBuf::from("codex"),
+            root.path().join("absent/git"),
+            PathBuf::from("/usr/bin/git"),
+        ];
+        let path = sanitised_path(&bin, &executables).unwrap();
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/usr/sbin"),
+                PathBuf::from("/sbin"),
+                bin,
+                providers,
+            ]
+        );
+        assert_eq!(
+            sanitised_path(Path::new(""), &[]).unwrap(),
+            OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        assert_eq!(
+            sanitised_path(Path::new("relative"), &[]).unwrap(),
+            OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+    }
+
+    #[test]
+    fn uninstall_boots_out_a_loaded_agent_and_reports_failure() {
+        use super::*;
+        let home = Path::new("/home/test");
+        let mut calls = Vec::new();
+        stop_with(home, |args, cwd| {
+            assert_eq!(cwd, home);
+            calls.push(
+                args.iter()
+                    .map(|arg| arg.to_os_string())
+                    .collect::<Vec<_>>(),
+            );
+            Ok((true, String::new()))
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0], "print");
+        assert_eq!(calls[1][0], "bootout");
+        assert!(
+            calls[1][1]
+                .to_string_lossy()
+                .ends_with("/dev.provenant.peer")
+        );
+        let mut calls = 0;
+        stop_with(home, |_, _| {
+            calls += 1;
+            Ok((false, String::new()))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(matches!(
+            stop_with(home, |args, _| {
+                Ok((args[0] == OsStr::new("print"), "denied".into()))
+            }),
+            Err(AgentError::Launchctl("bootout", _))
+        ));
+    }
+
     #[test]
     fn forward_falls_back_only_when_no_agent_accepts() {
         use super::*;
@@ -571,27 +845,18 @@ mod tests {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().to_path_buf();
+        // Listen before serving, so no readiness probe takes a transient slot.
+        let listener = listen(&state).unwrap();
         let server_state = state.clone();
         std::thread::spawn(move || {
-            let _ = serve_state(&server_state);
+            let _ = serve_listener(listener, &server_state);
         });
         let socket = directory(&state).join(SOCKET);
-        for _ in 0..200 {
-            if UnixStream::connect(&socket).is_ok() {
-                break;
-            }
-            std::thread::park_timeout(Duration::from_millis(25));
-        }
-        // Hold the cap with connections that never finish their request.
+        // Hold the cap with connections that never finish their request. The
+        // server accepts its queue in order, so each later request is refused.
         let held: Vec<UnixStream> = (0..CONCURRENT)
             .map(|_| UnixStream::connect(&socket).unwrap())
             .collect();
-        for _ in 0..200 {
-            if forward(&state, b"x").unwrap() == Forward::Busy {
-                break;
-            }
-            std::thread::park_timeout(Duration::from_millis(25));
-        }
         assert_eq!(forward(&state, b"x").unwrap(), Forward::Busy);
         // A request beyond the socket buffers must not lose the busy reply.
         assert_eq!(

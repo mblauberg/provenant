@@ -77,7 +77,7 @@ default. `--state-dir` or `PROVENANT_STATE_DIR` selects another absolute root.
 | `runs/`, `run.sqlite3` | `run`: runs, attempts and output |
 | `worktrees/` | `supervisor` and `confinement`: writer leases and reservations |
 | `fabric/` | `fabric-store`: the Fabric database |
-| `quota/`, `routing/`, `workflow/projects/<id>/` | Their owning crates |
+| `quota/`, `workflow/projects/<id>/` | Their owning crates |
 | `usage.jsonl` | Local usage counters for `telemetry stats --usage` |
 
 Fabric MCP reaches the same run service as the CLI through the Fabric runtime.
@@ -324,10 +324,10 @@ decisions. `provenant-run` owns dispatch and records the resolved route and
 provider result. `provenant-providers` supplies the Claude, Codex, Cursor, Agy,
 and OpenCode adapters.
 
-`provenant route list` shows pool membership, weights, pacing, and readiness.
-`provenant route set`, `remove`, and `reset` manage pool overrides;
-`provenant route pacing` selects a provider policy (`pace`, `spend`, or
-`max`). Ready candidates are selected using their configured weight and
+`provenant route list` shows pool membership and configured weights; it does
+not probe, and pacing and readiness apply at dispatch. `provenant route set`,
+`remove`, and `reset` manage pool overrides; `provenant route pacing` selects
+a provider policy (`pace`, `spend`, or `max`). Ready candidates are selected using their configured weight and
 pacing factor. Availability and quota eligibility are checked before
 dispatch. Route names and model identifiers are explicit; the router does not
 infer a route from a task class or synonym.

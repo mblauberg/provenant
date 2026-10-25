@@ -2,7 +2,7 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -31,29 +31,7 @@ pub enum ProviderError {
     CredentialUnavailable,
 }
 
-/// No preflight probe form is implemented yet. An uninhabited plan cannot be
-/// forged or accidentally executed.
-#[derive(Debug)]
-pub enum PreflightPlan {}
-
-pub struct PreflightInput {
-    pub route: ResolvedRoute,
-    pub observed_unix_seconds: i64,
-}
-
-/// Redacted cache projection; raw provider diagnostics are never persisted here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreflightFailure {
-    Disabled,
-    MissingExecutable,
-    AuthRequired,
-    UnsupportedVersion,
-    MalformedProtocol,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
     pub adapter: String,
@@ -63,7 +41,6 @@ pub struct AvailabilityRecord {
     pub catalogue_revision: String,
     pub account_key: Option<String>,
     pub observed_models: Vec<String>,
-    pub last_preflight_error: Option<PreflightFailure>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,
 }
@@ -247,12 +224,6 @@ pub(crate) fn verify_lineage(
 pub trait Adapter: Sync {
     fn id(&self) -> &'static str;
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
-    fn preflight(&self, input: &PreflightInput) -> Result<PreflightPlan, ProviderError>;
-    fn decode_preflight(
-        &self,
-        plan: &PreflightPlan,
-        capture: &[u8],
-    ) -> Result<AvailabilityRecord, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
     /// If a later line fails, events from earlier lines in that call are

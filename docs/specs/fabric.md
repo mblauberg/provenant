@@ -80,11 +80,29 @@ label shares one read cursor and never competes for claims. Labels do not prove
 a model family. Message, task, run and operation IDs are opaque 128-bit hex
 values.
 
+Each lane's provider environment and generated MCP entry pin
+`PROVENANT_AGENT_LABEL` to `lane-<AttemptId>`, giving it a separate actor and
+inbox from the chair. The
+MCP edge captures the host-set lane environment at startup. A positive
+`PROVENANT_LANE_DEPTH` or a present `PROVENANT_RUN_STATE_DIR` refuses
+coordination mutations with `lane_coordination_refused`: mail send and
+mark-read, task changes, event notes, claims and landing leases. The CLI
+coordination edge also refuses these mutations and landing push or reconcile
+under that environment. `fabric peer` and `fabric peer-agent` refuse to start
+there at all, because a peer frame names its own agent. Reads and child-store
+run submit, cancel and output remain available within the existing child
+policy.
+
+This guards the tool surface. Lanes still have direct write access to
+`fabric.sqlite3` and its companions because opening the current store for a
+read requires a writable WAL connection and migration checks.
+
 Settings live under `domains.fabric` in `config.toml` (`agent_label`,
 `client_label`, `ssh_executable`, `home_hosts`, `peers`, `limits`); the
 bundled defaults are `crates/fabric-runtime/assets/fabric.toml`. There is no
-per-knob environment input. The only product environment inputs are
-`PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL`.
+per-knob environment input. Product environment inputs are
+`PROVENANT_STATE_DIR`, `PROVENANT_AGENT_LABEL` and the host-set lane inputs
+described above.
 
 Limits are hard ceilings that config may lower and never raise. The default
 and the ceiling are the same value:
@@ -160,7 +178,6 @@ other envelope.
 | `claim acquire\|renew\|verify\|release\|list` | Advisory issue and path ownership |
 | `landing acquire\|renew\|verify\|release\|wait\|push\|reconcile` | Branch, expected SHA and fence; push is an explicit authorised action |
 | `graph run\|status\|cancel\|resume` | Bounded task graphs |
-| `host list` | Peer and adapter readiness observations |
 | `mcp [--client NAME]` | The stdio server; clients are `claude`, `codex`, `cursor`, `agy`, `opencode` |
 
 Two entry points are hidden from `provenant help`: `fabric peer` (the fixed
@@ -170,7 +187,9 @@ usage and exits 2, so a registration must name `fabric mcp`.
 
 The MCP server exposes 11 tools. Each takes a tagged `op` enum that rejects
 unknown fields, with no numeric-string coercion or synonym repair. The schema
-catalogue is explicit and checked against serde acceptance.
+catalogue has two cached forms: strict schemas for serde acceptance probes and
+error paths, and compact schemas for `tools/list`. Every valid strict-schema
+probe must also pass its compact schema.
 
 | Tool | Operations |
 |---|---|
@@ -186,6 +205,67 @@ catalogue is explicit and checked against serde acceptance.
 | `fabric_output` | read, fetch |
 | `fabric_hosts` | list |
 
+The compact input schemas keep `maxLength` and identifier patterns for IDs,
+operation IDs, Git OIDs, SHA-256 digests and graph IDs. They omit text
+`minLength`, UTF-8 byte annotations and the NUL-exclusion pattern. Runtime
+validation still rejects empty text, NUL characters and excess UTF-8 bytes
+before side effects, with `invalid_input` and the exact field path. Since a
+string's code point count cannot exceed its UTF-8 byte count, these schemas
+only relax acceptance. Single-use definitions are inlined recursively;
+unreachable definitions are removed. Definitions used at least twice stay in
+`$defs` at the input-schema root, and an empty `$defs` is omitted.
+
+Only identity and submit publish `outputSchema`, each with `type: "object"`.
+Submit's optional `worktree` receipt is an object with `path` and `branch`.
+Other tools still send `structuredContent`. `fabric_hosts` returns
+`{"hosts":[...]}`, including `{"hosts":[]}` for an empty page. The CLI host
+list keeps its JSON `data` array; peer health replies keep the single
+`HostHealth` record. The wrapper belongs only to the MCP edge. This also
+satisfies the object requirement in MCP 2025-11-25; MCP 2026-07-28 permits any
+JSON value.
+
+The shared submit wire type accepts `new_worktree` for peer ingress. The MCP
+submit owner refuses worktree creation, so MCP parsing rejects that field,
+including `null`, with `invalid_input` at `arguments.tasks[N].new_worktree`.
+It remains absent from the input schema. Peer deserialisation and worktree
+creation through CLI dispatch are unchanged.
+
+Both the [2025-11-25 output-schema rules](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#output-schema)
+and the [2026-07-28 rules](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema)
+require structured results to conform to a published output schema, without
+an explicit exemption for `isError`. Fabric therefore omits
+`structuredContent` on identity and submit errors. Their `content` text
+contains the stable code and JSON error details, including the field path
+for invalid input and `operation_id` for `launch_unknown`. This avoids
+validating error details against a success schema or inventing a success
+receipt after an uncertain launch. Other tools retain structured error
+details; a frame-size fallback whose tool is unknown uses text only.
+
+Legacy catalogues omit all output schemas. Both protocol eras use the same
+compact input schemas and error policy; protocol versions and catalogue
+cache behaviour are unchanged.
+
+Issue #1571 wave 1 measured the following bytes with
+`serde_json::to_vec(tool).len()`, including each complete tool object and
+excluding catalogue array framing. The total fell by 75.8%. Tests allow 10%
+growth per tool, rounded up, with hard caps of 3,072 bytes per tool and 18 KiB
+for the sum.
+
+| Tool | Before (bytes) | After (bytes) |
+|---|---:|---:|
+| `fabric_identity` | 5,973 | 1,387 |
+| `fabric_mail` | 6,586 | 2,441 |
+| `fabric_task` | 7,710 | 2,209 |
+| `fabric_events` | 6,220 | 781 |
+| `fabric_claim` | 6,776 | 2,185 |
+| `fabric_landing` | 7,105 | 2,020 |
+| `fabric_submit` | 6,780 | 2,338 |
+| `fabric_run` | 7,545 | 1,776 |
+| `fabric_graph` | 5,780 | 838 |
+| `fabric_output` | 7,395 | 1,375 |
+| `fabric_hosts` | 5,188 | 336 |
+| **Total** | **73,058** | **17,686** |
+
 Mutating operations in the mail, task, events, claim and landing tools accept
 an optional `operation_id` so a caller can retry after a lost reply; observation
 operations reject it. Responses carry typed `structuredContent` and a short text
@@ -198,9 +278,9 @@ under `fetch/<host>/<run>/`. Output tools accept no arbitrary source or
 destination path.
 
 Submission tasks carry a prompt and route preference, with optional account,
-access, worktree, timeout and delivery ID. They accept no artefact inputs.
-`resume` is separate from submission and cannot change route, account or
-authority.
+access, worktree, `deliver` and delivery ID, and a required `timeout_ms` (1000
+to 14400000). They accept no artefact inputs. `resume` is separate from
+submission and cannot change route, account or authority.
 
 ### Bounded graphs and route fallback
 
@@ -415,12 +495,28 @@ Fabric does not own these wire forms.
   codes are `invalid_input`, `not_found`, `conflict`, `busy`, `stale_fence`,
   `home_unavailable`, `peer_version`, `launch_unknown`,
   `continuation_unsupported`, `confinement_refused`, `lane_depth`,
+  `lane_coordination_refused`,
   `worktree_missing`, `base_unreachable`, `branch_exists`, `output_too_large`,
-  `state_corrupt`, `publication_failed`, `cancelled`, `timeout` and `io`.
+  `state_corrupt`, `upgrade_refused`, `publication_failed`, `cancelled`,
+  `timeout` and `io`.
   Uncertain mutations include their `operation_id`. Oversized read responses
   return `result_too_large`, while committed mutation receipts keep the
   transport ceiling so a lowered read limit cannot hide them. Health checks do
   not repair, prune or acquire claims.
+
+Peer errors use the locally frozen request's operation ID. A supplied peer ID
+must match it; generic refusals may omit the ID. A mismatch is a protocol error
+(`state_corrupt`). A remote status snapshot must name the requested attempt,
+as must each record returned to a wait. Human lane listings remove control,
+escape and formatting characters from peer text through the shared plain-text
+sanitiser; structured records preserve the received values.
+
+## Follow-up: lane store isolation
+
+`lane-store-isolation` will add a read-only coordination store path and move
+lane event refresh and other shared-store writes to the host. It must preserve
+local and federated reads and child-store submission without granting lanes
+write access to shared SQLite or `fabric/locks`, then remove those grants.
 
 ## Deliberate cuts
 
@@ -432,14 +528,14 @@ Fabric does not own these wire forms.
 | Task dependency API | Four task states and token-fenced ownership; the chair submits dependent runs explicitly |
 | Separate notes, activity, events and watch views | One append-only event stream with bounded cursor reads |
 | Terminal-run mail notices by default | Run completion emits an idempotent event; mail only when requested |
-| Fabric-owned routing pools, councils, rotation, provider catalogue and cooldown reset | `routing` resolves once and Fabric forwards; `route list` owns live-ID discovery |
+| Fabric-owned routing pools, councils, rotation, provider catalogue and cooldown reset | `routing` resolves once and Fabric forwards; `route list` shows the bundled catalogue |
 | Native-seat provider bans | No family is inferred from a seat; shared run policy governs dispatch |
 | Graph shell gates, gate workers and automatic task mirroring | Verification is an ordinary authorised task or chair action |
 | Host auto-placement and local fallback after an explicit choice | Placement is local by default and remote only when explicit |
 | Remote PID probing | Only the owning host can report process identity |
 | Offline outbound mailbox, inbox pull and merged host cursors | One authoritative sequence at the home; no replicator or clock-skew merge |
 | Copying whole run directories | An explicit verified fetch of an allowlisted artefact set replaces it |
-| Registration doctor and install smoke | `check` subjects and `host list` readiness cover them |
+| Registration doctor and install smoke | `check` subjects and `hosts` readiness cover them |
 | Startup retention sweeps and DB pruning | Explicit maintenance of new state only |
 | Numeric coercion, synonym repair and fuzzy command hints | Invalid fields are refused with a stable code and field path |
 | Python and Node discovery, subprocess RPC and package provisioning | Everything runs in process in one executable |

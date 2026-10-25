@@ -2,427 +2,6 @@
   {
     "description": "Inspect the authenticated Fabric identity.",
     "inputSchema": {
-      "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
-        }
-      },
       "additionalProperties": false,
       "properties": {
         "op": {
@@ -554,194 +133,12 @@
     "description": "Send and read mail with explicit cursors.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
         },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -783,195 +180,6 @@
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "oneOf": [
@@ -1031,7 +239,46 @@
           "properties": {
             "artifacts": {
               "items": {
-                "$ref": "#/$defs/Artifact"
+                "additionalProperties": false,
+                "properties": {
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "path": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "encoding": {
+                        "enum": [
+                          "utf8",
+                          "native_bytes"
+                        ],
+                        "type": "string"
+                      },
+                      "path": {
+                        "maxLength": 4096,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "encoding",
+                      "path"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "digest",
+                  "path"
+                ],
+                "type": "object"
               },
               "maxItems": 100,
               "minItems": 0,
@@ -1039,10 +286,7 @@
             },
             "body": {
               "maxLength": 65536,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 65536
+              "type": "string"
             },
             "kind": {
               "enum": [
@@ -1100,475 +344,19 @@
       ],
       "type": "object"
     },
-    "name": "fabric_mail",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "cursor": {
-              "type": "integer"
-            },
-            "result": {
-              "const": "marked_read"
-            }
-          },
-          "required": [
-            "cursor",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "cursor": {
-              "type": "integer"
-            },
-            "page": {
-              "additionalProperties": false,
-              "properties": {
-                "items": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "maxItems": 100,
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "truncated": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "items",
-                "truncated"
-              ],
-              "type": "object"
-            },
-            "result": {
-              "const": "read"
-            }
-          },
-          "required": [
-            "cursor",
-            "page",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "result": {
-              "const": "sent"
-            }
-          },
-          "required": [
-            "id",
-            "result"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_mail"
   },
   {
     "description": "Create and manage fenced project tasks.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
         },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
         },
         "TaskProof": {
           "additionalProperties": false,
@@ -1633,10 +421,7 @@
               "anyOf": [
                 {
                   "maxLength": 65536,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 65536
+                  "type": "string"
                 },
                 {
                   "type": "null"
@@ -1645,10 +430,7 @@
             },
             "objective": {
               "maxLength": 65536,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 65536
+              "type": "string"
             },
             "op": {
               "const": "create"
@@ -1759,10 +541,7 @@
               "anyOf": [
                 {
                   "maxLength": 65536,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 65536
+                  "type": "string"
                 },
                 {
                   "type": "null"
@@ -1771,10 +550,7 @@
             },
             "objective": {
               "maxLength": 65536,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 65536
+              "type": "string"
             },
             "op": {
               "const": "update"
@@ -1796,550 +572,11 @@
       ],
       "type": "object"
     },
-    "name": "fabric_task",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "proof": {
-              "type": "object"
-            },
-            "result": {
-              "const": "claimed"
-            }
-          },
-          "required": [
-            "proof",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "result": {
-              "const": "created"
-            },
-            "task": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "result",
-            "task"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "result": {
-              "const": "finished"
-            },
-            "task": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "result",
-            "task"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "page": {
-              "additionalProperties": false,
-              "properties": {
-                "items": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "maxItems": 100,
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "truncated": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "items",
-                "truncated"
-              ],
-              "type": "object"
-            },
-            "result": {
-              "const": "listed"
-            }
-          },
-          "required": [
-            "page",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "result": {
-              "const": "released"
-            },
-            "task": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "result",
-            "task"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "result": {
-              "const": "updated"
-            },
-            "task": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "result",
-            "task"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_task"
   },
   {
     "description": "Read the activity journal or append a note.",
     "inputSchema": {
-      "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
-        }
-      },
       "oneOf": [
         {
           "additionalProperties": false,
@@ -2348,10 +585,7 @@
               "anyOf": [
                 {
                   "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
+                  "type": "string"
                 },
                 {
                   "type": "null"
@@ -2360,16 +594,14 @@
             },
             "note": {
               "maxLength": 65536,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 65536
+              "type": "string"
             },
             "op": {
               "const": "note"
             },
             "operation_id": {
-              "$ref": "#/$defs/OperationId"
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "type": "string"
             }
           },
           "required": [
@@ -2423,154 +655,12 @@
       ],
       "type": "object"
     },
-    "name": "fabric_events",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "result": {
-              "const": "noted"
-            },
-            "seq": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "result",
-            "seq"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "cursor": {
-              "type": "integer"
-            },
-            "page": {
-              "additionalProperties": false,
-              "properties": {
-                "items": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "maxItems": 100,
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "truncated": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "items",
-                "truncated"
-              ],
-              "type": "object"
-            },
-            "result": {
-              "const": "read"
-            },
-            "run_events_pending": {
-              "type": "boolean"
-            },
-            "timed_out": {
-              "type": "boolean"
-            },
-            "unknown_hosts": {
-              "items": {
-                "type": "string"
-              },
-              "maxItems": 100,
-              "minItems": 0,
-              "type": "array"
-            }
-          },
-          "required": [
-            "cursor",
-            "page",
-            "result",
-            "run_events_pending",
-            "timed_out",
-            "unknown_hosts"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_events"
   },
   {
     "description": "Manage advisory work claims.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
         "ClaimProof": {
           "additionalProperties": false,
           "properties": {
@@ -2600,328 +690,13 @@
           ],
           "type": "object"
         },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
         },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "oneOf": [
@@ -2940,7 +715,64 @@
               "$ref": "#/$defs/OperationId"
             },
             "scope": {
-              "$ref": "#/$defs/Scope"
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "key": {
+                      "maxLength": 1024,
+                      "type": "string"
+                    },
+                    "kind": {
+                      "const": "issue"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "paths"
+                    },
+                    "paths": {
+                      "items": {
+                        "maxLength": 4096,
+                        "type": "string"
+                      },
+                      "maxItems": 100,
+                      "minItems": 1,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "worktree"
+                    },
+                    "path": {
+                      "maxLength": 4096,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "path"
+                  ],
+                  "type": "object"
+                }
+              ]
             }
           },
           "required": [
@@ -3041,220 +873,14 @@
       ],
       "type": "object"
     },
-    "name": "fabric_claim",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "claim": {
-              "type": "object"
-            },
-            "proof": {
-              "type": "object"
-            },
-            "result": {
-              "const": "acquired"
-            }
-          },
-          "required": [
-            "claim",
-            "proof",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "page": {
-              "additionalProperties": false,
-              "properties": {
-                "items": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "maxItems": 100,
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "truncated": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "items",
-                "truncated"
-              ],
-              "type": "object"
-            },
-            "result": {
-              "const": "listed"
-            }
-          },
-          "required": [
-            "page",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "result": {
-              "const": "released"
-            }
-          },
-          "required": [
-            "id",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "claim": {
-              "type": "object"
-            },
-            "result": {
-              "const": "renewed"
-            }
-          },
-          "required": [
-            "claim",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "claim": {
-              "type": "object"
-            },
-            "result": {
-              "const": "verified"
-            }
-          },
-          "required": [
-            "claim",
-            "result"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_claim"
   },
   {
     "description": "Manage landing leases and observe a generation.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
         "GitOid": {
           "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
           "type": "string"
         },
         "LandingProof": {
@@ -3266,14 +892,12 @@
               "type": "integer"
             },
             "id": {
-              "$ref": "#/$defs/Id"
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
             },
             "reference": {
               "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
+              "type": "string"
             },
             "token": {
               "items": {
@@ -3294,283 +918,9 @@
           ],
           "type": "object"
         },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "oneOf": [
@@ -3596,10 +946,7 @@
             },
             "reference": {
               "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
+              "type": "string"
             }
           },
           "required": [
@@ -3684,10 +1031,7 @@
             },
             "reference": {
               "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
+              "type": "string"
             },
             "wait_ms": {
               "maximum": 55000,
@@ -3706,533 +1050,15 @@
       ],
       "type": "object"
     },
-    "name": "fabric_landing",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "landing": {
-              "type": "object"
-            },
-            "proof": {
-              "type": "object"
-            },
-            "result": {
-              "const": "acquired"
-            }
-          },
-          "required": [
-            "landing",
-            "proof",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "reference": {
-              "type": "string"
-            },
-            "result": {
-              "const": "released"
-            }
-          },
-          "required": [
-            "id",
-            "reference",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "landing": {
-              "type": "object"
-            },
-            "result": {
-              "const": "renewed"
-            }
-          },
-          "required": [
-            "landing",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "landing": {
-              "type": "object"
-            },
-            "result": {
-              "const": "verified"
-            }
-          },
-          "required": [
-            "landing",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "landing": {
-              "anyOf": [
-                {
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "result": {
-              "const": "waited"
-            },
-            "timed_out": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "landing",
-            "result",
-            "timed_out"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_landing"
   },
   {
     "description": "Submit one batch to the run service.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -4262,10 +1088,7 @@
         "knobs": {
           "items": {
             "maxLength": 256,
-            "minLength": 1,
-            "pattern": "^[^\\u0000]*$",
-            "type": "string",
-            "x-provenant-maxUtf8Bytes": 256
+            "type": "string"
           },
           "maxItems": 64,
           "minItems": 0,
@@ -4275,7 +1098,8 @@
           "const": "submission"
         },
         "operation_id": {
-          "$ref": "#/$defs/OperationId"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
         },
         "tasks": {
           "items": {
@@ -4292,10 +1116,7 @@
                 "anyOf": [
                   {
                     "maxLength": 64,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 64
+                    "type": "string"
                   },
                   {
                     "type": "null"
@@ -4309,20 +1130,14 @@
                     "properties": {
                       "branch": {
                         "maxLength": 1024,
-                        "minLength": 1,
-                        "pattern": "^[^\\u0000]*$",
-                        "type": "string",
-                        "x-provenant-maxUtf8Bytes": 1024
+                        "type": "string"
                       },
                       "open_pr": {
                         "type": "boolean"
                       },
                       "remote": {
                         "maxLength": 64,
-                        "minLength": 1,
-                        "pattern": "^[^\\u0000]*$",
-                        "type": "string",
-                        "x-provenant-maxUtf8Bytes": 64
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -4348,13 +1163,80 @@
               },
               "prompt": {
                 "maxLength": 65536,
-                "minLength": 1,
-                "pattern": "^[^\\u0000]*$",
-                "type": "string",
-                "x-provenant-maxUtf8Bytes": 65536
+                "type": "string"
               },
               "route": {
-                "$ref": "#/$defs/Route"
+                "additionalProperties": false,
+                "properties": {
+                  "adapter": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "effort": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "model": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "role": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "route": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_class": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "type": "object"
               },
               "timeout_ms": {
                 "maximum": 14400000,
@@ -4365,10 +1247,7 @@
                 "anyOf": [
                   {
                     "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
+                    "type": "string"
                   },
                   {
                     "type": "null"
@@ -4430,6 +1309,22 @@
           "maxItems": 100,
           "minItems": 0,
           "type": "array"
+        },
+        "worktree": {
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "path"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -4443,51 +1338,6 @@
     "description": "List, inspect, wait for, cancel or resume runs.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
         "AttemptTarget": {
           "additionalProperties": false,
           "properties": {
@@ -4510,357 +1360,13 @@
           ],
           "type": "object"
         },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
         },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "oneOf": [
@@ -4928,10 +1434,7 @@
             },
             "prompt": {
               "maxLength": 65536,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 65536
+              "type": "string"
             },
             "target": {
               "$ref": "#/$defs/AttemptTarget"
@@ -5000,588 +1503,11 @@
       ],
       "type": "object"
     },
-    "name": "fabric_run",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "type": "object"
-            },
-            "result": {
-              "const": "cancel"
-            }
-          },
-          "required": [
-            "attempt",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "page": {
-              "additionalProperties": false,
-              "properties": {
-                "items": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "maxItems": 100,
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "next_after": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "attempt": {
-                          "pattern": "^[0-9a-f]{32}$",
-                          "type": "string"
-                        },
-                        "host": {
-                          "anyOf": [
-                            {
-                              "pattern": "^[0-9a-f]{32}$",
-                              "type": "string"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "attempt",
-                        "host"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "truncated": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "items",
-                "next_after",
-                "truncated"
-              ],
-              "type": "object"
-            },
-            "result": {
-              "const": "list"
-            }
-          },
-          "required": [
-            "page",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "type": "object"
-            },
-            "result": {
-              "const": "resume"
-            }
-          },
-          "required": [
-            "attempt",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "type": "object"
-            },
-            "result": {
-              "const": "status"
-            }
-          },
-          "required": [
-            "attempt",
-            "result"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "attempts": {
-              "items": {
-                "type": "object"
-              },
-              "maxItems": 100,
-              "minItems": 0,
-              "type": "array"
-            },
-            "condition": {
-              "enum": [
-                "any",
-                "all"
-              ],
-              "type": "string"
-            },
-            "result": {
-              "const": "wait"
-            },
-            "satisfied": {
-              "type": "boolean"
-            },
-            "timed_out": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "attempts",
-            "condition",
-            "result",
-            "satisfied",
-            "timed_out"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_run"
   },
   {
     "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
     "inputSchema": {
-      "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
-        }
-      },
       "oneOf": [
         {
           "additionalProperties": false,
@@ -5605,10 +1531,7 @@
           "properties": {
             "document": {
               "maxLength": 4096,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 4096
+              "type": "string"
             },
             "op": {
               "const": "resume"
@@ -5625,10 +1548,7 @@
           "properties": {
             "document": {
               "maxLength": 4096,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 4096
+              "type": "string"
             },
             "op": {
               "const": "run"
@@ -5660,78 +1580,12 @@
       ],
       "type": "object"
     },
-    "name": "fabric_graph",
-    "outputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "checkpoint": {
-          "type": "object"
-        },
-        "status": {
-          "enum": [
-            "pending",
-            "complete",
-            "cancelled"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "checkpoint",
-        "status"
-      ],
-      "type": "object"
-    }
+    "name": "fabric_graph"
   },
   {
     "description": "Read bounded output or fetch a manifest artefact.",
     "inputSchema": {
       "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
         "AttemptTarget": {
           "additionalProperties": false,
           "properties": {
@@ -5754,357 +1608,9 @@
           ],
           "type": "object"
         },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
         }
       },
       "oneOf": [
@@ -6112,7 +1618,46 @@
           "additionalProperties": false,
           "properties": {
             "artifact": {
-              "$ref": "#/$defs/Artifact"
+              "additionalProperties": false,
+              "properties": {
+                "digest": {
+                  "anyOf": [
+                    {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "path": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "encoding": {
+                      "enum": [
+                        "utf8",
+                        "native_bytes"
+                      ],
+                      "type": "string"
+                    },
+                    "path": {
+                      "maxLength": 4096,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "encoding",
+                    "path"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "digest",
+                "path"
+              ],
+              "type": "object"
             },
             "max_bytes": {
               "maximum": 131072,
@@ -6173,661 +1718,18 @@
       ],
       "type": "object"
     },
-    "name": "fabric_output",
-    "outputSchema": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "artifact": {
-              "additionalProperties": false,
-              "properties": {
-                "digest": {
-                  "anyOf": [
-                    {
-                      "pattern": "^sha256:[0-9a-f]{64}$",
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "path": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "digest",
-                "path"
-              ],
-              "type": "object"
-            },
-            "bytes": {
-              "oneOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "data": {
-                      "items": {
-                        "maximum": 255,
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "maxItems": 131072,
-                      "minItems": 0,
-                      "type": "array"
-                    },
-                    "encoding": {
-                      "const": "bytes"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "encoding"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "data": {
-                      "type": "string"
-                    },
-                    "encoding": {
-                      "const": "utf8"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "encoding"
-                  ],
-                  "type": "object"
-                }
-              ]
-            },
-            "digest": {
-              "type": "string"
-            },
-            "kind": {
-              "const": "artifact"
-            },
-            "target": {
-              "additionalProperties": false,
-              "properties": {
-                "attempt": {
-                  "pattern": "^[0-9a-f]{32}$",
-                  "type": "string"
-                },
-                "host": {
-                  "anyOf": [
-                    {
-                      "pattern": "^[0-9a-f]{32}$",
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "attempt",
-                "host"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "artifact",
-            "bytes",
-            "digest",
-            "kind",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "bytes": {
-              "oneOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "data": {
-                      "items": {
-                        "maximum": 255,
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "maxItems": 65536,
-                      "minItems": 0,
-                      "type": "array"
-                    },
-                    "encoding": {
-                      "const": "bytes"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "encoding"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "data": {
-                      "type": "string"
-                    },
-                    "encoding": {
-                      "const": "utf8"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "encoding"
-                  ],
-                  "type": "object"
-                }
-              ]
-            },
-            "digest": {
-              "type": "string"
-            },
-            "eof": {
-              "type": "boolean"
-            },
-            "kind": {
-              "const": "chunk"
-            },
-            "next_offset": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "offset": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "part": {
-              "enum": [
-                "stdout",
-                "stderr"
-              ],
-              "type": "string"
-            },
-            "target": {
-              "additionalProperties": false,
-              "properties": {
-                "attempt": {
-                  "pattern": "^[0-9a-f]{32}$",
-                  "type": "string"
-                },
-                "host": {
-                  "anyOf": [
-                    {
-                      "pattern": "^[0-9a-f]{32}$",
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "attempt",
-                "host"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "bytes",
-            "digest",
-            "eof",
-            "kind",
-            "next_offset",
-            "offset",
-            "part",
-            "target"
-          ],
-          "type": "object"
-        }
-      ]
-    }
+    "name": "fabric_output"
   },
   {
     "description": "List peer hosts and readiness observations.",
     "inputSchema": {
-      "$defs": {
-        "Artifact": {
-          "additionalProperties": false,
-          "properties": {
-            "digest": {
-              "anyOf": [
-                {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
-                  ],
-                  "type": "string"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "encoding",
-                "path"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "digest",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AttemptTarget": {
-          "additionalProperties": false,
-          "properties": {
-            "attempt": {
-              "$ref": "#/$defs/Id"
-            },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "attempt"
-          ],
-          "type": "object"
-        },
-        "ClaimProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "token"
-          ],
-          "type": "object"
-        },
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
-        },
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "type": "string",
-              "x-provenant-maxUtf8Bytes": 1024
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "MessageRef": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "local"
-                }
-              },
-              "required": [
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "host": {
-                  "$ref": "#/$defs/Id"
-                },
-                "id": {
-                  "$ref": "#/$defs/Id"
-                },
-                "scope": {
-                  "const": "remote"
-                }
-              },
-              "required": [
-                "host",
-                "id",
-                "scope"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "Route": {
-          "additionalProperties": false,
-          "properties": {
-            "adapter": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "effort": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "role": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "route": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "task_class": {
-              "anyOf": [
-                {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 128
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [],
-          "type": "object"
-        },
-        "Scope": {
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "key": {
-                  "maxLength": 1024,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 1024
-                },
-                "kind": {
-                  "const": "issue"
-                }
-              },
-              "required": [
-                "key",
-                "kind"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "paths"
-                },
-                "paths": {
-                  "items": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "pattern": "^[^\\u0000]*$",
-                    "type": "string",
-                    "x-provenant-maxUtf8Bytes": 4096
-                  },
-                  "maxItems": 100,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "kind",
-                "paths"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "const": "worktree"
-                },
-                "path": {
-                  "maxLength": 4096,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "type": "string",
-                  "x-provenant-maxUtf8Bytes": 4096
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "TaskProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "task": {
-              "$ref": "#/$defs/Id"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "task",
-            "token"
-          ],
-          "type": "object"
-        }
-      },
       "additionalProperties": false,
       "properties": {
         "after": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Id"
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
             },
             {
               "type": "null"
@@ -6848,38 +1750,6 @@
       ],
       "type": "object"
     },
-    "name": "fabric_hosts",
-    "outputSchema": {
-      "items": {
-        "additionalProperties": false,
-        "properties": {
-          "available": {
-            "type": "boolean"
-          },
-          "execution": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "host": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "available",
-          "execution",
-          "host"
-        ],
-        "type": "object"
-      },
-      "maxItems": 100,
-      "minItems": 0,
-      "type": "array"
-    }
+    "name": "fabric_hosts"
   }
 ]

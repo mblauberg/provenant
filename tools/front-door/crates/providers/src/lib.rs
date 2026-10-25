@@ -9,6 +9,7 @@ pub mod codex_rollout;
 mod contract;
 pub mod cursor;
 mod dylib;
+pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
@@ -62,19 +63,6 @@ macro_rules! adapter {
                 } else {
                     crate::AccountDetection::Unknown
                 })
-            }
-            fn preflight(
-                &self,
-                _: &crate::PreflightInput,
-            ) -> Result<crate::PreflightPlan, crate::ProviderError> {
-                Err(crate::ProviderError::UnsupportedPolicy)
-            }
-            fn decode_preflight(
-                &self,
-                plan: &crate::PreflightPlan,
-                _: &[u8],
-            ) -> Result<crate::AvailabilityRecord, crate::ProviderError> {
-                match *plan {}
             }
             fn prepare(
                 &self,

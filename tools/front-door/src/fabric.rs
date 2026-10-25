@@ -98,7 +98,8 @@ impl stdio::Factory for Factory {
             BoundFacade { factory: self },
             &self.clock,
         )
-        .with_limits(self.context.config.limits.clone()))
+        .with_limits(self.context.config.limits.clone())
+        .with_lane_restrictions(self.context.in_lane))
     }
 }
 struct BoundFacade<'a> {
@@ -423,10 +424,10 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
     })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
-                    "fabric host list",
+                    "hosts",
                     provenant_records::Outcome::Ok,
                     data,
                 ),
@@ -436,7 +437,7 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
             )
         }
         Err(error) => crate::fail(
-            "fabric host list",
+            "hosts",
             provenant_records::Outcome::Error,
             "io",
             &error.to_string(),
@@ -446,6 +447,10 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
 }
 pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // A request names its own agent, so a lane could act as any actor.
+        if provenant_cli::fabric::in_lane() {
+            return Err(CoordinationError::LaneMutation.into());
+        }
         let bytes = provenant_supervisor::sys::hook_io::read_stdin(
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),
@@ -662,31 +667,39 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 } else {
                     let coverage =
                         if matches!(input, CoordinationInput::Events(EventsInput::Read { .. })) {
-                            peer_factory.pull_events_from(false, budget, &cancel)?
+                            peer_factory.pull_events_from(false, budget, &cancel)
                         } else {
-                            EventCoverage::default()
+                            Ok(EventCoverage::default())
                         };
-                    let service = CoordinationService::open(
-                        &context.roots.state,
-                        context.identity.project,
-                        request.actor()?,
-                        &clock,
-                        &backoff,
-                        budget,
-                        &cancel,
-                    )?;
-                    match input.execute(&service, operation_id.clone(), budget, &cancel) {
-                        Ok(mut value) => {
-                            if let CoordinationResult::Events(EventsResult::Read {
-                                unknown_hosts,
-                                run_events_pending,
-                                ..
-                            }) = &mut value
-                            {
-                                unknown_hosts.extend(coverage.unknown_hosts);
-                                *run_events_pending |= coverage.more_events;
+                    match coverage {
+                        Ok(coverage) => {
+                            let service = CoordinationService::open(
+                                &context.roots.state,
+                                context.identity.project,
+                                request.actor()?,
+                                &clock,
+                                &backoff,
+                                budget,
+                                &cancel,
+                            )?;
+                            match input.execute(&service, operation_id.clone(), budget, &cancel) {
+                                Ok(mut value) => {
+                                    if let CoordinationResult::Events(EventsResult::Read {
+                                        unknown_hosts,
+                                        run_events_pending,
+                                        ..
+                                    }) = &mut value
+                                    {
+                                        unknown_hosts.extend(coverage.unknown_hosts);
+                                        *run_events_pending |= coverage.more_events;
+                                    }
+                                    PeerResult::Coordination(value)
+                                }
+                                Err(error) => PeerResult::Error {
+                                    code: error.code().into(),
+                                    operation_id: operation_id.clone(),
+                                },
                             }
-                            PeerResult::Coordination(value)
                         }
                         Err(error) => PeerResult::Error {
                             code: error.code().into(),
@@ -742,6 +755,7 @@ fn store_error_code(error: &provenant_fabric_store::Error) -> &'static str {
         | StoreError::SchemaVersion(_)
         | StoreError::UnversionedDatabase
         | StoreError::JournalMode(_) => "state_corrupt",
+        StoreError::LegacyImportData { .. } => "upgrade_refused",
         _ => "io",
     }
 }
@@ -840,6 +854,9 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
             let proof = fence.proof()?;
             let factory = factory(globals)?;
             let ctx = &factory.context;
+            if ctx.in_lane {
+                return Err(CoordinationError::LaneMutation.into());
+            }
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 300)?;
             if let Some(project) = &ctx.identity.federation
@@ -904,7 +921,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
         })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
@@ -947,7 +964,14 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
         Err(error) => crate::fail(
             command,
             provenant_records::Outcome::Refused,
-            "landing_refused",
+            if matches!(
+                error.downcast_ref::<CoordinationError>(),
+                Some(CoordinationError::LaneMutation)
+            ) {
+                "lane_coordination_refused"
+            } else {
+                "landing_refused"
+            },
             &error.to_string(),
             globals,
         ),
@@ -1229,6 +1253,7 @@ impl BinaryRunOwner<'_> {
                 return Err(FacadeError::ConfinementRefused);
             }
             let host = target.host.ok_or(FacadeError::InvalidInput)?;
+            let attempt_id = target.attempt;
             return match self.peer(
                 host,
                 PeerAction::Run {
@@ -1238,7 +1263,9 @@ impl BinaryRunOwner<'_> {
                 cancel,
             )? {
                 PeerResult::Run(value) => match *value {
-                    RunResult::Status { attempt } => Ok(attempt),
+                    RunResult::Status { attempt } if attempt.attempt_id == attempt_id => {
+                        Ok(attempt)
+                    }
                     _ => Err(FacadeError::StateCorrupt),
                 },
                 _ => Err(FacadeError::StateCorrupt),
@@ -2305,7 +2332,7 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
     })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
@@ -2403,6 +2430,7 @@ impl Factory {
                         .map_err(|_| FacadeError::StateCorrupt)?;
                     coverage.more_events |= page.truncated;
                 }
+                Err(error) if host == ctx.identity.host => return Err(error),
                 Err(_) => coverage.unknown_hosts.push(host),
             }
         }
@@ -2501,7 +2529,7 @@ pub fn events(
     })();
     match result {
         Ok((data, timed_out)) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     "fabric events read",
@@ -2534,6 +2562,7 @@ mod peer_tests {
             "stale_fence",
             "timeout",
             "state_corrupt",
+            "upgrade_refused",
             "peer_version",
             "publication_failed",
             "home_unavailable",
