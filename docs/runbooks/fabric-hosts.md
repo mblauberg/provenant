@@ -117,7 +117,8 @@ The peer fetches every remote with its own Git credentials, then refuses with
 `BASE_UNREACHABLE` unless a remote-tracking ref contains the base, so push the
 base first. Use a remote-tracking ref or a pushed commit: a local branch name
 resolves in the peer's clone. The peer creates the branch's registered
-worktree with its own `worktree create`; an existing branch is
+worktree with its own `worktree create`. A retry reuses that worktree while
+it is clean at the base with no live writer; any other existing branch is
 `BRANCH_EXISTS`. Delivery flags run host delivery on the peer with its Git and
 `gh` credentials. Without them, the writer's commits stay in the peer's
 worktree, and the dispatch receipt's `worktree` names its path and branch.

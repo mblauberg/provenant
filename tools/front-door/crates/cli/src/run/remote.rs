@@ -385,11 +385,13 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
             "--worktree names a path on this host; a peer writer takes --branch and --base",
         ));
     };
-    if provenant_confinement::repo::GitRefName::branch(branch).is_err() {
+    if provenant_confinement::repo::GitRefName::branch(branch).is_err()
+        || provenant_confinement::repo::GitRevision::new(base).is_err()
+    {
         return Err(Fail::new(
             Status::Invalid,
             "INVALID",
-            "invalid --branch name",
+            "invalid --branch or --base",
         ));
     }
     Ok(NewWorktree {

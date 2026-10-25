@@ -123,7 +123,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     let assets = roots::product_root()?;
     let project = roots::selected_project(globals.project.as_deref(), true)?;
     let roots = roots::roots(globals, &assets, &project)?;
-    let result = with_context(&roots, &project, |context, cancel| {
+    let result = with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
         Ok(match command {
             Worktree::Create { branch, base } => Data::Created(worktrees::create(
                 context,
@@ -162,11 +162,13 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     Ok(result)
 }
 
-/// Run one worktree-owner action for `project` under fresh state `roots`.
-/// Peer ingress uses it to create a peer writer's worktree.
+/// Run one worktree-owner action for `project` under fresh state `roots`,
+/// with Git mutations bounded by `mutation`. Peer ingress uses it to create a
+/// peer writer's worktree within its peer-call budget.
 pub(crate) fn with_context<T>(
     roots: &provenant_core::Roots,
     project: &Path,
+    mutation: Duration,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
     // Create the fresh state hierarchy through held, no-follow directories.
@@ -230,7 +232,7 @@ pub(crate) fn with_context<T>(
         workers: &crate::worktree_tests::FreeWorkers,
         clock: &clock,
         utility_budget: budget,
-        mutation_budget: UtilityBudget::bounded(MUTATION_TIMEOUT)?,
+        mutation_budget: UtilityBudget::bounded(mutation)?,
         lock_budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?,
     };
     let result = action(&context, &cancel);

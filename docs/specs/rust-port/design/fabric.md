@@ -652,9 +652,14 @@ A peer writer gets its base from the shared remote, not from the caller
 (#1457). The submission names a new branch and a base instead of a worktree
 path; peer ingress refuses a caller-supplied path. The peer fetches every
 remote with its own Git authority and hooks disabled, refuses a base that no
-remote-tracking ref contains (`base_unreachable`), and creates the branch's
-registered worktree through its worktree owner (`branch_exists` if the branch
-is taken). A replayed operation finds that worktree instead of creating one.
+remote-tracking ref contains (`base_unreachable`), pins it to a commit and
+creates the branch's registered worktree at that commit through its worktree
+owner. Fetch and create each take at most half of the remaining peer budget,
+leaving a reserve for the submission. A retry adopts the branch's worktree
+while it is clean at the pinned commit with no live writer, so a create whose
+submission was lost does not strand the branch; otherwise an existing branch
+is `branch_exists`. A replayed operation finds its worktree instead of
+creating one.
 The writer then takes the ordinary local writer path on the peer, including
 host delivery with the peer's credentials. The receipt names the peer
 worktree, where undelivered commits stay. Uncommitted changes are never

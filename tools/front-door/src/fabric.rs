@@ -917,12 +917,12 @@ const GIT_REDIRECTS: &[&str] = &[
 ];
 /// Fetch every remote with this host's own Git authority, then require `base`
 /// on a remote-tracking ref, so a peer writer never starts from a commit only
-/// this clone has.
+/// this clone has. Returns the pinned base commit.
 fn fetch_remote_base(
     project: &Path,
     base: &str,
     timeout: std::time::Duration,
-) -> Result<(), FacadeError> {
+) -> Result<provenant_core::GitOid, FacadeError> {
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
     let git = crate::roots::git_binary().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
@@ -969,7 +969,12 @@ fn fetch_remote_base(
     if refs.iter().all(u8::is_ascii_whitespace) {
         return Err(FacadeError::BaseUnreachable);
     }
-    Ok(())
+    let commit = format!("{base}^{{commit}}");
+    let oid = git_output(&["rev-parse", "--verify", "--end-of-options", &commit])?;
+    std::str::from_utf8(&oid)
+        .ok()
+        .and_then(|oid| provenant_core::GitOid::parse(oid.trim()).ok())
+        .ok_or(FacadeError::BaseUnreachable)
 }
 
 struct BinaryRunOwner<'a> {
@@ -1363,7 +1368,8 @@ impl BinaryRunOwner<'_> {
     }
     /// The writer worktree a peer request names. A first request fetches every
     /// remote, requires the base on a remote-tracking ref and creates the
-    /// branch at it; a replayed operation finds the worktree it created.
+    /// branch at it. A retry adopts the branch's worktree while it is still
+    /// clean at that base; a replayed operation finds the one it created.
     fn peer_worktree(
         &self,
         operation_id: &provenant_core::OperationId,
@@ -1371,38 +1377,58 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
-        use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
+        use provenant_confinement::worktrees::{
+            self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
+        };
         let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
+            .map_err(|_| FacadeError::InvalidInput)?;
+        provenant_confinement::repo::GitRevision::new(&spec.base)
             .map_err(|_| FacadeError::InvalidInput)?;
         let replay = self
             .store(budget, cancel)?
             .operation(operation_id, &self.call(budget, cancel))
             .map_err(run_error)?
             .is_some();
+        // Fetch and create each take at most half of what remains, so the
+        // submission keeps a reserve; a retry adopts a create that ran late.
+        let half = || {
+            let micros = budget.remaining(self.factory.clock.mono_now()).as_micros() / 2;
+            std::time::Duration::from_micros(micros)
+        };
         let project = &self.factory.cwd;
-        if !replay {
-            let remaining = budget.remaining(self.factory.clock.mono_now()).as_micros();
-            fetch_remote_base(
-                project,
-                &spec.base,
-                std::time::Duration::from_micros(remaining),
-            )?;
-        }
+        let base = if replay {
+            None
+        } else {
+            Some(fetch_remote_base(project, &spec.base, half())?)
+        };
         let info = crate::worktrees::with_context(
             &self.factory.context.roots,
             project,
+            half(),
             |context, cancel| {
-                if replay {
-                    return worktrees::list(context, cancel)?
-                        .into_iter()
-                        .find(|w| w.branch.as_deref() == Some(branch.as_str()))
-                        .ok_or(WorktreeError::NotFound.into());
-                }
-                let request = WorktreeCreate {
-                    branch: spec.branch.clone(),
-                    base: Some(spec.base.clone()),
+                let existing = worktrees::list(context, cancel)?
+                    .into_iter()
+                    .find(|w| w.branch.as_deref() == Some(branch.as_str()));
+                let Some(base) = base else {
+                    return existing.ok_or(WorktreeError::NotFound.into());
                 };
-                Ok(worktrees::create(context, request, cancel)?)
+                match existing {
+                    Some(info)
+                        if info.head == base
+                            && info.dirty == WorktreeCondition::Clean
+                            && info.writer != WriterState::Live =>
+                    {
+                        Ok(info)
+                    }
+                    Some(_) => Err(WorktreeError::InvalidRequest.into()),
+                    None => {
+                        let request = WorktreeCreate {
+                            branch: spec.branch.clone(),
+                            base: Some(base.to_string()),
+                        };
+                        Ok(worktrees::create(context, request, cancel)?)
+                    }
+                }
             },
         )
         .map_err(|error| match error {

@@ -1456,6 +1456,21 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
         placed["data"]["lanes"][0]["attempt_id"]
     );
 
+    // A retry whose first create left no run record adopts the worktree
+    // while it is still clean at the base; a unique commit makes it taken.
+    let (status, adopted) = dispatch("peer-writer-retry", "peer/writer", "origin/main")?;
+    assert_eq!(status, 0, "{adopted}");
+    assert_ne!(adopted["data"]["run_id"], run.as_str());
+    assert_eq!(adopted["data"]["worktree"], *worktree);
+    git(
+        &rig,
+        path,
+        &[
+            &commit[..],
+            &["commit", "-q", "--allow-empty", "-m", "work"],
+        ]
+        .concat(),
+    )?;
     let (status, taken) = dispatch("peer-writer-again", "peer/writer", "origin/main")?;
     assert_ne!(status, 0);
     assert_eq!(taken["error"]["code"], "BRANCH_EXISTS", "{taken}");
