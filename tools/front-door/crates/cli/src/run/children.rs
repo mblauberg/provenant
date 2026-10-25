@@ -292,9 +292,15 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 };
                 accepted.insert((record.attempt_id, generation));
             }
-            if let Err(error) =
-                launch_on_host(&session, id, &edge, &call, Some((launch, &validated)))
-            {
+            // The child launches for this attempt's sealed requester, never
+            // the actor its lane-written run record names.
+            if let Err(error) = launch_on_host(
+                &session,
+                id,
+                &edge,
+                &call,
+                Some((launch, &validated, context.actor_id)),
+            ) {
                 launch_error = Some(error.message);
             }
         }

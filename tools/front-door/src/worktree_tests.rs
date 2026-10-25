@@ -641,7 +641,7 @@ fn start_writer(
     Ok(store.start_with_writer_lease(
         run,
         provider,
-        holder,
+        &|record, _| holder(record),
         &|directory, scope, binding| {
             provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,
@@ -2407,6 +2407,14 @@ fn verify_lane_profile(
         assert_eq!(record.provider_launched, Some(true), "{reason}");
     }
     assert_eq!(record.provider_launched, Some(true), "{reason}");
+    // The lane stamps its own actor on the child's run record. The host must
+    // still launch for the requester sealed in the parent's holder context.
+    assert_ne!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
+    let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
+        "runs/{}/attempts/{attempt_id}/launch.json",
+        record.run_id
+    )))?)?;
+    assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
     let provider_state = child.join(format!(
         "runs/{}/attempts/{attempt_id}/provider-state",
         record.run_id

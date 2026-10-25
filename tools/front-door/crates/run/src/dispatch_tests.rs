@@ -297,7 +297,14 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     assert_eq!(store.request(record.run_id, &call)?, swapped);
     let fake = Fake::default();
     assert!(matches!(
-        store.start_child(record.run_id, &validated, &fake, &|_| unreachable!(), &call),
+        store.start_child(
+            record.run_id,
+            &validated,
+            context(temp.path())?.actor_id,
+            &fake,
+            &|_, _| unreachable!(),
+            &call
+        ),
         Err(RunError::Validation(
             "child request changed after validation"
         ))
@@ -309,7 +316,14 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
         refuse: true,
         ..Fake::default()
     };
-    store.start_child(record.run_id, &swapped, &refuse, &|_| unreachable!(), &call)?;
+    store.start_child(
+        record.run_id,
+        &swapped,
+        context(temp.path())?.actor_id,
+        &refuse,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
     let continued = store.resume(
         &Resume {
             prior: nested.attempts[0].attempt_id,
@@ -329,6 +343,85 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
             "a child run cannot continue an attempt"
         ))
     ));
+    Ok(())
+}
+
+#[test]
+fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult {
+    struct Ready;
+    impl Providers for Ready {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, String> {
+            Ok(PreparedLaunch {
+                argv: vec!["fixture".into()],
+                environment: Vec::new(),
+                stdin: Vec::new(),
+                secret_input: None,
+                cwd: "/".into(),
+                route: route(),
+                skipped_routes: Vec::new(),
+                observed_head: None,
+                confinement: None,
+            })
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!("the holder refuses before any guardian")
+        }
+    }
+    let parent = AttemptId::from_bytes([9; 16]);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
+    for child in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut prepared = input();
+        if child {
+            prepared.request.lane_depth = Some(2);
+            prepared.request.parent_attempt = Some(parent);
+        }
+        let record = store.create(&prepared, &call)?;
+        // The lane rewrites the actor its child's run record names.
+        let mut run = store.run(record.run_id, &call)?;
+        run.actor_id = forged;
+        store.db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&run)?, run.run_id.to_string()],
+        )?;
+        let seen = Cell::new(None);
+        let holder = |_: &AttemptRecord, requester| {
+            seen.set(Some(requester));
+            Err(RunError::Validation("holder observed"))
+        };
+        let started = if child {
+            let validated = store.validate_child(
+                record.run_id,
+                parent,
+                &input().request.tasks[0],
+                1,
+                2,
+                &call,
+            )?;
+            store.start_child(record.run_id, &validated, sealed, &Ready, &holder, &call)?
+        } else {
+            store.start(record.run_id, &Ready, &holder, &call)?
+        };
+        assert!(matches!(started[..], [Started::Refused { .. }]));
+        // A top-level store is host-written, so its record stays the source.
+        assert_eq!(seen.get(), Some(if child { sealed } else { forged }));
+    }
     Ok(())
 }
 
@@ -599,7 +692,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
         observed: None,
         ..Fake::default()
     };
-    let started = store.start(run.run_id, &fake, &|_| unreachable!(), &call)?;
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
     assert!(
         matches!(&started[..], [Started::Refused { reason, .. }] if reason.contains("disabled"))
     );
@@ -622,7 +715,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
     assert!(
         store
-            .start(run.run_id, &fake, &|_| unreachable!(), &call)?
+            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
             .is_empty()
     );
     Ok(())
@@ -892,7 +985,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         refuse: true,
         ..Fake::default()
     };
-    store.start(run.run_id, &fake, &|_| unreachable!(), &call)?;
+    store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
     assert_eq!(fake.resumed.get(), None);
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
@@ -924,7 +1017,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         record.requested_route,
         store.record(prior, &call)?.requested_route
     );
-    store.start(continued.run_id, &fake, &|_| unreachable!(), &call)?;
+    store.start(continued.run_id, &fake, &|_, _| unreachable!(), &call)?;
     assert_eq!(fake.resumed.get(), Some(prior));
     Ok(())
 }
