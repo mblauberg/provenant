@@ -2270,6 +2270,15 @@ fn verify_lane_profile(
         }
     };
     let before = run_count()?;
+    // Startup spacing is host-wide: the child would otherwise wait out the
+    // default 20 s after the parent's own start, past this test's deadline.
+    // Clear only the last-start time; the lease counts stay real.
+    let ledger = state.join("admission.sqlite3");
+    if ledger.exists() {
+        let db = rusqlite::Connection::open(&ledger)?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        db.execute("DELETE FROM spacing", [])?;
+    }
     fs::write(state.join("config.toml"), config(2))?;
     let nested_frames =
         String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");

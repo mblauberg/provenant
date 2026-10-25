@@ -5,7 +5,7 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
     marker::PhantomData,
-    path::Component,
+    path::{Component, Path},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -67,8 +67,9 @@ pub struct RunStore {
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
-    /// The trusted host config root owns worktree registrations even when this
-    /// store contains nested runs. Supplied by the host composition edge.
+    /// The trusted host config root owns worktree registrations and the host
+    /// admission ledger even when this store contains nested runs. Supplied by
+    /// the host composition edge.
     pub fn with_writer_registry(mut self, state: &std::path::Path) -> Self {
         self.writer_registry = state.to_owned();
         self
@@ -98,7 +99,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        companions(&root)?;
+        companions(&root, "run.sqlite3")?;
         let db = Connection::open_with_flags(
             context.state_root.as_path().join("run.sqlite3"),
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -121,58 +122,8 @@ impl RunStore {
 
     pub fn open(context: &ExecutionContext, request: &Request<'_>) -> Result<Self> {
         request.retry(|| Ok(()))?;
-        let mut root = Directory::root(true)?;
-        for component in context.state_root.as_path().components() {
-            if let Component::Normal(name) = component {
-                match root.metadata_at(name, false) {
-                    Ok(_) => {}
-                    Err(error) if error.is_not_found() => match root.mkdir(name, 0o700) {
-                        Ok(()) => root.sync()?,
-                        Err(error) if error.is_exists() => {}
-                        Err(error) => return Err(error.into()),
-                    },
-                    Err(error) => return Err(error.into()),
-                }
-                let before = root.metadata_at(name, false)?;
-                let opened = root.open_directory(name)?;
-                verify_directory_identity(
-                    name,
-                    before,
-                    opened.metadata()?,
-                    root.metadata_at(name, false)?,
-                    opened.metadata()?.device,
-                )?;
-                root = opened;
-            }
-        }
-        private(&root)?;
-        let root = root.into_anchor()?;
-        match root.create_new(OsStr::new("run.sqlite3")) {
-            Ok(file) => {
-                file.sync()?;
-                root.sync()?;
-            }
-            Err(e) if e.is_exists() => {}
-            Err(e) => return Err(e.into()),
-        }
-        companions(&root)?;
-        let db = Connection::open_with_flags(
-            context.state_root.as_path().join("run.sqlite3"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        db.busy_timeout(Duration::ZERO)?;
+        let (root, db) = open_database(context.state_root.as_path(), "run.sqlite3", request)?;
         request.retry(|| version(&db))?;
-        request.retry(|| {
-            let mode: String =
-                db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-            if !mode.eq_ignore_ascii_case("wal") {
-                return Err(RunError::Validation("WAL unavailable"));
-            }
-            db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
-            Ok(())
-        })?;
         let store = Self {
             db,
             root,
@@ -190,7 +141,7 @@ impl RunStore {
             }
             Ok(())
         })?;
-        companions(&store.root)?;
+        companions(&store.root, "run.sqlite3")?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -198,13 +149,81 @@ impl RunStore {
         request: &Request<'_>,
         action: impl Fn(&Connection) -> Result<T>,
     ) -> Result<T> {
-        request.retry(|| {
-            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-            let value = action(&tx)?;
-            tx.commit()?;
-            Ok(value)
-        })
+        immediate(&self.db, request, action)
     }
+}
+/// One immediate transaction, retried while SQLite reports the file busy.
+pub(crate) fn immediate<T>(
+    db: &Connection,
+    request: &Request<'_>,
+    action: impl Fn(&Connection) -> Result<T>,
+) -> Result<T> {
+    request.retry(|| {
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        let value = action(&tx)?;
+        tx.commit()?;
+        Ok(value)
+    })
+}
+/// Create the private directory chain and database file, then open it in WAL
+/// mode with full synchronisation. Every component is identity-checked.
+pub(crate) fn open_database(
+    path: &Path,
+    name: &str,
+    request: &Request<'_>,
+) -> Result<(Directory, Connection)> {
+    let mut root = Directory::root(true)?;
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            match root.metadata_at(part, false) {
+                Ok(_) => {}
+                Err(error) if error.is_not_found() => match root.mkdir(part, 0o700) {
+                    Ok(()) => root.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                },
+                Err(error) => return Err(error.into()),
+            }
+            let before = root.metadata_at(part, false)?;
+            let opened = root.open_directory(part)?;
+            verify_directory_identity(
+                part,
+                before,
+                opened.metadata()?,
+                root.metadata_at(part, false)?,
+                opened.metadata()?.device,
+            )?;
+            root = opened;
+        }
+    }
+    private(&root)?;
+    let root = root.into_anchor()?;
+    match root.create_new(OsStr::new(name)) {
+        Ok(file) => {
+            file.sync()?;
+            root.sync()?;
+        }
+        Err(e) if e.is_exists() => {}
+        Err(e) => return Err(e.into()),
+    }
+    companions(&root, name)?;
+    let db = Connection::open_with_flags(
+        path.join(name),
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    db.busy_timeout(Duration::ZERO)?;
+    request.retry(|| {
+        let mode: String =
+            db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(RunError::Validation("WAL unavailable"));
+        }
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+        Ok(())
+    })?;
+    Ok((root, db))
 }
 fn version(db: &Connection) -> Result<i64> {
     let (version, has_schema): (i64, bool) = db.query_row("SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -220,14 +239,9 @@ pub(crate) fn private(directory: &Directory) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory) -> Result<()> {
-    for name in [
-        "run.sqlite3",
-        "run.sqlite3-wal",
-        "run.sqlite3-shm",
-        "run.sqlite3-journal",
-    ] {
-        match directory.metadata_at(OsStr::new(name), false) {
+fn companions(directory: &Directory, base: &str) -> Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        match directory.metadata_at(OsStr::new(&format!("{base}{suffix}")), false) {
             Ok(m)
                 if m.kind == FileKind::Regular
                     && m.links == 1

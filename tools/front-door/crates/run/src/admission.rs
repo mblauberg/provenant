@@ -1,6 +1,7 @@
 //! Host admission. Each attempt waits inside its own guardian, before spawn;
 //! there is no scheduler daemon. Resource samples are taken outside the store
-//! transaction, which then rechecks counts and spacing while claiming capacity.
+//! transaction, which then rechecks run concurrency and leases host capacity
+//! and spacing from the host ledger while claiming.
 use crate::{
     db::{bytes, decode, sql_int},
     store::insert_event,
@@ -242,36 +243,34 @@ impl RunStore {
         now: WallTime,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        let ledger = crate::ledger::open(&self.writer_registry, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Starting {
                 return Err(RunError::Refused);
             }
             let mut ticket = self.ticket(tx, id)?;
-            let (host, project, run): (i64, i64, i64) = tx.query_row(
-                "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1), COUNT(*) FILTER (WHERE run=?2) FROM admission WHERE active=1",
-                params![old.project_id.to_string(), old.run_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            let run: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+                [old.run_id.to_string()],
+                |r| r.get(0),
             )?;
-            if host >= sql_int(HOST_ACTIVE)?
-                || project >= sql_int(PROJECT_ACTIVE)?
-                || run >= sql_int(ticket.run_concurrency)?
-            {
+            if run >= sql_int(ticket.run_concurrency)? {
                 return Ok(None);
             }
-            let now_ms = now.as_micros() / 1000;
-            let last: Option<i64> = tx
-                .query_row("SELECT last_start FROM spacing WHERE id=1", [], |r| r.get(0))
-                .optional()?;
-            let spacing = sql_int(ticket.startup_spacing_ms)?;
-            // A wall clock that stepped back does not hold every start.
-            if last.is_some_and(|last| last <= now_ms && now_ms - last < spacing) {
+            // Host and project counts and spacing span every execution
+            // namespace, so they live in the host ledger, not this store.
+            if !crate::ledger::lease(
+                &ledger,
+                self.context.state_root.as_path(),
+                id,
+                old.project_id,
+                now.as_micros() / 1000,
+                sql_int(ticket.startup_spacing_ms)?,
+                call,
+            )? {
                 return Ok(None);
             }
-            tx.execute(
-                "INSERT INTO spacing(id,last_start) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET last_start=excluded.last_start",
-                [now_ms],
-            )?;
             ticket.active = true;
             tx.execute(
                 "UPDATE admission SET active=1, record=?1 WHERE attempt=?2",
