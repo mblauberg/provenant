@@ -23,29 +23,6 @@ use std::{
 };
 
 const LIMIT: usize = 1_048_576;
-// Private, exclusively created command working directories. The supervisor
-// owns entropy and mode-0700 creation; tempfile remains a dev-only dependency.
-struct ProbeScratch(PathBuf);
-impl ProbeScratch {
-    fn new() -> Result<Self, ProbeFailure> {
-        let parent = fs::canonicalize(std::env::temp_dir()).map_err(|_| ProbeFailure::Network)?;
-        let anchor = provenant_supervisor::fs::Directory::open_anchor(&parent)
-            .map_err(|_| ProbeFailure::Network)?;
-        let name = provenant_supervisor::fs::temporary_name().map_err(|_| ProbeFailure::Network)?;
-        anchor
-            .mkdir(&name, 0o700)
-            .map_err(|_| ProbeFailure::Network)?;
-        Ok(Self(parent.join(name)))
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for ProbeScratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 struct Account {
     scope: AccountScope,
     identity_dir: PathBuf,
@@ -164,7 +141,9 @@ impl LiveQuota {
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
-        let scratch = ProbeScratch::new()?;
+        let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::MissingCli)?;
+        let executor = provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
+            .map_err(|_| ProbeFailure::Network)?;
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
         let mut env = vec![
@@ -182,7 +161,7 @@ impl LiveQuota {
         }
         let mut options = ExecOptions::new(
             &argv,
-            scratch.path(),
+            Path::new("/"),
             Duration::from_secs((remaining as u64).min(max_seconds)),
         );
         options.env = Some(&env);
@@ -190,8 +169,8 @@ impl LiveQuota {
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
-        SystemExecutor::new(1)
-            .and_then(|e| e.execute(options))
+        executor
+            .execute(options)
             .map_err(|_| ProbeFailure::MissingCli)
     }
     fn json_command(
@@ -420,7 +399,8 @@ impl LiveQuota {
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
-        let scratch = ProbeScratch::new()?;
+        let scratch = provenant_providers::host::HostProbeDir::create(&self.state)
+            .map_err(|_| ProbeFailure::Network)?;
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(

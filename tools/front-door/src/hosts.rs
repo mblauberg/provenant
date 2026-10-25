@@ -51,7 +51,7 @@ fn probe(
     if let Some(config) = config {
         env.push(("CLAUDE_CONFIG_DIR".into(), config.as_os_str().to_owned()));
     }
-    let mut options = ExecOptions::new(argv, home, Duration::from_secs(seconds));
+    let mut options = ExecOptions::new(argv, Path::new("/"), Duration::from_secs(seconds));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Discard;
@@ -90,7 +90,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
     ];
     // The metadata is not needed, so discard both streams rather than retain it.
     let env = [(OsString::from("HOME"), home.as_os_str().to_owned())];
-    let mut options = ExecOptions::new(&argv, home, Duration::from_secs(2));
+    let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(2));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;

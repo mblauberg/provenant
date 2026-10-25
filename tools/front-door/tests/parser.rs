@@ -547,7 +547,7 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     let bin = rig.root.join("status-bin");
     fs::create_dir(&bin)?;
     let claude = bin.join("claude");
-    fs::write(&claude, b"#!/bin/sh\n[ \"$1 $2 $3\" = 'auth status --json' ] || exit 90\ncase \"$CLAUDE_CONFIG_DIR\" in\n  */.claude-pro) printf '{\"loggedIn\":false}'; exit 1;;\n  *) printf '{\"loggedIn\":true,\"email\":\"private-marker\"}';;\nesac\n")?;
+    fs::write(&claude, b"#!/bin/sh\npwd -P >> \"$HOME/doctor-cwd\"\n[ \"$1 $2 $3\" = 'auth status --json' ] || exit 90\ncase \"$CLAUDE_CONFIG_DIR\" in\n  */.claude-pro) printf '{\"loggedIn\":false}'; exit 1;;\n  *) printf '{\"loggedIn\":true,\"email\":\"private-marker\"}';;\nesac\n")?;
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
     fs::create_dir(rig.home.join(".claude-default"))?;
     let identity = rig.home.join(".claude-pro");
@@ -578,6 +578,10 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     );
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-marker"));
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("private-credential-marker"));
+    assert_eq!(
+        fs::read_to_string(rig.home.join("doctor-cwd"))?,
+        "/\n/\n/\n"
+    );
     assert!(!rig.state.exists());
     assert_eq!(
         code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
